@@ -1,0 +1,16 @@
+# Backend configuration for development environment
+# backend-configs/development.tfbackend
+
+bucket         = "cosine-terraform-state-dev"
+key            = "base-infrastructure/development/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "cosine-terraform-locks-dev"
+encrypt        = true
+
+# Tags for the S3 backend
+tags = {
+  Environment = "development"
+  Project     = "cosine"
+  Component   = "base-infrastructure"
+  ManagedBy   = "terraform"
+}

@@ -1,0 +1,16 @@
+# Backend configuration for production environment
+# backend-configs/production.tfbackend
+
+bucket         = "cosine-terraform-state-prod"
+key            = "base-infrastructure/production/terraform.tfstate"
+region         = "us-east-1"
+dynamodb_table = "cosine-terraform-locks-prod"
+encrypt        = true
+
+# Tags for the S3 backend
+tags = {
+  Environment = "production"
+  Project     = "cosine"
+  Component   = "base-infrastructure"
+  ManagedBy   = "terraform"
+}
