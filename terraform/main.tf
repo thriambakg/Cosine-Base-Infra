@@ -3,7 +3,7 @@
 
 terraform {
   required_version = ">= 1.0"
-  
+
   required_providers {
     aws = {
       source  = "hashicorp/aws"
@@ -24,7 +24,7 @@ terraform {
 
 provider "aws" {
   region = var.aws_region
-  
+
   default_tags {
     tags = var.common_tags
   }
@@ -37,9 +37,9 @@ data "aws_region" "current" {}
 # Lambda Layer for shared dependencies
 module "shared_layer" {
   source = "./modules/lambda-layer"
-  
+
   project_name = var.project_name
   environment  = var.environment
-  
+
   tags = var.common_tags
 }

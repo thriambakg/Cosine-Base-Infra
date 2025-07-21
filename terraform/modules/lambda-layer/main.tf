@@ -15,7 +15,7 @@ resource "aws_lambda_layer_version" "shared_dependencies" {
 resource "null_resource" "pip_install" {
   triggers = {
     requirements = filemd5("${path.module}/requirements.txt")
-    script      = filemd5("${path.module}/install-layer-deps.ps1")
+    script       = filemd5("${path.module}/install-layer-deps.ps1")
   }
 
   provisioner "local-exec" {

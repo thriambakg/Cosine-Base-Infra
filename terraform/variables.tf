@@ -11,11 +11,11 @@ variable "environment" {
   description = "Environment (development, staging, production)"
   type        = string
   default     = "staging"
-  
+
   validation {
     condition = contains([
       "development",
-      "staging", 
+      "staging",
       "production"
     ], var.environment)
     error_message = "Environment must be development, staging, or production."
@@ -32,8 +32,8 @@ variable "common_tags" {
   description = "Common tags to apply to all resources"
   type        = map(string)
   default = {
-    Project     = "cosine"
-    ManagedBy   = "terraform"
-    Repository  = "Cosine-Base-Infra"
+    Project    = "cosine"
+    ManagedBy  = "terraform"
+    Repository = "Cosine-Base-Infra"
   }
 }
