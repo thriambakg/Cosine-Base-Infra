@@ -1,33 +1,25 @@
 # Lambda Layer Module for shared dependencies
 # modules/lambda-layer/main.tf
 
+# Create an empty layer that can be used by other Lambda functions
+# Dependencies should be managed externally or through deployment pipelines
 resource "aws_lambda_layer_version" "shared_dependencies" {
   layer_name          = "${var.project_name}-shared-deps-${var.environment}"
-  description         = "Shared dependencies for ${var.project_name} Lambda functions"
-  filename            = data.archive_file.layer_zip.output_path
+  description         = "Shared dependencies layer for ${var.project_name} Lambda functions"
+  
+  # Create a minimal layer with just a placeholder
+  filename            = data.archive_file.empty_layer.output_path
   compatible_runtimes = ["python3.11", "python3.12"]
-  source_code_hash    = data.archive_file.layer_zip.output_base64sha256
-
-  depends_on = [null_resource.pip_install]
+  source_code_hash    = data.archive_file.empty_layer.output_base64sha256
 }
 
-# Install dependencies to layer directory
-resource "null_resource" "pip_install" {
-  triggers = {
-    requirements = filemd5("${path.module}/requirements.txt")
-    script       = filemd5("${path.module}/install-layer-deps.ps1")
-  }
-
-  provisioner "local-exec" {
-    command     = "powershell -ExecutionPolicy Bypass -File \"${path.module}/install-layer-deps.ps1\" -ModulePath \"${path.module}\" -RequirementsFile \"${path.module}/requirements.txt\""
-    interpreter = ["cmd", "/C"]
-  }
-}
-
-# Create layer ZIP file
-data "archive_file" "layer_zip" {
+# Create a minimal empty layer structure
+data "archive_file" "empty_layer" {
   type        = "zip"
-  source_dir  = "${path.module}/layer"
-  output_path = "${path.module}/../../temp/${var.project_name}-layer-${var.environment}.zip"
-  depends_on  = [null_resource.pip_install]
+  output_path = "${path.module}/empty-layer.zip"
+  
+  source {
+    content  = "# Empty layer - dependencies can be added via deployment process"
+    filename = "python/placeholder.py"
+  }
 }
