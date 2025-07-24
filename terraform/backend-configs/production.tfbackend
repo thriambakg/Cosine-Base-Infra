@@ -6,11 +6,3 @@ key            = "base-infrastructure/production/terraform.tfstate"
 region         = "us-east-1"
 dynamodb_table = "cosine-terraform-locks-prod"
 encrypt        = true
-
-# Tags for the S3 backend
-tags = {
-  Environment = "production"
-  Project     = "cosine"
-  Component   = "base-infrastructure"
-  ManagedBy   = "terraform"
-}

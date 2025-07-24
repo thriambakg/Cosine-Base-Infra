@@ -39,6 +39,8 @@ on:
 env:
   TF_VERSION: '1.4.0'
   AWS_REGION: 'us-east-1'
+  TFLINT_VERSION: '0.46.1'
+  TFSEC_VERSION: '1.28.1'
 
 jobs:
   terraform-plan:
@@ -84,6 +86,28 @@ jobs:
       
       - name: Terraform Validate
         run: terraform validate
+      
+      - name: Install TFLint
+        run: |
+          curl -sLo tflint.zip https://github.com/terraform-linters/tflint/releases/download/v${{ env.TFLINT_VERSION }}/tflint_linux_amd64.zip
+          unzip tflint.zip -d /usr/local/bin/
+          tflint --version
+      
+      - name: Install tfsec
+        run: |
+          curl -sLo tfsec https://github.com/aquasecurity/tfsec/releases/download/v${{ env.TFSEC_VERSION }}/tfsec-linux-amd64
+          chmod +x tfsec
+          mv tfsec /usr/local/bin/
+          tfsec --version
+      
+      - name: TFLint
+        run: |
+          tflint --init
+          tflint
+      
+      - name: tfsec Security Scan
+        run: |
+          tfsec .
       
       - name: Terraform Plan
         id: plan
@@ -214,7 +238,7 @@ jobs:
           echo "- **Compatible Runtimes:** $(terraform output -raw compatible_runtimes)" >> $GITHUB_STEP_SUMMARY
 
   security-scan:
-    name: 'Security Scan'
+    name: 'Security Scan & Linting'
     runs-on: ubuntu-latest
     if: github.event_name == 'pull_request' || github.event_name == 'push'
     
@@ -226,6 +250,30 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
       
+      - name: Install TFLint
+        run: |
+          curl -sLo tflint.zip https://github.com/terraform-linters/tflint/releases/download/v${{ env.TFLINT_VERSION }}/tflint_linux_amd64.zip
+          unzip tflint.zip -d /usr/local/bin/
+          tflint --version
+      
+      - name: Install tfsec
+        run: |
+          curl -sLo tfsec https://github.com/aquasecurity/tfsec/releases/download/v${{ env.TFSEC_VERSION }}/tfsec-linux-amd64
+          chmod +x tfsec
+          mv tfsec /usr/local/bin/
+          tfsec --version
+      
+      - name: TFLint Check
+        run: |
+          tflint --init
+          tflint
+      
+      - name: tfsec Security Scan
+        run: |
+          tfsec . --format=json --out=tfsec-results.json || true
+          tfsec . --format=sarif --out=tfsec-results.sarif || true
+          tfsec .
+      
       - name: Run Checkov
         uses: bridgecrewio/checkov-action@master
         with:
@@ -233,10 +281,18 @@ jobs:
           framework: terraform
           soft_fail: true
           output_format: sarif
-          output_file_path: reports/results.sarif
+          output_file_path: reports/checkov-results.sarif
+      
+      - name: Upload tfsec results to GitHub Advanced Security
+        if: always()
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: terraform/tfsec-results.sarif
+        continue-on-error: true
       
       - name: Upload Checkov results to GitHub Advanced Security
         if: always()
         uses: github/codeql-action/upload-sarif@v3
         with:
-          sarif_file: reports/results.sarif
+          sarif_file: reports/checkov-results.sarif
+        continue-on-error: true
