@@ -1,15 +1,7 @@
 # .gitignore for Cosine Base Infrastructure
 
 # Terraform files
-*.tfstate
-*.tfstate.*
-*.tfvars
-!*.tfvars.example
-!environments/*.tfvars
-.terraform/
-.terraform.lock.hcl
-*.tfplan
-*.tfplan.*
+
 
 # Crash log files
 crash.log
