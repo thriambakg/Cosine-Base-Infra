@@ -5,6 +5,7 @@
 *.tfstate.*
 *.tfvars
 !*.tfvars.example
+!environments/*.tfvars
 .terraform/
 .terraform.lock.hcl
 *.tfplan
