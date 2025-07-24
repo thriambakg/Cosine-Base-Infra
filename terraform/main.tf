@@ -14,12 +14,6 @@ terraform {
       version = "~> 2.0"
     }
   }
-
-  # Backend configuration for remote state
-  backend "s3" {
-    # These values will be provided during terraform init
-    # or through backend configuration files
-  }
 }
 
 provider "aws" {
