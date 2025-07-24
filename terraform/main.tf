@@ -24,10 +24,6 @@ provider "aws" {
   }
 }
 
-# Data sources for account and region info
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
 # Lambda Layer for shared dependencies
 module "shared_layer" {
   source = "./modules/lambda-layer"
