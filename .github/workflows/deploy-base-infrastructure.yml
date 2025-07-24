@@ -128,6 +128,27 @@ jobs:
       - name: Terraform Plan
         id: plan
         run: |
+          echo "🔍 Checking for environment files..."
+          echo "Current directory: $(pwd)"
+          echo "Directory contents:"
+          ls -la
+          echo "Environments directory:"
+          if [ -d "environments" ]; then
+            ls -la environments/
+          else
+            echo "❌ environments directory does not exist"
+            exit 1
+          fi
+          
+          echo "Looking for: environments/${{ matrix.environment }}.tfvars"
+          if [ ! -f "environments/${{ matrix.environment }}.tfvars" ]; then
+            echo "❌ Environment file environments/${{ matrix.environment }}.tfvars does not exist"
+            echo "Available files in environments/:"
+            ls -la environments/ || echo "No files found"
+            exit 1
+          fi
+          
+          echo "✅ Environment file found, proceeding with plan..."
           terraform plan \
             -var="environment=${{ matrix.environment }}" \
             -var-file="environments/${{ matrix.environment }}.tfvars" \
