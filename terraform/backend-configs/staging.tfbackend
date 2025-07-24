@@ -1,8 +1,8 @@
 # Backend configuration for staging environment
 # backend-configs/staging.tfbackend
 
-bucket         = "cosine-terraform-state-staging"
+bucket         = "cosine-terraform-state-bucket"
 key            = "base-infrastructure/staging/terraform.tfstate"
 region         = "us-east-1"
-dynamodb_table = "cosine-terraform-locks-staging"
+dynamodb_table = "cosine-terraform-locks"
 encrypt        = true

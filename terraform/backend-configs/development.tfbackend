@@ -1,8 +1,8 @@
 # Backend configuration for development environment
 # backend-configs/development.tfbackend
 
-bucket         = "cosine-terraform-state-dev"
+bucket         = "cosine-terraform-state-bucket"
 key            = "base-infrastructure/development/terraform.tfstate"
 region         = "us-east-1"
-dynamodb_table = "cosine-terraform-locks-dev"
+dynamodb_table = "cosine-terraform-locks"
 encrypt        = true

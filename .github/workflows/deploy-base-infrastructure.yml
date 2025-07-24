@@ -78,6 +78,22 @@ jobs:
       - name: Terraform Format Check
         run: terraform fmt -check -recursive
       
+      - name: Check Backend Infrastructure
+        run: |
+          echo "🚀 Checking if backend infrastructure exists..."
+          
+          # Try to describe the S3 bucket
+          if aws s3api head-bucket --bucket cosine-terraform-state-bucket 2>/dev/null; then
+            echo "✅ Backend infrastructure already exists"
+          else
+            echo "❌ Backend infrastructure (S3 bucket: cosine-terraform-state-bucket) does not exist"
+            echo "Please run the bootstrap process from your main project first:"
+            echo "  cd Cosine2.0/terraform/bootstrap"
+            echo "  terraform init"
+            echo "  terraform apply"
+            exit 1
+          fi
+      
       - name: Terraform Init
         run: |
           terraform init \
