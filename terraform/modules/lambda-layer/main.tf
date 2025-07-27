@@ -1,14 +1,21 @@
 # Lambda Layer Module for shared dependencies
 # modules/lambda-layer/main.tf
 
-# Create a minimal empty layer structure first
-data "archive_file" "empty_layer" {
-  type        = "zip"
-  output_path = "${path.module}/empty-layer.zip"
+# Create the ZIP file using a null_resource to ensure it exists before being referenced
+resource "null_resource" "create_empty_layer" {
+  provisioner "local-exec" {
+    command = <<-EOT
+      mkdir -p "${path.module}/temp/python"
+      echo "# Empty layer placeholder" > "${path.module}/temp/python/__init__.py"
+      cd "${path.module}/temp"
+      zip -r "${path.module}/empty-layer.zip" python/
+      rm -rf "${path.module}/temp"
+    EOT
+    interpreter = ["/bin/bash", "-c"]
+  }
 
-  source {
-    content  = "# Empty layer - dependencies can be added via deployment process"
-    filename = "python/placeholder.py"
+  triggers = {
+    always_run = timestamp()
   }
 }
 
@@ -16,12 +23,13 @@ data "archive_file" "empty_layer" {
 # Dependencies should be managed externally or through deployment pipelines
 resource "aws_lambda_layer_version" "shared_dependencies" {
   layer_name  = "${var.project_name}-shared-deps-${var.environment}"
-  description = "Shared dependencies layer for ${var.project_name} Lambda functions"
+  description = "Shared dependencies layer for ${var.project_name} Lambda functions - populated externally"
 
-  # Create a minimal layer with just a placeholder
-  filename            = data.archive_file.empty_layer.output_path
+  filename            = "${path.module}/empty-layer.zip"
   compatible_runtimes = ["python3.11", "python3.12"]
-  source_code_hash    = data.archive_file.empty_layer.output_base64sha256
+  
+  # Use a simple hash since we're creating a minimal layer
+  source_code_hash = base64sha256("empty-layer-${var.environment}")
 
-  depends_on = [data.archive_file.empty_layer]
+  depends_on = [null_resource.create_empty_layer]
 }
