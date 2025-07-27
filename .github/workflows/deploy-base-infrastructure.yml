@@ -58,7 +58,7 @@ jobs:
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'
     needs: determine-environment
-    uses: .github/workflows/reusable/terraform-pipeline.yml
+    uses: .github/workflows/reusable/terraform-pipeline.yml@main
     with:
       terraform_directory: 'terraform'
       infrastructure_type: 'base'
