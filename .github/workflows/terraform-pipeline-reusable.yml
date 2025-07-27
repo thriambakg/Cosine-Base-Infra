@@ -1,5 +1,5 @@
 # Reusable Terraform CI/CD Workflow
-# .github/workflows/reusable/terraform-pipeline.yml
+# .github/workflows/terraform-pipeline-reusable.yml
 
 name: Reusable Terraform Pipeline
 
