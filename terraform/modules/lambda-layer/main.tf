@@ -4,7 +4,7 @@
 # Create the ZIP file using a null_resource to ensure it exists before being referenced
 resource "null_resource" "create_empty_layer" {
   provisioner "local-exec" {
-    command = <<-EOT
+    command     = <<-EOT
       mkdir -p "${path.module}/temp/python"
       echo "# Empty layer placeholder" > "${path.module}/temp/python/__init__.py"
       cd "${path.module}/temp"
@@ -27,7 +27,7 @@ resource "aws_lambda_layer_version" "shared_dependencies" {
 
   filename            = "${path.module}/empty-layer.zip"
   compatible_runtimes = ["python3.11", "python3.12"]
-  
+
   # Use a simple hash since we're creating a minimal layer
   source_code_hash = base64sha256("empty-layer-${var.environment}")
 
