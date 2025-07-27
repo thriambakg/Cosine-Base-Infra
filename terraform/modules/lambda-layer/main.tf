@@ -8,7 +8,7 @@ resource "null_resource" "create_empty_layer" {
       mkdir -p "${path.module}/temp/python"
       echo "# Empty layer placeholder" > "${path.module}/temp/python/__init__.py"
       cd "${path.module}/temp"
-      zip -r "${path.module}/empty-layer.zip" python/
+      zip -r "../empty-layer.zip" python/
       rm -rf "${path.module}/temp"
     EOT
     interpreter = ["/bin/bash", "-c"]
