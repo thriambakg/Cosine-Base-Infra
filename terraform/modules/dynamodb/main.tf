@@ -51,8 +51,8 @@ resource "aws_dynamodb_table" "user_profiles" {
 
   # Server-side encryption
   server_side_encryption {
-    enabled    = true
-    kms_key_id = var.kms_key_id
+    enabled     = true
+    kms_key_arn = var.kms_key_id
   }
 
   # Point-in-time recovery
@@ -135,8 +135,8 @@ resource "aws_dynamodb_table" "security_events" {
 
   # Server-side encryption
   server_side_encryption {
-    enabled    = true
-    kms_key_id = var.kms_key_id
+    enabled     = true
+    kms_key_arn = var.kms_key_id
   }
 
   # Point-in-time recovery
@@ -196,8 +196,8 @@ resource "aws_dynamodb_table" "user_sessions" {
 
   # Server-side encryption
   server_side_encryption {
-    enabled    = true
-    kms_key_id = var.kms_key_id
+    enabled     = true
+    kms_key_arn = var.kms_key_id
   }
 
   # Point-in-time recovery

@@ -128,11 +128,7 @@ resource "aws_cloudwatch_dashboard" "main" {
     ]
   })
 
-  tags = merge(var.tags, {
-    Name    = "${var.project_name}-dashboard-${var.environment}"
-    Type    = "Dashboard"
-    Purpose = "Monitoring"
-  })
+  # Note: CloudWatch dashboards do not support tags
 }
 
 # Security Event Metric Filter

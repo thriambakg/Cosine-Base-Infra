@@ -5,9 +5,8 @@
 resource "aws_cognito_user_pool" "main" {
   name = "${var.project_name}-user-pool-${var.environment}"
 
-  # Username configuration
-  username_attributes = ["email"]
-  alias_attributes    = ["email", "preferred_username"]
+  # Username configuration - use alias_attributes instead of username_attributes
+  alias_attributes = ["email", "preferred_username"]
 
   # Password policy
   password_policy {

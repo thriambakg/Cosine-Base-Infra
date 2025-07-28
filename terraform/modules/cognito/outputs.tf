@@ -37,5 +37,10 @@ output "user_pool_hosted_ui_url" {
   value       = var.domain_name != "" ? "https://${aws_cognito_user_pool_domain.main[0].domain}.auth.${data.aws_region.current.name}.amazoncognito.com" : null
 }
 
+output "user_pool_domain_cloudfront_distribution_arn" {
+  description = "CloudFront distribution ARN for the user pool domain"
+  value       = var.domain_name != "" ? aws_cognito_user_pool_domain.main[0].cloudfront_distribution_arn : null
+}
+
 # Data source for current region
 data "aws_region" "current" {}

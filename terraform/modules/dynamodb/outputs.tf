@@ -22,6 +22,11 @@ output "user_profiles_stream_arn" {
   value       = aws_dynamodb_table.user_profiles.stream_arn
 }
 
+output "user_profiles_table_stream_arn" {
+  description = "ARN of the user profiles DynamoDB stream (alias)"
+  value       = aws_dynamodb_table.user_profiles.stream_arn
+}
+
 # Security Events Table
 output "security_events_table_name" {
   description = "Name of the security events DynamoDB table"
@@ -43,6 +48,11 @@ output "security_events_stream_arn" {
   value       = aws_dynamodb_table.security_events.stream_arn
 }
 
+output "security_events_table_stream_arn" {
+  description = "ARN of the security events DynamoDB stream (alias)"
+  value       = aws_dynamodb_table.security_events.stream_arn
+}
+
 # User Sessions Table
 output "user_sessions_table_name" {
   description = "Name of the user sessions DynamoDB table"
@@ -61,6 +71,11 @@ output "user_sessions_table_id" {
 
 output "user_sessions_stream_arn" {
   description = "ARN of the user sessions DynamoDB stream"
+  value       = aws_dynamodb_table.user_sessions.stream_arn
+}
+
+output "user_sessions_table_stream_arn" {
+  description = "ARN of the user sessions DynamoDB stream (alias)"
   value       = aws_dynamodb_table.user_sessions.stream_arn
 }
 

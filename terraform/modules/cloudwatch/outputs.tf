@@ -12,6 +12,16 @@ output "security_events_log_group_arn" {
   value       = aws_cloudwatch_log_group.security_events.arn
 }
 
+output "security_log_group_name" {
+  description = "Name of the security events log group (alias)"
+  value       = aws_cloudwatch_log_group.security_events.name
+}
+
+output "security_log_group_arn" {
+  description = "ARN of the security events log group (alias)"
+  value       = aws_cloudwatch_log_group.security_events.arn
+}
+
 output "auth_events_log_group_name" {
   description = "Name of the authentication events log group"
   value       = aws_cloudwatch_log_group.auth_events.name
@@ -19,6 +29,16 @@ output "auth_events_log_group_name" {
 
 output "auth_events_log_group_arn" {
   description = "ARN of the authentication events log group"
+  value       = aws_cloudwatch_log_group.auth_events.arn
+}
+
+output "auth_log_group_name" {
+  description = "Name of the authentication events log group (alias)"
+  value       = aws_cloudwatch_log_group.auth_events.name
+}
+
+output "auth_log_group_arn" {
+  description = "ARN of the authentication events log group (alias)"
   value       = aws_cloudwatch_log_group.auth_events.arn
 }
 
