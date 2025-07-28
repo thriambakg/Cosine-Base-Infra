@@ -24,10 +24,6 @@ provider "aws" {
   }
 }
 
-# Data sources
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
 # KMS keys for encryption
 module "kms" {
   source = "./modules/kms"
