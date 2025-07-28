@@ -1,236 +1,322 @@
 # Cosine Base Infrastructure
 
-This repository contains the shared infrastructure components for the Cosine project, including Lambda layers and other reusable AWS resources.
+This repository contains the shared infrastructure components for the Cosine project using Terraform. It provides reusable modules for authentication, data storage, encryption, and monitoring that can be used across different environments and projects.
 
 ## 🏗️ Architecture Overview
 
-This base infrastructure repository provides:
-- **Lambda Layers**: Shared Python dependencies (yfinance, numpy, pandas)
-- **Centralized Management**: Single source of truth for shared resources
-- **Multi-Environment Support**: Development, staging, and production configurations
-- **Automated CI/CD**: GitHub Actions for infrastructure deployment
+The base infrastructure includes:
+
+- **Authentication**: AWS Cognito User Pool with configurable MFA and security policies
+- **Data Storage**: DynamoDB tables for user profiles, security events, and session management
+- **Encryption**: KMS keys for service-specific encryption (main, DynamoDB, CloudWatch)
+- **Monitoring**: CloudWatch log groups, dashboards, and security alarms
+- **Shared Resources**: Lambda layers for common dependencies
 
 ## 📁 Repository Structure
 
 ```
-Cosine-Base-Infra/
-├── .github/workflows/           # CI/CD pipeline configurations
-│   └── deploy-base-infrastructure.yml
-├── terraform/                   # Infrastructure as Code
-│   ├── main.tf                 # Main Terraform configuration
-│   ├── variables.tf            # Variable definitions
-│   ├── outputs.tf              # Output definitions
-│   ├── backend.tf              # State backend configuration
-│   ├── backend-configs/        # Environment-specific backend configs
-│   │   ├── development.tfbackend
-│   │   ├── staging.tfbackend
-│   │   └── production.tfbackend
-│   ├── environments/           # Environment-specific variables
-│   │   ├── development.tfvars
-│   │   ├── staging.tfvars
-│   │   └── production.tfvars
-│   └── modules/
-│       └── lambda-layer/       # Lambda layer module
-│           ├── main.tf
-│           ├── variables.tf
-│           ├── outputs.tf
-│           ├── requirements.txt
-│           ├── install-layer-deps.ps1
-│           └── README.md
+terraform/
+├── main.tf                    # Main Terraform configuration
+├── variables.tf               # Variable definitions
+├── outputs.tf                 # Output definitions
+├── backend.tf                 # Remote state configuration
+├── modules/                   # Reusable Terraform modules
+│   ├── cognito/              # Authentication module
+│   ├── dynamodb/             # Data storage module
+│   ├── kms/                  # Encryption keys module
+│   ├── cloudwatch/           # Monitoring module
+│   └── lambda-layer/         # Shared dependencies module
+├── environments/             # Environment-specific configurations
+│   ├── development.auto.tfvars
+│   ├── staging.auto.tfvars
+│   └── production.auto.tfvars
+└── backend-configs/          # Backend configurations per environment
+    ├── development.tfbackend
+    ├── staging.tfbackend
+    └── production.tfbackend
 ```
 
 ## 🚀 Quick Start
 
 ### Prerequisites
-- AWS CLI configured with appropriate permissions
-- Terraform v1.4.0 or later
-- PowerShell (for dependency installation)
 
-### Initial Setup
+1. **AWS CLI** configured with appropriate credentials
+2. **Terraform** >= 1.0 installed
+3. **Access** to AWS account with necessary permissions
 
-1. **Clone the repository**:
+### Deployment Steps
+
+1. **Clone the repository**
    ```bash
    git clone <repository-url>
-   cd Cosine-Base-Infra
+   cd Cosine-Base-Infra/terraform
    ```
 
-2. **Initialize Terraform**:
+2. **Initialize Terraform** (for each environment)
    ```bash
-   cd terraform
-   terraform init -backend-config="backend-configs/staging.tfbackend"
+   # Development
+   terraform init -backend-config=backend-configs/development.tfbackend
+   
+   # Staging
+   terraform init -backend-config=backend-configs/staging.tfbackend
+   
+   # Production
+   terraform init -backend-config=backend-configs/production.tfbackend
    ```
 
-3. **Plan and apply**:
+3. **Plan the deployment**
    ```bash
-   terraform plan -var-file="environments/staging.tfvars"
-   terraform apply -var-file="environments/staging.tfvars"
+   # Development
+   terraform plan -var-file=environments/development.auto.tfvars
+   
+   # Staging
+   terraform plan -var-file=environments/staging.auto.tfvars
+   
+   # Production
+   terraform plan -var-file=environments/production.auto.tfvars
    ```
 
-## 🔧 Lambda Layer Module
+4. **Apply the configuration**
+   ```bash
+   # Development
+   terraform apply -var-file=environments/development.auto.tfvars
+   
+   # Staging
+   terraform apply -var-file=environments/staging.auto.tfvars
+   
+   # Production
+   terraform apply -var-file=environments/production.auto.tfvars
+   ```
 
-The Lambda layer module creates a shared layer containing Python dependencies for data analysis and financial data retrieval.
+## 📦 Modules
 
-### Included Packages
-- **yfinance** (v0.2.28): Yahoo Finance data retrieval
-- **numpy** (≥1.24.0): Numerical computing
-- **pandas** (≥2.0.0): Data manipulation and analysis
-- **requests** (≥2.31.0): HTTP library
+### Cognito Module
+Provides AWS Cognito User Pool with:
+- Configurable MFA (OFF/OPTIONAL/ON)
+- Advanced security features
+- Custom domain support
+- OAuth 2.0/OpenID Connect flows
+- Rate limiting and bot protection
 
-### Usage in Other Projects
+**Outputs**: User Pool ID, Client ID, Domain, etc.
 
-After deployment, reference the layer in your Lambda functions:
+### DynamoDB Module
+Creates three tables:
+- **User Profiles**: Stores user account information with email GSI
+- **Security Events**: Audit trail for security-related events
+- **User Sessions**: Manages active user sessions with TTL
 
-```hcl
-# In your application's Terraform configuration
-data "terraform_remote_state" "base_infrastructure" {
-  backend = "s3"
-  config = {
-    bucket = "cosine-terraform-state-staging"
-    key    = "base-infrastructure/staging/terraform.tfstate"
-    region = "us-east-1"
-  }
-}
+**Features**: Encryption, streams, point-in-time recovery, deletion protection
 
-resource "aws_lambda_function" "example" {
-  # ... other configuration ...
-  
-  layers = [
-    data.terraform_remote_state.base_infrastructure.outputs.lambda_layer_arn
-  ]
-}
-```
+### KMS Module
+Provides encryption keys:
+- **Main Key**: General purpose encryption
+- **DynamoDB Key**: Specifically for DynamoDB encryption
+- **CloudWatch Key**: For log group encryption
 
-## 🌍 Environment Management
+**Features**: Automatic rotation, service-specific policies, proper IAM controls
 
-### Environments
-- **Development**: For testing and development work
-- **Staging**: Pre-production testing environment
-- **Production**: Live production environment
+### CloudWatch Module
+Sets up monitoring infrastructure:
+- **Log Groups**: Security, Auth, Application, Lambda, API Gateway
+- **Dashboard**: Centralized monitoring view
+- **Alarms**: Failed login and suspicious activity detection
+- **Metric Filters**: Security event parsing
 
-### Backend State Management
-Each environment uses separate S3 buckets for Terraform state:
-- Development: `cosine-terraform-state-dev`
-- Staging: `cosine-terraform-state-staging`
-- Production: `cosine-terraform-state-prod`
+### Lambda Layer Module
+Creates shared Lambda layer with common dependencies for Python runtime.
 
-### Deploying to Different Environments
+## 🔧 Configuration
 
-```bash
-# Development
-terraform init -backend-config="backend-configs/development.tfbackend"
-terraform apply -var-file="environments/development.tfvars"
+### Environment Variables
 
-# Staging
-terraform init -backend-config="backend-configs/staging.tfbackend"
-terraform apply -var-file="environments/staging.tfvars"
+Each environment (development, staging, production) has its own configuration file in the `environments/` directory. Key differences:
 
-# Production
-terraform init -backend-config="backend-configs/production.tfbackend"
-terraform apply -var-file="environments/production.tfvars"
-```
+| Setting | Development | Staging | Production |
+|---------|-------------|---------|------------|
+| MFA | OFF | OPTIONAL | ON |
+| Key Rotation | Disabled | Enabled | Enabled |
+| Log Retention | 7-30 days | 14-180 days | 30-365 days |
+| Deletion Protection | Disabled | Enabled | Enabled |
+| Alert Thresholds | Relaxed | Moderate | Strict |
 
-## 🤖 CI/CD Pipeline
+### Customization
 
-The GitHub Actions pipeline automatically:
-- **Validates** Terraform configuration
-- **Plans** infrastructure changes
-- **Applies** changes on merge to main/develop branches
-- **Comments** on PRs with plan details
-- **Scans** for security issues with Checkov
+To customize for your environment:
 
-### Pipeline Triggers
-- **Push** to main/develop branches
-- **Pull requests** to main/develop branches
-- **Manual dispatch** with environment selection
+1. **Update variables** in the appropriate `.auto.tfvars` file
+2. **Modify tags** to match your organization's standards
+3. **Adjust retention policies** based on compliance requirements
+4. **Configure callback URLs** for your application domains
 
-### Required Secrets
-Configure these secrets in your GitHub repository:
-- `AWS_ACCESS_KEY_ID`: AWS access key for deployment
-- `AWS_SECRET_ACCESS_KEY`: AWS secret key for deployment
+### Required Variables
 
-## 🔒 Security
-
-### Best Practices Implemented
-- **State encryption**: Terraform state is encrypted in S3
-- **IAM least privilege**: Resources use minimal required permissions
-- **Security scanning**: Automated Checkov security analysis
-- **Environment isolation**: Separate state buckets per environment
-
-### Security Scanning
-The pipeline includes automated security scanning with Checkov, which:
-- Scans Terraform code for security issues
-- Uploads results to GitHub Security tab
-- Provides detailed reports on potential vulnerabilities
+At minimum, you must set:
+- `environment`: Target environment name
+- `cognito_callback_urls`: Your application's callback URLs
+- `cognito_logout_urls`: Your application's logout URLs
 
 ## 📊 Outputs
 
-After deployment, the following outputs are available:
+The infrastructure exposes comprehensive outputs for use in other Terraform configurations:
 
-| Output | Description |
-|--------|-------------|
-| `lambda_layer_arn` | ARN of the shared Lambda layer |
-| `lambda_layer_version` | Version number of the layer |
-| `lambda_layer_version_arn` | ARN including version |
-| `layer_name` | Name of the layer |
-| `compatible_runtimes` | Supported Python runtimes |
+### Authentication
+- `cognito_user_pool_id`: For Lambda/API Gateway integration
+- `cognito_user_pool_client_id`: For frontend configuration
+- `cognito_user_pool_client_secret`: For backend authentication
 
-## 🔧 Local Development
+### Data Storage
+- `user_profiles_table_name`: For application database operations
+- `security_events_table_name`: For audit logging
+- `user_sessions_table_name`: For session management
 
-### Testing Layer Dependencies Locally
+### Encryption
+- `kms_key_arn`: For encrypting application data
+- `dynamodb_key_arn`: For DynamoDB encryption
+- `cloudwatch_key_arn`: For log encryption
 
-```powershell
-# Navigate to the lambda-layer module
-cd terraform/modules/lambda-layer
+### Monitoring
+- `security_log_group_name`: For security event logging
+- `application_log_group_name`: For application logging
+- `dashboard_url`: For monitoring access
 
-# Run the dependency installation script
-./install-layer-deps.ps1
-```
+## 🔐 Security Features
 
-This creates a virtual environment and installs dependencies for local testing.
+### Encryption
+- **At Rest**: All DynamoDB tables encrypted with customer-managed KMS keys
+- **In Transit**: HTTPS/TLS for all API communications
+- **Logs**: CloudWatch logs encrypted with dedicated KMS key
 
-## 📝 Contributing
+### Authentication
+- **MFA Support**: SMS, TOTP, or hardware tokens
+- **Advanced Security**: Bot detection, compromised credential detection
+- **Rate Limiting**: Protection against brute force attacks
+- **Password Policies**: Configurable complexity requirements
 
-1. Create a feature branch from `develop`
-2. Make your changes
-3. Test locally with `terraform plan`
-4. Create a pull request to `develop`
-5. After review, merge to `main` for production deployment
+### Monitoring
+- **Security Events**: Comprehensive logging of authentication events
+- **Failed Login Detection**: Automated alerting on suspicious activity
+- **Audit Trail**: Complete history of user actions in DynamoDB
+- **Real-time Dashboards**: CloudWatch dashboard for security monitoring
 
-## 🏷️ Tagging Strategy
+### Access Control
+- **Least Privilege**: IAM policies follow principle of least privilege
+- **Service-specific Keys**: Separate KMS keys for different services
+- **Resource-based Policies**: Granular access control on all resources
 
-Resources are automatically tagged with:
-- **Project**: cosine
-- **Environment**: development/staging/production
-- **ManagedBy**: terraform
-- **Repository**: Cosine-Base-Infra
+## 🌍 Multi-Environment Support
 
-## 🆘 Troubleshooting
+The infrastructure supports three environments out of the box:
+
+### Development
+- **Purpose**: Local development and testing
+- **Security**: Relaxed for ease of development
+- **Cost**: Optimized for minimal charges
+- **Retention**: Short log retention periods
+
+### Staging
+- **Purpose**: Pre-production testing
+- **Security**: Production-like settings
+- **Cost**: Balanced between cost and functionality
+- **Retention**: Moderate log retention
+
+### Production
+- **Purpose**: Live user environment
+- **Security**: Maximum security enforcement
+- **Cost**: Optimized for reliability over cost
+- **Retention**: Long-term log retention for compliance
+
+## 🔄 Integration with Main Project
+
+To use this base infrastructure in your main Cosine project:
+
+1. **Reference as Terraform Data Source**:
+   ```hcl
+   data "terraform_remote_state" "base_infra" {
+     backend = "s3"
+     config = {
+       bucket = "cosine-terraform-state"
+       key    = "base-infra/${var.environment}.tfstate"
+       region = "us-east-1"
+     }
+   }
+   ```
+
+2. **Use Outputs in Resources**:
+   ```hcl
+   resource "aws_lambda_function" "api" {
+     # ... other configuration
+     
+     environment {
+       variables = {
+         USER_POOL_ID    = data.terraform_remote_state.base_infra.outputs.cognito_user_pool_id
+         USER_TABLE_NAME = data.terraform_remote_state.base_infra.outputs.user_profiles_table_name
+         KMS_KEY_ID      = data.terraform_remote_state.base_infra.outputs.kms_key_id
+       }
+     }
+   }
+   ```
+
+## 📈 Cost Optimization
+
+### Development Environment
+- Pay-per-request DynamoDB billing
+- Shorter log retention periods
+- Disabled point-in-time recovery
+- No key rotation (for cost savings)
+
+### Production Environment
+- Can switch to provisioned capacity for predictable workloads
+- Longer retention for compliance
+- Full backup and recovery features
+- All security features enabled
+
+### Monitoring Costs
+Use the CloudWatch dashboard to monitor:
+- DynamoDB consumed capacity
+- Lambda invocation counts
+- Log ingestion volume
+- KMS key usage
+
+## 🔍 Troubleshooting
 
 ### Common Issues
 
-1. **PowerShell Execution Policy**:
-   ```powershell
-   Set-ExecutionPolicy -ExecutionPolicy RemoteSigned -Scope CurrentUser
-   ```
+1. **Permission Errors**: Ensure your AWS credentials have sufficient permissions for all resources
+2. **State Lock**: If Terraform state is locked, check for running operations or manually unlock
+3. **Resource Conflicts**: Ensure resource names are unique across environments
+4. **Backend Access**: Verify S3 bucket and DynamoDB table exist for state management
 
-2. **AWS Permissions**: Ensure your AWS credentials have permissions for:
-   - Lambda layer creation and management
-   - S3 bucket access for state storage
-   - DynamoDB table access for state locking
+### Debugging
 
-3. **State Lock Issues**:
+1. **Enable Terraform Debug Logging**:
    ```bash
-   terraform force-unlock <lock-id>
+   export TF_LOG=DEBUG
+   terraform plan
    ```
 
-### Getting Help
+2. **Check AWS CloudTrail**: For API call debugging
+3. **Review CloudWatch Logs**: For runtime issues
+4. **Validate Configuration**:
+   ```bash
+   terraform validate
+   terraform fmt -check
+   ```
 
-For issues with this infrastructure:
-1. Check the GitHub Actions logs
-2. Review Terraform plan output
-3. Validate AWS permissions
-4. Check the security scan results
+## 🤝 Contributing
+
+1. **Follow Terraform Best Practices**: Use consistent formatting and naming
+2. **Update Documentation**: Keep README and module docs current
+3. **Test Changes**: Validate in development environment first
+4. **Security Review**: Ensure no sensitive data in code or state
 
 ## 📄 License
 
-This project is part of the Cosine financial analysis platform.
+This project is licensed under the MIT License - see the LICENSE file for details.
+
+## 📞 Support
+
+For questions or support:
+- Create an issue in this repository
+- Review the troubleshooting section
+- Check AWS documentation for service-specific guidance
