@@ -20,7 +20,7 @@ resource "aws_kms_key" "main" {
   # Key policy
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "EnableRootAccess"
         Effect = "Allow"
@@ -29,8 +29,8 @@ resource "aws_kms_key" "main" {
         }
         Action   = "kms:*"
         Resource = "*"
-      },
-      {
+      }], 
+      length(var.key_administrators) > 0 ? [{
         Sid    = "AllowKeyAdministrators"
         Effect = "Allow"
         Principal = {
@@ -53,7 +53,7 @@ resource "aws_kms_key" "main" {
           "kms:CancelKeyDeletion"
         ]
         Resource = "*"
-      },
+      }] : [], [
       {
         Sid    = "AllowServiceUsage"
         Effect = "Allow"
@@ -68,8 +68,7 @@ resource "aws_kms_key" "main" {
           "kms:DescribeKey"
         ]
         Resource = "*"
-      }
-    ]
+      }])
   })
 
   tags = merge(var.tags, {
@@ -100,7 +99,7 @@ resource "aws_kms_key" "dynamodb" {
   # Key policy specific for DynamoDB
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "EnableRootAccess"
         Effect = "Allow"
@@ -109,8 +108,8 @@ resource "aws_kms_key" "dynamodb" {
         }
         Action   = "kms:*"
         Resource = "*"
-      },
-      {
+      }], 
+      length(var.key_administrators) > 0 ? [{
         Sid    = "AllowKeyAdministrators"
         Effect = "Allow"
         Principal = {
@@ -133,7 +132,7 @@ resource "aws_kms_key" "dynamodb" {
           "kms:CancelKeyDeletion"
         ]
         Resource = "*"
-      },
+      }] : [], [
       {
         Sid    = "AllowDynamoDBService"
         Effect = "Allow"
@@ -148,8 +147,7 @@ resource "aws_kms_key" "dynamodb" {
           "kms:DescribeKey"
         ]
         Resource = "*"
-      }
-    ]
+      }])
   })
 
   tags = merge(var.tags, {
@@ -180,7 +178,7 @@ resource "aws_kms_key" "cloudwatch" {
   # Key policy for CloudWatch Logs
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
+    Statement = concat([
       {
         Sid    = "EnableRootAccess"
         Effect = "Allow"
@@ -189,8 +187,8 @@ resource "aws_kms_key" "cloudwatch" {
         }
         Action   = "kms:*"
         Resource = "*"
-      },
-      {
+      }], 
+      length(var.key_administrators) > 0 ? [{
         Sid    = "AllowKeyAdministrators"
         Effect = "Allow"
         Principal = {
@@ -213,7 +211,7 @@ resource "aws_kms_key" "cloudwatch" {
           "kms:CancelKeyDeletion"
         ]
         Resource = "*"
-      },
+      }] : [], [
       {
         Sid    = "AllowCloudWatchLogs"
         Effect = "Allow"
@@ -228,8 +226,7 @@ resource "aws_kms_key" "cloudwatch" {
           "kms:DescribeKey"
         ]
         Resource = "*"
-      }
-    ]
+      }])
   })
 
   tags = merge(var.tags, {

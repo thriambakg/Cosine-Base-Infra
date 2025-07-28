@@ -1,0 +1,39 @@
+# Git attributes for Cosine Base Infrastructure
+
+# Terraform files should maintain LF line endings for cross-platform compatibility
+*.tf text eol=lf
+*.tfvars text eol=lf
+*.hcl text eol=lf
+.terraform.lock.hcl text eol=lf
+
+# Shell scripts should use LF
+*.sh text eol=lf
+
+# Windows batch files should use CRLF
+*.bat text eol=crlf
+*.cmd text eol=crlf
+*.ps1 text eol=crlf
+
+# Binary files
+*.zip binary
+*.tar.gz binary
+*.exe binary
+*.dll binary
+*.so binary
+
+# Documentation
+*.md text
+*.txt text
+README text
+LICENSE text
+
+# Configuration files
+*.json text
+*.yaml text
+*.yml text
+*.toml text
+*.ini text
+
+# Python files
+*.py text eol=lf
+requirements.txt text eol=lf
