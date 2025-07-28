@@ -42,5 +42,30 @@ output "user_pool_domain_cloudfront_distribution_arn" {
   value       = var.domain_name != "" ? aws_cognito_user_pool_domain.main[0].cloudfront_distribution_arn : null
 }
 
+output "supported_identity_providers" {
+  description = "List of supported identity providers"
+  value = concat(
+    ["COGNITO"],
+    var.enable_google_provider ? ["Google"] : [],
+    var.enable_apple_provider ? ["SignInWithApple"] : [],
+    var.enable_microsoft_provider ? ["Microsoft"] : []
+  )
+}
+
+output "google_provider_name" {
+  description = "Google identity provider name"
+  value       = var.enable_google_provider ? aws_cognito_identity_provider.google[0].provider_name : null
+}
+
+output "apple_provider_name" {
+  description = "Apple identity provider name"
+  value       = var.enable_apple_provider ? aws_cognito_identity_provider.apple[0].provider_name : null
+}
+
+output "microsoft_provider_name" {
+  description = "Microsoft identity provider name"
+  value       = var.enable_microsoft_provider ? aws_cognito_identity_provider.microsoft[0].provider_name : null
+}
+
 # Data source for current region
 data "aws_region" "current" {}

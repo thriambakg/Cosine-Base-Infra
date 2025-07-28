@@ -1,6 +1,36 @@
 # Cognito User Pool Module
 # modules/cognito/main.tf
 
+# Data source for retrieving OAuth credentials from Secrets Manager
+data "aws_secretsmanager_secret" "oauth_credentials" {
+  count = var.use_secrets_manager ? 1 : 0
+  name  = var.secrets_manager_secret_name
+}
+
+data "aws_secretsmanager_secret_version" "oauth_credentials" {
+  count     = var.use_secrets_manager ? 1 : 0
+  secret_id = data.aws_secretsmanager_secret.oauth_credentials[0].id
+}
+
+# Local values to handle both direct variables and Secrets Manager
+locals {
+  oauth_secrets = var.use_secrets_manager ? jsondecode(data.aws_secretsmanager_secret_version.oauth_credentials[0].secret_string) : {}
+  
+  # Google credentials
+  google_client_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "google_client_id", "") : var.google_client_id
+  google_client_secret = var.use_secrets_manager ? lookup(local.oauth_secrets, "google_client_secret", "") : var.google_client_secret
+  
+  # Apple credentials
+  apple_client_id   = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_client_id", "") : var.apple_client_id
+  apple_team_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_team_id", "") : var.apple_team_id
+  apple_key_id      = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_key_id", "") : var.apple_key_id
+  apple_private_key = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_private_key", "") : var.apple_private_key
+  
+  # Microsoft credentials
+  microsoft_client_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "microsoft_client_id", "") : var.microsoft_client_id
+  microsoft_client_secret = var.use_secrets_manager ? lookup(local.oauth_secrets, "microsoft_client_secret", "") : var.microsoft_client_secret
+}
+
 # Cognito User Pool
 resource "aws_cognito_user_pool" "main" {
   name = "${var.project_name}-user-pool-${var.environment}"
@@ -151,6 +181,14 @@ resource "aws_cognito_user_pool_client" "main" {
     "ALLOW_USER_PASSWORD_AUTH"
   ]
 
+  # Supported identity providers
+  supported_identity_providers = concat(
+    ["COGNITO"],
+    var.enable_google_provider ? ["Google"] : [],
+    var.enable_apple_provider ? ["SignInWithApple"] : [],
+    var.enable_microsoft_provider ? ["Microsoft"] : []
+  )
+
   # Token validity
   access_token_validity  = var.access_token_validity
   id_token_validity      = var.id_token_validity
@@ -182,7 +220,12 @@ resource "aws_cognito_user_pool_client" "main" {
   # Prevent user existence errors
   prevent_user_existence_errors = "ENABLED"
 
-  depends_on = [aws_cognito_user_pool.main]
+  depends_on = [
+    aws_cognito_user_pool.main,
+    aws_cognito_identity_provider.google,
+    aws_cognito_identity_provider.apple,
+    aws_cognito_identity_provider.microsoft
+  ]
 }
 
 # Cognito User Pool Domain (optional)
@@ -190,4 +233,71 @@ resource "aws_cognito_user_pool_domain" "main" {
   count        = var.domain_name != "" ? 1 : 0
   domain       = var.domain_name
   user_pool_id = aws_cognito_user_pool.main.id
+}
+
+# Google Identity Provider
+resource "aws_cognito_identity_provider" "google" {
+  count         = var.enable_google_provider ? 1 : 0
+  user_pool_id  = aws_cognito_user_pool.main.id
+  provider_name = "Google"
+  provider_type = "Google"
+
+  provider_details = {
+    client_id        = local.google_client_id
+    client_secret    = local.google_client_secret
+    authorize_scopes = "email openid profile"
+  }
+
+  attribute_mapping = {
+    email       = "email"
+    given_name  = "given_name"
+    family_name = "family_name"
+    username    = "sub"
+  }
+}
+
+# Apple Identity Provider
+resource "aws_cognito_identity_provider" "apple" {
+  count         = var.enable_apple_provider ? 1 : 0
+  user_pool_id  = aws_cognito_user_pool.main.id
+  provider_name = "SignInWithApple"
+  provider_type = "SignInWithApple"
+
+  provider_details = {
+    client_id      = local.apple_client_id
+    team_id        = local.apple_team_id
+    key_id         = local.apple_key_id
+    private_key    = local.apple_private_key
+    authorize_scopes = "email name"
+  }
+
+  attribute_mapping = {
+    email       = "email"
+    given_name  = "firstName"
+    family_name = "lastName"
+    username    = "sub"
+  }
+}
+
+# Microsoft Identity Provider
+resource "aws_cognito_identity_provider" "microsoft" {
+  count         = var.enable_microsoft_provider ? 1 : 0
+  user_pool_id  = aws_cognito_user_pool.main.id
+  provider_name = "Microsoft"
+  provider_type = "OIDC"
+
+  provider_details = {
+    client_id        = local.microsoft_client_id
+    client_secret    = local.microsoft_client_secret
+    attributes_request_method = "GET"
+    oidc_issuer      = "https://login.microsoftonline.com/common/v2.0"
+    authorize_scopes = "email openid profile"
+  }
+
+  attribute_mapping = {
+    email       = "email"
+    given_name  = "given_name"
+    family_name = "family_name"
+    username    = "sub"
+  }
 }

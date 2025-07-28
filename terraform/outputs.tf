@@ -237,3 +237,19 @@ output "common_tags" {
   description = "Common tags applied to all resources"
   value       = var.common_tags
 }
+
+# Secrets Manager Outputs
+output "oauth_secrets_enabled" {
+  description = "Whether OAuth secrets are stored in Secrets Manager"
+  value       = var.oauth_secrets_enabled
+}
+
+output "oauth_secret_arns" {
+  description = "ARNs of OAuth secrets in Secrets Manager"
+  value       = var.oauth_secrets_enabled ? module.secrets_manager.secret_arns : {}
+}
+
+output "oauth_secret_names" {
+  description = "Names of OAuth secrets in Secrets Manager"
+  value       = var.oauth_secrets_enabled ? module.secrets_manager.secret_names : {}
+}

@@ -37,6 +37,33 @@ module "kms" {
   allowed_services        = var.kms_allowed_services
 }
 
+# Secrets Manager for OAuth credentials
+module "secrets_manager" {
+  source = "./modules/secrets-manager"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  tags                 = var.common_tags
+  kms_key_id          = module.kms.main_key_id
+  recovery_window_days = var.secrets_recovery_window_days
+
+  secrets = var.oauth_secrets_enabled ? {
+    oauth-credentials = {
+      description = "OAuth provider credentials for federated authentication"
+      secret_data = {
+        google_client_id         = var.cognito_google_client_id
+        google_client_secret     = var.cognito_google_client_secret
+        apple_client_id          = var.cognito_apple_client_id
+        apple_team_id            = var.cognito_apple_team_id
+        apple_key_id             = var.cognito_apple_key_id
+        apple_private_key        = var.cognito_apple_private_key
+        microsoft_client_id      = var.cognito_microsoft_client_id
+        microsoft_client_secret  = var.cognito_microsoft_client_secret
+      }
+    }
+  } : {}
+}
+
 # Cognito User Pool for authentication
 module "cognito" {
   source = "./modules/cognito"
@@ -52,6 +79,29 @@ module "cognito" {
   id_token_validity      = var.cognito_id_token_validity
   refresh_token_validity = var.cognito_refresh_token_validity
   domain_name            = var.cognito_domain_name
+
+  # Google Identity Provider
+  enable_google_provider = var.cognito_enable_google_provider
+  google_client_id       = var.cognito_google_client_id
+  google_client_secret   = var.cognito_google_client_secret
+
+  # Apple Identity Provider
+  enable_apple_provider = var.cognito_enable_apple_provider
+  apple_client_id       = var.cognito_apple_client_id
+  apple_team_id         = var.cognito_apple_team_id
+  apple_key_id          = var.cognito_apple_key_id
+  apple_private_key     = var.cognito_apple_private_key
+
+  # Microsoft Identity Provider
+  enable_microsoft_provider = var.cognito_enable_microsoft_provider
+  microsoft_client_id       = var.cognito_microsoft_client_id
+  microsoft_client_secret   = var.cognito_microsoft_client_secret
+
+  # Secrets Manager Integration
+  use_secrets_manager         = var.oauth_secrets_enabled
+  secrets_manager_secret_name = var.oauth_secrets_enabled ? module.secrets_manager.secret_names["oauth-credentials"] : ""
+
+  depends_on = [module.secrets_manager]
 }
 
 # DynamoDB tables for user data

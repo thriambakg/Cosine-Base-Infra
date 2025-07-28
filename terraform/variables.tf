@@ -152,6 +152,81 @@ variable "cognito_domain_name" {
   default     = ""
 }
 
+# Federated Identity Provider Configuration
+variable "cognito_enable_google_provider" {
+  description = "Enable Google as an identity provider"
+  type        = bool
+  default     = false
+}
+
+variable "cognito_google_client_id" {
+  description = "Google OAuth client ID"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cognito_google_client_secret" {
+  description = "Google OAuth client secret"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cognito_enable_apple_provider" {
+  description = "Enable Apple as an identity provider"
+  type        = bool
+  default     = false
+}
+
+variable "cognito_apple_client_id" {
+  description = "Apple Services ID"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cognito_apple_team_id" {
+  description = "Apple Team ID"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cognito_apple_key_id" {
+  description = "Apple Key ID"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cognito_apple_private_key" {
+  description = "Apple private key content"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cognito_enable_microsoft_provider" {
+  description = "Enable Microsoft as an identity provider"
+  type        = bool
+  default     = false
+}
+
+variable "cognito_microsoft_client_id" {
+  description = "Microsoft OAuth client ID"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "cognito_microsoft_client_secret" {
+  description = "Microsoft OAuth client secret"
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 # DynamoDB Configuration
 variable "dynamodb_billing_mode" {
   description = "DynamoDB billing mode"
@@ -276,4 +351,21 @@ variable "cloudwatch_alarm_notification_topic_arn" {
   description = "SNS topic ARN for CloudWatch alarm notifications (optional)"
   type        = string
   default     = ""
+}
+
+# Secrets Manager Configuration
+variable "oauth_secrets_enabled" {
+  description = "Enable storing OAuth credentials in Secrets Manager"
+  type        = bool
+  default     = false
+}
+
+variable "secrets_recovery_window_days" {
+  description = "Number of days to recover deleted secrets (0-30)"
+  type        = number
+  default     = 7
+  validation {
+    condition     = var.secrets_recovery_window_days >= 0 && var.secrets_recovery_window_days <= 30
+    error_message = "Recovery window must be between 0 and 30 days."
+  }
 }
