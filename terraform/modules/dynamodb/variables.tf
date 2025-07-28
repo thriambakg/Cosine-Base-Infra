@@ -102,3 +102,9 @@ variable "ttl_attribute_name" {
   type        = string
   default     = "expires_at"
 }
+
+variable "enable_deletion_protection" {
+  description = "Enable deletion protection lifecycle rule (should be false for development/testing)"
+  type        = bool
+  default     = false
+}
