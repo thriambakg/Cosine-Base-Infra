@@ -18,7 +18,7 @@ variable "tags" {
 }
 
 variable "kms_key_id" {
-  description = "KMS key ID for DynamoDB encryption"
+  description = "KMS key ARN for DynamoDB encryption"
   type        = string
 }
 

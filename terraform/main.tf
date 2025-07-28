@@ -61,7 +61,7 @@ module "dynamodb" {
   project_name                   = var.project_name
   environment                    = var.environment
   tags                           = var.common_tags
-  kms_key_id                     = module.kms.dynamodb_key_id
+  kms_key_id                     = module.kms.dynamodb_key_arn
   billing_mode                   = var.dynamodb_billing_mode
   read_capacity                  = var.dynamodb_read_capacity
   write_capacity                 = var.dynamodb_write_capacity
