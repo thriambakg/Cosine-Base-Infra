@@ -29,7 +29,7 @@ resource "aws_kms_key" "main" {
         }
         Action   = "kms:*"
         Resource = "*"
-      }], 
+      }],
       length(var.key_administrators) > 0 ? [{
         Sid    = "AllowKeyAdministrators"
         Effect = "Allow"
@@ -53,22 +53,22 @@ resource "aws_kms_key" "main" {
           "kms:CancelKeyDeletion"
         ]
         Resource = "*"
-      }] : [], [
-      {
-        Sid    = "AllowServiceUsage"
-        Effect = "Allow"
-        Principal = {
-          Service = var.allowed_services
-        }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-      }])
+        }] : [], [
+        {
+          Sid    = "AllowServiceUsage"
+          Effect = "Allow"
+          Principal = {
+            Service = var.allowed_services
+          }
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ]
+          Resource = "*"
+    }])
   })
 
   tags = merge(var.tags, {
@@ -108,7 +108,7 @@ resource "aws_kms_key" "dynamodb" {
         }
         Action   = "kms:*"
         Resource = "*"
-      }], 
+      }],
       length(var.key_administrators) > 0 ? [{
         Sid    = "AllowKeyAdministrators"
         Effect = "Allow"
@@ -132,22 +132,22 @@ resource "aws_kms_key" "dynamodb" {
           "kms:CancelKeyDeletion"
         ]
         Resource = "*"
-      }] : [], [
-      {
-        Sid    = "AllowDynamoDBService"
-        Effect = "Allow"
-        Principal = {
-          Service = "dynamodb.amazonaws.com"
-        }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-      }])
+        }] : [], [
+        {
+          Sid    = "AllowDynamoDBService"
+          Effect = "Allow"
+          Principal = {
+            Service = "dynamodb.amazonaws.com"
+          }
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ]
+          Resource = "*"
+    }])
   })
 
   tags = merge(var.tags, {
@@ -187,7 +187,7 @@ resource "aws_kms_key" "cloudwatch" {
         }
         Action   = "kms:*"
         Resource = "*"
-      }], 
+      }],
       length(var.key_administrators) > 0 ? [{
         Sid    = "AllowKeyAdministrators"
         Effect = "Allow"
@@ -211,22 +211,22 @@ resource "aws_kms_key" "cloudwatch" {
           "kms:CancelKeyDeletion"
         ]
         Resource = "*"
-      }] : [], [
-      {
-        Sid    = "AllowCloudWatchLogs"
-        Effect = "Allow"
-        Principal = {
-          Service = "logs.${data.aws_region.current.name}.amazonaws.com"
-        }
-        Action = [
-          "kms:Encrypt",
-          "kms:Decrypt",
-          "kms:ReEncrypt*",
-          "kms:GenerateDataKey*",
-          "kms:DescribeKey"
-        ]
-        Resource = "*"
-      }])
+        }] : [], [
+        {
+          Sid    = "AllowCloudWatchLogs"
+          Effect = "Allow"
+          Principal = {
+            Service = "logs.${data.aws_region.current.name}.amazonaws.com"
+          }
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ]
+          Resource = "*"
+    }])
   })
 
   tags = merge(var.tags, {

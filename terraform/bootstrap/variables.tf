@@ -22,8 +22,8 @@ variable "tags" {
   description = "Common tags to apply to all resources"
   type        = map(string)
   default = {
-    Project     = "Cosine"
-    ManagedBy   = "Terraform"
-    Purpose     = "BootstrapInfrastructure"
+    Project   = "Cosine"
+    ManagedBy = "Terraform"
+    Purpose   = "BootstrapInfrastructure"
   }
 }
