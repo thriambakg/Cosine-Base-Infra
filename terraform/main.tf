@@ -73,7 +73,6 @@ module "dynamodb" {
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
   ttl_enabled                    = var.dynamodb_ttl_enabled
   ttl_attribute_name             = var.dynamodb_ttl_attribute_name
-  enable_deletion_protection     = false # Allow table recreation during development
 
   depends_on = [module.kms]
 }

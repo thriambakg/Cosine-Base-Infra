@@ -73,7 +73,7 @@ resource "aws_dynamodb_table" "user_profiles" {
   })
 
   lifecycle {
-    prevent_destroy = var.enable_deletion_protection
+    prevent_destroy = false
   }
 }
 
@@ -157,7 +157,7 @@ resource "aws_dynamodb_table" "security_events" {
   })
 
   lifecycle {
-    prevent_destroy = var.enable_deletion_protection
+    prevent_destroy = false
   }
 }
 
@@ -218,6 +218,6 @@ resource "aws_dynamodb_table" "user_sessions" {
   })
 
   lifecycle {
-    prevent_destroy = var.enable_deletion_protection
+    prevent_destroy = false
   }
 }
