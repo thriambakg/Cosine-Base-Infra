@@ -214,7 +214,7 @@ variable "dynamodb_point_in_time_recovery_enabled" {
 variable "dynamodb_deletion_protection_enabled" {
   description = "Enable deletion protection for DynamoDB tables"
   type        = bool
-  default     = true
+  default     = false
 }
 
 variable "dynamodb_ttl_enabled" {
