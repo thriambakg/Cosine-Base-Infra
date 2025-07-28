@@ -70,9 +70,9 @@ variable "kms_key_administrators" {
 variable "kms_allowed_services" {
   description = "List of AWS services allowed to use KMS keys"
   type        = list(string)
-  default     = [
+  default = [
     "dynamodb.amazonaws.com",
-    "logs.amazonaws.com", 
+    "logs.amazonaws.com",
     "s3.amazonaws.com",
     "lambda.amazonaws.com"
   ]
