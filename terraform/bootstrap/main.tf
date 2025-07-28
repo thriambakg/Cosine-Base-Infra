@@ -1,4 +1,5 @@
 # Bootstrap Infrastructure for Terraform State Management
+
 # This creates the S3 bucket and DynamoDB table needed for remote state
 
 terraform {
