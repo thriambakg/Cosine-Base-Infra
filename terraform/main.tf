@@ -44,21 +44,21 @@ module "secrets_manager" {
   project_name         = var.project_name
   environment          = var.environment
   tags                 = var.common_tags
-  kms_key_id          = module.kms.main_key_id
+  kms_key_id           = module.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
 
   secrets = var.oauth_secrets_enabled ? {
     oauth-credentials = {
       description = "OAuth provider credentials for federated authentication"
       secret_data = {
-        google_client_id         = var.cognito_google_client_id
-        google_client_secret     = var.cognito_google_client_secret
-        apple_client_id          = var.cognito_apple_client_id
-        apple_team_id            = var.cognito_apple_team_id
-        apple_key_id             = var.cognito_apple_key_id
-        apple_private_key        = var.cognito_apple_private_key
-        microsoft_client_id      = var.cognito_microsoft_client_id
-        microsoft_client_secret  = var.cognito_microsoft_client_secret
+        google_client_id        = var.cognito_google_client_id
+        google_client_secret    = var.cognito_google_client_secret
+        apple_client_id         = var.cognito_apple_client_id
+        apple_team_id           = var.cognito_apple_team_id
+        apple_key_id            = var.cognito_apple_key_id
+        apple_private_key       = var.cognito_apple_private_key
+        microsoft_client_id     = var.cognito_microsoft_client_id
+        microsoft_client_secret = var.cognito_microsoft_client_secret
       }
     }
   } : {}

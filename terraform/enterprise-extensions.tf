@@ -15,10 +15,10 @@ variable "enable_saml_providers" {
 variable "saml_providers" {
   description = "SAML identity providers configuration"
   type = map(object({
-    metadata_url         = optional(string)
-    metadata_file        = optional(string)
-    display_name         = string
-    attribute_mapping    = optional(map(string), {})
+    metadata_url      = optional(string)
+    metadata_file     = optional(string)
+    display_name      = string
+    attribute_mapping = optional(map(string), {})
   }))
   default = {}
 }
@@ -33,12 +33,12 @@ variable "enable_oidc_providers" {
 variable "oidc_providers" {
   description = "OIDC identity providers configuration"
   type = map(object({
-    issuer_url           = string
-    client_id            = string
-    client_secret        = string
-    display_name         = string
-    authorize_scopes     = optional(string, "email openid profile")
-    attribute_mapping    = optional(map(string), {})
+    issuer_url        = string
+    client_id         = string
+    client_secret     = string
+    display_name      = string
+    authorize_scopes  = optional(string, "email openid profile")
+    attribute_mapping = optional(map(string), {})
   }))
   default   = {}
   sensitive = true
@@ -105,7 +105,7 @@ variable "enterprise_password_policy" {
     require_symbols                  = bool
     require_uppercase                = bool
     temporary_password_validity_days = number
-    password_history_size           = optional(number, 24)
+    password_history_size            = optional(number, 24)
   })
   default = {
     minimum_length                   = 12
@@ -114,7 +114,7 @@ variable "enterprise_password_policy" {
     require_symbols                  = true
     require_uppercase                = true
     temporary_password_validity_days = 1
-    password_history_size           = 24
+    password_history_size            = 24
   }
 }
 

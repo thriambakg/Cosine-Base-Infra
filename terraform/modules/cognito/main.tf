@@ -15,17 +15,17 @@ data "aws_secretsmanager_secret_version" "oauth_credentials" {
 # Local values to handle both direct variables and Secrets Manager
 locals {
   oauth_secrets = var.use_secrets_manager ? jsondecode(data.aws_secretsmanager_secret_version.oauth_credentials[0].secret_string) : {}
-  
+
   # Google credentials
   google_client_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "google_client_id", "") : var.google_client_id
   google_client_secret = var.use_secrets_manager ? lookup(local.oauth_secrets, "google_client_secret", "") : var.google_client_secret
-  
+
   # Apple credentials
   apple_client_id   = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_client_id", "") : var.apple_client_id
   apple_team_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_team_id", "") : var.apple_team_id
   apple_key_id      = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_key_id", "") : var.apple_key_id
   apple_private_key = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_private_key", "") : var.apple_private_key
-  
+
   # Microsoft credentials
   microsoft_client_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "microsoft_client_id", "") : var.microsoft_client_id
   microsoft_client_secret = var.use_secrets_manager ? lookup(local.oauth_secrets, "microsoft_client_secret", "") : var.microsoft_client_secret
@@ -264,10 +264,10 @@ resource "aws_cognito_identity_provider" "apple" {
   provider_type = "SignInWithApple"
 
   provider_details = {
-    client_id      = local.apple_client_id
-    team_id        = local.apple_team_id
-    key_id         = local.apple_key_id
-    private_key    = local.apple_private_key
+    client_id        = local.apple_client_id
+    team_id          = local.apple_team_id
+    key_id           = local.apple_key_id
+    private_key      = local.apple_private_key
     authorize_scopes = "email name"
   }
 
@@ -287,11 +287,11 @@ resource "aws_cognito_identity_provider" "microsoft" {
   provider_type = "OIDC"
 
   provider_details = {
-    client_id        = local.microsoft_client_id
-    client_secret    = local.microsoft_client_secret
+    client_id                 = local.microsoft_client_id
+    client_secret             = local.microsoft_client_secret
     attributes_request_method = "GET"
-    oidc_issuer      = "https://login.microsoftonline.com/common/v2.0"
-    authorize_scopes = "email openid profile"
+    oidc_issuer               = "https://login.microsoftonline.com/common/v2.0"
+    authorize_scopes          = "email openid profile"
   }
 
   attribute_mapping = {

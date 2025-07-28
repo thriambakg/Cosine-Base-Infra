@@ -12,10 +12,10 @@ resource "aws_secretsmanager_secret" "secrets" {
   recovery_window_in_days = var.recovery_window_days
 
   tags = merge(var.tags, {
-    Name        = "${var.project_name}-${each.key}-${var.environment}"
-    Type        = "Secret"
-    Purpose     = "SecureStorage"
-    SecretType  = each.key
+    Name       = "${var.project_name}-${each.key}-${var.environment}"
+    Type       = "Secret"
+    Purpose    = "SecureStorage"
+    SecretType = each.key
   })
 }
 
@@ -23,7 +23,7 @@ resource "aws_secretsmanager_secret" "secrets" {
 resource "aws_secretsmanager_secret_version" "secret_versions" {
   for_each = var.secrets
 
-  secret_id = aws_secretsmanager_secret.secrets[each.key].id
+  secret_id     = aws_secretsmanager_secret.secrets[each.key].id
   secret_string = jsonencode(each.value.secret_data)
 
   lifecycle {
