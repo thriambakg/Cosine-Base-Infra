@@ -84,7 +84,7 @@ module "cloudwatch" {
   project_name                   = var.project_name
   environment                    = var.environment
   tags                           = var.common_tags
-  kms_key_id                     = module.kms.cloudwatch_key_id
+  kms_key_id                     = module.kms.cloudwatch_key_arn
   aws_region                     = var.aws_region
   cognito_user_pool_id           = module.cognito.user_pool_id
   user_profiles_table_name       = module.dynamodb.user_profiles_table_name
