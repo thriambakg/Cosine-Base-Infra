@@ -72,11 +72,8 @@ resource "aws_dynamodb_table" "user_profiles" {
     Purpose = "UserProfiles"
   })
 
-  dynamic "lifecycle" {
-    for_each = var.enable_deletion_protection ? [1] : []
-    content {
-      prevent_destroy = true
-    }
+  lifecycle {
+    prevent_destroy = var.enable_deletion_protection
   }
 }
 
@@ -159,11 +156,8 @@ resource "aws_dynamodb_table" "security_events" {
     Purpose = "AuditLogs"
   })
 
-  dynamic "lifecycle" {
-    for_each = var.enable_deletion_protection ? [1] : []
-    content {
-      prevent_destroy = true
-    }
+  lifecycle {
+    prevent_destroy = var.enable_deletion_protection
   }
 }
 
@@ -223,10 +217,7 @@ resource "aws_dynamodb_table" "user_sessions" {
     Purpose = "SessionManagement"
   })
 
-  dynamic "lifecycle" {
-    for_each = var.enable_deletion_protection ? [1] : []
-    content {
-      prevent_destroy = true
-    }
+  lifecycle {
+    prevent_destroy = var.enable_deletion_protection
   }
 }
