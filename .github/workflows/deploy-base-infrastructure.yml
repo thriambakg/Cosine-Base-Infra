@@ -32,6 +32,11 @@ on:
         required: false
         default: false
         type: boolean
+      force_apply:
+        description: 'Force terraform apply even if no changes detected'
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   determine-environment:
@@ -58,12 +63,13 @@ jobs:
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'
     needs: determine-environment
-    uses: ./.github/workflows/terraform-pipeline-reusable.yml
+    uses: thriambakg/Cosine-pipelines/.github/workflows/terraform-reusable.yml@master
     with:
       terraform_directory: 'terraform'
       infrastructure_type: 'base'
       environment: ${{ needs.determine-environment.outputs.environment }}
       destroy: ${{ github.event.inputs.destroy == 'true' }}
+      force_apply: ${{ github.event.inputs.force_apply == 'true' }}
       base_infra_dependency: false
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
