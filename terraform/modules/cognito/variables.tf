@@ -98,41 +98,6 @@ variable "google_client_secret" {
   sensitive   = true
 }
 
-# Apple Identity Provider Configuration
-variable "enable_apple_provider" {
-  description = "Enable Apple identity provider"
-  type        = bool
-  default     = false
-}
-
-variable "apple_client_id" {
-  description = "Apple Services ID (Client ID)"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "apple_team_id" {
-  description = "Apple Developer Team ID"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "apple_key_id" {
-  description = "Apple Sign In Key ID"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "apple_private_key" {
-  description = "Apple Sign In Private Key"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
 # Microsoft Identity Provider Configuration
 variable "enable_microsoft_provider" {
   description = "Enable Microsoft identity provider"

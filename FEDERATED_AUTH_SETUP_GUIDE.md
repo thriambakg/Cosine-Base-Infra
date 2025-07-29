@@ -1,11 +1,11 @@
 # Setting Up Federated Authentication with Cognito
 
-This guide walks you through enabling third-party authentication (Google, Apple, Microsoft) for your Cosine application.
+This guide walks you through enabling third-party authentication (Google, Microsoft) for your Cosine application.
 
 ## Prerequisites ✅
 
 - Base infrastructure deployed and working
-- Access to Google, Apple, and Microsoft developer consoles
+- Access to Google and Microsoft developer consoles
 - Domain name for production (optional but recommended)
 
 ## Step 1: Configure OAuth Applications
@@ -27,30 +27,6 @@ This guide walks you through enabling third-party authentication (Google, Apple,
      ```
 7. Copy the Client ID and Client Secret
 
-### 🍎 Apple Sign-In Setup
-
-1. Go to [Apple Developer Console](https://developer.apple.com/)
-2. Sign in with your Apple Developer account
-3. Go to "Certificates, Identifiers & Profiles"
-4. Create a new App ID:
-   - Description: "Cosine App"
-   - Enable "Sign In with Apple"
-5. Create a Services ID:
-   - Description: "Cosine Web Service"
-   - Identifier: `com.yourdomain.cosine.web`
-   - Configure "Sign In with Apple":
-     - Primary App ID: Select the App ID created above
-     - Return URLs: `https://cosine-staging.auth.us-east-1.amazoncognito.com/oauth2/idpresponse`
-6. Create a Key for Sign In with Apple:
-   - Key Name: "Cosine Apple Auth Key"
-   - Enable "Sign In with Apple"
-   - Download the key file (.p8)
-7. Note down:
-   - Services ID (Client ID)
-   - Team ID
-   - Key ID
-   - Private key content
-
 ### 🪟 Microsoft OAuth Setup
 
 1. Go to [Azure Portal](https://portal.azure.com/)
@@ -67,39 +43,38 @@ This guide walks you through enabling third-party authentication (Google, Apple,
 
 ### Enable Google Provider
 
-1. Create a `.tfvars` file for sensitive variables:
+1. Create a `.tfvars` file for sensitive variables for each environment:
    ```bash
-   # terraform/secrets.tfvars
+   # terraform/secrets-dev.tfvars
    cognito_enable_google_provider = true
-   cognito_google_client_id = "your-google-client-id.apps.googleusercontent.com"
-   cognito_google_client_secret = "your-google-client-secret"
+   cognito_google_client_id = "your-google-client-id-dev.apps.googleusercontent.com"
+   cognito_google_client_secret = "your-google-client-secret-dev"
+
+   # terraform/secrets-staging.tfvars
+   cognito_enable_google_provider = true
+   cognito_google_client_id = "your-google-client-id-staging.apps.googleusercontent.com"
+   cognito_google_client_secret = "your-google-client-secret-staging"
+
+   # terraform/secrets-prod.tfvars
+   cognito_enable_google_provider = true
+   cognito_google_client_id = "your-google-client-id-prod.apps.googleusercontent.com"
+   cognito_google_client_secret = "your-google-client-secret-prod"
    ```
 
-2. Apply the changes:
+2. Apply the changes for the desired environment:
    ```bash
    cd terraform
-   terraform plan -var-file="secrets.tfvars"
-   terraform apply -var-file="secrets.tfvars"
+   terraform plan -var-file="secrets-<environment>.tfvars"
+   terraform apply -var-file="secrets-<environment>.tfvars"
    ```
-
-### Enable Apple Provider (Optional)
-
-```bash
-# Add to secrets.tfvars
-cognito_enable_apple_provider = true
-cognito_apple_client_id = "com.yourdomain.cosine.web"
-cognito_apple_team_id = "YOUR_TEAM_ID"
-cognito_apple_key_id = "YOUR_KEY_ID"
-cognito_apple_private_key = "-----BEGIN PRIVATE KEY-----\nYOUR_PRIVATE_KEY_CONTENT\n-----END PRIVATE KEY-----"
-```
 
 ### Enable Microsoft Provider (Optional)
 
 ```bash
-# Add to secrets.tfvars
+# Add to secrets-<environment>.tfvars
 cognito_enable_microsoft_provider = true
-cognito_microsoft_client_id = "your-microsoft-app-id"
-cognito_microsoft_client_secret = "your-microsoft-client-secret"
+cognito_microsoft_client_id = "your-microsoft-app-id-<environment>"
+cognito_microsoft_client_secret = "your-microsoft-client-secret-<environment>"
 ```
 
 ## Step 3: Update Frontend Configuration
@@ -119,7 +94,7 @@ cognito_microsoft_client_secret = "your-microsoft-client-secret"
        userPoolWebClientId: 'YOUR_CLIENT_ID',
        oauth: {
          domain: 'cosine-staging.auth.us-east-1.amazoncognito.com',
-         socialProviders: ['GOOGLE', 'APPLE', 'MICROSOFT'],
+         socialProviders: ['GOOGLE', 'MICROSOFT'],
          redirectSignIn: ['http://localhost:3000/auth/callback'],
          redirectSignOut: ['http://localhost:3000/'],
        }
@@ -139,7 +114,6 @@ cognito_microsoft_client_secret = "your-microsoft-client-secret"
 
 2. **Test Each Provider:**
    - Click "Continue with Google" → Should redirect to Google OAuth
-   - Click "Continue with Apple" → Should redirect to Apple Sign-In
    - Click "Continue with Microsoft" → Should redirect to Microsoft OAuth
 
 3. **Verify User Creation:**
@@ -266,8 +240,7 @@ enable_cross_region_backup = true
    - Verify Amplify configuration domains
 
 3. **Apple Sign-In Issues:**
-   - Ensure Services ID is properly configured
-   - Verify the private key format and permissions
+   - Not implemented in this configuration (Apple Developer Program enrollment required)
 
 4. **User Attribute Mapping:**
    - Check Cognito identity provider attribute mapping
@@ -289,7 +262,7 @@ terraform output
 ## Next Steps 🚀
 
 ### **Phase 1: Basic Implementation** (Current Guide)
-1. **Standard OAuth Providers:** Google, Apple, Microsoft ✅
+1. **Standard OAuth Providers:** Google, Microsoft ✅
 2. **Basic Security:** Secrets Manager, KMS encryption ✅
 3. **Development Testing:** Local and staging environments ✅
 

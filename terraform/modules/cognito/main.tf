@@ -20,12 +20,6 @@ locals {
   google_client_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "google_client_id", "") : var.google_client_id
   google_client_secret = var.use_secrets_manager ? lookup(local.oauth_secrets, "google_client_secret", "") : var.google_client_secret
 
-  # Apple credentials
-  apple_client_id   = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_client_id", "") : var.apple_client_id
-  apple_team_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_team_id", "") : var.apple_team_id
-  apple_key_id      = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_key_id", "") : var.apple_key_id
-  apple_private_key = var.use_secrets_manager ? lookup(local.oauth_secrets, "apple_private_key", "") : var.apple_private_key
-
   # Microsoft credentials
   microsoft_client_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "microsoft_client_id", "") : var.microsoft_client_id
   microsoft_client_secret = var.use_secrets_manager ? lookup(local.oauth_secrets, "microsoft_client_secret", "") : var.microsoft_client_secret
@@ -185,7 +179,6 @@ resource "aws_cognito_user_pool_client" "main" {
   supported_identity_providers = concat(
     ["COGNITO"],
     var.enable_google_provider ? ["Google"] : [],
-    var.enable_apple_provider ? ["SignInWithApple"] : [],
     var.enable_microsoft_provider ? ["Microsoft"] : []
   )
 
@@ -223,7 +216,6 @@ resource "aws_cognito_user_pool_client" "main" {
   depends_on = [
     aws_cognito_user_pool.main,
     aws_cognito_identity_provider.google,
-    aws_cognito_identity_provider.apple,
     aws_cognito_identity_provider.microsoft
   ]
 }
@@ -252,29 +244,6 @@ resource "aws_cognito_identity_provider" "google" {
     email       = "email"
     given_name  = "given_name"
     family_name = "family_name"
-    username    = "sub"
-  }
-}
-
-# Apple Identity Provider
-resource "aws_cognito_identity_provider" "apple" {
-  count         = var.enable_apple_provider ? 1 : 0
-  user_pool_id  = aws_cognito_user_pool.main.id
-  provider_name = "SignInWithApple"
-  provider_type = "SignInWithApple"
-
-  provider_details = {
-    client_id        = local.apple_client_id
-    team_id          = local.apple_team_id
-    key_id           = local.apple_key_id
-    private_key      = local.apple_private_key
-    authorize_scopes = "email name"
-  }
-
-  attribute_mapping = {
-    email       = "email"
-    given_name  = "firstName"
-    family_name = "lastName"
     username    = "sub"
   }
 }

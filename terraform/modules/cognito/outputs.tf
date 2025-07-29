@@ -47,7 +47,6 @@ output "supported_identity_providers" {
   value = concat(
     ["COGNITO"],
     var.enable_google_provider ? ["Google"] : [],
-    var.enable_apple_provider ? ["SignInWithApple"] : [],
     var.enable_microsoft_provider ? ["Microsoft"] : []
   )
 }
@@ -55,11 +54,6 @@ output "supported_identity_providers" {
 output "google_provider_name" {
   description = "Google identity provider name"
   value       = var.enable_google_provider ? aws_cognito_identity_provider.google[0].provider_name : null
-}
-
-output "apple_provider_name" {
-  description = "Apple identity provider name"
-  value       = var.enable_apple_provider ? aws_cognito_identity_provider.apple[0].provider_name : null
 }
 
 output "microsoft_provider_name" {

@@ -53,10 +53,6 @@ module "secrets_manager" {
       secret_data = {
         google_client_id        = var.cognito_google_client_id
         google_client_secret    = var.cognito_google_client_secret
-        apple_client_id         = var.cognito_apple_client_id
-        apple_team_id           = var.cognito_apple_team_id
-        apple_key_id            = var.cognito_apple_key_id
-        apple_private_key       = var.cognito_apple_private_key
         microsoft_client_id     = var.cognito_microsoft_client_id
         microsoft_client_secret = var.cognito_microsoft_client_secret
       }
@@ -84,13 +80,6 @@ module "cognito" {
   enable_google_provider = var.cognito_enable_google_provider
   google_client_id       = var.cognito_google_client_id
   google_client_secret   = var.cognito_google_client_secret
-
-  # Apple Identity Provider
-  enable_apple_provider = var.cognito_enable_apple_provider
-  apple_client_id       = var.cognito_apple_client_id
-  apple_team_id         = var.cognito_apple_team_id
-  apple_key_id          = var.cognito_apple_key_id
-  apple_private_key     = var.cognito_apple_private_key
 
   # Microsoft Identity Provider
   enable_microsoft_provider = var.cognito_enable_microsoft_provider

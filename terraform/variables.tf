@@ -173,40 +173,6 @@ variable "cognito_google_client_secret" {
   sensitive   = true
 }
 
-variable "cognito_enable_apple_provider" {
-  description = "Enable Apple as an identity provider"
-  type        = bool
-  default     = false
-}
-
-variable "cognito_apple_client_id" {
-  description = "Apple Services ID"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "cognito_apple_team_id" {
-  description = "Apple Team ID"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "cognito_apple_key_id" {
-  description = "Apple Key ID"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "cognito_apple_private_key" {
-  description = "Apple private key content"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
 variable "cognito_enable_microsoft_provider" {
   description = "Enable Microsoft as an identity provider"
   type        = bool
