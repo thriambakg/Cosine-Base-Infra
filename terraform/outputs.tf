@@ -22,6 +22,7 @@ output "compatible_runtimes" {
   value       = module.shared_layer.compatible_runtimes
 }
 
+
 # KMS outputs
 output "kms_key_id" {
   description = "ID of the main KMS key"
