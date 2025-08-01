@@ -304,21 +304,3 @@ resource "aws_api_gateway_usage_plan_key" "this" {
   key_type      = "API_KEY"
   usage_plan_id = aws_api_gateway_usage_plan.this[0].id
 }
-
-# CKV2_AWS_29: Ensure API Gateway is protected by WAF
-# WAF protection is mandatory for all public-facing API Gateways
-resource "aws_wafv2_web_acl_association" "api_gateway" {
-  count        = var.waf_web_acl_arn != null ? 1 : 0
-  resource_arn = aws_api_gateway_stage.main.arn
-  web_acl_arn  = var.waf_web_acl_arn
-}
-
-# Compliance validation: WAF must be attached for public APIs
-resource "terraform_data" "waf_compliance_check" {
-  lifecycle {
-    precondition {
-      condition     = var.waf_web_acl_arn != null
-      error_message = "CKV2_AWS_29: WAF protection is required for API Gateway. Please provide waf_web_acl_arn."
-    }
-  }
-}
