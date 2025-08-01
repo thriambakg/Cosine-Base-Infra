@@ -248,11 +248,8 @@ variable "waf_web_acl_arn" {
   default     = null
 }
 
-variable "ignore_waf_requirement" {
-  description = "Set to true to bypass WAF requirement check for public APIs (only if WAF is managed externally)"
-  type        = bool
-  default     = false
-}
+# WAF is required by default for CKV2_AWS_29 compliance - no option to disable
+# If you need to bypass this, use external WAF management at the ALB/CloudFront level
 
 # Custom Domain Configuration
 variable "domain_name" {

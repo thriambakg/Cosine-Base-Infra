@@ -170,10 +170,9 @@ resource "aws_api_gateway_stage" "this" {
     precondition {
       condition = (
         var.endpoint_type == "PRIVATE" ||
-        var.waf_web_acl_arn != null ||
-        var.ignore_waf_requirement == true
+        var.waf_web_acl_arn != null
       )
-      error_message = "Public API Gateway stages must be protected by WAF for security compliance (CKV2_AWS_29). Solutions: 1) Provide waf_web_acl_arn, 2) Use PRIVATE endpoint_type, or 3) Set ignore_waf_requirement=true if WAF is managed externally."
+      error_message = "Public API Gateway stages must be protected by WAF for security compliance (CKV2_AWS_29). Solutions: 1) Provide waf_web_acl_arn, or 2) Use PRIVATE endpoint_type."
     }
 
     # CKV2_AWS_4: Ensure logging is properly configured
@@ -304,4 +303,22 @@ resource "aws_api_gateway_usage_plan_key" "this" {
   key_id        = aws_api_gateway_api_key.this[each.key].id
   key_type      = "API_KEY"
   usage_plan_id = aws_api_gateway_usage_plan.this[0].id
+}
+
+# CKV2_AWS_29: Ensure API Gateway is protected by WAF
+# WAF protection is mandatory for all public-facing API Gateways
+resource "aws_wafv2_web_acl_association" "api_gateway" {
+  count        = var.waf_web_acl_arn != null ? 1 : 0
+  resource_arn = aws_api_gateway_stage.main.arn
+  web_acl_arn  = var.waf_web_acl_arn
+}
+
+# Compliance validation: WAF must be attached for public APIs
+resource "terraform_data" "waf_compliance_check" {
+  lifecycle {
+    precondition {
+      condition     = var.waf_web_acl_arn != null
+      error_message = "CKV2_AWS_29: WAF protection is required for API Gateway. Please provide waf_web_acl_arn."
+    }
+  }
 }

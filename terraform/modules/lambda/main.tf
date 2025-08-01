@@ -88,7 +88,7 @@ resource "aws_lambda_function" "this" {
     }
   }
 
-  # KMS key for environment variable encryption - CKV_AWS_173
+  # KMS key for environment variable encryption - CKV_AWS_173 (mandatory when env vars exist)
   kms_key_arn = var.lambda_kms_key_arn
 
   # Code signing configuration - CKV_AWS_272
@@ -129,9 +129,18 @@ resource "aws_lambda_function" "this" {
     aws_iam_role_policy_attachment.lambda_basic,
     aws_cloudwatch_log_group.lambda
   ]
-}
 
-# Lambda function alias (for versioning)
+  # CKV_AWS_173: Lifecycle rule to enforce KMS encryption when environment variables exist
+  lifecycle {
+    precondition {
+      condition = (
+        length(var.environment_variables) == 0 ||
+        var.lambda_kms_key_arn != null
+      )
+      error_message = "Lambda functions with environment variables must use KMS encryption (CKV_AWS_173). Provide lambda_kms_key_arn when environment_variables are defined."
+    }
+  }
+} # Lambda function alias (for versioning)
 resource "aws_lambda_alias" "this" {
   count            = var.create_alias ? 1 : 0
   name             = var.alias_name

@@ -79,6 +79,29 @@ resource "aws_wafv2_web_acl" "this" {
     }
   }
 
+  # CKV_AWS_192: Log4j vulnerability protection (CVE-2021-44228)
+  rule {
+    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    priority = 4
+
+    action {
+      block {}
+    }
+
+    statement {
+      managed_rule_group_statement {
+        name        = "AWSManagedRulesKnownBadInputsRuleSet"
+        vendor_name = "AWS"
+      }
+    }
+
+    visibility_config {
+      cloudwatch_metrics_enabled = true
+      metric_name                = "${var.web_acl_name}-Log4jProtection"
+      sampled_requests_enabled   = true
+    }
+  }
+
   tags = merge(var.tags, {
     Name = var.web_acl_name
     Type = "WAFv2WebACL"

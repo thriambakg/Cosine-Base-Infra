@@ -43,7 +43,7 @@ variable "recovery_window_days" {
 }
 
 variable "automatic_rotation" {
-  description = "Configuration for automatic secret rotation"
+  description = "Configuration for automatic secret rotation (CKV_AWS_304: max 90 days)"
   type = map(object({
     rotation_lambda_arn = string
     rotation_rules = object({
@@ -55,8 +55,8 @@ variable "automatic_rotation" {
   validation {
     condition = alltrue([
       for config in var.automatic_rotation :
-      config.rotation_rules.automatically_after_days <= 90
+      config.rotation_rules.automatically_after_days >= 1 && config.rotation_rules.automatically_after_days <= 90
     ])
-    error_message = "Automatic rotation must be configured for 90 days or less to meet compliance requirements."
+    error_message = "CKV_AWS_304: Automatic rotation must be configured between 1 and 90 days for compliance requirements. Current values exceed the 90-day maximum."
   }
 }
