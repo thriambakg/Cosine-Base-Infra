@@ -349,8 +349,8 @@ variable "automatic_secret_rotation" {
   validation {
     condition = alltrue([
       for config in var.automatic_secret_rotation :
-      config.rotation_rules.automatically_after_days <= 90
+      config.rotation_rules.automatically_after_days >= 1 && config.rotation_rules.automatically_after_days <= 90
     ])
-    error_message = "Automatic rotation must be configured for 90 days or less to meet compliance requirements (CKV_AWS_304)."
+    error_message = "CKV_AWS_304: Automatic rotation must be configured between 1 and 90 days to meet compliance requirements. All values must be <= 90 days."
   }
 }

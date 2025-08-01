@@ -170,9 +170,9 @@ resource "aws_api_gateway_stage" "this" {
     precondition {
       condition = (
         var.endpoint_type == "PRIVATE" ||
-        (var.waf_web_acl_arn != null && var.endpoint_type != "PRIVATE")
+        (var.endpoint_type != "PRIVATE" && var.waf_web_acl_arn != null && var.waf_web_acl_arn != "")
       )
-      error_message = "CKV2_AWS_29: Public API Gateway stages must be protected by WAF for security compliance. Solutions: 1) Provide waf_web_acl_arn for public APIs, or 2) Use PRIVATE endpoint_type."
+      error_message = "CKV2_AWS_29: Public API Gateway stages MUST be protected by WAF for security compliance. You must provide a valid waf_web_acl_arn for non-PRIVATE endpoints. Current endpoint_type: ${var.endpoint_type}"
     }
 
     # CKV2_AWS_4: Ensure logging is properly configured
@@ -186,7 +186,7 @@ resource "aws_api_gateway_stage" "this" {
   }
 }
 
-# Method settings for the stage
+# Method settings for the stage - CKV2_AWS_4 compliance
 resource "aws_api_gateway_method_settings" "this" {
   count       = var.create_deployment ? 1 : 0
   rest_api_id = aws_api_gateway_rest_api.this.id
@@ -194,12 +194,14 @@ resource "aws_api_gateway_method_settings" "this" {
   method_path = "*/*"
 
   settings {
-    # Enable detailed CloudWatch metrics
+    # CKV2_AWS_4: Enable detailed CloudWatch metrics (required for compliance)
     metrics_enabled = var.detailed_metrics_enabled
 
-    # Data trace logging
+    # CKV2_AWS_4: Data trace logging configuration
     data_trace_enabled = var.data_trace_enabled
-    logging_level      = var.logging_level
+
+    # CKV2_AWS_4: Logging level must be ERROR or INFO (never OFF)
+    logging_level = var.logging_level
 
     # Throttling settings
     throttling_rate_limit  = var.throttling_rate_limit
@@ -217,10 +219,42 @@ resource "aws_api_gateway_method_settings" "this" {
 }
 
 # CKV2_AWS_29: WAF Web ACL Association (mandatory for public APIs)
+# This resource ensures public API stages are always protected by WAF
 resource "aws_wafv2_web_acl_association" "this" {
-  count        = var.endpoint_type != "PRIVATE" && var.create_deployment ? 1 : 0
+  count        = var.create_deployment && var.endpoint_type != "PRIVATE" ? 1 : 0
   resource_arn = aws_api_gateway_stage.this[0].arn
   web_acl_arn  = var.waf_web_acl_arn
+
+  # Ensure WAF ARN is provided for public endpoints
+  depends_on = [aws_api_gateway_stage.this]
+}
+
+# Additional compliance validation resource for CKV2_AWS_29
+resource "terraform_data" "waf_compliance_validation" {
+  count = var.create_deployment && var.endpoint_type != "PRIVATE" ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition     = var.waf_web_acl_arn != null && var.waf_web_acl_arn != ""
+      error_message = "CKV2_AWS_29: Public API Gateway stages require WAF protection. WAF Web ACL ARN must be provided for ${var.endpoint_type} endpoints."
+    }
+  }
+}
+
+# Additional compliance validation resource for CKV2_AWS_4
+resource "terraform_data" "logging_compliance_validation" {
+  count = var.create_deployment ? 1 : 0
+
+  lifecycle {
+    precondition {
+      condition = (
+        var.enable_access_logging == true &&
+        contains(["ERROR", "INFO"], var.logging_level) &&
+        var.detailed_metrics_enabled == true
+      )
+      error_message = "CKV2_AWS_4: API Gateway stage must have appropriate logging configuration. Requirements: enable_access_logging=true, logging_level must be ERROR or INFO (not OFF), detailed_metrics_enabled=true."
+    }
+  }
 }
 
 # Custom domain name (if provided)

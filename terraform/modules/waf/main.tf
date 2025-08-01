@@ -35,11 +35,11 @@ resource "aws_wafv2_web_acl" "this" {
 
   # IP Reputation rule (AWS Managed)
   rule {
-    name     = "AWSManagedRulesAmazonIpReputationList"
+    name     = "AWS-AWSManagedRulesAmazonIpReputationList"
     priority = 2
 
-    action {
-      block {}
+    override_action {
+      none {}
     }
 
     statement {
@@ -58,11 +58,11 @@ resource "aws_wafv2_web_acl" "this" {
 
   # Core Rule Set (AWS Managed)
   rule {
-    name     = "AWSManagedRulesCommonRuleSet"
+    name     = "AWS-AWSManagedRulesCommonRuleSet"
     priority = 3
 
-    action {
-      block {}
+    override_action {
+      none {}
     }
 
     statement {
@@ -81,11 +81,11 @@ resource "aws_wafv2_web_acl" "this" {
 
   # CKV_AWS_192: Log4j vulnerability protection (CVE-2021-44228)
   rule {
-    name     = "AWSManagedRulesKnownBadInputsRuleSet"
+    name     = "AWS-AWSManagedRulesKnownBadInputsRuleSet"
     priority = 4
 
-    action {
-      block {}
+    override_action {
+      none {}
     }
 
     statement {

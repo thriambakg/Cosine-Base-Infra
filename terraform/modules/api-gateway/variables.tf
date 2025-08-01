@@ -19,7 +19,7 @@ variable "api_description" {
 }
 
 variable "endpoint_type" {
-  description = "Type of endpoint. Valid values: EDGE, REGIONAL, PRIVATE"
+  description = "Type of endpoint. Valid values: EDGE, REGIONAL, PRIVATE. Note: EDGE and REGIONAL require waf_web_acl_arn for compliance"
   type        = string
   default     = "REGIONAL"
 
@@ -146,13 +146,13 @@ variable "data_trace_enabled" {
 }
 
 variable "logging_level" {
-  description = "Logging level for method settings. Valid values: ERROR, INFO (CKV2_AWS_4 compliance - OFF not recommended)"
+  description = "Logging level for method settings. Valid values: ERROR, INFO (CKV2_AWS_4 compliance - OFF is not allowed)"
   type        = string
-  default     = "INFO" # Compliance default
+  default     = "INFO" # Compliance default for detailed logging
 
   validation {
     condition     = contains(["ERROR", "INFO"], var.logging_level)
-    error_message = "Logging level must be ERROR or INFO for compliance (CKV2_AWS_4). OFF is not recommended for production APIs."
+    error_message = "CKV2_AWS_4: Logging level must be ERROR or INFO for compliance. OFF is not allowed for production APIs as it violates security logging requirements."
   }
 }
 
@@ -243,9 +243,17 @@ variable "unauthorized_cache_control_header_strategy" {
 
 # Security Configuration
 variable "waf_web_acl_arn" {
-  description = "ARN of WAF Web ACL to associate with the API Gateway stage"
+  description = "ARN of WAF Web ACL to associate with the API Gateway stage. REQUIRED for EDGE/REGIONAL endpoints (CKV2_AWS_29 compliance)"
   type        = string
   default     = null
+
+  validation {
+    condition = (
+      var.waf_web_acl_arn == null ||
+      (var.waf_web_acl_arn != "" && can(regex("^arn:aws:wafv2:[a-z0-9-]+:[0-9]+:.*", var.waf_web_acl_arn)))
+    )
+    error_message = "WAF Web ACL ARN must be a valid ARN format when provided. Cannot be empty string."
+  }
 }
 
 # WAF is required by default for CKV2_AWS_29 compliance - no option to disable
