@@ -189,7 +189,7 @@ resource "aws_s3_bucket_notification" "logs_notification" {
 
 # SNS topic for state notifications
 resource "aws_sns_topic" "s3_notifications" {
-  name           = "terraform-state-s3-notifications"
+  name              = "terraform-state-s3-notifications"
   kms_master_key_id = aws_kms_key.terraform_state.arn
 }
 
