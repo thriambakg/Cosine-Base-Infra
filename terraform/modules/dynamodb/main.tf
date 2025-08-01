@@ -1,6 +1,13 @@
 # DynamoDB Module
 # modules/dynamodb/main.tf
 
+# KMS key for DynamoDB encryption
+resource "aws_kms_key" "dynamodb" {
+  description             = "KMS key for DynamoDB table encryption"
+  enable_key_rotation     = true
+  deletion_window_in_days = 10
+}
+
 # User Profiles Table
 resource "aws_dynamodb_table" "user_profiles" {
   name                        = "${var.project_name}-user-profiles-${var.environment}"
@@ -52,7 +59,7 @@ resource "aws_dynamodb_table" "user_profiles" {
   # Server-side encryption
   server_side_encryption {
     enabled     = true
-    kms_key_arn = var.kms_key_id
+    kms_key_arn = aws_kms_key.dynamodb.arn
   }
 
   # Point-in-time recovery
@@ -136,7 +143,7 @@ resource "aws_dynamodb_table" "security_events" {
   # Server-side encryption
   server_side_encryption {
     enabled     = true
-    kms_key_arn = var.kms_key_id
+    kms_key_arn = aws_kms_key.dynamodb.arn
   }
 
   # Point-in-time recovery
@@ -168,7 +175,7 @@ resource "aws_dynamodb_table" "user_sessions" {
   hash_key                    = "session_id"
   stream_enabled              = var.stream_enabled
   stream_view_type            = var.stream_enabled ? var.stream_view_type : null
-  deletion_protection_enabled = false
+  deletion_protection_enabled = var.deletion_protection_enabled
 
   # Capacity settings for provisioned mode
   read_capacity  = var.billing_mode == "PROVISIONED" ? var.read_capacity : null
@@ -197,7 +204,7 @@ resource "aws_dynamodb_table" "user_sessions" {
   # Server-side encryption
   server_side_encryption {
     enabled     = true
-    kms_key_arn = var.kms_key_id
+    kms_key_arn = aws_kms_key.dynamodb.arn
   }
 
   # Point-in-time recovery

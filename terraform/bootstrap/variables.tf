@@ -27,3 +27,10 @@ variable "tags" {
     Purpose   = "BootstrapInfrastructure"
   }
 }
+
+variable "replica_region" {
+  description = "AWS region for the replication destination bucket"
+  type        = string
+  default     = "us-east-2"
+}
+
