@@ -96,8 +96,7 @@ jobs:
             
             ### Security Scans:
             - **TFLint:** Passed
-            - **tfsec:** Passed  
-            - **Checkov:** Passed
+            - **Security Scans:** Passed  
             
             ### Next Steps:
             - Merge this PR to apply the infrastructure changes
