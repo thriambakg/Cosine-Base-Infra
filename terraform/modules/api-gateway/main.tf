@@ -45,6 +45,11 @@ resource "aws_api_gateway_rest_api" "this" {
     Name = var.api_name
     Type = "APIGateway"
   })
+
+  # CKV_AWS_237: Create before destroy lifecycle rule
+  lifecycle {
+    create_before_destroy = true
+  }
 }
 
 # CloudWatch log group for API Gateway
@@ -148,9 +153,12 @@ resource "aws_api_gateway_stage" "this" {
     }
   }
 
-  # Cache settings
+  # Cache settings - CKV_AWS_120: Ensure caching is enabled
   cache_cluster_enabled = var.cache_cluster_enabled
-  cache_cluster_size    = var.cache_cluster_size
+  cache_cluster_size    = var.cache_cluster_enabled ? var.cache_cluster_size : null
+
+  # CKV2_AWS_51: Client certificate authentication
+  client_certificate_id = var.client_certificate_id
 
   tags = merge(var.tags, {
     Name  = "${var.api_name}-${var.stage_name}"

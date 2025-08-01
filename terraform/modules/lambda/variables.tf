@@ -196,3 +196,10 @@ variable "alarm_sns_topic_arn" {
   type        = string
   default     = ""
 }
+
+# Code Signing Configuration - CKV_AWS_272
+variable "code_signing_config_arn" {
+  description = "ARN of the Code Signing Config"
+  type        = string
+  default     = null
+}

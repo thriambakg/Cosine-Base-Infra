@@ -179,11 +179,11 @@ variable "throttling_burst_limit" {
   }
 }
 
-# Caching Configuration
+# Caching Configuration - CKV_AWS_120 & CKV_AWS_225
 variable "cache_cluster_enabled" {
   description = "Whether to enable API Gateway cache cluster"
   type        = bool
-  default     = false
+  default     = true # Enable by default for compliance
 }
 
 variable "cache_cluster_size" {
@@ -202,7 +202,7 @@ variable "cache_cluster_size" {
 variable "caching_enabled" {
   description = "Whether to enable method-level caching"
   type        = bool
-  default     = false
+  default     = true # Enable by default for compliance CKV_AWS_225
 }
 
 variable "cache_ttl_in_seconds" {
@@ -330,4 +330,11 @@ variable "api_keys" {
     value       = optional(string, null)
   }))
   default = {}
+}
+
+# Client Certificate Configuration - CKV2_AWS_51
+variable "client_certificate_id" {
+  description = "ID of the client certificate for the stage"
+  type        = string
+  default     = null
 }

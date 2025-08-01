@@ -80,7 +80,7 @@ resource "aws_lambda_function" "this" {
   # Layers
   layers = var.layers
 
-  # Environment variables (encrypted)
+  # Environment variables (encrypted) - CKV_AWS_173
   dynamic "environment" {
     for_each = length(var.environment_variables) > 0 ? [1] : []
     content {
@@ -88,8 +88,11 @@ resource "aws_lambda_function" "this" {
     }
   }
 
-  # KMS key for environment variable encryption
+  # KMS key for environment variable encryption - CKV_AWS_173
   kms_key_arn = var.lambda_kms_key_arn
+
+  # Code signing configuration - CKV_AWS_272
+  code_signing_config_arn = var.code_signing_config_arn
 
   # VPC configuration
   dynamic "vpc_config" {
