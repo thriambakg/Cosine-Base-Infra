@@ -214,7 +214,9 @@ resource "aws_sns_topic_policy" "s3_notifications_policy" {
           ArnLike = {
             "aws:SourceArn" = [
               aws_s3_bucket.terraform_state.arn,
-              aws_s3_bucket.terraform_state_replica.arn
+              aws_s3_bucket.terraform_state_replica.arn,
+              aws_s3_bucket.terraform_state_logs.arn,
+              aws_s3_bucket.terraform_state_logs_replica.arn
             ]
           }
         }
@@ -629,4 +631,25 @@ resource "aws_s3_bucket_lifecycle_configuration" "terraform_state_logs_replica_l
       days_after_initiation = 7
     }
   }
+}
+
+# S3 Event Notification for terraform_state_logs_replica bucket (SNS)
+resource "aws_s3_bucket_notification" "terraform_state_logs_replica" {
+  provider = aws.replica
+  bucket   = aws_s3_bucket.terraform_state_logs_replica.id
+
+  topic {
+    topic_arn = aws_sns_topic.s3_notifications.arn
+    events    = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.s3_notifications_policy]
+}
+
+# S3 Access Logging for terraform_state_logs_replica bucket
+resource "aws_s3_bucket_logging" "terraform_state_logs_replica" {
+  provider      = aws.replica
+  bucket        = aws_s3_bucket.terraform_state_logs_replica.id
+  target_bucket = aws_s3_bucket.terraform_state_logs.id
+  target_prefix = "terraform-state-logs-replica/"
 }
