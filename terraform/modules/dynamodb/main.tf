@@ -6,7 +6,40 @@ resource "aws_kms_key" "dynamodb" {
   description             = "KMS key for DynamoDB table encryption"
   enable_key_rotation     = true
   deletion_window_in_days = 10
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow use of the key for DynamoDB"
+        Effect = "Allow"
+        Principal = {
+          Service = "dynamodb.amazonaws.com"
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
 }
+
+# Get current AWS account info for KMS policy
+data "aws_caller_identity" "current" {}
 
 # User Profiles Table
 resource "aws_dynamodb_table" "user_profiles" {

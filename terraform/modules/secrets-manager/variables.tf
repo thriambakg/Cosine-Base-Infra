@@ -51,4 +51,12 @@ variable "automatic_rotation" {
     })
   }))
   default = {}
+
+  validation {
+    condition = alltrue([
+      for config in var.automatic_rotation :
+      config.rotation_rules.automatically_after_days <= 90
+    ])
+    error_message = "Automatic rotation must be configured for 90 days or less to meet compliance requirements."
+  }
 }

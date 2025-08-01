@@ -37,25 +37,25 @@ variable "security_log_retention_days" {
 variable "auth_log_retention_days" {
   description = "Retention period for authentication logs in days"
   type        = number
-  default     = 90
+  default     = 365
 }
 
 variable "application_log_retention_days" {
   description = "Retention period for application logs in days"
   type        = number
-  default     = 30
+  default     = 365
 }
 
 variable "lambda_log_retention_days" {
   description = "Retention period for Lambda logs in days"
   type        = number
-  default     = 14
+  default     = 365
 }
 
 variable "api_gateway_log_retention_days" {
   description = "Retention period for API Gateway logs in days"
   type        = number
-  default     = 14
+  default     = 365
 }
 
 # Dashboard configuration
