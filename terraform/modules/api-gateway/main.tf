@@ -164,6 +164,14 @@ resource "aws_api_gateway_stage" "this" {
     Name  = "${var.api_name}-${var.stage_name}"
     Stage = var.stage_name
   })
+
+  # CKV2_AWS_29: Lifecycle rule to encourage WAF protection for public APIs
+  lifecycle {
+    precondition {
+      condition = var.endpoint_type == "PRIVATE" || var.waf_web_acl_arn != null || var.ignore_waf_requirement == true
+      error_message = "Public API Gateway stages should be protected by WAF for security compliance (CKV2_AWS_29). Either provide waf_web_acl_arn, use PRIVATE endpoint_type, or set ignore_waf_requirement=true if WAF is managed externally."
+    }
+  }
 }
 
 # Method settings for the stage

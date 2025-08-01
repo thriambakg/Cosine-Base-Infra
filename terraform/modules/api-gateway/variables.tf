@@ -146,13 +146,13 @@ variable "data_trace_enabled" {
 }
 
 variable "logging_level" {
-  description = "Logging level for method settings. Valid values: OFF, ERROR, INFO"
+  description = "Logging level for method settings. Valid values: ERROR, INFO (CKV2_AWS_4 compliance - OFF not recommended)"
   type        = string
-  default     = "INFO"
+  default     = "INFO" # Compliance default
 
   validation {
-    condition     = contains(["OFF", "ERROR", "INFO"], var.logging_level)
-    error_message = "Logging level must be one of: OFF, ERROR, INFO."
+    condition     = contains(["ERROR", "INFO"], var.logging_level)
+    error_message = "Logging level must be ERROR or INFO for compliance (CKV2_AWS_4). OFF is not recommended for production APIs."
   }
 }
 
@@ -246,6 +246,12 @@ variable "waf_web_acl_arn" {
   description = "ARN of WAF Web ACL to associate with the API Gateway stage"
   type        = string
   default     = null
+}
+
+variable "ignore_waf_requirement" {
+  description = "Set to true to bypass WAF requirement check for public APIs (only if WAF is managed externally)"
+  type        = bool
+  default     = false
 }
 
 # Custom Domain Configuration

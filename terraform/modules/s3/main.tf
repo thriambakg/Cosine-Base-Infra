@@ -161,6 +161,64 @@ resource "aws_s3_bucket_public_access_block" "replica" {
   restrict_public_buckets = true
 }
 
+# CKV2_AWS_61: Lifecycle configuration for replica bucket
+resource "aws_s3_bucket_lifecycle_configuration" "replica" {
+  count    = var.enable_cross_region_replication ? 1 : 0
+  provider = aws.replica
+  bucket   = aws_s3_bucket.replica[0].id
+
+  rule {
+    id     = "replica_lifecycle_rule"
+    status = "Enabled"
+
+    # Delete incomplete multipart uploads after 7 days (CKV_AWS_300)
+    abort_incomplete_multipart_upload {
+      days_after_initiation = 7
+    }
+
+    # Transition rules
+    dynamic "transition" {
+      for_each = var.lifecycle_rules
+      content {
+        days          = transition.value.transition_days
+        storage_class = transition.value.storage_class
+      }
+    }
+
+    # Expiration rule
+    dynamic "expiration" {
+      for_each = var.expiration_days != null ? [1] : []
+      content {
+        days = var.expiration_days
+      }
+    }
+  }
+
+  depends_on = [aws_s3_bucket_versioning.replica]
+}
+
+# CKV_AWS_18: Access logging for replica bucket
+resource "aws_s3_bucket_logging" "replica" {
+  count    = var.enable_cross_region_replication && var.access_log_bucket != null ? 1 : 0
+  provider = aws.replica
+  bucket   = aws_s3_bucket.replica[0].id
+
+  target_bucket = var.access_log_bucket
+  target_prefix = "replica-access-logs/${var.bucket_name}-replica/"
+}
+
+# CKV2_AWS_62: Event notifications for replica bucket
+resource "aws_s3_bucket_notification" "replica" {
+  count    = var.enable_cross_region_replication && var.notification_topic_arn != null ? 1 : 0
+  provider = aws.replica
+  bucket   = aws_s3_bucket.replica[0].id
+
+  topic {
+    topic_arn = var.notification_topic_arn
+    events    = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+  }
+}
+
 # IAM role for replication
 resource "aws_iam_role" "replication" {
   count = var.enable_cross_region_replication ? 1 : 0
