@@ -65,15 +65,15 @@ resource "aws_sns_topic" "s3_notifications" {
 
 # SNS Topic Policy to allow S3 buckets to publish
 resource "aws_sns_topic_policy" "s3_notifications_policy" {
-  arn    = aws_sns_topic.s3_notifications.arn
+  arn = aws_sns_topic.s3_notifications.arn
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
+        Effect    = "Allow"
         Principal = { Service = "s3.amazonaws.com" }
-        Action = "sns:Publish"
-        Resource = aws_sns_topic.s3_notifications.arn
+        Action    = "sns:Publish"
+        Resource  = aws_sns_topic.s3_notifications.arn
         Condition = {
           ArnLike = {
             "aws:SourceArn" = [
