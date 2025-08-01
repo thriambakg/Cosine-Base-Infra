@@ -170,9 +170,9 @@ resource "aws_api_gateway_stage" "this" {
     precondition {
       condition = (
         var.endpoint_type == "PRIVATE" ||
-        var.waf_web_acl_arn != null
+        (var.waf_web_acl_arn != null && var.endpoint_type != "PRIVATE")
       )
-      error_message = "Public API Gateway stages must be protected by WAF for security compliance (CKV2_AWS_29). Solutions: 1) Provide waf_web_acl_arn, or 2) Use PRIVATE endpoint_type."
+      error_message = "CKV2_AWS_29: Public API Gateway stages must be protected by WAF for security compliance. Solutions: 1) Provide waf_web_acl_arn for public APIs, or 2) Use PRIVATE endpoint_type."
     }
 
     # CKV2_AWS_4: Ensure logging is properly configured
@@ -181,7 +181,7 @@ resource "aws_api_gateway_stage" "this" {
         var.enable_access_logging == true &&
         contains(["ERROR", "INFO"], var.logging_level)
       )
-      error_message = "API Gateway stage must have access logging enabled and appropriate logging level (ERROR or INFO) for compliance (CKV2_AWS_4)."
+      error_message = "CKV2_AWS_4: API Gateway stage must have access logging enabled and appropriate logging level (ERROR or INFO) for compliance."
     }
   }
 }
@@ -216,9 +216,9 @@ resource "aws_api_gateway_method_settings" "this" {
   }
 }
 
-# WAF Web ACL Association (if provided)
+# CKV2_AWS_29: WAF Web ACL Association (mandatory for public APIs)
 resource "aws_wafv2_web_acl_association" "this" {
-  count        = var.waf_web_acl_arn != null && var.create_deployment ? 1 : 0
+  count        = var.endpoint_type != "PRIVATE" && var.create_deployment ? 1 : 0
   resource_arn = aws_api_gateway_stage.this[0].arn
   web_acl_arn  = var.waf_web_acl_arn
 }
