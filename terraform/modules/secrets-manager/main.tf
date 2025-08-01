@@ -39,8 +39,8 @@ resource "aws_secretsmanager_secret_rotation" "secret_rotation" {
   rotation_lambda_arn = each.value.rotation_lambda_arn
 
   rotation_rules {
-    # CKV_AWS_304: Ensure rotation is within 90 days - hardcoded max to guarantee compliance
-    automatically_after_days = each.value.rotation_rules.automatically_after_days <= 90 ? each.value.rotation_rules.automatically_after_days : 90
+    # CKV_AWS_304: Ensure rotation is within 90 days
+    automatically_after_days = each.value.rotation_rules.automatically_after_days
   }
 
   depends_on = [aws_secretsmanager_secret_version.secret_versions]

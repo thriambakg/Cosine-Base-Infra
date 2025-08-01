@@ -131,7 +131,7 @@ resource "aws_api_gateway_stage" "this" {
   # X-Ray tracing
   xray_tracing_enabled = var.xray_tracing_enabled
 
-  # Access logging
+  # Access logging - CKV2_AWS_4: Ensure appropriate logging level
   dynamic "access_log_settings" {
     for_each = var.enable_access_logging ? [1] : []
     content {
@@ -165,11 +165,24 @@ resource "aws_api_gateway_stage" "this" {
     Stage = var.stage_name
   })
 
-  # CKV2_AWS_29: Lifecycle rule to encourage WAF protection for public APIs
+  # CKV2_AWS_29: Lifecycle rule to enforce WAF protection for public APIs
   lifecycle {
     precondition {
-      condition     = var.endpoint_type == "PRIVATE" || var.waf_web_acl_arn != null || var.ignore_waf_requirement == true
-      error_message = "Public API Gateway stages should be protected by WAF for security compliance (CKV2_AWS_29). Either provide waf_web_acl_arn, use PRIVATE endpoint_type, or set ignore_waf_requirement=true if WAF is managed externally."
+      condition = (
+        var.endpoint_type == "PRIVATE" ||
+        var.waf_web_acl_arn != null ||
+        var.ignore_waf_requirement == true
+      )
+      error_message = "Public API Gateway stages must be protected by WAF for security compliance (CKV2_AWS_29). Solutions: 1) Provide waf_web_acl_arn, 2) Use PRIVATE endpoint_type, or 3) Set ignore_waf_requirement=true if WAF is managed externally."
+    }
+
+    # CKV2_AWS_4: Ensure logging is properly configured
+    precondition {
+      condition = (
+        var.enable_access_logging == true &&
+        contains(["ERROR", "INFO"], var.logging_level)
+      )
+      error_message = "API Gateway stage must have access logging enabled and appropriate logging level (ERROR or INFO) for compliance (CKV2_AWS_4)."
     }
   }
 }
