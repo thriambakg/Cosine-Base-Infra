@@ -46,6 +46,7 @@ module "secrets_manager" {
   tags                 = var.common_tags
   kms_key_id           = module.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
+  automatic_rotation   = var.automatic_secret_rotation
 
   secrets = var.oauth_secrets_enabled ? {
     oauth-credentials = {

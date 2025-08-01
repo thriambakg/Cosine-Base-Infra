@@ -280,25 +280,25 @@ variable "cloudwatch_security_log_retention_days" {
 variable "cloudwatch_auth_log_retention_days" {
   description = "CloudWatch authentication log retention in days"
   type        = number
-  default     = 90
+  default     = 365
 }
 
 variable "cloudwatch_application_log_retention_days" {
   description = "CloudWatch application log retention in days"
   type        = number
-  default     = 30
+  default     = 365
 }
 
 variable "cloudwatch_lambda_log_retention_days" {
   description = "CloudWatch Lambda log retention in days"
   type        = number
-  default     = 14
+  default     = 365
 }
 
 variable "cloudwatch_api_gateway_log_retention_days" {
   description = "CloudWatch API Gateway log retention in days"
   type        = number
-  default     = 30
+  default     = 365
 }
 
 variable "cloudwatch_failed_login_threshold" {
@@ -333,5 +333,24 @@ variable "secrets_recovery_window_days" {
   validation {
     condition     = var.secrets_recovery_window_days >= 0 && var.secrets_recovery_window_days <= 30
     error_message = "Recovery window must be between 0 and 30 days."
+  }
+}
+
+variable "automatic_secret_rotation" {
+  description = "Configuration for automatic secret rotation (CKV_AWS_304 compliance)"
+  type = map(object({
+    rotation_lambda_arn = string
+    rotation_rules = object({
+      automatically_after_days = number
+    })
+  }))
+  default = {}
+
+  validation {
+    condition = alltrue([
+      for config in var.automatic_secret_rotation :
+      config.rotation_rules.automatically_after_days <= 90
+    ])
+    error_message = "Automatic rotation must be configured for 90 days or less to meet compliance requirements (CKV_AWS_304)."
   }
 }
