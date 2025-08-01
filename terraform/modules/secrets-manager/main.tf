@@ -39,10 +39,17 @@ resource "aws_secretsmanager_secret_rotation" "secret_rotation" {
   rotation_lambda_arn = each.value.rotation_lambda_arn
 
   rotation_rules {
-    automatically_after_days = each.value.rotation_rules.automatically_after_days
+    automatically_after_days = min(each.value.rotation_rules.automatically_after_days, 90)
   }
 
   depends_on = [aws_secretsmanager_secret_version.secret_versions]
+
+  lifecycle {
+    precondition {
+      condition     = each.value.rotation_rules.automatically_after_days <= 90
+      error_message = "Secret rotation must be configured for 90 days or less to meet compliance requirements (CKV_AWS_304). Current value: ${each.value.rotation_rules.automatically_after_days} days."
+    }
+  }
 }
 
 # Data source for retrieving secret values (for reference)

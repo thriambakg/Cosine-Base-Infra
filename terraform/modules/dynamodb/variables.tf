@@ -88,7 +88,7 @@ variable "point_in_time_recovery_enabled" {
 variable "deletion_protection_enabled" {
   description = "Enable deletion protection"
   type        = bool
-  default     = false
+  default     = true # Changed to true for security compliance
 }
 
 variable "ttl_enabled" {
