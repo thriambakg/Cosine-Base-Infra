@@ -27,11 +27,72 @@ resource "aws_s3_bucket" "terraform_state" {
   })
 }
 
+# Current AWS account ID and region
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
 # KMS key for S3 bucket encryption
 resource "aws_kms_key" "terraform_state" {
   description             = "KMS key for Terraform state S3 buckets"
   enable_key_rotation     = true
   deletion_window_in_days = 7
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Sid    = "Enable IAM User Permissions"
+        Effect = "Allow"
+        Principal = {
+          AWS = "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+        }
+        Action   = "kms:*"
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow use of the key for S3"
+        Effect = "Allow"
+        Principal = {
+          Service = "s3.amazonaws.com"
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey*"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow use of the key for DynamoDB"
+        Effect = "Allow"
+        Principal = {
+          Service = "dynamodb.amazonaws.com"
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey*"
+        ]
+        Resource = "*"
+      },
+      {
+        Sid    = "Allow use of the key for SNS"
+        Effect = "Allow"
+        Principal = {
+          Service = "sns.amazonaws.com"
+        }
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey*"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+}
+
+# KMS key alias
+resource "aws_kms_alias" "terraform_state" {
+  name          = "alias/terraform-state-bootstrap"
+  target_key_id = aws_kms_key.terraform_state.key_id
 }
 
 # S3 bucket for access logs (in primary region)
@@ -58,9 +119,78 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "terraform_state_l
 }
 
 
-# SNS Topic for S3 notifications
+# S3 bucket lifecycle policies for logs bucket
+resource "aws_s3_bucket_lifecycle_configuration" "logs_lifecycle" {
+  bucket = aws_s3_bucket.logs.id
+
+  rule {
+    id     = "logs_lifecycle"
+    status = "Enabled"
+
+    expiration {
+      days = 90
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
+# S3 bucket lifecycle policies for replica bucket
+resource "aws_s3_bucket_lifecycle_configuration" "replica_lifecycle" {
+  bucket = aws_s3_bucket.replica.id
+
+  rule {
+    id     = "replica_lifecycle"
+    status = "Enabled"
+
+    expiration {
+      days = 90
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+}
+
+# S3 bucket public access block for logs bucket
+resource "aws_s3_bucket_public_access_block" "logs_pab" {
+  bucket = aws_s3_bucket.logs.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# S3 bucket public access block for replica bucket
+resource "aws_s3_bucket_public_access_block" "replica_pab" {
+  bucket = aws_s3_bucket.replica.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# S3 bucket notifications for logs bucket
+resource "aws_s3_bucket_notification" "logs_notification" {
+  bucket = aws_s3_bucket.logs.id
+
+  topic {
+    topic_arn = aws_sns_topic.terraform_state_notifications.arn
+    events    = ["s3:ObjectCreated:*", "s3:ObjectRemoved:*"]
+  }
+
+  depends_on = [aws_sns_topic_policy.terraform_state_notifications]
+}
+
+# SNS topic for state notifications
 resource "aws_sns_topic" "s3_notifications" {
-  name = "terraform-state-s3-notifications"
+  name           = "terraform-state-s3-notifications"
+  kms_master_key_id = aws_kms_key.terraform_state.arn
 }
 
 # SNS Topic Policy to allow S3 buckets to publish
@@ -191,7 +321,23 @@ resource "aws_s3_bucket_public_access_block" "terraform_state" {
   restrict_public_buckets = true
 }
 
-# S3 bucket lifecycle configuration
+# S3 bucket versioning for logs bucket
+resource "aws_s3_bucket_versioning" "logs_versioning" {
+  bucket = aws_s3_bucket.logs.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# S3 bucket versioning for replica bucket
+resource "aws_s3_bucket_versioning" "replica_versioning" {
+  bucket = aws_s3_bucket.replica.id
+  versioning_configuration {
+    status = "Enabled"
+  }
+}
+
+# S3 bucket lifecycle policies
 resource "aws_s3_bucket_lifecycle_configuration" "terraform_state" {
   bucket = aws_s3_bucket.terraform_state.id
 
@@ -304,7 +450,8 @@ resource "aws_dynamodb_table" "terraform_locks" {
   }
 
   server_side_encryption {
-    enabled = true
+    enabled     = true
+    kms_key_arn = aws_kms_key.terraform_state.arn
   }
 
   point_in_time_recovery {
