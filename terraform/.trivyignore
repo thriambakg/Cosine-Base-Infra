@@ -1,0 +1,11 @@
+# Trivy ignore file for Terraform security scanning
+# This file tells Trivy which security issues to ignore during scanning
+
+# Common Terraform false positives that are acceptable for this project
+# Add specific CVE IDs or rule IDs here if needed
+
+# Example of ignoring specific issues:
+# AVD-AWS-0001
+# CVE-2021-12345
+
+# For now, this file is empty but prevents the "ignorefile not found" error
