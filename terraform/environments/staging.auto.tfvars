@@ -48,16 +48,8 @@ cloudwatch_application_log_retention_days = 365 # 1 year
 cloudwatch_lambda_log_retention_days      = 365 # 1 year
 cloudwatch_api_gateway_log_retention_days = 365 # 1 year
 
-# Secrets Manager automatic rotation (CKV_AWS_304 compliance)
-automatic_secret_rotation = {
-  oauth-credentials = {
-    rotation_lambda_arn = "<REPLACE_WITH_ROTATION_LAMBDA_ARN>" # TODO: Provide the ARN of your rotation Lambda
-    rotation_rules = {
-      automatically_after_days = 90
-    }
-  }
-  # Add other secrets here as needed
-}
+# Secrets Manager automatic rotation (disabled for manual console management)
+automatic_secret_rotation = {}
 
 # Alert thresholds (production-like)
 cloudwatch_failed_login_threshold        = 5

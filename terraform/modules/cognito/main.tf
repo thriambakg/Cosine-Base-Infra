@@ -147,7 +147,7 @@ resource "aws_cognito_user_pool" "main" {
   })
 
   lifecycle {
-    prevent_destroy = true
+    prevent_destroy = false
   }
 }
 
