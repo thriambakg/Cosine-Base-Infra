@@ -22,12 +22,12 @@ kms_deletion_window_in_days = 10
 cognito_mfa_configuration      = "OPTIONAL" # Optional MFA for testing
 cognito_advanced_security_mode = "ENFORCED" # Full security
 cognito_callback_urls = [
-  "https://staging.cosine.app",
-  "https://staging.cosine.app/auth/callback"
+  "http://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com",
+  "http://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/auth/callback"
 ]
 cognito_logout_urls = [
-  "https://staging.cosine.app",
-  "https://staging.cosine.app/auth/logout"
+  "http://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com",
+  "http://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/auth/logout"
 ]
 cognito_access_token_validity  = 60 # 1 hour
 cognito_id_token_validity      = 60 # 1 hour
@@ -58,6 +58,7 @@ cloudwatch_suspicious_activity_threshold = 10
 # Federated Authentication Configuration
 cognito_enable_google_provider    = true
 cognito_enable_microsoft_provider = true
+cognito_domain_name               = "cosine-auth-staging"
 
 # OAuth Secrets Manager Integration (console-managed secrets)
 oauth_secrets_enabled = true # Create empty secret resource for console population
