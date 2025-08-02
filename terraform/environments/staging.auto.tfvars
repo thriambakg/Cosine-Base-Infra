@@ -22,12 +22,12 @@ kms_deletion_window_in_days = 10
 cognito_mfa_configuration      = "OPTIONAL" # Optional MFA for testing
 cognito_advanced_security_mode = "ENFORCED" # Full security
 cognito_callback_urls = [
-  "http://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com",
-  "http://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/auth/callback"
+  "http://localhost:3000",
+  "http://localhost:3000/auth/callback"
 ]
 cognito_logout_urls = [
-  "http://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com",
-  "http://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/auth/logout"
+  "http://localhost:3000",
+  "http://localhost:3000/auth/logout"
 ]
 cognito_access_token_validity  = 60 # 1 hour
 cognito_id_token_validity      = 60 # 1 hour
