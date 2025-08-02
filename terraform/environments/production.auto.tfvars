@@ -38,6 +38,12 @@ cognito_access_token_validity  = 30 # 30 minutes (more secure)
 cognito_id_token_validity      = 30 # 30 minutes (more secure)
 cognito_refresh_token_validity = 30 # 30 days
 
+# Federated Authentication Configuration
+cognito_enable_google_provider    = true
+cognito_enable_microsoft_provider = true
+cognito_domain_name               = "cosine-production"
+oauth_secrets_enabled             = true
+
 # DynamoDB Configuration (maximum durability)
 dynamodb_billing_mode                   = "PAY_PER_REQUEST" # Can switch to PROVISIONED if predictable load
 dynamodb_stream_enabled                 = true

@@ -50,14 +50,16 @@ module "secrets_manager" {
   # Only enable automatic rotation if secrets are enabled
   automatic_rotation = var.oauth_secrets_enabled ? var.automatic_secret_rotation : {}
 
+  # Create empty secret for console population
   secrets = var.oauth_secrets_enabled ? {
     oauth-credentials = {
-      description = "OAuth provider credentials for federated authentication"
+      description = "OAuth provider credentials for federated authentication (populated manually)"
       secret_data = {
-        google_client_id        = var.cognito_google_client_id
-        google_client_secret    = var.cognito_google_client_secret
-        microsoft_client_id     = var.cognito_microsoft_client_id
-        microsoft_client_secret = var.cognito_microsoft_client_secret
+        # Placeholder values - will be updated manually in console
+        google_client_id        = "PLACEHOLDER_GOOGLE_CLIENT_ID"
+        google_client_secret    = "PLACEHOLDER_GOOGLE_CLIENT_SECRET"
+        microsoft_client_id     = "PLACEHOLDER_MICROSOFT_CLIENT_ID"
+        microsoft_client_secret = "PLACEHOLDER_MICROSOFT_CLIENT_SECRET"
       }
     }
   } : {}
@@ -79,15 +81,15 @@ module "cognito" {
   refresh_token_validity = var.cognito_refresh_token_validity
   domain_name            = var.cognito_domain_name
 
-  # Google Identity Provider
+  # Google Identity Provider (will use secrets manager when enabled)
   enable_google_provider = var.cognito_enable_google_provider
-  google_client_id       = var.cognito_google_client_id
-  google_client_secret   = var.cognito_google_client_secret
+  google_client_id       = "" # Will be read from secrets manager
+  google_client_secret   = "" # Will be read from secrets manager
 
-  # Microsoft Identity Provider
+  # Microsoft Identity Provider (will use secrets manager when enabled)
   enable_microsoft_provider = var.cognito_enable_microsoft_provider
-  microsoft_client_id       = var.cognito_microsoft_client_id
-  microsoft_client_secret   = var.cognito_microsoft_client_secret
+  microsoft_client_id       = "" # Will be read from secrets manager
+  microsoft_client_secret   = "" # Will be read from secrets manager
 
   # Secrets Manager Integration
   use_secrets_manager         = var.oauth_secrets_enabled

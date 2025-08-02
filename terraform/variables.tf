@@ -193,6 +193,13 @@ variable "cognito_microsoft_client_secret" {
   sensitive   = true
 }
 
+# OAuth Secrets Manager Configuration
+variable "oauth_secrets_enabled" {
+  description = "Enable OAuth secrets management through AWS Secrets Manager"
+  type        = bool
+  default     = false
+}
+
 # DynamoDB Configuration
 variable "dynamodb_billing_mode" {
   description = "DynamoDB billing mode"
@@ -317,13 +324,6 @@ variable "cloudwatch_alarm_notification_topic_arn" {
   description = "SNS topic ARN for CloudWatch alarm notifications (optional)"
   type        = string
   default     = ""
-}
-
-# Secrets Manager Configuration
-variable "oauth_secrets_enabled" {
-  description = "Enable storing OAuth credentials in Secrets Manager"
-  type        = bool
-  default     = false
 }
 
 variable "secrets_recovery_window_days" {

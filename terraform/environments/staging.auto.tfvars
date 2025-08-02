@@ -62,3 +62,10 @@ automatic_secret_rotation = {
 # Alert thresholds (production-like)
 cloudwatch_failed_login_threshold        = 5
 cloudwatch_suspicious_activity_threshold = 10
+
+# Federated Authentication Configuration
+cognito_enable_google_provider    = true
+cognito_enable_microsoft_provider = true
+
+# OAuth Secrets Manager Integration (console-managed secrets)
+oauth_secrets_enabled = true # Create empty secret resource for console population
