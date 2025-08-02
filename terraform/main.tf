@@ -81,15 +81,15 @@ module "cognito" {
   refresh_token_validity = var.cognito_refresh_token_validity
   domain_name            = var.cognito_domain_name
 
-  # Google Identity Provider (will use secrets manager when enabled)
+  # Google Identity Provider
   enable_google_provider = var.cognito_enable_google_provider
-  google_client_id       = "" # Will be read from secrets manager
-  google_client_secret   = "" # Will be read from secrets manager
+  google_client_id       = var.oauth_secrets_enabled ? "" : var.cognito_google_client_id
+  google_client_secret   = var.oauth_secrets_enabled ? "" : var.cognito_google_client_secret
 
-  # Microsoft Identity Provider (will use secrets manager when enabled)
+  # Microsoft Identity Provider  
   enable_microsoft_provider = var.cognito_enable_microsoft_provider
-  microsoft_client_id       = "" # Will be read from secrets manager
-  microsoft_client_secret   = "" # Will be read from secrets manager
+  microsoft_client_id       = var.oauth_secrets_enabled ? "" : var.cognito_microsoft_client_id
+  microsoft_client_secret   = var.oauth_secrets_enabled ? "" : var.cognito_microsoft_client_secret
 
   # Secrets Manager Integration
   use_secrets_manager         = var.oauth_secrets_enabled
