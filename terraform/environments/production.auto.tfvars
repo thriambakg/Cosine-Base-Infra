@@ -23,16 +23,16 @@ kms_deletion_window_in_days = 30 # Maximum retention
 cognito_mfa_configuration      = "ON"       # Required MFA
 cognito_advanced_security_mode = "ENFORCED" # Full security enforcement
 cognito_callback_urls = [
-  "https://cosine.app",
-  "https://cosine.app/auth/callback",
-  "https://app.cosine.io",
-  "https://app.cosine.io/auth/callback"
+  "https://investcosine.com",
+  "https://investcosine.com/auth/callback",
+  "https://www.investcosine.com", 
+  "https://www.investcosine.com/auth/callback"
 ]
 cognito_logout_urls = [
-  "https://cosine.app",
-  "https://cosine.app/auth/logout",
-  "https://app.cosine.io",
-  "https://app.cosine.io/auth/logout"
+  "https://investcosine.com",
+  "https://investcosine.com/auth/logout",
+  "https://www.investcosine.com",
+  "https://www.investcosine.com/auth/logout"
 ]
 cognito_access_token_validity  = 30 # 30 minutes (more secure)
 cognito_id_token_validity      = 30 # 30 minutes (more secure)
