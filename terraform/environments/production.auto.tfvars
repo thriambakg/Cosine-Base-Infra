@@ -72,13 +72,15 @@ cloudwatch_failed_login_threshold        = 3 # Very sensitive
 cloudwatch_suspicious_activity_threshold = 5 # Very sensitive
 
 # Secrets Manager automatic rotation (CKV_AWS_304 compliance)
+# Note: OAuth credentials typically don't require automatic rotation as they are manually managed
+# If rotation is needed, create a Lambda function and provide its ARN below
 automatic_secret_rotation = {
-  oauth-credentials = {
-    rotation_lambda_arn = "<REPLACE_WITH_ROTATION_LAMBDA_ARN>" # TODO: Provide the ARN of your rotation Lambda
-    rotation_rules = {
-      automatically_after_days = 30 # More frequent rotation for production
-    }
-  }
+  # oauth-credentials = {
+  #   rotation_lambda_arn = "arn:aws:lambda:us-east-1:676206904242:function:cosine-oauth-rotation-production"
+  #   rotation_rules = {
+  #     automatically_after_days = 30 # More frequent rotation for production
+  #   }
+  # }
   # Add other secrets here as needed
 }
 

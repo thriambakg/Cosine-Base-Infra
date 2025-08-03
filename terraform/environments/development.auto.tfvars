@@ -50,13 +50,15 @@ cloudwatch_lambda_log_retention_days      = 365 # 1 year
 cloudwatch_api_gateway_log_retention_days = 365 # 1 year
 
 # Secrets Manager automatic rotation (CKV_AWS_304 compliance)
+# Note: OAuth credentials typically don't require automatic rotation as they are manually managed
+# If rotation is needed, create a Lambda function and provide its ARN below
 automatic_secret_rotation = {
-  oauth-credentials = {
-    rotation_lambda_arn = "<REPLACE_WITH_ROTATION_LAMBDA_ARN>" # TODO: Provide the ARN of your rotation Lambda
-    rotation_rules = {
-      automatically_after_days = 90 # Maximum allowed for compliance
-    }
-  }
+  # oauth-credentials = {
+  #   rotation_lambda_arn = "arn:aws:lambda:us-east-1:676206904242:function:cosine-oauth-rotation-development"
+  #   rotation_rules = {
+  #     automatically_after_days = 90 # Maximum allowed for compliance
+  #   }
+  # }
   # Add other secrets here as needed
 }
 
