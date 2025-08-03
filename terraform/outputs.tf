@@ -254,3 +254,21 @@ output "oauth_secret_names" {
   description = "Names of OAuth secrets in Secrets Manager"
   value       = var.oauth_secrets_enabled ? module.secrets_manager.secret_names : {}
 }
+
+# ============================================================================
+# FRONTEND CONFIGURATION OUTPUT
+# Consolidated configuration for frontend deployments across environments
+# ============================================================================
+
+output "frontend_auth_config" {
+  description = "Complete authentication configuration for frontend applications"
+  value = {
+    user_pool_id    = module.cognito.user_pool_id
+    user_pool_arn   = module.cognito.user_pool_arn
+    client_id       = module.cognito.user_pool_client_id
+    domain_name     = module.cognito.user_pool_domain
+    full_domain_url = module.cognito.user_pool_domain != null ? "${module.cognito.user_pool_domain}.auth.${var.aws_region}.amazoncognito.com" : null
+    region          = var.aws_region
+    environment     = var.environment
+  }
+}
