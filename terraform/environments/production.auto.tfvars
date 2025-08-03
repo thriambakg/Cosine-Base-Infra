@@ -25,7 +25,7 @@ cognito_advanced_security_mode = "ENFORCED" # Full security enforcement
 cognito_callback_urls = [
   "https://investcosine.com",
   "https://investcosine.com/auth/callback",
-  "https://www.investcosine.com", 
+  "https://www.investcosine.com",
   "https://www.investcosine.com/auth/callback"
 ]
 cognito_logout_urls = [
