@@ -24,6 +24,16 @@ provider "aws" {
   }
 }
 
+# Temporary provider for replica region to clean up cross-region replication resources
+provider "aws" {
+  alias  = "replica"
+  region = "us-west-2" # Different region for replication
+
+  default_tags {
+    tags = var.common_tags
+  }
+}
+
 # KMS keys for encryption
 module "kms" {
   source = "./modules/kms"
@@ -158,12 +168,17 @@ module "shared_layer" {
 module "static_hosting_bucket" {
   source = "./modules/s3"
 
-  bucket_name   = "${var.project_name}-static-hosting-${var.environment}"
-  environment   = var.environment
-  purpose       = "static-website-hosting"
-  force_destroy = true
-  kms_key_arn   = module.kms.s3_key_arn
-  tags          = var.common_tags
+  bucket_name                     = "${var.project_name}-static-hosting-${var.environment}"
+  environment                     = var.environment
+  purpose                         = "static-website-hosting"
+  force_destroy                   = true
+  kms_key_arn                     = module.kms.main_key_arn
+  tags                            = var.common_tags
+  enable_cross_region_replication = false # Explicitly disable replication
+
+  providers = {
+    aws.replica = aws.replica
+  }
 
   depends_on = [module.kms]
 }

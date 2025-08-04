@@ -56,6 +56,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
     id     = "security_compliance"
     status = "Enabled"
 
+    filter {
+      prefix = ""
+    }
+
     # Abort incomplete multipart uploads (CKV_AWS_300)
     abort_incomplete_multipart_upload {
       days_after_initiation = var.abort_incomplete_multipart_upload_days
@@ -171,26 +175,18 @@ resource "aws_s3_bucket_lifecycle_configuration" "replica" {
     id     = "replica_lifecycle_rule"
     status = "Enabled"
 
+    filter {
+      prefix = ""
+    }
+
     # Delete incomplete multipart uploads after 7 days (CKV_AWS_300)
     abort_incomplete_multipart_upload {
       days_after_initiation = 7
     }
 
-    # Transition rules
-    dynamic "transition" {
-      for_each = var.lifecycle_rules
-      content {
-        days          = transition.value.transition_days
-        storage_class = transition.value.storage_class
-      }
-    }
-
-    # Expiration rule
-    dynamic "expiration" {
-      for_each = var.expiration_days != null ? [1] : []
-      content {
-        days = var.expiration_days
-      }
+    # Expire old versions
+    noncurrent_version_expiration {
+      noncurrent_days = var.noncurrent_version_expiration_days
     }
   }
 

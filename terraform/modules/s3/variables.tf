@@ -125,3 +125,25 @@ variable "replica_region" {
   type        = string
   default     = ""
 }
+
+variable "lifecycle_rules" {
+  description = "Lifecycle rules for S3 bucket"
+  type = list(object({
+    id     = string
+    status = string
+    filter = optional(object({
+      prefix = optional(string)
+      tags   = optional(map(string))
+    }))
+    expiration = optional(object({
+      days = number
+    }))
+    noncurrent_version_expiration = optional(object({
+      noncurrent_days = number
+    }))
+    abort_incomplete_multipart_upload = optional(object({
+      days_after_initiation = number
+    }))
+  }))
+  default = []
+}
