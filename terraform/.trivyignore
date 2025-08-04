@@ -4,6 +4,11 @@
 # Common Terraform false positives that are acceptable for this project
 # Add specific CVE IDs or rule IDs here if needed
 
+# CloudFront Origin Access Control (OAC) requires these settings to be disabled
+# for static website hosting buckets to work properly with CloudFront
+AVD-AWS-0087  # Public access block does not block public policies - Required for CloudFront OAC
+AVD-AWS-0093  # Public access block does not restrict public buckets - Required for CloudFront OAC
+
 # Example of ignoring specific issues:
 # AVD-AWS-0001
 # CVE-2021-12345
