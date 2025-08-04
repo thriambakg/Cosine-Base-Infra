@@ -86,3 +86,29 @@ automatic_secret_rotation = {
 
 # SNS topic for critical alerts (to be created separately or referenced)
 # cloudwatch_alarm_notification_topic_arn = "arn:aws:sns:us-east-1:123456789012:critical-alerts"
+
+# ============================================================================
+# VPC Configuration
+# ============================================================================
+
+vpc_cidr = "10.0.0.0/16"
+az_count = 2
+
+# ============================================================================
+# ALB Configuration
+# ============================================================================
+
+# SSL Certificate for production domain
+certificate_arn = "arn:aws:acm:us-east-1:676206904242:certificate/7f8d2b7b-d9d7-4ba8-9795-ddd3c11d8361"
+
+# HTTPS configuration
+enable_https = true
+
+# ALB Access Logs (disabled by default, enable if S3 bucket exists)
+enable_alb_access_logs = false
+alb_access_logs_bucket = ""
+
+# WAF Configuration (strict security for production)
+waf_rate_limit        = 1000 # Stricter rate limiting for production
+waf_blocked_countries = ["CN", "RU", "KP", "IR", "SY", "CU"]
+enable_waf_logging    = true

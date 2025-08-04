@@ -153,3 +153,17 @@ module "shared_layer" {
 
   tags = var.common_tags
 }
+
+# S3 bucket for static website hosting
+module "static_hosting_bucket" {
+  source = "./modules/s3"
+
+  bucket_name   = "${var.project_name}-static-hosting-${var.environment}"
+  environment   = var.environment
+  purpose       = "static-website-hosting"
+  force_destroy = true
+  kms_key_arn   = module.kms.s3_key_arn
+  tags          = var.common_tags
+
+  depends_on = [module.kms]
+}
