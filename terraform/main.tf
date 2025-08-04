@@ -175,6 +175,7 @@ module "static_hosting_bucket" {
   kms_key_arn                     = module.kms.main_key_arn
   tags                            = var.common_tags
   enable_cross_region_replication = false # Explicitly disable replication
+  allow_cloudfront_oac            = true  # Enable CloudFront OAC compatibility
 
   providers = {
     aws.replica = aws.replica

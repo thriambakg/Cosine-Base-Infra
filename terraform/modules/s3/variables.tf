@@ -147,3 +147,34 @@ variable "lifecycle_rules" {
   }))
   default = []
 }
+
+# Public Access Block Configuration
+variable "block_public_acls" {
+  description = "Whether Amazon S3 should block public ACLs for this bucket"
+  type        = bool
+  default     = true
+}
+
+variable "ignore_public_acls" {
+  description = "Whether Amazon S3 should ignore public ACLs for this bucket"
+  type        = bool
+  default     = true
+}
+
+variable "block_public_policy" {
+  description = "Whether Amazon S3 should block public bucket policies for this bucket"
+  type        = bool
+  default     = true
+}
+
+variable "restrict_public_buckets" {
+  description = "Whether Amazon S3 should restrict public bucket policies for this bucket"
+  type        = bool
+  default     = true
+}
+
+variable "allow_cloudfront_oac" {
+  description = "Allow CloudFront Origin Access Control by setting block_public_policy and restrict_public_buckets to false"
+  type        = bool
+  default     = false
+}
