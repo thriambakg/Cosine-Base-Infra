@@ -5,6 +5,7 @@
 environment = "staging"
 aws_region  = "us-east-1"
 
+
 # Common tags
 common_tags = {
   Project     = "cosine"
