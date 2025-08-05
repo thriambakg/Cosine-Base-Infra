@@ -102,44 +102,7 @@ resource "aws_cognito_user_pool" "main" {
     }
   }
 
-  schema {
-    attribute_data_type      = "String"
-    developer_only_attribute = false
-    mutable                  = true
-    name                     = "given_name"
-    required                 = false
-
-    string_attribute_constraints {
-      min_length = 1
-      max_length = 256
-    }
-  }
-
-  schema {
-    attribute_data_type      = "String"
-    developer_only_attribute = false
-    mutable                  = true
-    name                     = "family_name"
-    required                 = false
-
-    string_attribute_constraints {
-      min_length = 1
-      max_length = 256
-    }
-  }
-
-  schema {
-    attribute_data_type      = "String"
-    developer_only_attribute = false
-    mutable                  = true
-    name                     = "phone_number"
-    required                 = false
-
-    string_attribute_constraints {
-      min_length = 1
-      max_length = 256
-    }
-  }
+  # Only email is defined as a schema attribute. given_name, family_name, and phone_number removed.
 
   tags = merge(var.tags, {
     Name = "${var.project_name}-user-pool-${var.environment}"
@@ -196,18 +159,11 @@ resource "aws_cognito_user_pool_client" "main" {
   # Read and write attributes
   read_attributes = [
     "email",
-    "email_verified",
-    "given_name",
-    "family_name",
-    "phone_number",
-    "phone_number_verified"
+    "email_verified"
   ]
 
   write_attributes = [
-    "email",
-    "given_name",
-    "family_name",
-    "phone_number"
+    "email"
   ]
 
   # Prevent user existence errors

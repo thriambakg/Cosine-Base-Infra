@@ -47,6 +47,7 @@ variable "allowed_services" {
     "lambda.amazonaws.com",
     "dynamodb.amazonaws.com",
     "logs.amazonaws.com",
-    "s3.amazonaws.com"
+    "s3.amazonaws.com",
+    "cloudfront.amazonaws.com"
   ]
 }
