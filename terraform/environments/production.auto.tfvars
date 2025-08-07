@@ -24,8 +24,10 @@ cognito_mfa_configuration      = "ON"       # Required MFA
 cognito_advanced_security_mode = "ENFORCED" # Full security enforcement
 cognito_callback_urls = [
   "https://investcosine.com",
+  "https://investcosine.com/app",
   "https://investcosine.com/auth/callback",
   "https://www.investcosine.com",
+  "https://www.investcosine.com/app",
   "https://www.investcosine.com/auth/callback"
 ]
 cognito_logout_urls = [
@@ -34,8 +36,8 @@ cognito_logout_urls = [
   "https://www.investcosine.com",
   "https://www.investcosine.com/auth/logout"
 ]
-cognito_access_token_validity  = 30 # 30 minutes (more secure)
-cognito_id_token_validity      = 30 # 30 minutes (more secure)
+cognito_access_token_validity  = 60 # 60 minutes (1 hour)
+cognito_id_token_validity      = 60 # 60 minutes (1 hour)  
 cognito_refresh_token_validity = 30 # 30 days
 
 # Federated Authentication Configuration
