@@ -36,13 +36,13 @@ cognito_logout_urls = [
   "https://www.investcosine.com",
   "https://www.investcosine.com/auth/logout"
 ]
-cognito_access_token_validity  = 60 # 60 minutes (1 hour)
-cognito_id_token_validity      = 60 # 60 minutes (1 hour)  
-cognito_refresh_token_validity = 30 # 30 days
+cognito_access_token_validity  = 1 # 60 minutes (1 hour)
+cognito_id_token_validity      = 1 # 60 minutes (1 hour)  
+cognito_refresh_token_validity = 1 # 30 days
 
 # Temporarily disable Google/Microsoft providers until OAuth secrets are configured
-cognito_enable_google_provider    = false
-cognito_enable_microsoft_provider = false
+cognito_enable_google_provider    = true
+cognito_enable_microsoft_provider = true
 cognito_domain_name               = "cosine-production"
 # Temporarily disable OAuth secrets to fix deployment
 oauth_secrets_enabled = false
