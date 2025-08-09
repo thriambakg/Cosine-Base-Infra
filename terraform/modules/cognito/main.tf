@@ -118,7 +118,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom_marketingconsent"
+    name                     = "custom_markconsent"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -140,7 +140,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom_subscriptionplan"
+    name                     = "custom_subplan"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -151,7 +151,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom_subscriptionstatus"
+    name                     = "custom_substatus"
     required                 = false
     string_attribute_constraints {
       min_length = 1
