@@ -45,7 +45,7 @@ cognito_enable_google_provider    = true
 cognito_enable_microsoft_provider = true
 cognito_domain_name               = "cosine-production"
 # Temporarily disable OAuth secrets to fix deployment
-oauth_secrets_enabled = false
+oauth_secrets_enabled = true
 
 # DynamoDB Configuration (maximum durability)
 dynamodb_billing_mode                   = "PAY_PER_REQUEST" # Can switch to PROVISIONED if predictable load
