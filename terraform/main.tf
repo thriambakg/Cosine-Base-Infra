@@ -62,7 +62,7 @@ module "secrets_manager" {
 
   # Create empty secret for console population
   secrets = var.oauth_secrets_enabled ? {
-    oauth-ext = {
+    oauth-gaz = {
       description = "OAuth provider credentials for federated authentication (populated manually)"
       secret_data = {
         # Placeholder values - will be updated manually in console
@@ -103,7 +103,7 @@ module "cognito" {
 
   # Secrets Manager Integration
   use_secrets_manager         = var.oauth_secrets_enabled
-  secrets_manager_secret_name = var.oauth_secrets_enabled ? module.secrets_manager.secret_names["oauth-ext"] : ""
+  secrets_manager_secret_name = var.oauth_secrets_enabled ? module.secrets_manager.secret_names["oauth-gaz"] : ""
 
   depends_on = [module.secrets_manager]
 }
