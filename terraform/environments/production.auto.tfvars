@@ -36,9 +36,9 @@ cognito_logout_urls = [
   "https://www.investcosine.com",
   "https://www.investcosine.com/auth/logout"
 ]
-cognito_access_token_validity  = 1 # 60 minutes (1 hour)
-cognito_id_token_validity      = 1 # 60 minutes (1 hour)  
-cognito_refresh_token_validity = 1 # 30 days
+cognito_access_token_validity  = 5 # 60 minutes (1 hour)
+cognito_id_token_validity      = 5 # 60 minutes (1 hour)  
+cognito_refresh_token_validity = 1 # 1 day
 
 # Temporarily disable Google/Microsoft providers until OAuth secrets are configured
 cognito_enable_google_provider    = true
