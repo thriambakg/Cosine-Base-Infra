@@ -107,7 +107,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:termsaccept"
+    name                     = "custom_termsaccepted"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -118,7 +118,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:markconsent"
+    name                     = "custom_marketingconsent"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -129,7 +129,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:role"
+    name                     = "custom_role"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -140,7 +140,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:subplan"
+    name                     = "custom_subscriptionplan"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -151,7 +151,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:substatus"
+    name                     = "custom_subscriptionstatus"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -217,20 +217,20 @@ resource "aws_cognito_user_pool_client" "main" {
   read_attributes = [
     "email",
     "email_verified",
-    "custom:termsaccept",
-    "custom:markconsent",
-    "custom:role",
-    "custom:subplan",
-    "custom:substatus"
+    "custom_termsaccepted",
+    "custom_markconsent",
+    "custom_role",
+    "custom_subplan",
+    "custom_substatus"
   ]
 
   write_attributes = [
     "email",
-    "custom:termsaccept",
-    "custom:markconsent",
-    "custom:role",
-    "custom:subplan",
-    "custom:substatus"
+    "custom_termsaccepted",
+    "custom_markconsent",
+    "custom_role",
+    "custom_subplan",
+    "custom_substatus"
   ]
 
   # Prevent user existence errors

@@ -119,7 +119,7 @@ variable "cognito_access_token_validity" {
   default     = 60
 
   validation {
-    condition     = var.cognito_access_token_validity >= 1 && var.cognito_access_token_validity <= 1440
+    condition     = var.cognito_access_token_validity >= 5 && var.cognito_access_token_validity <= 1440
     error_message = "Access token validity must be between 5 and 1440 minutes."
   }
 }
