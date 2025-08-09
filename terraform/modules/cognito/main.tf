@@ -118,7 +118,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:marketingconsent"
+    name                     = "custom:markconsent"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -218,7 +218,7 @@ resource "aws_cognito_user_pool_client" "main" {
     "email",
     "email_verified",
     "custom:termsaccept",
-    "custom:marketingconsent",
+    "custom:markconsent",
     "custom:role",
     "custom:subplan",
     "custom:substatus"
@@ -227,7 +227,7 @@ resource "aws_cognito_user_pool_client" "main" {
   write_attributes = [
     "email",
     "custom:termsaccept",
-    "custom:marketingconsent",
+    "custom:markconsent",
     "custom:role",
     "custom:subplan",
     "custom:substatus"
