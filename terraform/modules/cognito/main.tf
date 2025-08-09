@@ -107,7 +107,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom_termsaccepted"
+    name                     = "custom_termsaccept"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -216,7 +216,6 @@ resource "aws_cognito_user_pool_client" "main" {
   # Read and write attributes
   read_attributes = [
     "email",
-    "email_verified",
     "custom_termsaccept",
     "custom_markconsent",
     "custom_role",
