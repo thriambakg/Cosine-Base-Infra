@@ -217,7 +217,7 @@ resource "aws_cognito_user_pool_client" "main" {
   read_attributes = [
     "email",
     "email_verified",
-    "custom_termsaccepted",
+    "custom_termsaccept",
     "custom_markconsent",
     "custom_role",
     "custom_subplan",
@@ -226,7 +226,7 @@ resource "aws_cognito_user_pool_client" "main" {
 
   write_attributes = [
     "email",
-    "custom_termsaccepted",
+    "custom_termsaccept",
     "custom_markconsent",
     "custom_role",
     "custom_subplan",
