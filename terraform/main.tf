@@ -103,7 +103,7 @@ module "cognito" {
 
   # Secrets Manager Integration
   use_secrets_manager         = var.oauth_secrets_enabled
-  secrets_manager_secret_name = var.oauth_secrets_enabled ? module.secrets_manager.secret_names["oauth-credentials"] : ""
+  secrets_manager_secret_name = var.oauth_secrets_enabled ? module.secrets_manager.secret_names["oauth-ext"] : ""
 
   depends_on = [module.secrets_manager]
 }
