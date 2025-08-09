@@ -102,6 +102,63 @@ resource "aws_cognito_user_pool" "main" {
     }
   }
 
+  # Custom attributes for registration
+  schema {
+    attribute_data_type      = "String"
+    developer_only_attribute = false
+    mutable                  = true
+    name                     = "custom:terms_accepted"
+    required                 = false
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 10
+    }
+  }
+  schema {
+    attribute_data_type      = "String"
+    developer_only_attribute = false
+    mutable                  = true
+    name                     = "custom:marketing_consent"
+    required                 = false
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 10
+    }
+  }
+  schema {
+    attribute_data_type      = "String"
+    developer_only_attribute = false
+    mutable                  = true
+    name                     = "custom:role"
+    required                 = false
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 20
+    }
+  }
+  schema {
+    attribute_data_type      = "String"
+    developer_only_attribute = false
+    mutable                  = true
+    name                     = "custom:subscription_plan"
+    required                 = false
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 20
+    }
+  }
+  schema {
+    attribute_data_type      = "String"
+    developer_only_attribute = false
+    mutable                  = true
+    name                     = "custom:subscription_status"
+    required                 = false
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 20
+    }
+  }
+
   # Only email is defined as a schema attribute. given_name, family_name, and phone_number removed.
 
   tags = merge(var.tags, {
@@ -159,11 +216,21 @@ resource "aws_cognito_user_pool_client" "main" {
   # Read and write attributes
   read_attributes = [
     "email",
-    "email_verified"
+    "email_verified",
+    "custom:terms_accepted",
+    "custom:marketing_consent",
+    "custom:role",
+    "custom:subscription_plan",
+    "custom:subscription_status"
   ]
 
   write_attributes = [
-    "email"
+    "email",
+    "custom:terms_accepted",
+    "custom:marketing_consent",
+    "custom:role",
+    "custom:subscription_plan",
+    "custom:subscription_status"
   ]
 
   # Prevent user existence errors
