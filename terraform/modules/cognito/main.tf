@@ -215,21 +215,22 @@ resource "aws_cognito_user_pool_client" "main" {
 
   # Read and write attributes
   read_attributes = [
-    "email",
-    "custom_termsaccept",
-    "custom_markconsent",
-    "custom_role",
-    "custom_subplan",
-    "custom_substatus"
+    "email"
+    # "email_verified",
+    # "custom_termsaccept",
+    # "custom_markconsent",
+    # "custom_role",
+    # "custom_subplan",
+    # "custom_substatus"
   ]
 
   write_attributes = [
     "email",
-    "custom_termsaccept",
-    "custom_markconsent",
-    "custom_role",
-    "custom_subplan",
-    "custom_substatus"
+    # "custom_termsaccept",
+    # "custom_markconsent",
+    # "custom_role",
+    # "custom_subplan",
+    # "custom_substatus"
   ]
 
   # Prevent user existence errors
