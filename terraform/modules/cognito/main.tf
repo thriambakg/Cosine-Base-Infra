@@ -107,7 +107,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:terms_accepted"
+    name                     = "custom:termsaccept"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -118,7 +118,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:marketing_consent"
+    name                     = "custom:marketingconsent"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -140,7 +140,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:subscription_plan"
+    name                     = "custom:subplan"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -151,7 +151,7 @@ resource "aws_cognito_user_pool" "main" {
     attribute_data_type      = "String"
     developer_only_attribute = false
     mutable                  = true
-    name                     = "custom:subscription_status"
+    name                     = "custom:substatus"
     required                 = false
     string_attribute_constraints {
       min_length = 1
@@ -217,20 +217,20 @@ resource "aws_cognito_user_pool_client" "main" {
   read_attributes = [
     "email",
     "email_verified",
-    "custom:terms_accepted",
-    "custom:marketing_consent",
+    "custom:termsaccept",
+    "custom:marketingconsent",
     "custom:role",
-    "custom:subscription_plan",
-    "custom:subscription_status"
+    "custom:subplan",
+    "custom:substatus"
   ]
 
   write_attributes = [
     "email",
-    "custom:terms_accepted",
-    "custom:marketing_consent",
+    "custom:termsaccept",
+    "custom:marketingconsent",
     "custom:role",
-    "custom:subscription_plan",
-    "custom:subscription_status"
+    "custom:subplan",
+    "custom:substatus"
   ]
 
   # Prevent user existence errors
