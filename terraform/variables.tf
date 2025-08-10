@@ -74,7 +74,8 @@ variable "kms_allowed_services" {
     "dynamodb.amazonaws.com",
     "logs.amazonaws.com",
     "s3.amazonaws.com",
-    "lambda.amazonaws.com"
+    "lambda.amazonaws.com",
+    "cloudfront.amazonaws.com",
   ]
 }
 
