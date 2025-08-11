@@ -195,11 +195,11 @@ resource "aws_cognito_user_pool_client" "main" {
     "ALLOW_USER_PASSWORD_AUTH"
   ]
 
-  # Supported identity providers
+  # Supported identity providers (social providers first)
   supported_identity_providers = concat(
-    ["COGNITO"],
     var.enable_google_provider ? ["Google"] : [],
-    var.enable_microsoft_provider ? ["Microsoft"] : []
+    var.enable_microsoft_provider ? ["Microsoft"] : [],
+    ["COGNITO"]
   )
 
   # Token validity
@@ -284,6 +284,10 @@ resource "aws_cognito_identity_provider" "microsoft" {
     attributes_request_method = "GET"
     oidc_issuer               = "https://login.microsoftonline.com/common/v2.0"
     authorize_scopes          = "email openid profile"
+    authorize_url             = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    token_url                 = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
+    attributes_url            = "https://graph.microsoft.com/v1.0/me"
+    jwks_uri                  = "https://login.microsoftonline.com/common/discovery/v2.0/keys"
   }
 
   attribute_mapping = {
