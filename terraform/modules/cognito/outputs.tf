@@ -47,7 +47,7 @@ output "supported_identity_providers" {
   value = concat(
     ["COGNITO"],
     var.enable_google_provider ? ["Google"] : [],
-    var.enable_microsoft_provider ? ["Microsoft"] : []
+
   )
 }
 
@@ -56,10 +56,7 @@ output "google_provider_name" {
   value       = var.enable_google_provider ? aws_cognito_identity_provider.google[0].provider_name : null
 }
 
-output "microsoft_provider_name" {
-  description = "Microsoft identity provider name"
-  value       = var.enable_microsoft_provider ? aws_cognito_identity_provider.microsoft[0].provider_name : null
-}
+
 
 # Data source for current region
 data "aws_region" "current" {}

@@ -98,26 +98,7 @@ variable "google_client_secret" {
   sensitive   = true
 }
 
-# Microsoft Identity Provider Configuration
-variable "enable_microsoft_provider" {
-  description = "Enable Microsoft identity provider"
-  type        = bool
-  default     = false
-}
 
-variable "microsoft_client_id" {
-  description = "Microsoft Application (client) ID"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "microsoft_client_secret" {
-  description = "Microsoft client secret"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
 
 # Secrets Manager Integration
 variable "use_secrets_manager" {
@@ -130,4 +111,11 @@ variable "secrets_manager_secret_name" {
   description = "Name of the Secrets Manager secret containing OAuth credentials"
   type        = string
   default     = ""
+}
+
+# Email Template Configuration
+variable "verification_link_placeholder" {
+  description = "Cognito placeholder for email verification link"
+  type        = string
+  default     = "{##Verify My Email Address##}"
 }

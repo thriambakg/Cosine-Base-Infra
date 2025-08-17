@@ -20,9 +20,7 @@ locals {
   google_client_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "google_client_id", "") : var.google_client_id
   google_client_secret = var.use_secrets_manager ? lookup(local.oauth_secrets, "google_client_secret", "") : var.google_client_secret
 
-  # Microsoft credentials
-  microsoft_client_id     = var.use_secrets_manager ? lookup(local.oauth_secrets, "microsoft_client_id", "") : var.microsoft_client_id
-  microsoft_client_secret = var.use_secrets_manager ? lookup(local.oauth_secrets, "microsoft_client_secret", "") : var.microsoft_client_secret
+
 }
 
 # Cognito User Pool
@@ -58,6 +56,8 @@ resource "aws_cognito_user_pool" "main" {
     email_sending_account = "COGNITO_DEFAULT"
   }
 
+
+
   # MFA configuration
   mfa_configuration = var.mfa_configuration
 
@@ -76,11 +76,90 @@ resource "aws_cognito_user_pool" "main" {
     advanced_security_mode = var.advanced_security_mode
   }
 
-  # Verification message templates
+  # Verification message templates - using LINK for better UX
   verification_message_template {
-    default_email_option = "CONFIRM_WITH_CODE"
-    email_subject        = "Verify your ${var.project_name} account"
-    email_message        = "Your verification code is {####}"
+    default_email_option  = "CONFIRM_WITH_LINK"
+    email_subject         = "Welcome to Cosine! Please verify your email"
+    email_subject_by_link = "Welcome to Cosine! Please verify your email"
+    email_message_by_link = <<-EOT
+<!DOCTYPE html>
+<html>
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Verify Your Email - Cosine</title>
+</head>
+<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; background-color: #f8fafc;">
+    <table role="presentation" style="width: 100%; border-collapse: collapse;">
+        <tr>
+            <td style="padding: 40px 20px;">
+                <table role="presentation" style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
+                    <!-- Header with Branding -->
+                    <tr>
+                        <td style="padding: 40px 40px 20px; text-align: center; background: linear-gradient(135deg, #1e3a8a 0%, #581c87 50%, #3730a3 100%); border-radius: 12px 12px 0 0;">
+                            <div style="display: inline-flex; align-items: center; font-family: system-ui, -apple-system, sans-serif;">
+                                <!-- Cosine logo image -->
+                                <img src="https://investcosine.com/email-logo.png" 
+                                     width="48" 
+                                     height="48" 
+                                     alt="Cosine Logo" 
+                                     style="margin-right: 15px; display: inline-block; vertical-align: middle;">
+                                
+                                <!-- Company name and tagline -->
+                                <div style="text-align: left;">
+                                    <div style="color: white; font-size: 24px; font-weight: 600; line-height: 1.2; text-shadow: 0 2px 4px rgba(0,0,0,0.2);">
+                                        Cosine
+                                    </div>
+                                    <div style="color: rgba(255,255,255,0.7); font-size: 11px; font-weight: 400; line-height: 1.2;">
+                                        AI-Powered Trading Intelligence
+                                    </div>
+                                </div>
+                            </div>
+                        </td>
+                    </tr>
+                    
+                    <!-- Content -->
+                    <tr>
+                        <td style="padding: 40px;">
+                            <h2 style="margin: 0 0 20px; color: #1e293b; font-size: 24px; font-weight: 600;">Welcome to Cosine!</h2>
+                            
+                            <p style="margin: 0 0 20px; color: #475569; font-size: 16px; line-height: 1.6;">
+                                Thank you for joining our AI-powered trading platform. To get started and ensure the security of your account, please verify your email address.
+                            </p>
+                            
+                            <div style="text-align: center; margin: 40px 0;">
+                                <p style="margin: 0; font-size: 24px; font-weight: 700; color: #1e3a8a;">${var.verification_link_placeholder}</p>
+                            </div>
+                            
+                            <hr style="margin: 32px 0; border: none; border-top: 1px solid #e2e8f0;">
+                            
+                            <p style="margin: 0; color: #64748b; font-size: 14px; line-height: 1.6;">
+                                <strong>What's next?</strong><br>
+                                • Access real-time market analysis<br>
+                                • Get AI-powered trading insights<br>
+                                • Optimize your portfolio with advanced tools<br>
+                                • Connect with other traders in our community
+                            </p>
+                        </td>
+                    </tr>
+                    
+                    <!-- Footer -->
+                    <tr>
+                        <td style="padding: 20px 40px; background-color: #f8fafc; border-radius: 0 0 12px 12px; text-align: center;">
+                            <p style="margin: 0; color: #64748b; font-size: 12px;">
+                                This email was sent by Cosine Trading Platform<br>
+                                If you didn't create an account, you can safely ignore this email.
+                            </p>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+</body>
+</html>
+EOT
+    email_message         = "Your verification code is {####}. Use this code to verify your Cosine account."
   }
 
   # User attribute update settings
@@ -102,7 +181,33 @@ resource "aws_cognito_user_pool" "main" {
     }
   }
 
-  # Custom attributes for registration
+  # Schema attributes to match existing User Pool configuration
+  # These were likely added manually in AWS console and need to be defined in Terraform
+
+  schema {
+    attribute_data_type      = "String"
+    developer_only_attribute = false
+    mutable                  = true
+    name                     = "given_name"
+    required                 = false
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 256
+    }
+  }
+
+  schema {
+    attribute_data_type      = "String"
+    developer_only_attribute = false
+    mutable                  = true
+    name                     = "family_name"
+    required                 = false
+    string_attribute_constraints {
+      min_length = 1
+      max_length = 256
+    }
+  }
+
   schema {
     attribute_data_type      = "String"
     developer_only_attribute = false
@@ -114,6 +219,7 @@ resource "aws_cognito_user_pool" "main" {
       max_length = 10
     }
   }
+
   schema {
     attribute_data_type      = "String"
     developer_only_attribute = false
@@ -125,6 +231,7 @@ resource "aws_cognito_user_pool" "main" {
       max_length = 10
     }
   }
+
   schema {
     attribute_data_type      = "String"
     developer_only_attribute = false
@@ -136,6 +243,7 @@ resource "aws_cognito_user_pool" "main" {
       max_length = 20
     }
   }
+
   schema {
     attribute_data_type      = "String"
     developer_only_attribute = false
@@ -147,6 +255,7 @@ resource "aws_cognito_user_pool" "main" {
       max_length = 20
     }
   }
+
   schema {
     attribute_data_type      = "String"
     developer_only_attribute = false
@@ -158,8 +267,6 @@ resource "aws_cognito_user_pool" "main" {
       max_length = 20
     }
   }
-
-  # Only email is defined as a schema attribute. given_name, family_name, and phone_number removed.
 
   tags = merge(var.tags, {
     Name = "${var.project_name}-user-pool-${var.environment}"
@@ -198,7 +305,7 @@ resource "aws_cognito_user_pool_client" "main" {
   # Supported identity providers (social providers first)
   supported_identity_providers = concat(
     var.enable_google_provider ? ["Google"] : [],
-    var.enable_microsoft_provider ? ["Microsoft"] : [],
+
     ["COGNITO"]
   )
 
@@ -213,24 +320,27 @@ resource "aws_cognito_user_pool_client" "main" {
     refresh_token = "days"
   }
 
-  # Read and write attributes
+  # Read and write attributes - enable access to existing User Pool attributes
   read_attributes = [
-    "email"
-    # "email_verified",
-    # "custom_termsaccept",
-    # "custom_markconsent",
-    # "custom_role",
-    # "custom_subplan",
-    # "custom_substatus"
+    "email",
+    "given_name",
+    "family_name",
+    "custom:custom_termsaccept",
+    "custom:custom_markconsent",
+    "custom:custom_role",
+    "custom:custom_subplan",
+    "custom:custom_substatus"
   ]
 
   write_attributes = [
     "email",
-    # "custom_termsaccept",
-    # "custom_markconsent",
-    # "custom_role",
-    # "custom_subplan",
-    # "custom_substatus"
+    "given_name",
+    "family_name",
+    "custom:custom_termsaccept",
+    "custom:custom_markconsent",
+    "custom:custom_role",
+    "custom:custom_subplan",
+    "custom:custom_substatus"
   ]
 
   # Prevent user existence errors
@@ -239,7 +349,7 @@ resource "aws_cognito_user_pool_client" "main" {
   depends_on = [
     aws_cognito_user_pool.main,
     aws_cognito_identity_provider.google,
-    aws_cognito_identity_provider.microsoft
+
   ]
 }
 
@@ -271,29 +381,4 @@ resource "aws_cognito_identity_provider" "google" {
   }
 }
 
-# Microsoft Identity Provider
-resource "aws_cognito_identity_provider" "microsoft" {
-  count         = var.enable_microsoft_provider ? 1 : 0
-  user_pool_id  = aws_cognito_user_pool.main.id
-  provider_name = "Microsoft"
-  provider_type = "OIDC"
 
-  provider_details = {
-    client_id                 = local.microsoft_client_id
-    client_secret             = local.microsoft_client_secret
-    attributes_request_method = "GET"
-    oidc_issuer               = "https://login.microsoftonline.com/common/v2.0"
-    authorize_scopes          = "email openid profile"
-    authorize_url             = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
-    token_url                 = "https://login.microsoftonline.com/common/oauth2/v2.0/token"
-    attributes_url            = "https://graph.microsoft.com/v1.0/me"
-    jwks_uri                  = "https://login.microsoftonline.com/common/discovery/v2.0/keys"
-  }
-
-  attribute_mapping = {
-    email       = "email"
-    given_name  = "given_name"
-    family_name = "family_name"
-    username    = "sub"
-  }
-}

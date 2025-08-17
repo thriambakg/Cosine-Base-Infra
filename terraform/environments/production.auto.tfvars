@@ -20,15 +20,17 @@ enable_key_rotation         = true
 kms_deletion_window_in_days = 30 # Maximum retention
 
 # Cognito Configuration (maximum security)
-cognito_mfa_configuration      = "ON"       # Required MFA
+cognito_mfa_configuration      = "OPTIONAL" # Optional MFA
 cognito_advanced_security_mode = "ENFORCED" # Full security enforcement
 cognito_callback_urls = [
   "https://investcosine.com",
   "https://investcosine.com/app",
   "https://investcosine.com/auth/callback",
+  "https://investcosine.com/auth/verify",
   "https://www.investcosine.com",
   "https://www.investcosine.com/app",
-  "https://www.investcosine.com/auth/callback"
+  "https://www.investcosine.com/auth/callback",
+  "https://www.investcosine.com/auth/verify"
 ]
 cognito_logout_urls = [
   "https://investcosine.com",
@@ -42,7 +44,7 @@ cognito_refresh_token_validity = 1 # 1 day
 
 # Temporarily disable Google/Microsoft providers until OAuth secrets are configured
 cognito_enable_google_provider    = true
-cognito_enable_microsoft_provider = true
+cognito_enable_microsoft_provider = false
 cognito_domain_name               = "cosine-production"
 # Temporarily disable OAuth secrets to fix deployment
 oauth_secrets_enabled = true

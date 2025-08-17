@@ -66,10 +66,9 @@ module "secrets_manager" {
       description = "OAuth provider credentials for federated authentication (populated manually)"
       secret_data = {
         # Placeholder values - will be updated manually in console
-        google_client_id        = "PLACEHOLDER_GOOGLE_CLIENT_ID"
-        google_client_secret    = "PLACEHOLDER_GOOGLE_CLIENT_SECRET"
-        microsoft_client_id     = "PLACEHOLDER_MICROSOFT_CLIENT_ID"
-        microsoft_client_secret = "PLACEHOLDER_MICROSOFT_CLIENT_SECRET"
+        google_client_id     = "PLACEHOLDER_GOOGLE_CLIENT_ID"
+        google_client_secret = "PLACEHOLDER_GOOGLE_CLIENT_SECRET"
+
       }
     }
   } : {}
@@ -96,10 +95,7 @@ module "cognito" {
   google_client_id       = var.oauth_secrets_enabled ? "" : var.cognito_google_client_id
   google_client_secret   = var.oauth_secrets_enabled ? "" : var.cognito_google_client_secret
 
-  # Microsoft Identity Provider  
-  enable_microsoft_provider = var.cognito_enable_microsoft_provider
-  microsoft_client_id       = var.oauth_secrets_enabled ? "" : var.cognito_microsoft_client_id
-  microsoft_client_secret   = var.oauth_secrets_enabled ? "" : var.cognito_microsoft_client_secret
+
 
   # Secrets Manager Integration
   use_secrets_manager         = var.oauth_secrets_enabled

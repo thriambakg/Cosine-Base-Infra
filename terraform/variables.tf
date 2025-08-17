@@ -174,25 +174,7 @@ variable "cognito_google_client_secret" {
   sensitive   = true
 }
 
-variable "cognito_enable_microsoft_provider" {
-  description = "Enable Microsoft as an identity provider"
-  type        = bool
-  default     = false
-}
 
-variable "cognito_microsoft_client_id" {
-  description = "Microsoft OAuth client ID"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
-
-variable "cognito_microsoft_client_secret" {
-  description = "Microsoft OAuth client secret"
-  type        = string
-  default     = ""
-  sensitive   = true
-}
 
 # OAuth Secrets Manager Configuration
 variable "oauth_secrets_enabled" {

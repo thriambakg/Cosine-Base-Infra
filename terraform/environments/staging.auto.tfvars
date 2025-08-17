@@ -58,7 +58,7 @@ cloudwatch_suspicious_activity_threshold = 10
 
 # Federated Authentication Configuration
 cognito_enable_google_provider    = true
-cognito_enable_microsoft_provider = true
+cognito_enable_microsoft_provider = false
 cognito_domain_name               = "cosine-auth-staging"
 
 # OAuth Secrets Manager Integration (console-managed secrets)
