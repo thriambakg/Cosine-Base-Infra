@@ -76,6 +76,14 @@ resource "aws_cognito_user_pool" "main" {
     advanced_security_mode = var.advanced_security_mode
   }
 
+  # Lambda configuration for triggers
+  dynamic "lambda_config" {
+    for_each = var.post_authentication_lambda_arn != "" ? [1] : []
+    content {
+      post_authentication = var.post_authentication_lambda_arn
+    }
+  }
+
   # Verification message templates - using LINK for better UX
   verification_message_template {
     default_email_option  = "CONFIRM_WITH_LINK"
@@ -277,6 +285,8 @@ EOT
     prevent_destroy = false
   }
 }
+
+
 
 # Cognito User Pool Client
 resource "aws_cognito_user_pool_client" "main" {

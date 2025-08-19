@@ -95,13 +95,14 @@ module "cognito" {
   google_client_id       = var.oauth_secrets_enabled ? "" : var.cognito_google_client_id
   google_client_secret   = var.oauth_secrets_enabled ? "" : var.cognito_google_client_secret
 
-
+  # Lambda trigger for user profile creation
+  post_authentication_lambda_arn = module.user_profile_creation_lambda.function_arn
 
   # Secrets Manager Integration
   use_secrets_manager         = var.oauth_secrets_enabled
   secrets_manager_secret_name = var.oauth_secrets_enabled ? module.secrets_manager.secret_names["oauth-gaz"] : ""
 
-  depends_on = [module.secrets_manager]
+  depends_on = [module.secrets_manager, module.user_profile_creation_lambda]
 }
 
 # DynamoDB tables for user data
@@ -127,6 +128,46 @@ module "dynamodb" {
   depends_on = [module.kms]
 }
 
+# User Profile Creation Lambda Function (Cognito Trigger)
+module "user_profile_creation_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-user-profile-creation-${var.environment}"
+  description   = "Lambda function for creating user profiles on Cognito signup"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 30
+  memory_size   = 256
+
+  # Source directory
+  source_dir = "../backend_app/src/user_profile_creation/app"
+
+  # Environment variables
+  environment_variables = {
+    USER_PROFILES_TABLE_NAME = module.dynamodb.user_profiles_table_name
+  }
+
+  # IAM policies for DynamoDB access
+  additional_policy_arns = [
+    module.dynamodb.user_profiles_table_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.dynamodb]
+}
+
+# Lambda permission for Cognito to invoke the user profile creation function
+resource "aws_lambda_permission" "cognito_user_profile_creation" {
+  statement_id  = "AllowCognitoInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = module.user_profile_creation_lambda.function_name
+  principal     = "cognito-idp.amazonaws.com"
+  source_arn    = module.cognito.user_pool_arn
+
+  depends_on = [module.user_profile_creation_lambda, module.cognito]
+}
+
 # CloudWatch logging and monitoring
 module "cloudwatch" {
   source = "./modules/cloudwatch"
@@ -150,15 +191,7 @@ module "cloudwatch" {
   depends_on = [module.kms, module.cognito, module.dynamodb]
 }
 
-# Lambda Layer for shared dependencies
-module "shared_layer" {
-  source = "./modules/lambda-layer"
 
-  project_name = var.project_name
-  environment  = var.environment
-
-  tags = var.common_tags
-}
 
 # S3 bucket for static website hosting
 module "static_hosting_bucket" {

@@ -119,3 +119,12 @@ variable "verification_link_placeholder" {
   type        = string
   default     = "{##Verify My Email Address##}"
 }
+
+# Lambda Trigger Configuration
+variable "post_authentication_lambda_arn" {
+  description = "ARN of the Lambda function to trigger after authentication"
+  type        = string
+  default     = ""
+}
+
+

@@ -97,3 +97,8 @@ output "all_table_arns" {
     aws_dynamodb_table.user_sessions.arn
   ]
 }
+
+output "user_profiles_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing user_profiles table"
+  value       = aws_iam_policy.user_profiles_table_policy.arn
+}

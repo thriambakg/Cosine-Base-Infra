@@ -117,6 +117,44 @@ resource "aws_dynamodb_table" "user_profiles" {
   }
 }
 
+# IAM Policy for Lambda functions to access user_profiles table
+resource "aws_iam_policy" "user_profiles_table_policy" {
+  name        = "${var.project_name}-user-profiles-table-policy-${var.environment}"
+  description = "Policy for Lambda functions to access user_profiles DynamoDB table"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan"
+        ]
+        Resource = [
+          aws_dynamodb_table.user_profiles.arn,
+          "${aws_dynamodb_table.user_profiles.arn}/index/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
+        ]
+        Resource = aws_kms_key.dynamodb.arn
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
 # Security Events Table
 resource "aws_dynamodb_table" "security_events" {
   name                        = "${var.project_name}-security-events-${var.environment}"
