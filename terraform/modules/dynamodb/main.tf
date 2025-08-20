@@ -299,3 +299,91 @@ resource "aws_dynamodb_table" "user_sessions" {
     prevent_destroy = false
   }
 }
+
+# Alerts Table
+resource "aws_dynamodb_table" "alerts" {
+  name                        = "${var.project_name}-alerts-${var.environment}"
+  billing_mode                = var.billing_mode
+  hash_key                    = "alert_status"
+  range_key                   = "created_at"
+  stream_enabled              = var.stream_enabled
+  stream_view_type            = var.stream_enabled ? var.stream_view_type : null
+  deletion_protection_enabled = var.deletion_protection_enabled
+
+  # Capacity settings for provisioned mode
+  read_capacity  = var.billing_mode == "PROVISIONED" ? var.read_capacity : null
+  write_capacity = var.billing_mode == "PROVISIONED" ? var.write_capacity : null
+
+  attribute {
+    name = "alert_status"
+    type = "S"
+  }
+
+  attribute {
+    name = "created_at"
+    type = "S"
+  }
+
+  attribute {
+    name = "alert_id"
+    type = "S"
+  }
+
+  # Global Secondary Index for alert ID lookups
+  global_secondary_index {
+    name            = "AlertIdIndex"
+    hash_key        = "alert_id"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Global Secondary Index for user-based alert queries (using alert_id as hash key)
+  global_secondary_index {
+    name            = "UserAlertsIndex"
+    hash_key        = "alert_id"
+    range_key       = "created_at"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Global Secondary Index for alert ID lookups
+  global_secondary_index {
+    name            = "AlertIdIndex"
+    hash_key        = "alert_id"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Server-side encryption
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.dynamodb.arn
+  }
+
+  # Point-in-time recovery
+  point_in_time_recovery {
+    enabled = var.point_in_time_recovery_enabled
+  }
+
+  # TTL for automatic cleanup of triggered alerts (30 days after triggered)
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = merge(var.tags, {
+    Name    = "${var.project_name}-alerts-${var.environment}"
+    Type    = "AlertData"
+    Purpose = "StockAlerts"
+  })
+
+  lifecycle {
+    prevent_destroy = false
+  }
+}

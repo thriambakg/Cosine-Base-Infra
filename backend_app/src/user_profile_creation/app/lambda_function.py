@@ -83,6 +83,16 @@ def create_default_dashboard() -> Dict[str, Any]:
                 'id': 'tile_1',
                 'symbol': 'BTC',
                 'timeframe': '1d',
+                'displayOptions': {
+                    'showPrice': True,
+                    'show24hChange': True,
+                    'showAnnualReturn': True,
+                    'showVolatility': True,
+                    'showChart': True
+                },
+                'autoRefresh': False,
+                'isPinned': False,
+                'size': {'width': 350, 'height': 400},
                 'position': {'x': 0, 'y': 0},
                 'created_at': now
             }

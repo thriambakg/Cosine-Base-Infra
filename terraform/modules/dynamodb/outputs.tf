@@ -79,13 +79,40 @@ output "user_sessions_table_stream_arn" {
   value       = aws_dynamodb_table.user_sessions.stream_arn
 }
 
+# Alerts Table
+output "alerts_table_name" {
+  description = "Name of the alerts DynamoDB table"
+  value       = aws_dynamodb_table.alerts.name
+}
+
+output "alerts_table_arn" {
+  description = "ARN of the alerts DynamoDB table"
+  value       = aws_dynamodb_table.alerts.arn
+}
+
+output "alerts_table_id" {
+  description = "ID of the alerts DynamoDB table"
+  value       = aws_dynamodb_table.alerts.id
+}
+
+output "alerts_stream_arn" {
+  description = "ARN of the alerts DynamoDB stream"
+  value       = aws_dynamodb_table.alerts.stream_arn
+}
+
+output "alerts_table_stream_arn" {
+  description = "ARN of the alerts DynamoDB stream (alias)"
+  value       = aws_dynamodb_table.alerts.stream_arn
+}
+
 # Combined outputs for easier access
 output "all_table_names" {
   description = "List of all DynamoDB table names"
   value = [
     aws_dynamodb_table.user_profiles.name,
     aws_dynamodb_table.security_events.name,
-    aws_dynamodb_table.user_sessions.name
+    aws_dynamodb_table.user_sessions.name,
+    aws_dynamodb_table.alerts.name
   ]
 }
 
@@ -94,11 +121,23 @@ output "all_table_arns" {
   value = [
     aws_dynamodb_table.user_profiles.arn,
     aws_dynamodb_table.security_events.arn,
-    aws_dynamodb_table.user_sessions.arn
+    aws_dynamodb_table.user_sessions.arn,
+    aws_dynamodb_table.alerts.arn
   ]
 }
 
 output "user_profiles_table_policy_arn" {
   description = "ARN of the IAM policy for accessing user_profiles table"
   value       = aws_iam_policy.user_profiles_table_policy.arn
+}
+
+# DynamoDB KMS Key
+output "dynamodb_kms_key_arn" {
+  description = "ARN of the DynamoDB KMS key"
+  value       = aws_kms_key.dynamodb.arn
+}
+
+output "dynamodb_kms_key_id" {
+  description = "ID of the DynamoDB KMS key"
+  value       = aws_kms_key.dynamodb.key_id
 }

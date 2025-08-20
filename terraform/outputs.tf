@@ -98,6 +98,17 @@ output "user_profiles_table_stream_arn" {
   value       = module.dynamodb.user_profiles_table_stream_arn
 }
 
+# DynamoDB KMS Key outputs
+output "dynamodb_module_kms_key_arn" {
+  description = "ARN of the DynamoDB module KMS key"
+  value       = module.dynamodb.dynamodb_kms_key_arn
+}
+
+output "dynamodb_module_kms_key_id" {
+  description = "ID of the DynamoDB module KMS key"
+  value       = module.dynamodb.dynamodb_kms_key_id
+}
+
 output "security_events_table_name" {
   description = "Name of the security events DynamoDB table"
   value       = module.dynamodb.security_events_table_name
@@ -136,6 +147,27 @@ output "user_sessions_table_id" {
 output "user_sessions_table_stream_arn" {
   description = "Stream ARN of the user sessions DynamoDB table"
   value       = module.dynamodb.user_sessions_table_stream_arn
+}
+
+# Alerts Table outputs
+output "alerts_table_name" {
+  description = "Name of the alerts DynamoDB table"
+  value       = module.dynamodb.alerts_table_name
+}
+
+output "alerts_table_arn" {
+  description = "ARN of the alerts DynamoDB table"
+  value       = module.dynamodb.alerts_table_arn
+}
+
+output "alerts_table_id" {
+  description = "ID of the alerts DynamoDB table"
+  value       = module.dynamodb.alerts_table_id
+}
+
+output "alerts_table_stream_arn" {
+  description = "Stream ARN of the alerts DynamoDB table"
+  value       = module.dynamodb.alerts_table_stream_arn
 }
 
 # CloudWatch outputs
