@@ -23,8 +23,13 @@ def lambda_handler(event, context):
         logger.info(f"Processing post authentication event: {json.dumps(event)}")
         
         # Extract user information from the event
-        user_id = event['userName']  # This is the Cognito user ID
+        # Use the Cognito user ID (sub) which is what the frontend uses
         user_attributes = event['request']['userAttributes']
+        user_id = user_attributes.get('sub')  # This is the Cognito user ID that frontend uses
+        
+        # Log the user ID being used for debugging
+        logger.info(f"Using user ID: {user_id}")
+        logger.info(f"User attributes: {json.dumps(user_attributes)}")
         
         # Check if user profile already exists
         try:

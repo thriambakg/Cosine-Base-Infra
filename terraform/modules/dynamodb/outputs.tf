@@ -133,11 +133,53 @@ output "user_profiles_table_policy_arn" {
 
 # DynamoDB KMS Key
 output "dynamodb_kms_key_arn" {
-  description = "ARN of the DynamoDB KMS key"
+  description = "ARN of the KMS key used for DynamoDB encryption"
   value       = aws_kms_key.dynamodb.arn
 }
 
 output "dynamodb_kms_key_id" {
-  description = "ID of the DynamoDB KMS key"
+  description = "ID of the KMS key used for DynamoDB encryption"
   value       = aws_kms_key.dynamodb.key_id
+}
+
+# Chat Connections Table Outputs
+output "chat_connections_table_name" {
+  description = "Name of the chat connections DynamoDB table"
+  value       = aws_dynamodb_table.chat_connections.name
+}
+
+output "chat_connections_table_arn" {
+  description = "ARN of the chat connections DynamoDB table"
+  value       = aws_dynamodb_table.chat_connections.arn
+}
+
+output "chat_connections_table_id" {
+  description = "ID of the chat connections DynamoDB table"
+  value       = aws_dynamodb_table.chat_connections.id
+}
+
+output "chat_connections_table_stream_arn" {
+  description = "Stream ARN of the chat connections DynamoDB table"
+  value       = aws_dynamodb_table.chat_connections.stream_arn
+}
+
+# Chat Sessions Table Outputs
+output "chat_sessions_table_name" {
+  description = "Name of the chat sessions DynamoDB table"
+  value       = aws_dynamodb_table.chat_sessions.name
+}
+
+output "chat_sessions_table_arn" {
+  description = "ARN of the chat sessions DynamoDB table"
+  value       = aws_dynamodb_table.chat_sessions.arn
+}
+
+output "chat_sessions_table_id" {
+  description = "ID of the chat sessions DynamoDB table"
+  value       = aws_dynamodb_table.chat_sessions.id
+}
+
+output "chat_sessions_table_stream_arn" {
+  description = "Stream ARN of the chat sessions DynamoDB table"
+  value       = aws_dynamodb_table.chat_sessions.stream_arn
 }

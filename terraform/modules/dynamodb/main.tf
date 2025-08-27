@@ -329,6 +329,11 @@ resource "aws_dynamodb_table" "alerts" {
     type = "S"
   }
 
+  attribute {
+    name = "user_email"
+    type = "S"
+  }
+
   # Global Secondary Index for alert ID lookups
   global_secondary_index {
     name            = "AlertIdIndex"
@@ -339,21 +344,11 @@ resource "aws_dynamodb_table" "alerts" {
     write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
   }
 
-  # Global Secondary Index for user-based alert queries (using alert_id as hash key)
+  # Global Secondary Index for user-based alert queries (using user_email as hash key)
   global_secondary_index {
     name            = "UserAlertsIndex"
-    hash_key        = "alert_id"
+    hash_key        = "user_email"
     range_key       = "created_at"
-    projection_type = "ALL"
-
-    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
-    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
-  }
-
-  # Global Secondary Index for alert ID lookups
-  global_secondary_index {
-    name            = "AlertIdIndex"
-    hash_key        = "alert_id"
     projection_type = "ALL"
 
     read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
@@ -381,6 +376,165 @@ resource "aws_dynamodb_table" "alerts" {
     Name    = "${var.project_name}-alerts-${var.environment}"
     Type    = "AlertData"
     Purpose = "StockAlerts"
+  })
+
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+# Chat Connections Table - for managing active WebSocket connections
+resource "aws_dynamodb_table" "chat_connections" {
+  name                        = "${var.project_name}-chat-connections-${var.environment}"
+  billing_mode                = var.billing_mode
+  hash_key                    = "connection_id"
+  stream_enabled              = var.stream_enabled
+  stream_view_type            = var.stream_enabled ? var.stream_view_type : null
+  deletion_protection_enabled = var.deletion_protection_enabled
+
+  # Capacity settings for provisioned mode
+  read_capacity  = var.billing_mode == "PROVISIONED" ? var.read_capacity : null
+  write_capacity = var.billing_mode == "PROVISIONED" ? var.write_capacity : null
+
+  attribute {
+    name = "connection_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "session_id"
+    type = "S"
+  }
+
+  # Global Secondary Index for user-based connection queries
+  global_secondary_index {
+    name            = "UserConnectionsIndex"
+    hash_key        = "user_id"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Global Secondary Index for session-based connection queries
+  global_secondary_index {
+    name            = "SessionConnectionsIndex"
+    hash_key        = "session_id"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Server-side encryption
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.dynamodb.arn
+  }
+
+  # Point-in-time recovery
+  point_in_time_recovery {
+    enabled = var.point_in_time_recovery_enabled
+  }
+
+  # TTL for automatic cleanup of stale connections (24 hours)
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = merge(var.tags, {
+    Name    = "${var.project_name}-chat-connections-${var.environment}"
+    Type    = "ConnectionData"
+    Purpose = "WebSocketConnections"
+  })
+
+  lifecycle {
+    prevent_destroy = false
+  }
+}
+
+# Chat Sessions Table - for storing chat message history
+resource "aws_dynamodb_table" "chat_sessions" {
+  name                        = "${var.project_name}-chat-sessions-${var.environment}"
+  billing_mode                = var.billing_mode
+  hash_key                    = "session_id"
+  range_key                   = "message_id"
+  stream_enabled              = var.stream_enabled
+  stream_view_type            = var.stream_enabled ? var.stream_view_type : null
+  deletion_protection_enabled = var.deletion_protection_enabled
+
+  # Capacity settings for provisioned mode
+  read_capacity  = var.billing_mode == "PROVISIONED" ? var.read_capacity : null
+  write_capacity = var.billing_mode == "PROVISIONED" ? var.write_capacity : null
+
+  attribute {
+    name = "session_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "message_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "user_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "timestamp"
+    type = "N"
+  }
+
+  # Global Secondary Index for user-based session queries
+  global_secondary_index {
+    name            = "UserSessionsIndex"
+    hash_key        = "user_id"
+    range_key       = "timestamp"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Global Secondary Index for timestamp-based queries
+  global_secondary_index {
+    name            = "TimestampIndex"
+    hash_key        = "timestamp"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Server-side encryption
+  server_side_encryption {
+    enabled     = true
+    kms_key_arn = aws_kms_key.dynamodb.arn
+  }
+
+  # Point-in-time recovery
+  point_in_time_recovery {
+    enabled = var.point_in_time_recovery_enabled
+  }
+
+  # TTL for automatic cleanup of old messages (90 days)
+  ttl {
+    attribute_name = "expires_at"
+    enabled        = true
+  }
+
+  tags = merge(var.tags, {
+    Name    = "${var.project_name}-chat-sessions-${var.environment}"
+    Type    = "ChatData"
+    Purpose = "MessageHistory"
   })
 
   lifecycle {
