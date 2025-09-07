@@ -50,8 +50,8 @@ mkdir -p python/
 
 # Install dependencies into the python directory
 echo "Installing dependencies using $PYTHON_CMD..."
-echo "Using requirements file: layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies-smart.txt}"
-$PYTHON_CMD -m pip install -r "layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies-smart.txt}" -t python/ --no-user
+echo "Using requirements file: layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies-minimal.txt}"
+$PYTHON_CMD -m pip install -r "layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies-minimal.txt}" -t python/ --no-user
 
 if [ $? -ne 0 ]; then
     echo "Error: Failed to install dependencies"
@@ -129,6 +129,35 @@ find python/ -name "*.csv" -size +100k -delete 2>/dev/null || true
 # Remove distribution metadata (but keep essential package info)
 find python/ -type d -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
 find python/ -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+
+# Linux-specific cleanup for large packages
+echo "Performing Linux-specific cleanup for large packages..."
+
+# Remove numpy.libs directory (contains large shared libraries)
+if [ -d "python/numpy.libs" ]; then
+    echo "Removing numpy.libs directory (37MB) - not needed in Lambda"
+    rm -rf python/numpy.libs
+fi
+
+# Remove large sympy data files
+if [ -d "python/sympy" ]; then
+    echo "Cleaning up sympy package..."
+    find python/sympy/ -name "*.py" -size +100k -delete 2>/dev/null || true
+    find python/sympy/ -name "*.dat" -delete 2>/dev/null || true
+    find python/sympy/ -name "*.txt" -size +10k -delete 2>/dev/null || true
+fi
+
+# Remove large botocore data files
+if [ -d "python/botocore/data" ]; then
+    echo "Cleaning up botocore data files..."
+    find python/botocore/data/ -name "*.json" -size +50k -delete 2>/dev/null || true
+fi
+
+# Remove large cryptography files
+if [ -d "python/cryptography" ]; then
+    echo "Cleaning up cryptography package..."
+    find python/cryptography/ -name "*.so" -size +1M -delete 2>/dev/null || true
+fi
 
 # Fix OpenTelemetry entry points issue (must be done BEFORE removing dist-info)
 echo "Fixing OpenTelemetry entry points..."
