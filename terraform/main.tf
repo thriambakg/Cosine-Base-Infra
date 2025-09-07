@@ -287,15 +287,14 @@ module "lambda_layers_bucket" {
   bucket_name                     = "${var.project_name}-lambda-layers-${var.environment}"
   environment                     = var.environment
   purpose                         = "lambda-layers-storage"
-  versioning_enabled              = true
   enable_cross_region_replication = false # Disable replication to avoid aws.replica provider requirement
   force_destroy                   = true
   kms_key_arn                     = module.kms.main_key_arn
   tags                            = var.common_tags
   lifecycle_rules = [
     {
-      id      = "cleanup_old_layers"
-      enabled = true
+      id     = "cleanup_old_layers"
+      status = "Enabled"
       expiration = {
         days = 30
       }
