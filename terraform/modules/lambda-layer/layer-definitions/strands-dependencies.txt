@@ -1,6 +1,11 @@
-# Strands Dependencies Layer - Heavy AI agent framework
-# This layer contains the large strands-agents package
+# Strands Dependencies Layer - AWS Open Source AI Agents SDK
+# Official AWS Strands Agents framework for building AI agents
 
-# Strands Agents SDK - the correct AI agents framework from AWS
+# Core Strands Agents SDK
 strands-agents
+
+# Strands Agents Tools - Pre-built tools for agents
 strands-agents-tools
+
+# Additional dependencies for Strands Agents
+# These are typically included with the main packages
