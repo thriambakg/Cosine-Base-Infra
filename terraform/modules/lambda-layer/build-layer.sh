@@ -50,13 +50,25 @@ mkdir -p python/
 
 # Install dependencies into the python directory
 echo "Installing dependencies using $PYTHON_CMD..."
-echo "Using requirements file: layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies.txt}"
-$PYTHON_CMD -m pip install -r "layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies.txt}" -t python/ --no-user
+echo "Using requirements file: layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies-smart.txt}"
+$PYTHON_CMD -m pip install -r "layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies-smart.txt}" -t python/ --no-user
 
 if [ $? -ne 0 ]; then
     echo "Error: Failed to install dependencies"
     exit 1
 fi
+
+# Show package sizes to help identify large dependencies
+echo "Package sizes after installation:"
+du -h python/ | sort -hr | head -15
+
+echo ""
+echo "Analyzing largest packages for optimization opportunities..."
+echo "Top 10 largest packages:"
+du -h python/ | sort -hr | head -10 | while read size path; do
+    package_name=$(basename "$path")
+    echo "  $size - $package_name"
+done
 
 # Remove unnecessary files to reduce size
 echo "Cleaning up unnecessary files..."
@@ -88,7 +100,37 @@ find python/ -name "*.rst" -delete 2>/dev/null || true
 # Remove most .txt files but preserve important ones
 find python/ -name "*.txt" -not -path "*/opentelemetry_api-*/entry_points.txt" -delete 2>/dev/null || true
 
-# Fix OpenTelemetry entry points issue (must be done AFTER cleanup)
+# Smart cleanup to reduce layer size while preserving functionality
+echo "Performing smart cleanup to reduce layer size..."
+
+# Remove package installation artifacts (these are not needed at runtime)
+find python/ -name "*.whl" -delete 2>/dev/null || true
+find python/ -name "*.tar.gz" -delete 2>/dev/null || true
+find python/ -name "*.zip" -delete 2>/dev/null || true
+
+# Remove documentation and example files (not needed at runtime)
+find python/ -name "*example*" -type f -delete 2>/dev/null || true
+find python/ -name "*sample*" -type f -delete 2>/dev/null || true
+find python/ -name "*demo*" -type f -delete 2>/dev/null || true
+find python/ -name "*test*" -type f -delete 2>/dev/null || true
+
+# Remove documentation files
+find python/ -name "LICENSE*" -delete 2>/dev/null || true
+find python/ -name "CHANGELOG*" -delete 2>/dev/null || true
+find python/ -name "HISTORY*" -delete 2>/dev/null || true
+find python/ -name "NEWS*" -delete 2>/dev/null || true
+find python/ -name "README*" -delete 2>/dev/null || true
+
+# Remove large data files that might be included (but keep small config files)
+find python/ -name "*.json" -size +100k -delete 2>/dev/null || true
+find python/ -name "*.xml" -size +100k -delete 2>/dev/null || true
+find python/ -name "*.csv" -size +100k -delete 2>/dev/null || true
+
+# Remove distribution metadata (but keep essential package info)
+find python/ -type d -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
+find python/ -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
+
+# Fix OpenTelemetry entry points issue (must be done BEFORE removing dist-info)
 echo "Fixing OpenTelemetry entry points..."
 ENTRY_POINTS_PATH="python/opentelemetry_api-1.36.0.dist-info/entry_points.txt"
 if [ -d "python/opentelemetry_api-1.36.0.dist-info" ]; then
@@ -100,6 +142,10 @@ EOF
 else
     echo "OpenTelemetry distribution directory not found"
 fi
+
+# Remove OpenTelemetry distribution info but keep the entry points file
+# Only remove the dist-info directory, not the entire opentelemetry package
+find python/ -type d -name "opentelemetry*" -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
 
 # Create the layer zip file
 echo "Creating layer zip file..."
@@ -130,9 +176,25 @@ else
 fi
 
 # Check if layer is within size limits
-if [ $LAYER_SIZE_MB -gt 250 ]; then
-    echo "Warning: Layer size (${LAYER_SIZE_MB}MB) exceeds AWS Lambda layer limit of 250MB"
-    echo "Consider removing unnecessary dependencies or splitting into multiple layers"
+LAYER_SIZE_BYTES=$(stat -c%s layer.zip 2>/dev/null || echo 0)
+MAX_SIZE_BYTES=67108864  # 64MB limit for Lambda layers
+
+if [ $LAYER_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
+    echo "❌ ERROR: Layer size (${LAYER_SIZE_MB}MB / ${LAYER_SIZE_BYTES} bytes) exceeds AWS Lambda layer limit of 64MB"
+    echo "Current size: ${LAYER_SIZE_MB}MB"
+    echo "Maximum allowed: 64MB"
+    echo ""
+    echo "To reduce layer size, consider:"
+    echo "1. Removing unnecessary dependencies from requirements.txt"
+    echo "2. Splitting into multiple layers"
+    echo "3. Using lighter alternatives for heavy packages"
+    echo ""
+    echo "Largest directories in the layer:"
+    du -h python/ | sort -hr | head -10
+    exit 1
+elif [ $LAYER_SIZE_MB -gt 50 ]; then
+    echo "⚠️  Warning: Layer size (${LAYER_SIZE_MB}MB) is getting close to the 64MB limit"
+    echo "Consider optimizing dependencies to reduce size"
 fi
 
 echo "Lambda layer build completed successfully!"
