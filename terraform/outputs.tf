@@ -371,7 +371,7 @@ output "lambda_layer_utility_arn" {
 # S3 bucket outputs
 output "lambda_layers_bucket_name" {
   description = "Name of the S3 bucket for Lambda layers"
-  value       = module.lambda_layers_bucket.bucket_name
+  value       = module.lambda_layers_bucket.bucket_id
 }
 
 output "lambda_layers_bucket_arn" {

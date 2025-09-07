@@ -207,7 +207,7 @@ module "lambda_layer_core" {
   layer_description   = "Core dependencies layer for ${var.project_name} Lambda functions (requests, boto3, essential libraries)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_name
+  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
 }
 
 # Financial Dependencies Layer - Data analysis and financial packages
@@ -221,7 +221,7 @@ module "lambda_layer_financial" {
   layer_description   = "Financial data processing dependencies for ${var.project_name} Lambda functions (yfinance, numpy, pandas)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_name
+  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
 }
 
 # AI Core Dependencies Layer - Essential AI packages
@@ -235,7 +235,7 @@ module "lambda_layer_ai_core" {
   layer_description   = "Core AI dependencies for ${var.project_name} Lambda functions (aiohttp, pyjwt, tenacity, etc.)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_name
+  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
 }
 
 # Strands Core Dependencies Layer - Core AI agent framework
@@ -249,7 +249,7 @@ module "lambda_layer_strands" {
   layer_description   = "Strands Agents core framework for ${var.project_name} Lambda functions (strands-agents)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_name
+  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
 }
 
 # Strands Tools Dependencies Layer - AI agent tools
@@ -263,7 +263,7 @@ module "lambda_layer_strands_tools" {
   layer_description   = "Strands Agents tools for ${var.project_name} Lambda functions (strands-agents-tools)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_name
+  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
 }
 
 # Utility Dependencies Layer - Optional utility packages
@@ -277,7 +277,7 @@ module "lambda_layer_utility" {
   layer_description   = "Utility and optional dependencies for ${var.project_name} Lambda functions (pillow, sympy, rich, etc.)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_name
+  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
 }
 
 # S3 bucket for Lambda layers (large files >50MB)
