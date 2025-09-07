@@ -27,9 +27,9 @@ resource "null_resource" "build_layer" {
   }
 }
 
-# Upload large layers to S3 (for layers > 50MB compressed)
+# Upload layer to S3 (for all layers to avoid API size limits)
 resource "aws_s3_object" "layer_zip" {
-  count = fileexists(local.layer_zip_path) && filesize(local.layer_zip_path) > 52428800 ? 1 : 0 # 50MB in bytes
+  count = fileexists(local.layer_zip_path) ? 1 : 0
 
   bucket = var.s3_bucket_name
   key    = "lambda-layers/${var.project_name}-${var.layer_name_suffix}-deps-${var.environment}-${formatdate("YYYY-MM-DD-hhmm", timestamp())}.zip"
@@ -46,11 +46,11 @@ resource "aws_lambda_layer_version" "shared_dependencies" {
   layer_name  = "${var.project_name}-${var.layer_name_suffix}-deps-${var.environment}"
   description = var.layer_description
 
-  # Use S3 for large layers (>50MB), direct upload for smaller layers
-  filename          = fileexists(local.layer_zip_path) && filesize(local.layer_zip_path) <= 52428800 ? local.layer_zip_path : null
-  s3_bucket         = fileexists(local.layer_zip_path) && filesize(local.layer_zip_path) > 52428800 ? var.s3_bucket_name : null
-  s3_key            = fileexists(local.layer_zip_path) && filesize(local.layer_zip_path) > 52428800 ? aws_s3_object.layer_zip[0].key : null
-  s3_object_version = fileexists(local.layer_zip_path) && filesize(local.layer_zip_path) > 52428800 ? aws_s3_object.layer_zip[0].version_id : null
+  # Use S3 for all layers to avoid API size limits
+  filename          = null
+  s3_bucket         = fileexists(local.layer_zip_path) ? var.s3_bucket_name : null
+  s3_key            = fileexists(local.layer_zip_path) ? aws_s3_object.layer_zip[0].key : null
+  s3_object_version = fileexists(local.layer_zip_path) ? aws_s3_object.layer_zip[0].version_id : null
 
   source_code_hash    = fileexists(local.layer_zip_path) ? filebase64sha256(local.layer_zip_path) : null
   compatible_runtimes = var.compatible_runtimes
