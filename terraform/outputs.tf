@@ -368,6 +368,17 @@ output "lambda_layer_utility_arn" {
   value       = module.lambda_layer_utility.layer_arn
 }
 
+# S3 bucket outputs
+output "lambda_layers_bucket_name" {
+  description = "Name of the S3 bucket for Lambda layers"
+  value       = module.lambda_layers_bucket.bucket_name
+}
+
+output "lambda_layers_bucket_arn" {
+  description = "ARN of the S3 bucket for Lambda layers"
+  value       = module.lambda_layers_bucket.bucket_arn
+}
+
 # ============================================================================
 # FRONTEND CONFIGURATION OUTPUT
 # Consolidated configuration for frontend deployments across environments

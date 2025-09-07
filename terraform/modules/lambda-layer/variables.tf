@@ -48,3 +48,8 @@ variable "python_command" {
   type        = string
   default     = "python3.11"
 }
+
+variable "s3_bucket_name" {
+  description = "S3 bucket name for storing large layer files (>50MB)"
+  type        = string
+}
