@@ -12,13 +12,14 @@ locals {
 # Build the layer package
 resource "null_resource" "build_layer" {
   triggers = {
-    requirements_hash = filemd5(local.requirements_path)
-    build_script_hash = filemd5(local.build_script_path)
-    source_files_hash = var.source_files != [] ? join(",", [for f in var.source_files : filemd5("${path.module}/layer-definitions/${f}")]) : ""
+    requirements_hash       = filemd5(local.requirements_path)
+    build_script_hash       = filemd5(local.build_script_path)
+    conditional_script_hash = filemd5("${path.module}/build-layer-conditional.sh")
+    source_files_hash       = var.source_files != [] ? join(",", [for f in var.source_files : filemd5("${path.module}/layer-definitions/${f}")]) : ""
   }
 
   provisioner "local-exec" {
-    command     = "if [ ! -f layer.zip ] || [ ! -s layer.zip ] || [ $(stat -c%s layer.zip 2>/dev/null || echo 0) -lt 100 ]; then echo 'Building layer...'; ./build-layer.sh; else echo 'Layer already exists and is valid, skipping build'; fi"
+    command     = "./build-layer-conditional.sh"
     interpreter = ["bash"]
     working_dir = path.module
     environment = {
