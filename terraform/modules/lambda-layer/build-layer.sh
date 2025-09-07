@@ -250,12 +250,12 @@ fi
 
 # Check if layer is within size limits (AWS checks uncompressed size)
 UNCOMPRESSED_SIZE_BYTES=$((UNCOMPRESSED_SIZE_MB * 1024 * 1024))
-MAX_SIZE_BYTES=67108864  # 64MB limit for Lambda layers (uncompressed)
+MAX_SIZE_BYTES=262144000  # 250MB limit for Lambda layers (uncompressed)
 
 if [ $UNCOMPRESSED_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
-    print_error "Layer uncompressed size (${UNCOMPRESSED_SIZE_MB}MB / ${UNCOMPRESSED_SIZE_BYTES} bytes) exceeds AWS Lambda layer limit of 64MB"
+    print_error "Layer uncompressed size (${UNCOMPRESSED_SIZE_MB}MB / ${UNCOMPRESSED_SIZE_BYTES} bytes) exceeds AWS Lambda layer limit of 250MB"
     print_error "Current uncompressed size: ${UNCOMPRESSED_SIZE_MB}MB"
-    print_error "Maximum allowed: 64MB"
+    print_error "Maximum allowed: 250MB"
     echo ""
     print_error "To reduce layer size, consider:"
     print_error "1. Removing unnecessary dependencies from requirements.txt"
@@ -265,8 +265,8 @@ if [ $UNCOMPRESSED_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
     print_error "Largest directories in the layer:"
     du -h python/ | sort -hr | head -10
     exit 1
-elif [ $UNCOMPRESSED_SIZE_MB -gt 50 ]; then
-    print_warning "Layer uncompressed size (${UNCOMPRESSED_SIZE_MB}MB) is getting close to the 64MB limit"
+elif [ $UNCOMPRESSED_SIZE_MB -gt 200 ]; then
+    print_warning "Layer uncompressed size (${UNCOMPRESSED_SIZE_MB}MB) is getting close to the 250MB limit"
     print_warning "Consider optimizing dependencies to reduce size"
 fi
 
