@@ -314,11 +314,10 @@ output "oauth_secret_names" {
 
 # Lambda Layer outputs - Multiple layers for better dependency management
 output "lambda_layer_arns" {
-  description = "ARNs of all Lambda layers"
+  description = "ARNs of all Lambda layers (AI-Core consolidated into Core layer)"
   value = {
     core          = module.lambda_layer_core.layer_arn
     financial     = module.lambda_layer_financial.layer_arn
-    ai_core       = module.lambda_layer_ai_core.layer_arn
     strands       = module.lambda_layer_strands.layer_arn
     strands_tools = module.lambda_layer_strands_tools.layer_arn
     utility       = module.lambda_layer_utility.layer_arn
@@ -326,22 +325,20 @@ output "lambda_layer_arns" {
 }
 
 output "lambda_layer_arn_list" {
-  description = "List of essential Lambda layer ARNs for Lambda functions (max 5 layers)"
+  description = "List of essential Lambda layer ARNs for Lambda functions (4 layers - AI-Core consolidated into Core)"
   value = [
     module.lambda_layer_core.layer_arn,
     module.lambda_layer_financial.layer_arn,
-    module.lambda_layer_ai_core.layer_arn,
     module.lambda_layer_strands.layer_arn,
     module.lambda_layer_strands_tools.layer_arn
   ]
 }
 
 output "lambda_layer_arn_list_with_utility" {
-  description = "List of all Lambda layer ARNs including utility layer (for functions that can handle 6 layers)"
+  description = "List of all Lambda layer ARNs including utility layer (5 layers - AI-Core consolidated into Core)"
   value = [
     module.lambda_layer_core.layer_arn,
     module.lambda_layer_financial.layer_arn,
-    module.lambda_layer_ai_core.layer_arn,
     module.lambda_layer_strands.layer_arn,
     module.lambda_layer_strands_tools.layer_arn,
     module.lambda_layer_utility.layer_arn
@@ -359,10 +356,11 @@ output "lambda_layer_financial_arn" {
   value       = module.lambda_layer_financial.layer_arn
 }
 
-output "lambda_layer_ai_core_arn" {
-  description = "ARN of the AI core dependencies Lambda layer"
-  value       = module.lambda_layer_ai_core.layer_arn
-}
+# AI Core layer consolidated into Core layer
+# output "lambda_layer_ai_core_arn" {
+#   description = "ARN of the AI core dependencies Lambda layer"
+#   value       = module.lambda_layer_ai_core.layer_arn
+# }
 
 output "lambda_layer_strands_arn" {
   description = "ARN of the Strands core dependencies Lambda layer"

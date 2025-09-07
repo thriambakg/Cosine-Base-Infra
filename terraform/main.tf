@@ -224,19 +224,19 @@ module "lambda_layer_financial" {
   s3_bucket_name      = module.lambda_layers_bucket.bucket_id
 }
 
-# AI Core Dependencies Layer - Essential AI packages
-module "lambda_layer_ai_core" {
-  source = "./modules/lambda-layer"
-
-  project_name        = var.project_name
-  environment         = var.environment
-  requirements_file   = "ai-core-dependencies.txt"
-  layer_name_suffix   = "ai-core"
-  layer_description   = "Core AI dependencies for ${var.project_name} Lambda functions (aiohttp, pyjwt, tenacity, etc.)"
-  compatible_runtimes = ["python3.11"]
-  python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
-}
+# AI Core Dependencies Layer - CONSOLIDATED INTO CORE LAYER
+# module "lambda_layer_ai_core" {
+#   source = "./modules/lambda-layer"
+#
+#   project_name        = var.project_name
+#   environment         = var.environment
+#   requirements_file   = "ai-core-dependencies.txt"
+#   layer_name_suffix   = "ai-core"
+#   layer_description   = "Core AI dependencies for ${var.project_name} Lambda functions (aiohttp, pyjwt, tenacity, etc.)"
+#   compatible_runtimes = ["python3.11"]
+#   python_command      = "python3.11"
+#   s3_bucket_name      = module.lambda_layers_bucket.bucket_id
+# }
 
 # Strands Core Dependencies Layer - Core AI agent framework
 module "lambda_layer_strands" {
