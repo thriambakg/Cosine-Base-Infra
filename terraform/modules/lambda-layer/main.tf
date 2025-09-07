@@ -30,14 +30,14 @@ resource "null_resource" "build_layer" {
 
 # Create the Lambda layer with all dependencies
 resource "aws_lambda_layer_version" "shared_dependencies" {
-  depends_on = [null_resource.build_layer]
+  depends_on  = [null_resource.build_layer]
   layer_name  = "${var.project_name}-${var.layer_name_suffix}-${var.environment}"
   description = var.layer_description
 
   filename            = local.layer_zip_path
   source_code_hash    = filebase64sha256(local.layer_zip_path)
   compatible_runtimes = var.compatible_runtimes
-  
+
   # Layer size limit is 250 MB unzipped
   # Dependencies are defined in the requirements file specified by var.requirements_file
 }
