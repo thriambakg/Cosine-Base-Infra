@@ -34,7 +34,7 @@ resource "aws_lambda_layer_version" "shared_dependencies" {
   description = var.layer_description
 
   filename            = local.layer_zip_path
-  source_code_hash    = filebase64sha256(local.layer_zip_path)
+  source_code_hash    = fileexists(local.layer_zip_path) ? filebase64sha256(local.layer_zip_path) : null
   compatible_runtimes = var.compatible_runtimes
 
   # Layer size limit is 64 MB unzipped per layer

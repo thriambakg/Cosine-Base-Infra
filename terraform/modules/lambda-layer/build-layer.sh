@@ -69,10 +69,10 @@ print_status "Using Python command: ${PYTHON_CMD}"
 PYTHON_VERSION=$(${PYTHON_CMD} --version 2>&1 | cut -d' ' -f2)
 print_status "Python version: ${PYTHON_VERSION}"
 
-# Create placeholder layer file for Terraform validation
-if [ ! -f "${LAYER_FILE}" ]; then
-    print_status "Creating placeholder layer file for Terraform validation..."
-    touch "${LAYER_FILE}"
+# Remove any existing layer file to ensure clean creation
+if [ -f "${LAYER_FILE}" ]; then
+    print_status "Removing existing layer file: ${LAYER_FILE}"
+    rm -f "${LAYER_FILE}"
 fi
 
 # Clean up any existing python directory
@@ -183,7 +183,26 @@ find python/ -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
 
 # Create the layer zip file
 print_status "Creating layer zip file: ${LAYER_FILE}"
-zip -r "${LAYER_FILE}" python/ -q
+
+# Ensure python directory exists and has content
+if [ ! -d "python" ] || [ -z "$(ls -A python)" ]; then
+    print_error "Python directory is empty or doesn't exist. Cannot create layer."
+    exit 1
+fi
+
+# Create zip file with verbose output for debugging
+if ! zip -r "${LAYER_FILE}" python/ -q; then
+    print_error "Failed to create zip file: ${LAYER_FILE}"
+    print_error "Checking python directory contents:"
+    ls -la python/ | head -10
+    exit 1
+fi
+
+# Verify zip file was created successfully
+if [ ! -f "${LAYER_FILE}" ]; then
+    print_error "Zip file was not created: ${LAYER_FILE}"
+    exit 1
+fi
 
 # Get the size of the layer
 LAYER_SIZE=$(du -h "${LAYER_FILE}" | cut -f1)
@@ -224,6 +243,14 @@ if [ $LAYER_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
 elif [ $LAYER_SIZE_MB -gt 50 ]; then
     print_warning "Layer size (${LAYER_SIZE_MB}MB) is getting close to the 64MB limit"
     print_warning "Consider optimizing dependencies to reduce size"
+fi
+
+# Create a placeholder file for Terraform validation (if needed)
+# This ensures Terraform can validate even if the zip file doesn't exist yet
+PLACEHOLDER_FILE="${LAYER_FILE}.placeholder"
+if [ ! -f "${LAYER_FILE}" ] && [ ! -f "${PLACEHOLDER_FILE}" ]; then
+    print_status "Creating placeholder file for Terraform validation..."
+    touch "${PLACEHOLDER_FILE}"
 fi
 
 print_success "Lambda layer '${LAYER_NAME}' build completed successfully!"
