@@ -18,8 +18,8 @@ resource "null_resource" "build_layer" {
   }
 
   provisioner "local-exec" {
-    command     = "powershell.exe -ExecutionPolicy Bypass -File build-layer.ps1"
-    interpreter = ["powershell.exe", "-Command"]
+    command     = "./build-layer.sh"
+    interpreter = ["bash"]
     working_dir = path.module
     environment = {
       PYTHON_CMD        = var.python_command
