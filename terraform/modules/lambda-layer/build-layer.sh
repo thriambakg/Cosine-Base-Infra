@@ -6,10 +6,31 @@
 set -e
 
 # Default Python command (can be overridden)
-PYTHON_CMD=${PYTHON_CMD:-"python3.11"}
+# Try different Python commands in order of preference
+if [ -z "$PYTHON_CMD" ]; then
+    if command -v python3.11 >/dev/null 2>&1; then
+        PYTHON_CMD="python3.11"
+    elif command -v python3 >/dev/null 2>&1; then
+        PYTHON_CMD="python3"
+    elif command -v python >/dev/null 2>&1; then
+        PYTHON_CMD="python"
+    else
+        echo "Error: No Python command found. Please install Python or set PYTHON_CMD environment variable."
+        exit 1
+    fi
+fi
 
 echo "Building Lambda Layer with dependencies..."
 echo "Using Python command: $PYTHON_CMD"
+
+# Verify Python command works
+echo "Verifying Python installation..."
+$PYTHON_CMD --version
+if [ $? -ne 0 ]; then
+    echo "Error: Python command '$PYTHON_CMD' failed. Available Python commands:"
+    which python3.11 python3 python || echo "No Python commands found in PATH"
+    exit 1
+fi
 
 # Clean up any existing build artifacts
 echo "Cleaning up existing build artifacts..."

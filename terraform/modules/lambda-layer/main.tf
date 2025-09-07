@@ -18,7 +18,7 @@ resource "null_resource" "build_layer" {
   }
 
   provisioner "local-exec" {
-    command     = "./build-layer.sh"
+    command     = "if [ ! -f layer.zip ] || [ ! -s layer.zip ] || [ $(stat -c%s layer.zip 2>/dev/null || echo 0) -lt 100 ]; then echo 'Building layer...'; ./build-layer.sh; else echo 'Layer already exists and is valid, skipping build'; fi"
     interpreter = ["bash"]
     working_dir = path.module
     environment = {

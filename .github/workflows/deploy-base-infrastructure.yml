@@ -85,7 +85,7 @@ jobs:
           chmod +x build-layer.sh
           ./build-layer.sh
         env:
-          PYTHON_CMD: python3.11
+          PYTHON_CMD: python3
 
       - name: Verify Layer Contents
         run: |
