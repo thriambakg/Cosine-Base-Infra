@@ -176,8 +176,8 @@ if [[ "$OSTYPE" == "linux-gnu"* ]]; then
     fi
 fi
 
-# Handle OpenTelemetry entry points (only for AI layer)
-if [ "${LAYER_NAME}" = "ai" ]; then
+# Handle OpenTelemetry entry points (only for strands layer)
+if [ "${LAYER_NAME}" = "strands" ]; then
     print_status "Setting up OpenTelemetry entry points..."
     
     # Find opentelemetry_api directory
@@ -190,12 +190,12 @@ contextvars_context = opentelemetry.context.contextvars_context:ContextVarsRunti
 EOF
         print_success "Created OpenTelemetry entry_points.txt"
     else
-        print_warning "OpenTelemetry not found in AI layer - skipping entry points setup"
+        print_warning "OpenTelemetry not found in Strands layer - skipping entry points setup"
     fi
 fi
 
-# Remove .dist-info directories (but preserve opentelemetry_api for AI layer)
-if [ "${LAYER_NAME}" = "ai" ]; then
+# Remove .dist-info directories (but preserve opentelemetry_api for strands layer)
+if [ "${LAYER_NAME}" = "strands" ]; then
     find python/ -name "*.dist-info" -not -path "*/opentelemetry_api-*" -exec rm -rf {} + 2>/dev/null || true
 else
     find python/ -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true

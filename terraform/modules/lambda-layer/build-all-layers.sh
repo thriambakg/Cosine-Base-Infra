@@ -13,8 +13,14 @@ GREEN='\033[0;32m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Available layers
-AVAILABLE_LAYERS=("core" "financial" "ai" "utility")
+# Dynamically discover available layers
+AVAILABLE_LAYERS=()
+for req_file in layer-definitions/*-dependencies.txt; do
+  if [ -f "$req_file" ]; then
+    layer_name=$(basename "$req_file" -dependencies.txt)
+    AVAILABLE_LAYERS+=("$layer_name")
+  fi
+done
 
 # Function to print colored output
 print_status() {
@@ -24,6 +30,9 @@ print_status() {
 print_success() {
     echo -e "${GREEN}[SUCCESS]${NC} $1"
 }
+
+# Show discovered layers
+print_status "Discovered ${#AVAILABLE_LAYERS[@]} available layers: ${AVAILABLE_LAYERS[*]}"
 
 # Determine which layers to build
 if [ $# -eq 0 ]; then

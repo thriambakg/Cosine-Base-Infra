@@ -85,6 +85,15 @@ jobs:
           chmod +x build-layer.sh
           chmod +x build-all-layers.sh
           
+          # Build all layers dynamically
+          echo "🔍 Discovering available layers..."
+          for req_file in layer-definitions/*-dependencies.txt; do
+            if [ -f "$req_file" ]; then
+              layer_name=$(basename "$req_file" -dependencies.txt)
+              echo "📦 Found layer: $layer_name"
+            fi
+          done
+          
           # Build all layers using the consolidated script
           ./build-all-layers.sh
         env:
@@ -94,25 +103,35 @@ jobs:
         run: |
           cd terraform/modules/lambda-layer
           
-          # Verify all layers were created
-          for layer in layer-core.zip layer-financial.zip layer-ai.zip layer-utility.zip; do
-            if [ -f "$layer" ]; then
-              echo "✅ $layer created successfully"
-              echo "  Size: $(du -h "$layer" | cut -f1)"
-              echo "  Contents preview:"
-              unzip -l "$layer" | head -5
-              echo ""
-            else
-              echo "❌ $layer missing"
-              exit 1
+          # Dynamically discover and verify all layers
+          echo "🔍 Verifying dynamically discovered layers..."
+          layer_count=0
+          for req_file in layer-definitions/*-dependencies.txt; do
+            if [ -f "$req_file" ]; then
+              layer_name=$(basename "$req_file" -dependencies.txt)
+              layer_file="layer-${layer_name}.zip"
+              
+              if [ -f "$layer_file" ]; then
+                echo "✅ $layer_file created successfully"
+                echo "  Size: $(du -h "$layer_file" | cut -f1)"
+                echo "  Contents preview:"
+                unzip -l "$layer_file" | head -5
+                echo ""
+                layer_count=$((layer_count + 1))
+              else
+                echo "❌ $layer_file missing"
+                exit 1
+              fi
             fi
           done
           
-          # Verify critical files exist in AI layer (where OpenTelemetry would be)
-          if unzip -l layer-ai.zip | grep -q "python/opentelemetry_api-.*/entry_points.txt"; then
-            echo "✅ OpenTelemetry entry_points.txt found in AI layer"
+          echo "✅ Successfully verified $layer_count layers"
+          
+          # Verify critical files exist in Strands layer (where OpenTelemetry would be)
+          if unzip -l layer-strands.zip | grep -q "python/opentelemetry_api-.*/entry_points.txt"; then
+            echo "✅ OpenTelemetry entry_points.txt found in Strands layer"
           else
-            echo "⚠️  OpenTelemetry entry_points.txt not found in AI layer (may not be needed)"
+            echo "⚠️  OpenTelemetry entry_points.txt not found in Strands layer (may not be needed)"
           fi
           
           # Verify pydantic_core exists in financial layer
@@ -126,11 +145,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: lambda-layers-${{ needs.determine-environment.outputs.environment }}
-          path: |
-            terraform/modules/lambda-layer/layer-core.zip
-            terraform/modules/lambda-layer/layer-financial.zip
-            terraform/modules/lambda-layer/layer-ai.zip
-            terraform/modules/lambda-layer/layer-utility.zip
+          path: terraform/modules/lambda-layer/layer-*.zip
           retention-days: 1
 
   deploy-base-infrastructure:

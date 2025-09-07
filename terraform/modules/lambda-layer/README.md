@@ -4,12 +4,15 @@ This module creates AWS Lambda layers for shared Python dependencies, organized 
 
 ## Architecture
 
-The module uses a **multi-layer approach** with 4 separate layers:
+The module uses a **dynamic multi-layer approach** that automatically discovers layers based on requirements files:
 
 - **Core Layer** (`core-dependencies.txt`) - Essential packages (requests, boto3, etc.)
 - **Financial Layer** (`financial-dependencies.txt`) - Financial data processing (yfinance, numpy, pandas)
-- **AI Layer** (`ai-dependencies.txt`) - AI framework and agents (strands-agents, etc.)
+- **AI Core Layer** (`ai-core-dependencies.txt`) - Essential AI packages (aiohttp, pyjwt, tenacity, etc.)
+- **Strands Layer** (`strands-dependencies.txt`) - Heavy AI agent framework (strands-agents, strands-agents-tools)
 - **Utility Layer** (`utility-dependencies.txt`) - Optional utilities (pillow, sympy, rich, etc.)
+
+**Dynamic Discovery**: The system automatically discovers all layers by scanning for `*-dependencies.txt` files in the `layer-definitions/` directory.
 
 ## Files
 
@@ -79,16 +82,16 @@ resource "aws_lambda_function" "my_function" {
 ### To Add a New Layer:
 
 1. Create new requirements file: `layer-definitions/new-layer-dependencies.txt`
-2. Add layer to `AVAILABLE_LAYERS` in `build-all-layers.sh`
-3. Add module call in main `main.tf`
-4. Update outputs in `outputs.tf`
+2. Add module call in main `main.tf` with the layer name
+3. Update outputs in `outputs.tf`
+4. **That's it!** The system will automatically discover and build the new layer
 
 ### To Remove a Layer:
 
-1. Remove requirements file
-2. Remove from `AVAILABLE_LAYERS` in `build-all-layers.sh`
-3. Remove module call from main `main.tf`
-4. Remove from outputs in `outputs.tf`
+1. Remove requirements file from `layer-definitions/`
+2. Remove module call from main `main.tf`
+3. Remove from outputs in `outputs.tf`
+4. **That's it!** The system will automatically stop building the removed layer
 
 ## Benefits
 
@@ -98,9 +101,11 @@ resource "aws_lambda_function" "my_function" {
 - ✅ **Logical organization** - easy to understand and maintain
 - ✅ **Flexible usage** - use only the layers you need
 - ✅ **Independent updates** - update one layer without affecting others
+- ✅ **Dynamic layer discovery** - automatically finds and builds all layers
 - ✅ **Modular build system** - easy to add/remove layers
 - ✅ **Robust error handling** - graceful fallback for package installation issues
 - ✅ **Flexible version constraints** - uses compatible version ranges instead of exact pins
+- ✅ **Zero maintenance** - no need to update hardcoded layer lists
 
 ## Layer Limits
 

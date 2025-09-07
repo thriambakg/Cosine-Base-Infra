@@ -222,15 +222,28 @@ module "lambda_layer_financial" {
   python_command      = "python3.11"
 }
 
-# AI Dependencies Layer - Strands Agents and AI-related packages
-module "lambda_layer_ai" {
+# AI Core Dependencies Layer - Essential AI packages
+module "lambda_layer_ai_core" {
   source = "./modules/lambda-layer"
 
   project_name        = var.project_name
   environment         = var.environment
-  requirements_file   = "ai-dependencies.txt"
-  layer_name_suffix   = "ai"
-  layer_description   = "AI and agent framework dependencies for ${var.project_name} Lambda functions (strands-agents, AI libraries)"
+  requirements_file   = "ai-core-dependencies.txt"
+  layer_name_suffix   = "ai-core"
+  layer_description   = "Core AI dependencies for ${var.project_name} Lambda functions (aiohttp, pyjwt, tenacity, etc.)"
+  compatible_runtimes = ["python3.11"]
+  python_command      = "python3.11"
+}
+
+# Strands Dependencies Layer - Heavy AI agent framework
+module "lambda_layer_strands" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  requirements_file   = "strands-dependencies.txt"
+  layer_name_suffix   = "strands"
+  layer_description   = "Strands Agents framework for ${var.project_name} Lambda functions (strands-agents, strands-agents-tools)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
 }

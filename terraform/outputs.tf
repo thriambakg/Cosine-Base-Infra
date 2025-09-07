@@ -318,7 +318,8 @@ output "lambda_layer_arns" {
   value = {
     core      = module.lambda_layer_core.layer_arn
     financial = module.lambda_layer_financial.layer_arn
-    ai        = module.lambda_layer_ai.layer_arn
+    ai_core   = module.lambda_layer_ai_core.layer_arn
+    strands   = module.lambda_layer_strands.layer_arn
     utility   = module.lambda_layer_utility.layer_arn
   }
 }
@@ -328,7 +329,8 @@ output "lambda_layer_arn_list" {
   value = [
     module.lambda_layer_core.layer_arn,
     module.lambda_layer_financial.layer_arn,
-    module.lambda_layer_ai.layer_arn,
+    module.lambda_layer_ai_core.layer_arn,
+    module.lambda_layer_strands.layer_arn,
     module.lambda_layer_utility.layer_arn
   ]
 }
@@ -344,9 +346,14 @@ output "lambda_layer_financial_arn" {
   value       = module.lambda_layer_financial.layer_arn
 }
 
-output "lambda_layer_ai_arn" {
-  description = "ARN of the AI dependencies Lambda layer"
-  value       = module.lambda_layer_ai.layer_arn
+output "lambda_layer_ai_core_arn" {
+  description = "ARN of the AI core dependencies Lambda layer"
+  value       = module.lambda_layer_ai_core.layer_arn
+}
+
+output "lambda_layer_strands_arn" {
+  description = "ARN of the Strands dependencies Lambda layer"
+  value       = module.lambda_layer_strands.layer_arn
 }
 
 output "lambda_layer_utility_arn" {
