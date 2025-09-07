@@ -9,16 +9,17 @@ locals {
   layer_zip_path    = "${path.module}/layer-${var.layer_name_suffix}.zip"
 }
 
-# Build the layer package
+# Build the layer package (only if zip file doesn't exist)
 resource "null_resource" "build_layer" {
+  count = fileexists(local.layer_zip_path) ? 0 : 1
+
   triggers = {
     requirements_hash = filemd5(local.requirements_path)
     build_script_hash = filemd5(local.build_script_path)
   }
 
   provisioner "local-exec" {
-    command     = "./build-layer.sh ${var.layer_name_suffix}"
-    interpreter = ["bash"]
+    command     = "bash -c 'if [ -f build-layer.sh ]; then chmod +x build-layer.sh && ./build-layer.sh ${var.layer_name_suffix}; else echo \"Build script not found, skipping local build\"; fi'"
     working_dir = path.module
     environment = {
       PYTHON_CMD = var.python_command
