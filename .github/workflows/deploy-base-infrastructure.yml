@@ -109,6 +109,13 @@ jobs:
             exit 1
           fi
 
+      - name: Upload Lambda Layer Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-layer-${{ needs.determine-environment.outputs.environment }}
+          path: terraform/modules/lambda-layer/layer.zip
+          retention-days: 1
+
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'
     needs: [determine-environment, build-lambda-layer]
@@ -120,6 +127,7 @@ jobs:
       destroy: ${{ github.event.inputs.destroy == 'true' }}
       force_apply: ${{ github.event.inputs.force_apply == 'true' }}
       base_infra_dependency: false
+      has_lambda_layer: true
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
