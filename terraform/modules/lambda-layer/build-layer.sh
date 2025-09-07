@@ -230,7 +230,9 @@ fi
 # Get the size of the layer
 LAYER_SIZE=$(du -h "${LAYER_FILE}" | cut -f1)
 LAYER_SIZE_MB=$(du -m "${LAYER_FILE}" | cut -f1)
+UNCOMPRESSED_SIZE_MB=$(du -sm python/ | cut -f1)
 print_success "Layer created successfully: ${LAYER_FILE} (${LAYER_SIZE})"
+print_status "Compressed size: ${LAYER_SIZE_MB}MB, Uncompressed size: ${UNCOMPRESSED_SIZE_MB}MB"
 
 # Verify the layer structure
 print_status "Verifying layer structure..."
@@ -246,13 +248,13 @@ else
     exit 1
 fi
 
-# Check if layer is within size limits
-LAYER_SIZE_BYTES=$(stat -c%s "${LAYER_FILE}" 2>/dev/null || echo 0)
-MAX_SIZE_BYTES=67108864  # 64MB limit for Lambda layers
+# Check if layer is within size limits (AWS checks uncompressed size)
+UNCOMPRESSED_SIZE_BYTES=$((UNCOMPRESSED_SIZE_MB * 1024 * 1024))
+MAX_SIZE_BYTES=67108864  # 64MB limit for Lambda layers (uncompressed)
 
-if [ $LAYER_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
-    print_error "Layer size (${LAYER_SIZE_MB}MB / ${LAYER_SIZE_BYTES} bytes) exceeds AWS Lambda layer limit of 64MB"
-    print_error "Current size: ${LAYER_SIZE_MB}MB"
+if [ $UNCOMPRESSED_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
+    print_error "Layer uncompressed size (${UNCOMPRESSED_SIZE_MB}MB / ${UNCOMPRESSED_SIZE_BYTES} bytes) exceeds AWS Lambda layer limit of 64MB"
+    print_error "Current uncompressed size: ${UNCOMPRESSED_SIZE_MB}MB"
     print_error "Maximum allowed: 64MB"
     echo ""
     print_error "To reduce layer size, consider:"
@@ -263,8 +265,8 @@ if [ $LAYER_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
     print_error "Largest directories in the layer:"
     du -h python/ | sort -hr | head -10
     exit 1
-elif [ $LAYER_SIZE_MB -gt 50 ]; then
-    print_warning "Layer size (${LAYER_SIZE_MB}MB) is getting close to the 64MB limit"
+elif [ $UNCOMPRESSED_SIZE_MB -gt 50 ]; then
+    print_warning "Layer uncompressed size (${UNCOMPRESSED_SIZE_MB}MB) is getting close to the 64MB limit"
     print_warning "Consider optimizing dependencies to reduce size"
 fi
 

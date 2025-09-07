@@ -69,7 +69,8 @@ print_success "All requested layers built successfully!"
 print_status "Layer files created:"
 for layer in "${LAYERS_TO_BUILD[@]}"; do
     if [ -f "layer-${layer}.zip" ]; then
-        size=$(du -h "layer-${layer}.zip" | cut -f1)
-        echo "  - layer-${layer}.zip (${size})"
+        compressed_size=$(du -h "layer-${layer}.zip" | cut -f1)
+        compressed_mb=$(du -m "layer-${layer}.zip" | cut -f1)
+        echo "  - layer-${layer}.zip (${compressed_size} compressed)"
     fi
 done
