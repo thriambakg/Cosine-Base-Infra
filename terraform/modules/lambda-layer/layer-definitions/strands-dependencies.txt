@@ -1,11 +1,6 @@
 # Strands Dependencies Layer - AWS Open Source AI Agents SDK
 # Official AWS Strands Agents framework for building AI agents
 
-# Core Strands Agents SDK
-strands-agents
-
-# Strands Agents Tools - Pre-built tools for agents
-strands-agents-tools
-
-# Additional dependencies for Strands Agents
-# These are typically included with the main packages
+# Install specific version 1.0 packages
+strands-agents==1.0.0
+strands-agents-tools==1.0.0
