@@ -1,14 +1,12 @@
 # Financial Dependencies Layer - Data analysis and financial packages
 # This layer contains packages for financial data processing
-# Layer size: ~34M
+# Layer size: ~25M (optimized - removed optional packages)
 
-# Financial data and analysis
+# Financial data and analysis (core only)
 yfinance>=0.2.18
-numpy>=1.24.0,<2.0.0
-pandas>=2.0.0,<3.0.0
+numpy>=1.24.0,<1.27.0
+pandas>=2.0.0,<2.2.0
 
-# Supporting libraries for financial analysis
+# Essential supporting libraries only
 multitasking>=0.0.7
-appdirs>=1.4.4
 pytz>=2022.5
-frozendict>=2.3.4

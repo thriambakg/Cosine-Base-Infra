@@ -1,6 +1,6 @@
 # Core Dependencies Layer - Essential packages for all Lambda functions
 # This layer contains the most commonly used packages + AI core packages
-# Layer size: ~21M (consolidated with AI-Core layer)
+# Layer size: ~18M (optimized - removed optional packages)
 
 # Core HTTP and environment
 requests>=2.31.0,<3.0.0
@@ -10,7 +10,7 @@ python-dotenv>=1.0.0,<2.0.0
 boto3>=1.34.0,<2.0.0
 botocore>=1.34.0,<2.0.0
 
-# Essential supporting libraries
+# Essential supporting libraries only
 certifi>=2017.4.17
 charset-normalizer>=2
 idna>=2.5
@@ -19,7 +19,6 @@ jmespath>=0.7.1
 s3transfer>=0.9.0
 python-dateutil>=2.8.2
 six>=1.9
-tzdata
 
 # AI Core packages (consolidated from ai-core layer)
 aiohttp>=3.8.0
