@@ -17,13 +17,12 @@ resource "null_resource" "build_layer" {
   }
 
   provisioner "local-exec" {
-    command     = "./build-layer.sh"
+    command     = "./build-layer.sh ${var.layer_name_suffix}"
     interpreter = ["bash"]
     working_dir = path.module
     environment = {
       PYTHON_CMD = var.python_command
     }
-    args = [var.layer_name_suffix]
   }
 }
 
