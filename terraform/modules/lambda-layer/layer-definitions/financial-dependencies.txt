@@ -2,9 +2,9 @@
 # This layer contains packages for financial data processing
 
 # Financial data and analysis
-yfinance==0.2.18
-numpy==1.26.4
-pandas==2.2.0
+yfinance>=0.2.18
+numpy>=1.24.0,<2.0.0
+pandas>=2.0.0,<3.0.0
 
 # Supporting libraries for financial analysis
 multitasking>=0.0.7

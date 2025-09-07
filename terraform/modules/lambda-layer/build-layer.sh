@@ -86,13 +86,36 @@ mkdir -p python
 
 # Install dependencies
 print_status "Installing dependencies from ${REQUIREMENTS_FILE}..."
-${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --no-deps --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade
+print_status "Using pip install with Linux compatibility flags..."
+
+if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
+    print_error "Failed to install dependencies. Trying with more flexible options..."
+    
+    # Try again without platform restrictions for packages that might not have Linux wheels
+    if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --upgrade --no-cache-dir; then
+        print_error "Failed to install dependencies even with flexible options."
+        print_error "Please check your requirements file: layer-definitions/${REQUIREMENTS_FILE}"
+        print_error "Consider using more flexible version constraints (e.g., >=1.0.0 instead of ==1.0.0)"
+        exit 1
+    else
+        print_warning "Dependencies installed with flexible options (may not be Linux-optimized)"
+    fi
+else
+    print_success "Dependencies installed successfully with Linux compatibility"
+fi
 
 # Verify critical packages were installed
 print_status "Verifying package installation..."
 if [ ! -d "python" ] || [ -z "$(ls -A python)" ]; then
     print_error "No packages were installed. Check your requirements file."
     exit 1
+fi
+
+# Show installed packages for debugging
+print_status "Installed packages:"
+ls python/ | head -10
+if [ $(ls python/ | wc -l) -gt 10 ]; then
+    echo "... and $(($(ls python/ | wc -l) - 10)) more packages"
 fi
 
 # Clean up unnecessary files to reduce layer size

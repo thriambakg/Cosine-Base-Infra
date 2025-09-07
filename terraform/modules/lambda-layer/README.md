@@ -99,6 +99,8 @@ resource "aws_lambda_function" "my_function" {
 - ✅ **Flexible usage** - use only the layers you need
 - ✅ **Independent updates** - update one layer without affecting others
 - ✅ **Modular build system** - easy to add/remove layers
+- ✅ **Robust error handling** - graceful fallback for package installation issues
+- ✅ **Flexible version constraints** - uses compatible version ranges instead of exact pins
 
 ## Layer Limits
 
@@ -108,3 +110,36 @@ resource "aws_lambda_function" "my_function" {
 - **Maximum function size**: 50MB (zipped)
 
 This module ensures all layers stay well under these limits while providing all necessary dependencies.
+
+## Troubleshooting
+
+### Common Issues
+
+#### "No matching distribution found" Error
+If you see errors like `ERROR: No matching distribution found for numpy==1.26.4`, this means the exact version isn't available for the target platform.
+
+**Solution:** The requirements files now use flexible version constraints (e.g., `numpy>=1.24.0,<2.0.0`) instead of exact pins. If you still encounter issues, try:
+1. Using even more flexible constraints (e.g., `numpy>=1.20.0`)
+2. Removing version constraints entirely for problematic packages
+3. Checking if the package has Linux-compatible wheels
+
+#### "Zip file structure invalid" Error
+This usually happens when there are permission issues or existing zip files.
+
+**Solution:** The build script now automatically removes existing zip files before creating new ones. If you still encounter issues:
+1. Ensure you have write permissions in the directory
+2. Close any applications that might have the zip file open
+3. Run the build script from a clean directory
+
+#### Layer Size Exceeds 64MB
+If a layer is too large, the build will fail with a clear error message.
+
+**Solution:**
+1. Check the largest directories shown in the error output
+2. Remove unnecessary dependencies from the requirements file
+3. Consider splitting the layer into multiple smaller layers
+4. Use the cleanup options in the build script
+
+### Debug Mode
+
+To see more detailed output during the build process, you can modify the build script to remove the `-q` flag from the zip command, or add `set -x` at the beginning of the script to see all commands being executed.
