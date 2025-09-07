@@ -1,5 +1,6 @@
 # Core Dependencies Layer - Essential packages for all Lambda functions
 # This layer contains the most commonly used packages
+# Layer size: ~16M
 
 # Core HTTP and environment
 requests>=2.31.0,<3.0.0

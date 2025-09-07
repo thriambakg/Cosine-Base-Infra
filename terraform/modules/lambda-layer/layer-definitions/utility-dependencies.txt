@@ -1,5 +1,6 @@
 # Utility Dependencies Layer - Optional utility packages
 # This layer contains packages for enhanced functionality (optional)
+# Layer size: ~38M
 
 # Web content processing
 markdownify>=1.0.0

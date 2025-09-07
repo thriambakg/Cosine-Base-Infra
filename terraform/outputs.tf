@@ -316,11 +316,12 @@ output "oauth_secret_names" {
 output "lambda_layer_arns" {
   description = "ARNs of all Lambda layers"
   value = {
-    core      = module.lambda_layer_core.layer_arn
-    financial = module.lambda_layer_financial.layer_arn
-    ai_core   = module.lambda_layer_ai_core.layer_arn
-    strands   = module.lambda_layer_strands.layer_arn
-    utility   = module.lambda_layer_utility.layer_arn
+    core          = module.lambda_layer_core.layer_arn
+    financial     = module.lambda_layer_financial.layer_arn
+    ai_core       = module.lambda_layer_ai_core.layer_arn
+    strands       = module.lambda_layer_strands.layer_arn
+    strands_tools = module.lambda_layer_strands_tools.layer_arn
+    utility       = module.lambda_layer_utility.layer_arn
   }
 }
 
@@ -331,6 +332,7 @@ output "lambda_layer_arn_list" {
     module.lambda_layer_financial.layer_arn,
     module.lambda_layer_ai_core.layer_arn,
     module.lambda_layer_strands.layer_arn,
+    module.lambda_layer_strands_tools.layer_arn,
     module.lambda_layer_utility.layer_arn
   ]
 }
@@ -352,8 +354,13 @@ output "lambda_layer_ai_core_arn" {
 }
 
 output "lambda_layer_strands_arn" {
-  description = "ARN of the Strands dependencies Lambda layer"
+  description = "ARN of the Strands core dependencies Lambda layer"
   value       = module.lambda_layer_strands.layer_arn
+}
+
+output "lambda_layer_strands_tools_arn" {
+  description = "ARN of the Strands tools dependencies Lambda layer"
+  value       = module.lambda_layer_strands_tools.layer_arn
 }
 
 output "lambda_layer_utility_arn" {

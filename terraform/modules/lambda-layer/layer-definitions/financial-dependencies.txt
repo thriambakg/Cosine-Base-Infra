@@ -1,5 +1,6 @@
 # Financial Dependencies Layer - Data analysis and financial packages
 # This layer contains packages for financial data processing
+# Layer size: ~34M
 
 # Financial data and analysis
 yfinance>=0.2.18

@@ -235,7 +235,7 @@ module "lambda_layer_ai_core" {
   python_command      = "python3.11"
 }
 
-# Strands Dependencies Layer - Heavy AI agent framework
+# Strands Core Dependencies Layer - Core AI agent framework
 module "lambda_layer_strands" {
   source = "./modules/lambda-layer"
 
@@ -243,7 +243,20 @@ module "lambda_layer_strands" {
   environment         = var.environment
   requirements_file   = "strands-dependencies.txt"
   layer_name_suffix   = "strands"
-  layer_description   = "Strands Agents framework for ${var.project_name} Lambda functions (strands-agents, strands-agents-tools)"
+  layer_description   = "Strands Agents core framework for ${var.project_name} Lambda functions (strands-agents)"
+  compatible_runtimes = ["python3.11"]
+  python_command      = "python3.11"
+}
+
+# Strands Tools Dependencies Layer - AI agent tools
+module "lambda_layer_strands_tools" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  requirements_file   = "strands-tools-dependencies.txt"
+  layer_name_suffix   = "strands-tools"
+  layer_description   = "Strands Agents tools for ${var.project_name} Lambda functions (strands-agents-tools)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
 }

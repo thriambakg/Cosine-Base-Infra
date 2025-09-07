@@ -1,5 +1,6 @@
 # AI Core Dependencies Layer - Essential AI packages
 # This layer contains lightweight AI packages
+# Layer size: ~4.8M
 
 # Essential AI supporting libraries
 aiohttp>=3.8.0

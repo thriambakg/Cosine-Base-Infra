@@ -1,7 +1,7 @@
-# Strands Dependencies Layer - AWS Open Source AI Agents SDK
+# Strands Core Dependencies Layer - AWS Open Source AI Agents SDK
 # Official AWS Strands Agents framework for building AI agents
 # Repository: https://github.com/strands-agents/sdk-python
+# Layer size: ~30M (split from original 61M layer to stay under 70MB limit)
 
-# Install latest available versions
+# Core Strands Agents package only
 strands-agents==1.7.1
-strands-agents-tools==0.2.6
