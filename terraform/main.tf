@@ -301,6 +301,11 @@ module "lambda_layers_bucket" {
       }
     }
   ]
+
+  # Provide aws.replica provider (even though replication is disabled)
+  providers = {
+    aws.replica = aws
+  }
 }
 
 # S3 bucket for static website hosting
