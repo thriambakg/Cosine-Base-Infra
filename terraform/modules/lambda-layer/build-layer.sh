@@ -16,6 +16,13 @@ echo "Cleaning up existing build artifacts..."
 rm -rf python/
 rm -f layer.zip
 
+# Create a minimal placeholder zip file for Terraform validation
+echo "Creating placeholder layer.zip for Terraform validation..."
+mkdir -p python
+echo "# Placeholder for Terraform validation" > python/placeholder.txt
+zip -q layer.zip python/placeholder.txt
+rm -rf python/
+
 # Create python directory structure
 echo "Creating python directory structure..."
 mkdir -p python/
