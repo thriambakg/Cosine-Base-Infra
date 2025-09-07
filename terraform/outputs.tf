@@ -312,6 +312,22 @@ output "oauth_secret_names" {
   value       = var.oauth_secrets_enabled ? module.secrets_manager.secret_names : {}
 }
 
+# Lambda Layer outputs
+output "lambda_layer_arn" {
+  description = "ARN of the shared dependencies Lambda layer"
+  value       = module.lambda_layer.layer_arn
+}
+
+output "lambda_layer_version" {
+  description = "Version of the shared dependencies Lambda layer"
+  value       = module.lambda_layer.layer_version
+}
+
+output "lambda_layer_layer_arn" {
+  description = "Layer ARN of the shared dependencies Lambda layer"
+  value       = module.lambda_layer.layer_layer_arn
+}
+
 # ============================================================================
 # FRONTEND CONFIGURATION OUTPUT
 # Consolidated configuration for frontend deployments across environments

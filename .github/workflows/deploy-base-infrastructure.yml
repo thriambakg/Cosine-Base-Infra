@@ -64,9 +64,54 @@ jobs:
             echo "environment=development" >> $GITHUB_OUTPUT
           fi
 
+  build-lambda-layer:
+    name: 'Build Lambda Layer'
+    runs-on: ubuntu-latest
+    needs: determine-environment
+    if: ${{ !github.event.inputs.destroy }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Build Lambda Layer
+        run: |
+          cd terraform/modules/lambda-layer
+          chmod +x build-layer.sh
+          ./build-layer.sh
+        env:
+          PYTHON_CMD: python3.11
+
+      - name: Verify Layer Contents
+        run: |
+          cd terraform/modules/lambda-layer
+          echo "Layer size: $(du -h layer.zip | cut -f1)"
+          echo "Layer contents:"
+          unzip -l layer.zip | head -20
+          
+          # Verify critical files exist
+          if unzip -l layer.zip | grep -q "python/opentelemetry_api-.*/entry_points.txt"; then
+            echo "✅ OpenTelemetry entry_points.txt found"
+          else
+            echo "❌ OpenTelemetry entry_points.txt missing"
+            exit 1
+          fi
+          
+          if unzip -l layer.zip | grep -q "python/pydantic_core/"; then
+            echo "✅ pydantic_core found"
+          else
+            echo "❌ pydantic_core missing"
+            exit 1
+          fi
+
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'
-    needs: determine-environment
+    needs: [determine-environment, build-lambda-layer]
     uses: thriambakg/Cosine-pipelines/.github/workflows/terraform-reusable.yml@master
     with:
       terraform_directory: 'terraform'
@@ -82,7 +127,7 @@ jobs:
   comment-pr:
     name: 'Comment on PR'
     runs-on: ubuntu-latest
-    needs: [determine-environment, deploy-base-infrastructure]
+    needs: [determine-environment, build-lambda-layer, deploy-base-infrastructure]
     if: github.event_name == 'pull_request'
     steps:
       - name: Comment PR with Results
@@ -91,12 +136,18 @@ jobs:
           script: |
             const comment = `## Base Infrastructure Plan - ${{ needs.determine-environment.outputs.environment }}
             
-            The Terraform plan has been generated and security scans completed.
+            The Lambda layer has been built, Terraform plan generated, and security scans completed.
             
             ### Summary:
             - **Environment:** ${{ needs.determine-environment.outputs.environment }}
             - **Infrastructure Type:** Base Infrastructure
             - **Dependencies:** Self-contained (creates backend resources)
+            - **Lambda Layer:** Built with Linux-compatible dependencies
+            
+            ### Build Results:
+            - **Lambda Layer:** ✅ Built successfully
+            - **OpenTelemetry:** ✅ Entry points configured
+            - **Pydantic Core:** ✅ Linux-compatible extensions included
             
             ### Security Scans:
             - **TFLint:** Passed

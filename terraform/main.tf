@@ -193,6 +193,19 @@ module "cloudwatch" {
 
 
 
+# Lambda Layer for shared dependencies
+module "lambda_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  requirements_file   = "chat-agent-dependencies.txt"
+  layer_name_suffix   = "shared-deps"
+  layer_description   = "Shared dependencies layer for ${var.project_name} Lambda functions including Strands Agents SDK, financial data libraries, and AWS SDK"
+  compatible_runtimes = ["python3.11"]
+  python_command      = "python3.11"
+}
+
 # S3 bucket for static website hosting
 module "static_hosting_bucket" {
   source = "./modules/s3"
