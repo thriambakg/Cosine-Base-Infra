@@ -326,7 +326,18 @@ output "lambda_layer_arns" {
 }
 
 output "lambda_layer_arn_list" {
-  description = "List of all Lambda layer ARNs for easy use in Lambda functions"
+  description = "List of essential Lambda layer ARNs for Lambda functions (max 5 layers)"
+  value = [
+    module.lambda_layer_core.layer_arn,
+    module.lambda_layer_financial.layer_arn,
+    module.lambda_layer_ai_core.layer_arn,
+    module.lambda_layer_strands.layer_arn,
+    module.lambda_layer_strands_tools.layer_arn
+  ]
+}
+
+output "lambda_layer_arn_list_with_utility" {
+  description = "List of all Lambda layer ARNs including utility layer (for functions that can handle 6 layers)"
   value = [
     module.lambda_layer_core.layer_arn,
     module.lambda_layer_financial.layer_arn,
