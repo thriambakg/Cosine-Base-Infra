@@ -1,0 +1,66 @@
+#!/bin/bash
+
+# Build All Layers Script
+# This script builds all layers or specific layers as requested
+# Usage: ./build-all-layers.sh [layer1] [layer2] ...
+# Example: ./build-all-layers.sh                    # Build all layers
+# Example: ./build-all-layers.sh core financial     # Build only core and financial
+
+set -e  # Exit on any error
+
+# Colors for output
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Available layers
+AVAILABLE_LAYERS=("core" "financial" "ai" "utility")
+
+# Function to print colored output
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+# Determine which layers to build
+if [ $# -eq 0 ]; then
+    # Build all layers
+    LAYERS_TO_BUILD=("${AVAILABLE_LAYERS[@]}")
+    print_status "Building all layers: ${LAYERS_TO_BUILD[*]}"
+else
+    # Build specified layers
+    LAYERS_TO_BUILD=("$@")
+    print_status "Building specified layers: ${LAYERS_TO_BUILD[*]}"
+fi
+
+# Validate layer names
+for layer in "${LAYERS_TO_BUILD[@]}"; do
+    if [[ ! " ${AVAILABLE_LAYERS[@]} " =~ " ${layer} " ]]; then
+        echo "Error: Unknown layer '${layer}'"
+        echo "Available layers: ${AVAILABLE_LAYERS[*]}"
+        exit 1
+    fi
+done
+
+# Make build script executable
+chmod +x build-layer.sh
+
+# Build each layer
+for layer in "${LAYERS_TO_BUILD[@]}"; do
+    print_status "Building layer: ${layer}"
+    ./build-layer.sh "${layer}"
+    print_success "Layer '${layer}' built successfully"
+    echo ""
+done
+
+print_success "All requested layers built successfully!"
+print_status "Layer files created:"
+for layer in "${LAYERS_TO_BUILD[@]}"; do
+    if [ -f "layer-${layer}.zip" ]; then
+        size=$(du -h "layer-${layer}.zip" | cut -f1)
+        echo "  - layer-${layer}.zip (${size})"
+    fi
+done

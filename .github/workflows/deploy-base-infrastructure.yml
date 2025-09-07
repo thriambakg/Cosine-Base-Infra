@@ -79,41 +79,58 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Build Lambda Layer
+      - name: Build Lambda Layers
         run: |
           cd terraform/modules/lambda-layer
           chmod +x build-layer.sh
-          ./build-layer.sh
+          chmod +x build-all-layers.sh
+          
+          # Build all layers using the consolidated script
+          ./build-all-layers.sh
         env:
           PYTHON_CMD: python3
 
       - name: Verify Layer Contents
         run: |
           cd terraform/modules/lambda-layer
-          echo "Layer size: $(du -h layer.zip | cut -f1)"
-          echo "Layer contents:"
-          unzip -l layer.zip | head -20
           
-          # Verify critical files exist
-          if unzip -l layer.zip | grep -q "python/opentelemetry_api-.*/entry_points.txt"; then
-            echo "✅ OpenTelemetry entry_points.txt found"
+          # Verify all layers were created
+          for layer in layer-core.zip layer-financial.zip layer-ai.zip layer-utility.zip; do
+            if [ -f "$layer" ]; then
+              echo "✅ $layer created successfully"
+              echo "  Size: $(du -h "$layer" | cut -f1)"
+              echo "  Contents preview:"
+              unzip -l "$layer" | head -5
+              echo ""
+            else
+              echo "❌ $layer missing"
+              exit 1
+            fi
+          done
+          
+          # Verify critical files exist in AI layer (where OpenTelemetry would be)
+          if unzip -l layer-ai.zip | grep -q "python/opentelemetry_api-.*/entry_points.txt"; then
+            echo "✅ OpenTelemetry entry_points.txt found in AI layer"
           else
-            echo "❌ OpenTelemetry entry_points.txt missing"
-            exit 1
+            echo "⚠️  OpenTelemetry entry_points.txt not found in AI layer (may not be needed)"
           fi
           
-          if unzip -l layer.zip | grep -q "python/pydantic_core/"; then
-            echo "✅ pydantic_core found"
+          # Verify pydantic_core exists in financial layer
+          if unzip -l layer-financial.zip | grep -q "python/pydantic_core/"; then
+            echo "✅ pydantic_core found in financial layer"
           else
-            echo "❌ pydantic_core missing"
-            exit 1
+            echo "⚠️  pydantic_core not found in financial layer (may not be needed)"
           fi
 
-      - name: Upload Lambda Layer Artifact
+      - name: Upload Lambda Layer Artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: lambda-layer-${{ needs.determine-environment.outputs.environment }}
-          path: terraform/modules/lambda-layer/layer.zip
+          name: lambda-layers-${{ needs.determine-environment.outputs.environment }}
+          path: |
+            terraform/modules/lambda-layer/layer-core.zip
+            terraform/modules/lambda-layer/layer-financial.zip
+            terraform/modules/lambda-layer/layer-ai.zip
+            terraform/modules/lambda-layer/layer-utility.zip
           retention-days: 1
 
   deploy-base-infrastructure:

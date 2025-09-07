@@ -1,229 +1,231 @@
 #!/bin/bash
 
-# Build script for Lambda Layer with all dependencies
-# This script creates a layer package with all the heavy dependencies
+# Modular Lambda Layer Builder
+# This script can build any layer individually by specifying the layer name
+# Usage: ./build-layer.sh [LAYER_NAME]
+# Example: ./build-layer.sh core
+# Example: ./build-layer.sh financial
+# Example: ./build-layer.sh ai
+# Example: ./build-layer.sh utility
 
-set -e
+set -e  # Exit on any error
 
-# Default Python command (can be overridden)
-# Try different Python commands in order of preference
-if [ -z "$PYTHON_CMD" ]; then
-    if command -v python3.11 >/dev/null 2>&1; then
-        PYTHON_CMD="python3.11"
-    elif command -v python3 >/dev/null 2>&1; then
-        PYTHON_CMD="python3"
-    elif command -v python >/dev/null 2>&1; then
-        PYTHON_CMD="python"
-    else
-        echo "Error: No Python command found. Please install Python or set PYTHON_CMD environment variable."
-        exit 1
+# Configuration
+LAYER_NAME=${1:-"core"}
+REQUIREMENTS_FILE="${LAYER_NAME}-dependencies.txt"
+LAYER_FILE="layer-${LAYER_NAME}.zip"
+PYTHON_CMD=${PYTHON_CMD:-"python3"}
+
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+BLUE='\033[0;34m'
+NC='\033[0m' # No Color
+
+# Function to print colored output
+print_status() {
+    echo -e "${BLUE}[INFO]${NC} $1"
+}
+
+print_success() {
+    echo -e "${GREEN}[SUCCESS]${NC} $1"
+}
+
+print_warning() {
+    echo -e "${YELLOW}[WARNING]${NC} $1"
+}
+
+print_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
+
+# Validate inputs
+if [ ! -f "layer-definitions/${REQUIREMENTS_FILE}" ]; then
+    print_error "Requirements file not found: layer-definitions/${REQUIREMENTS_FILE}"
+    print_error "Available layers: core, financial, ai, utility"
+    exit 1
+fi
+
+print_status "Building Lambda layer: ${LAYER_NAME}"
+print_status "Requirements file: ${REQUIREMENTS_FILE}"
+print_status "Output file: ${LAYER_FILE}"
+
+# Detect Python command
+if command -v python3.11 >/dev/null 2>&1; then
+    PYTHON_CMD="python3.11"
+elif command -v python3 >/dev/null 2>&1; then
+    PYTHON_CMD="python3"
+elif command -v python >/dev/null 2>&1; then
+    PYTHON_CMD="python"
+else
+    print_error "Python not found. Please install Python 3.11 or later."
+    exit 1
+fi
+
+print_status "Using Python command: ${PYTHON_CMD}"
+
+# Verify Python version
+PYTHON_VERSION=$(${PYTHON_CMD} --version 2>&1 | cut -d' ' -f2)
+print_status "Python version: ${PYTHON_VERSION}"
+
+# Create placeholder layer file for Terraform validation
+if [ ! -f "${LAYER_FILE}" ]; then
+    print_status "Creating placeholder layer file for Terraform validation..."
+    touch "${LAYER_FILE}"
+fi
+
+# Clean up any existing python directory
+if [ -d "python" ]; then
+    print_status "Cleaning up existing python directory..."
+    rm -rf python
+fi
+
+# Create python directory
+mkdir -p python
+
+# Install dependencies
+print_status "Installing dependencies from ${REQUIREMENTS_FILE}..."
+${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --no-deps --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade
+
+# Verify critical packages were installed
+print_status "Verifying package installation..."
+if [ ! -d "python" ] || [ -z "$(ls -A python)" ]; then
+    print_error "No packages were installed. Check your requirements file."
+    exit 1
+fi
+
+# Clean up unnecessary files to reduce layer size
+print_status "Cleaning up unnecessary files..."
+
+# Remove .whl, .tar.gz, .zip files
+find python/ -name "*.whl" -delete
+find python/ -name "*.tar.gz" -delete
+find python/ -name "*.zip" -delete
+
+# Remove example, sample, demo files
+find python/ -name "*example*" -type d -exec rm -rf {} + 2>/dev/null || true
+find python/ -name "*sample*" -type d -exec rm -rf {} + 2>/dev/null || true
+find python/ -name "*demo*" -type d -exec rm -rf {} + 2>/dev/null || true
+find python/ -name "*test*" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Remove license, changelog, history, readme files
+find python/ -name "LICENSE*" -delete
+find python/ -name "CHANGELOG*" -delete
+find python/ -name "HISTORY*" -delete
+find python/ -name "README*" -delete
+find python/ -name "*.md" -delete
+find python/ -name "*.txt" -not -name "entry_points.txt" -delete
+
+# Remove large data files
+find python/ -name "*.json" -size +100k -delete
+find python/ -name "*.xml" -size +100k -delete
+find python/ -name "*.csv" -size +100k -delete
+
+# Linux-specific cleanup
+if [[ "$OSTYPE" == "linux-gnu"* ]]; then
+    print_status "Performing Linux-specific cleanup..."
+    
+    # Remove Windows-specific files
+    find python/ -name "*.dll" -delete
+    find python/ -name "*.exe" -delete
+    find python/ -name "*.pyd" -delete
+    
+    # Clean up numpy.libs (contains duplicate libraries)
+    if [ -d "python/numpy.libs" ]; then
+        rm -rf python/numpy.libs
+    fi
+    
+    # Clean up sympy (very large, often not needed in production)
+    if [ -d "python/sympy" ]; then
+        find python/sympy -name "*.py" -size +50k -delete
+    fi
+    
+    # Clean up botocore data
+    if [ -d "python/botocore/data" ]; then
+        find python/botocore/data -name "*.json" -size +10k -delete
+    fi
+    
+    # Clean up cryptography (remove unnecessary files)
+    if [ -d "python/cryptography" ]; then
+        find python/cryptography -name "*.c" -delete
+        find python/cryptography -name "*.h" -delete
     fi
 fi
 
-echo "Building Lambda Layer with dependencies..."
-echo "Using Python command: $PYTHON_CMD"
-
-# Verify Python command works
-echo "Verifying Python installation..."
-$PYTHON_CMD --version
-if [ $? -ne 0 ]; then
-    echo "Error: Python command '$PYTHON_CMD' failed. Available Python commands:"
-    which python3.11 python3 python || echo "No Python commands found in PATH"
-    exit 1
-fi
-
-# Clean up any existing build artifacts
-echo "Cleaning up existing build artifacts..."
-rm -rf python/
-rm -f layer.zip
-
-# Create a minimal placeholder zip file for Terraform validation
-echo "Creating placeholder layer.zip for Terraform validation..."
-mkdir -p python
-echo "# Placeholder for Terraform validation" > python/placeholder.txt
-zip -q layer.zip python/placeholder.txt
-rm -rf python/
-
-# Create python directory structure
-echo "Creating python directory structure..."
-mkdir -p python/
-
-# Install dependencies into the python directory
-echo "Installing dependencies using $PYTHON_CMD..."
-echo "Using requirements file: layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies-minimal.txt}"
-$PYTHON_CMD -m pip install -r "layer-definitions/${REQUIREMENTS_FILE:-chat-agent-dependencies-minimal.txt}" -t python/ --no-user
-
-if [ $? -ne 0 ]; then
-    echo "Error: Failed to install dependencies"
-    exit 1
-fi
-
-# Show package sizes to help identify large dependencies
-echo "Package sizes after installation:"
-du -h python/ | sort -hr | head -15
-
-echo ""
-echo "Analyzing largest packages for optimization opportunities..."
-echo "Top 10 largest packages:"
-du -h python/ | sort -hr | head -10 | while read size path; do
-    package_name=$(basename "$path")
-    echo "  $size - $package_name"
-done
-
-# Remove unnecessary files to reduce size
-echo "Cleaning up unnecessary files..."
-
-# Remove __pycache__ directories
-find python/ -type d -name "__pycache__" -exec rm -rf {} + 2>/dev/null || true
-
-# Remove compiled Python files (keep .so files for Linux Lambda)
-find python/ -name "*.pyc" -delete 2>/dev/null || true
-find python/ -name "*.pyo" -delete 2>/dev/null || true
-find python/ -name "*.pyd" -delete 2>/dev/null || true
-
-# Remove unnecessary distribution info files (keep OpenTelemetry one)
-find python/ -name "*.dist-info" -type d -not -name "opentelemetry_api-*" -exec rm -rf {} + 2>/dev/null || true
-find python/ -name "*.egg-info" -type d -exec rm -rf {} + 2>/dev/null || true
-
-# Remove macOS and Windows shared libraries (keep Linux .so files for Lambda)
-find python/ -name "*.dylib" -delete 2>/dev/null || true
-find python/ -name "*.dll" -delete 2>/dev/null || true
-
-# Remove test directories and documentation
-find python/ -type d -name "test*" -exec rm -rf {} + 2>/dev/null || true
-find python/ -type d -name "tests" -exec rm -rf {} + 2>/dev/null || true
-find python/ -type d -name "doc" -exec rm -rf {} + 2>/dev/null || true
-find python/ -type d -name "docs" -exec rm -rf {} + 2>/dev/null || true
-find python/ -name "*.md" -delete 2>/dev/null || true
-find python/ -name "*.rst" -delete 2>/dev/null || true
-
-# Remove most .txt files but preserve important ones
-find python/ -name "*.txt" -not -path "*/opentelemetry_api-*/entry_points.txt" -delete 2>/dev/null || true
-
-# Smart cleanup to reduce layer size while preserving functionality
-echo "Performing smart cleanup to reduce layer size..."
-
-# Remove package installation artifacts (these are not needed at runtime)
-find python/ -name "*.whl" -delete 2>/dev/null || true
-find python/ -name "*.tar.gz" -delete 2>/dev/null || true
-find python/ -name "*.zip" -delete 2>/dev/null || true
-
-# Remove documentation and example files (not needed at runtime)
-find python/ -name "*example*" -type f -delete 2>/dev/null || true
-find python/ -name "*sample*" -type f -delete 2>/dev/null || true
-find python/ -name "*demo*" -type f -delete 2>/dev/null || true
-find python/ -name "*test*" -type f -delete 2>/dev/null || true
-
-# Remove documentation files
-find python/ -name "LICENSE*" -delete 2>/dev/null || true
-find python/ -name "CHANGELOG*" -delete 2>/dev/null || true
-find python/ -name "HISTORY*" -delete 2>/dev/null || true
-find python/ -name "NEWS*" -delete 2>/dev/null || true
-find python/ -name "README*" -delete 2>/dev/null || true
-
-# Remove large data files that might be included (but keep small config files)
-find python/ -name "*.json" -size +100k -delete 2>/dev/null || true
-find python/ -name "*.xml" -size +100k -delete 2>/dev/null || true
-find python/ -name "*.csv" -size +100k -delete 2>/dev/null || true
-
-# Remove distribution metadata (but keep essential package info)
-find python/ -type d -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
-find python/ -type d -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
-
-# Linux-specific cleanup for large packages
-echo "Performing Linux-specific cleanup for large packages..."
-
-# Remove numpy.libs directory (contains large shared libraries)
-if [ -d "python/numpy.libs" ]; then
-    echo "Removing numpy.libs directory (37MB) - not needed in Lambda"
-    rm -rf python/numpy.libs
-fi
-
-# Remove large sympy data files
-if [ -d "python/sympy" ]; then
-    echo "Cleaning up sympy package..."
-    find python/sympy/ -name "*.py" -size +100k -delete 2>/dev/null || true
-    find python/sympy/ -name "*.dat" -delete 2>/dev/null || true
-    find python/sympy/ -name "*.txt" -size +10k -delete 2>/dev/null || true
-fi
-
-# Remove large botocore data files
-if [ -d "python/botocore/data" ]; then
-    echo "Cleaning up botocore data files..."
-    find python/botocore/data/ -name "*.json" -size +50k -delete 2>/dev/null || true
-fi
-
-# Remove large cryptography files
-if [ -d "python/cryptography" ]; then
-    echo "Cleaning up cryptography package..."
-    find python/cryptography/ -name "*.so" -size +1M -delete 2>/dev/null || true
-fi
-
-# Fix OpenTelemetry entry points issue (must be done BEFORE removing dist-info)
-echo "Fixing OpenTelemetry entry points..."
-ENTRY_POINTS_PATH="python/opentelemetry_api-1.36.0.dist-info/entry_points.txt"
-if [ -d "python/opentelemetry_api-1.36.0.dist-info" ]; then
-    cat > "$ENTRY_POINTS_PATH" << 'EOF'
+# Handle OpenTelemetry entry points (only for AI layer)
+if [ "${LAYER_NAME}" = "ai" ]; then
+    print_status "Setting up OpenTelemetry entry points..."
+    
+    # Find opentelemetry_api directory
+    OPENTELEMETRY_DIR=$(find python/ -name "opentelemetry_api-*" -type d | head -1)
+    if [ -n "$OPENTELEMETRY_DIR" ]; then
+        # Create entry_points.txt for OpenTelemetry
+        cat > "${OPENTELEMETRY_DIR}/entry_points.txt" << 'EOF'
 [opentelemetry_context]
 contextvars_context = opentelemetry.context.contextvars_context:ContextVarsRuntimeContext
 EOF
-    echo "Created OpenTelemetry entry points file"
-else
-    echo "OpenTelemetry distribution directory not found"
+        print_success "Created OpenTelemetry entry_points.txt"
+    else
+        print_warning "OpenTelemetry not found in AI layer - skipping entry points setup"
+    fi
 fi
 
-# Remove OpenTelemetry distribution info but keep the entry points file
-# Only remove the dist-info directory, not the entire opentelemetry package
-find python/ -type d -name "opentelemetry*" -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
+# Remove .dist-info directories (but preserve opentelemetry_api for AI layer)
+if [ "${LAYER_NAME}" = "ai" ]; then
+    find python/ -name "*.dist-info" -not -path "*/opentelemetry_api-*" -exec rm -rf {} + 2>/dev/null || true
+else
+    find python/ -name "*.dist-info" -exec rm -rf {} + 2>/dev/null || true
+fi
+
+# Remove .egg-info directories
+find python/ -name "*.egg-info" -exec rm -rf {} + 2>/dev/null || true
 
 # Create the layer zip file
-echo "Creating layer zip file..."
-zip -r layer.zip python/ -q
+print_status "Creating layer zip file: ${LAYER_FILE}"
+zip -r "${LAYER_FILE}" python/ -q
 
 # Get the size of the layer
-LAYER_SIZE=$(du -h layer.zip | cut -f1)
-LAYER_SIZE_MB=$(du -m layer.zip | cut -f1)
-echo "Layer created successfully: layer.zip (${LAYER_SIZE})"
+LAYER_SIZE=$(du -h "${LAYER_FILE}" | cut -f1)
+LAYER_SIZE_MB=$(du -m "${LAYER_FILE}" | cut -f1)
+print_success "Layer created successfully: ${LAYER_FILE} (${LAYER_SIZE})"
 
 # Verify the layer structure
-echo "Verifying layer structure..."
+print_status "Verifying layer structure..."
 echo "First 10 entries in layer:"
-unzip -l layer.zip | head -12 | tail -10
+unzip -l "${LAYER_FILE}" | head -12 | tail -10
 
 # Verify critical files exist
-echo "Checking for critical files..."
-if unzip -l layer.zip | grep -q "python/opentelemetry_api-.*/entry_points.txt"; then
-    echo "✓ OpenTelemetry entry_points.txt found"
+print_status "Checking for critical files..."
+if unzip -l "${LAYER_FILE}" | grep -q "python/"; then
+    print_success "✓ Python packages found"
 else
-    echo "✗ OpenTelemetry entry_points.txt missing"
-fi
-
-if unzip -l layer.zip | grep -q "python/pydantic_core/"; then
-    echo "✓ pydantic_core found"
-else
-    echo "✗ pydantic_core missing"
+    print_error "✗ No Python packages found"
+    exit 1
 fi
 
 # Check if layer is within size limits
-LAYER_SIZE_BYTES=$(stat -c%s layer.zip 2>/dev/null || echo 0)
+LAYER_SIZE_BYTES=$(stat -c%s "${LAYER_FILE}" 2>/dev/null || echo 0)
 MAX_SIZE_BYTES=67108864  # 64MB limit for Lambda layers
 
 if [ $LAYER_SIZE_BYTES -gt $MAX_SIZE_BYTES ]; then
-    echo "❌ ERROR: Layer size (${LAYER_SIZE_MB}MB / ${LAYER_SIZE_BYTES} bytes) exceeds AWS Lambda layer limit of 64MB"
-    echo "Current size: ${LAYER_SIZE_MB}MB"
-    echo "Maximum allowed: 64MB"
+    print_error "Layer size (${LAYER_SIZE_MB}MB / ${LAYER_SIZE_BYTES} bytes) exceeds AWS Lambda layer limit of 64MB"
+    print_error "Current size: ${LAYER_SIZE_MB}MB"
+    print_error "Maximum allowed: 64MB"
     echo ""
-    echo "To reduce layer size, consider:"
-    echo "1. Removing unnecessary dependencies from requirements.txt"
-    echo "2. Splitting into multiple layers"
-    echo "3. Using lighter alternatives for heavy packages"
+    print_error "To reduce layer size, consider:"
+    print_error "1. Removing unnecessary dependencies from requirements.txt"
+    print_error "2. Splitting into multiple layers"
+    print_error "3. Using lighter alternatives for heavy packages"
     echo ""
-    echo "Largest directories in the layer:"
+    print_error "Largest directories in the layer:"
     du -h python/ | sort -hr | head -10
     exit 1
 elif [ $LAYER_SIZE_MB -gt 50 ]; then
-    echo "⚠️  Warning: Layer size (${LAYER_SIZE_MB}MB) is getting close to the 64MB limit"
-    echo "Consider optimizing dependencies to reduce size"
+    print_warning "Layer size (${LAYER_SIZE_MB}MB) is getting close to the 64MB limit"
+    print_warning "Consider optimizing dependencies to reduce size"
 fi
 
-echo "Lambda layer build completed successfully!"
+print_success "Lambda layer '${LAYER_NAME}' build completed successfully!"
+print_success "Layer file: ${LAYER_FILE} (${LAYER_SIZE})"
+print_success "Ready for Terraform deployment"

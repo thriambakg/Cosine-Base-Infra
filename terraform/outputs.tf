@@ -312,20 +312,46 @@ output "oauth_secret_names" {
   value       = var.oauth_secrets_enabled ? module.secrets_manager.secret_names : {}
 }
 
-# Lambda Layer outputs
-output "lambda_layer_arn" {
-  description = "ARN of the shared dependencies Lambda layer"
-  value       = module.lambda_layer.layer_arn
+# Lambda Layer outputs - Multiple layers for better dependency management
+output "lambda_layer_arns" {
+  description = "ARNs of all Lambda layers"
+  value = {
+    core      = module.lambda_layer_core.layer_arn
+    financial = module.lambda_layer_financial.layer_arn
+    ai        = module.lambda_layer_ai.layer_arn
+    utility   = module.lambda_layer_utility.layer_arn
+  }
 }
 
-output "lambda_layer_version" {
-  description = "Version of the shared dependencies Lambda layer"
-  value       = module.lambda_layer.layer_version
+output "lambda_layer_arn_list" {
+  description = "List of all Lambda layer ARNs for easy use in Lambda functions"
+  value = [
+    module.lambda_layer_core.layer_arn,
+    module.lambda_layer_financial.layer_arn,
+    module.lambda_layer_ai.layer_arn,
+    module.lambda_layer_utility.layer_arn
+  ]
 }
 
-output "lambda_layer_layer_arn" {
-  description = "Layer ARN of the shared dependencies Lambda layer"
-  value       = module.lambda_layer.layer_layer_arn
+# Individual layer outputs for specific use cases
+output "lambda_layer_core_arn" {
+  description = "ARN of the core dependencies Lambda layer"
+  value       = module.lambda_layer_core.layer_arn
+}
+
+output "lambda_layer_financial_arn" {
+  description = "ARN of the financial dependencies Lambda layer"
+  value       = module.lambda_layer_financial.layer_arn
+}
+
+output "lambda_layer_ai_arn" {
+  description = "ARN of the AI dependencies Lambda layer"
+  value       = module.lambda_layer_ai.layer_arn
+}
+
+output "lambda_layer_utility_arn" {
+  description = "ARN of the utility dependencies Lambda layer"
+  value       = module.lambda_layer_utility.layer_arn
 }
 
 # ============================================================================

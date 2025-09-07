@@ -1,0 +1,13 @@
+# Financial Dependencies Layer - Data analysis and financial packages
+# This layer contains packages for financial data processing
+
+# Financial data and analysis
+yfinance==0.2.18
+numpy==1.26.4
+pandas==2.2.0
+
+# Supporting libraries for financial analysis
+multitasking>=0.0.7
+appdirs>=1.4.4
+pytz>=2022.5
+frozendict>=2.3.4

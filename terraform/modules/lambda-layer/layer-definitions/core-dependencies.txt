@@ -1,0 +1,21 @@
+# Core Dependencies Layer - Essential packages for all Lambda functions
+# This layer contains the most commonly used packages
+
+# Core HTTP and environment
+requests==2.31.0
+python-dotenv==1.0.0
+
+# AWS SDK (usually available in Lambda runtime, but including for completeness)
+boto3==1.34.0
+botocore==1.34.0
+
+# Essential supporting libraries
+certifi>=2017.4.17
+charset-normalizer>=2
+idna>=2.5
+urllib3>=1.21.1
+jmespath>=0.7.1
+s3transfer>=0.9.0
+python-dateutil>=2.8.2
+six>=1.9
+tzdata

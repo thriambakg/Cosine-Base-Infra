@@ -193,15 +193,57 @@ module "cloudwatch" {
 
 
 
-# Lambda Layer for shared dependencies
-module "lambda_layer" {
+# Multiple Lambda Layers for shared dependencies
+# This approach splits dependencies into logical layers to stay under 64MB limit per layer
+
+# Core Dependencies Layer - Essential packages for all Lambda functions
+module "lambda_layer_core" {
   source = "./modules/lambda-layer"
 
   project_name        = var.project_name
   environment         = var.environment
-  requirements_file   = "chat-agent-dependencies.txt"
-  layer_name_suffix   = "shared-deps"
-  layer_description   = "Shared dependencies layer for ${var.project_name} Lambda functions including Strands Agents SDK, financial data libraries, and AWS SDK"
+  requirements_file   = "core-dependencies.txt"
+  layer_name_suffix   = "core-deps"
+  layer_description   = "Core dependencies layer for ${var.project_name} Lambda functions (requests, boto3, essential libraries)"
+  compatible_runtimes = ["python3.11"]
+  python_command      = "python3.11"
+}
+
+# Financial Dependencies Layer - Data analysis and financial packages
+module "lambda_layer_financial" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  requirements_file   = "financial-dependencies.txt"
+  layer_name_suffix   = "financial-deps"
+  layer_description   = "Financial data processing dependencies for ${var.project_name} Lambda functions (yfinance, numpy, pandas)"
+  compatible_runtimes = ["python3.11"]
+  python_command      = "python3.11"
+}
+
+# AI Dependencies Layer - Strands Agents and AI-related packages
+module "lambda_layer_ai" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  requirements_file   = "ai-dependencies.txt"
+  layer_name_suffix   = "ai-deps"
+  layer_description   = "AI and agent framework dependencies for ${var.project_name} Lambda functions (strands-agents, AI libraries)"
+  compatible_runtimes = ["python3.11"]
+  python_command      = "python3.11"
+}
+
+# Utility Dependencies Layer - Optional utility packages
+module "lambda_layer_utility" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  requirements_file   = "utility-dependencies.txt"
+  layer_name_suffix   = "utility-deps"
+  layer_description   = "Utility and optional dependencies for ${var.project_name} Lambda functions (pillow, sympy, rich, etc.)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
 }

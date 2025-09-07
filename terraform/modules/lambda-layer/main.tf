@@ -6,26 +6,24 @@ locals {
   requirements_path = "${path.module}/layer-definitions/${var.requirements_file}"
   build_script_path = "${path.module}/build-layer.sh"
   python_dir_path   = "${path.module}/python"
-  layer_zip_path    = "${path.module}/layer.zip"
+  layer_zip_path    = "${path.module}/layer-${var.layer_name_suffix}.zip"
 }
 
 # Build the layer package
 resource "null_resource" "build_layer" {
   triggers = {
-    requirements_hash       = filemd5(local.requirements_path)
-    build_script_hash       = filemd5(local.build_script_path)
-    conditional_script_hash = filemd5("${path.module}/build-layer-conditional.sh")
-    source_files_hash       = var.source_files != [] ? join(",", [for f in var.source_files : filemd5("${path.module}/layer-definitions/${f}")]) : ""
+    requirements_hash = filemd5(local.requirements_path)
+    build_script_hash = filemd5(local.build_script_path)
   }
 
   provisioner "local-exec" {
-    command     = "./build-layer-conditional.sh"
+    command     = "./build-layer.sh"
     interpreter = ["bash"]
     working_dir = path.module
     environment = {
-      PYTHON_CMD        = var.python_command
-      REQUIREMENTS_FILE = var.requirements_file
+      PYTHON_CMD = var.python_command
     }
+    args = [var.layer_name_suffix]
   }
 }
 
@@ -39,7 +37,7 @@ resource "aws_lambda_layer_version" "shared_dependencies" {
   source_code_hash    = filebase64sha256(local.layer_zip_path)
   compatible_runtimes = var.compatible_runtimes
 
-  # Layer size limit is 250 MB unzipped
+  # Layer size limit is 64 MB unzipped per layer
   # Dependencies are defined in the requirements file specified by var.requirements_file
 }
 
