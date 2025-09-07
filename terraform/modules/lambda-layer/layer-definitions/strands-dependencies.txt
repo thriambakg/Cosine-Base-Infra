@@ -1,6 +1,7 @@
 # Strands Dependencies Layer - AWS Open Source AI Agents SDK
 # Official AWS Strands Agents framework for building AI agents
+# Repository: https://github.com/strands-agents/sdk-python
 
-# Install specific version 1.0 packages
-strands-agents==1.0.0
-strands-agents-tools==1.0.0
+# Install latest available versions
+strands-agents==1.7.1
+strands-agents-tools==0.2.6
