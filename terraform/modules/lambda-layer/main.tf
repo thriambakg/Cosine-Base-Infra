@@ -29,7 +29,7 @@ resource "null_resource" "build_layer" {
 # Create the Lambda layer with all dependencies
 resource "aws_lambda_layer_version" "shared_dependencies" {
   depends_on  = [null_resource.build_layer]
-  layer_name  = "${var.project_name}-${var.layer_name_suffix}-${var.environment}"
+  layer_name  = "${var.project_name}-${var.layer_name_suffix}-deps-${var.environment}"
   description = var.layer_description
 
   filename            = local.layer_zip_path

@@ -203,7 +203,7 @@ module "lambda_layer_core" {
   project_name        = var.project_name
   environment         = var.environment
   requirements_file   = "core-dependencies.txt"
-  layer_name_suffix   = "core-deps"
+  layer_name_suffix   = "core"
   layer_description   = "Core dependencies layer for ${var.project_name} Lambda functions (requests, boto3, essential libraries)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
@@ -216,7 +216,7 @@ module "lambda_layer_financial" {
   project_name        = var.project_name
   environment         = var.environment
   requirements_file   = "financial-dependencies.txt"
-  layer_name_suffix   = "financial-deps"
+  layer_name_suffix   = "financial"
   layer_description   = "Financial data processing dependencies for ${var.project_name} Lambda functions (yfinance, numpy, pandas)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
@@ -229,7 +229,7 @@ module "lambda_layer_ai" {
   project_name        = var.project_name
   environment         = var.environment
   requirements_file   = "ai-dependencies.txt"
-  layer_name_suffix   = "ai-deps"
+  layer_name_suffix   = "ai"
   layer_description   = "AI and agent framework dependencies for ${var.project_name} Lambda functions (strands-agents, AI libraries)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
@@ -242,7 +242,7 @@ module "lambda_layer_utility" {
   project_name        = var.project_name
   environment         = var.environment
   requirements_file   = "utility-dependencies.txt"
-  layer_name_suffix   = "utility-deps"
+  layer_name_suffix   = "utility"
   layer_description   = "Utility and optional dependencies for ${var.project_name} Lambda functions (pillow, sympy, rich, etc.)"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
