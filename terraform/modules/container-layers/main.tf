@@ -148,7 +148,8 @@ resource "null_resource" "build_layers" {
   for_each = var.layer_definitions
 
   provisioner "local-exec" {
-    command = <<-EOT
+    working_dir = path.module
+    command     = <<-EOT
       # Get AWS Account ID
       AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
       ECR_REGISTRY="$${AWS_ACCOUNT_ID}.dkr.ecr.${var.aws_region}.amazonaws.com"
