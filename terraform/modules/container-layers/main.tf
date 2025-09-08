@@ -179,7 +179,6 @@ resource "null_resource" "build_layers" {
         -e S3_BUCKET_NAME=${aws_s3_bucket.layer_artifacts.bucket} \
         -e LAYER_NAME=${each.key} \
         -e REQUIREMENTS_FILE=${each.value.requirements_file} \
-        -v $(pwd):/app \
         $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
     EOT
   }
