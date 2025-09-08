@@ -85,8 +85,10 @@ jobs:
         run: |
           echo "PROJECT_NAME=cosine" >> $GITHUB_ENV
           echo "ENVIRONMENT=${{ needs.determine-environment.outputs.environment }}" >> $GITHUB_ENV
-          echo "AWS_ACCOUNT_ID=${{ secrets.AWS_ACCOUNT_ID }}" >> $GITHUB_ENV
           echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
+          
+          # Get AWS Account ID from AWS CLI (more reliable than secrets)
+          echo "AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)" >> $GITHUB_ENV
 
       - name: Build Container-based Lambda Layers
         run: |

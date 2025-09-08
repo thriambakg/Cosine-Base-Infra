@@ -9,7 +9,6 @@ set -e
 PROJECT_NAME="${PROJECT_NAME:-cosine}"
 ENVIRONMENT="${ENVIRONMENT:-production}"
 AWS_REGION="${AWS_REGION:-us-east-1}"
-ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
 ECR_REPOSITORY="${PROJECT_NAME}-layer-builder-${ENVIRONMENT}"
 S3_BUCKET_NAME="${PROJECT_NAME}-layer-artifacts-${ENVIRONMENT}"
 
@@ -24,9 +23,22 @@ echo "  S3_BUCKET_NAME: $S3_BUCKET_NAME"
 
 # Check required environment variables
 if [ -z "$AWS_ACCOUNT_ID" ]; then
-    echo "[ERROR] AWS_ACCOUNT_ID environment variable is required"
-    exit 1
+    echo "[INFO] AWS_ACCOUNT_ID not set, attempting to get from AWS CLI..."
+    AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text 2>/dev/null || echo "")
+    if [ -z "$AWS_ACCOUNT_ID" ]; then
+        echo "[ERROR] AWS_ACCOUNT_ID environment variable is required and could not be determined from AWS CLI"
+        echo "[ERROR] Please set AWS_ACCOUNT_ID environment variable or ensure AWS CLI is configured"
+        exit 1
+    fi
+    echo "[INFO] Retrieved AWS_ACCOUNT_ID from AWS CLI: $AWS_ACCOUNT_ID"
 fi
+
+# Set ECR registry after AWS_ACCOUNT_ID is determined
+ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${AWS_REGION}.amazonaws.com"
+
+echo "[INFO] Final configuration:"
+echo "  AWS_ACCOUNT_ID: $AWS_ACCOUNT_ID"
+echo "  ECR_REGISTRY: $ECR_REGISTRY"
 
 # Login to ECR
 echo "[INFO] Logging in to Amazon ECR..."
@@ -34,7 +46,6 @@ aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --
 
 # Build and push container image
 echo "[INFO] Building container image..."
-cd terraform/modules/container-layers
 docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
 
 echo "[INFO] Pushing container image to ECR..."
