@@ -29,5 +29,5 @@ RUN chmod +x build-scripts/*.sh
 ENV PYTHONUNBUFFERED=1
 ENV AWS_DEFAULT_REGION=us-east-1
 
-# Default command
-CMD ["./build-scripts/build-all-layers.sh"]
+# Default command - build individual layer based on environment variables
+CMD ["./build-scripts/build-layer.sh"]

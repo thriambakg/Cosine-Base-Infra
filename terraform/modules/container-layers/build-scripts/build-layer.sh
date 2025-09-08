@@ -4,8 +4,8 @@
 
 set -e
 
-LAYER_NAME="$1"
-REQUIREMENTS_FILE="layer-definitions/${LAYER_NAME}-dependencies.txt"
+LAYER_NAME="${LAYER_NAME}"
+REQUIREMENTS_FILE="layer-definitions/${REQUIREMENTS_FILE}"
 OUTPUT_FILE="layer-${LAYER_NAME}.zip"
 S3_BUCKET="${S3_BUCKET_NAME}"
 S3_KEY="layers/${OUTPUT_FILE}"

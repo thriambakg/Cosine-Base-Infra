@@ -201,6 +201,7 @@ module "container_layers" {
 
   project_name = var.project_name
   environment  = var.environment
+  aws_region   = var.aws_region
   tags         = var.common_tags
 
   s3_bucket_arn = module.lambda_layers_bucket.bucket_arn

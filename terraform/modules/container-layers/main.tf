@@ -116,6 +116,44 @@ resource "aws_s3_bucket_lifecycle_configuration" "layer_artifacts" {
   }
 }
 
+# Build Lambda Layers using Container
+resource "null_resource" "build_layers" {
+  for_each = var.layer_definitions
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      # Get AWS Account ID
+      AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+      ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${var.aws_region}.amazonaws.com"
+      ECR_REPOSITORY="${var.project_name}-layer-builder-${var.environment}"
+      
+      # Login to ECR
+      aws ecr get-login-password --region ${var.aws_region} | docker login --username AWS --password-stdin $ECR_REGISTRY
+      
+      # Build and push container if not exists
+      if ! docker manifest inspect $ECR_REGISTRY/$ECR_REPOSITORY:latest >/dev/null 2>&1; then
+        echo "Building and pushing container image..."
+        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
+      fi
+      
+      # Run container to build specific layer
+      docker run --rm \
+        -e AWS_DEFAULT_REGION=${var.aws_region} \
+        -e S3_BUCKET_NAME=${aws_s3_bucket.layer_artifacts.bucket} \
+        -e LAYER_NAME=${each.key} \
+        -e REQUIREMENTS_FILE=${each.value.requirements_file} \
+        -v $(pwd):/app \
+        $ECR_REGISTRY/$ECR_REPOSITORY:latest
+    EOT
+  }
+
+  depends_on = [
+    aws_ecr_repository.layer_builder,
+    aws_s3_bucket.layer_artifacts
+  ]
+}
+
 # Lambda Layer Resources (created by container)
 resource "aws_lambda_layer_version" "layers" {
   for_each = var.layer_definitions
@@ -128,5 +166,8 @@ resource "aws_lambda_layer_version" "layers" {
   s3_bucket = aws_s3_bucket.layer_artifacts.bucket
   s3_key    = "layers/${each.key}-layer.zip"
 
-  depends_on = [aws_s3_bucket.layer_artifacts]
+  depends_on = [
+    aws_s3_bucket.layer_artifacts,
+    null_resource.build_layers
+  ]
 }
