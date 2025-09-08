@@ -92,18 +92,21 @@ jobs:
           script: |
             const comment = `## Base Infrastructure Plan - ${{ needs.determine-environment.outputs.environment }}
             
-            The Lambda layer has been built, Terraform plan generated, and security scans completed.
+            Terraform plan generated and security scans completed.
             
             ### Summary:
             - **Environment:** ${{ needs.determine-environment.outputs.environment }}
             - **Infrastructure Type:** Base Infrastructure
             - **Dependencies:** Self-contained (creates backend resources)
-            - **Lambda Layers:** Container-built with no size limitations
+            - **Lambda Layers:** Not applicable (chat agent uses container deployment)
             
-            ### Build Results:
-            - **Container Layers:** ✅ Built successfully with no size limits
-            - **Strands Agents:** ✅ AWS Strands Agents SDK included
-            - **Financial Libraries:** ✅ yfinance, numpy, pandas included
+            ### Infrastructure Components:
+            - **KMS Keys:** ✅ Encryption keys for all services
+            - **Cognito:** ✅ User authentication and authorization
+            - **DynamoDB:** ✅ Data storage tables
+            - **CloudWatch:** ✅ Logging and monitoring
+            - **Secrets Manager:** ✅ Secure credential storage
+            - **S3 Buckets:** ✅ Static hosting and file storage
             
             ### Security Scans:
             - **TFLint:** Passed
