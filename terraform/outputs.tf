@@ -312,69 +312,49 @@ output "oauth_secret_names" {
   value       = var.oauth_secrets_enabled ? module.secrets_manager.secret_names : {}
 }
 
-# Lambda Layer outputs - Multiple layers for better dependency management
+# Container-based Lambda Layer outputs
 output "lambda_layer_arns" {
-  description = "ARNs of all Lambda layers (AI-Core consolidated into Core layer)"
-  value = {
-    core          = module.lambda_layer_core.layer_arn
-    financial     = module.lambda_layer_financial.layer_arn
-    strands       = module.lambda_layer_strands.layer_arn
-    strands_tools = module.lambda_layer_strands_tools.layer_arn
-    utility       = module.lambda_layer_utility.layer_arn
-  }
+  description = "ARNs of all Lambda layers (container-built)"
+  value       = module.container_layers.lambda_layer_arns
 }
 
 output "lambda_layer_arn_list" {
-  description = "List of essential Lambda layer ARNs for Lambda functions (4 layers - AI-Core consolidated into Core)"
-  value = [
-    module.lambda_layer_core.layer_arn,
-    module.lambda_layer_financial.layer_arn,
-    module.lambda_layer_strands.layer_arn,
-    module.lambda_layer_strands_tools.layer_arn
-  ]
+  description = "List of essential Lambda layer ARNs for Lambda functions (container-built)"
+  value       = module.container_layers.lambda_layer_arn_list
 }
 
 output "lambda_layer_arn_list_with_utility" {
-  description = "List of all Lambda layer ARNs including utility layer (5 layers - AI-Core consolidated into Core)"
-  value = [
-    module.lambda_layer_core.layer_arn,
-    module.lambda_layer_financial.layer_arn,
-    module.lambda_layer_strands.layer_arn,
-    module.lambda_layer_strands_tools.layer_arn,
-    module.lambda_layer_utility.layer_arn
-  ]
+  description = "List of all Lambda layer ARNs including utility layer (container-built)"
+  value = concat(
+    module.container_layers.lambda_layer_arn_list,
+    [module.container_layers.lambda_layer_utility_arn]
+  )
 }
 
-# Individual layer outputs for specific use cases
+# Individual layer outputs for specific use cases (container-built)
 output "lambda_layer_core_arn" {
   description = "ARN of the core dependencies Lambda layer"
-  value       = module.lambda_layer_core.layer_arn
+  value       = module.container_layers.lambda_layer_core_arn
 }
 
 output "lambda_layer_financial_arn" {
   description = "ARN of the financial dependencies Lambda layer"
-  value       = module.lambda_layer_financial.layer_arn
+  value       = module.container_layers.lambda_layer_financial_arn
 }
-
-# AI Core layer consolidated into Core layer
-# output "lambda_layer_ai_core_arn" {
-#   description = "ARN of the AI core dependencies Lambda layer"
-#   value       = module.lambda_layer_ai_core.layer_arn
-# }
 
 output "lambda_layer_strands_arn" {
   description = "ARN of the Strands core dependencies Lambda layer"
-  value       = module.lambda_layer_strands.layer_arn
+  value       = module.container_layers.lambda_layer_strands_arn
 }
 
 output "lambda_layer_strands_tools_arn" {
   description = "ARN of the Strands tools dependencies Lambda layer"
-  value       = module.lambda_layer_strands_tools.layer_arn
+  value       = module.container_layers.lambda_layer_strands_tools_arn
 }
 
 output "lambda_layer_utility_arn" {
   description = "ARN of the utility dependencies Lambda layer"
-  value       = module.lambda_layer_utility.layer_arn
+  value       = module.container_layers.lambda_layer_utility_arn
 }
 
 # S3 bucket outputs

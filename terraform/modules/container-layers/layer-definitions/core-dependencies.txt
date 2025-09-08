@@ -1,0 +1,28 @@
+# Core Dependencies Layer - Essential packages for all Lambda functions
+# This layer contains the most commonly used packages + AI core packages
+# Layer size: ~18M (optimized - removed optional packages)
+
+# Core HTTP and environment
+requests>=2.31.0,<3.0.0
+python-dotenv>=1.0.0,<2.0.0
+
+# AWS SDK (usually available in Lambda runtime, but including for completeness)
+boto3>=1.34.0,<2.0.0
+botocore>=1.34.0,<2.0.0
+
+# Essential supporting libraries only
+certifi>=2017.4.17
+charset-normalizer>=2
+idna>=2.5
+urllib3>=1.21.1,<3.0.0
+jmespath>=0.7.1
+s3transfer>=0.9.0
+python-dateutil>=2.8.2
+six>=1.9
+
+# AI Core packages (consolidated from ai-core layer)
+aiohttp>=3.8.0
+aws-requests-auth>=0.4.3
+dill>=0.4.0
+pyjwt>=2.10.1
+tenacity>=9.1.2

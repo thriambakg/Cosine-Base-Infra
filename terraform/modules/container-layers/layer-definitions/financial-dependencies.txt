@@ -1,0 +1,8 @@
+# Financial Dependencies Layer - MINIMAL financial packages
+# This layer contains only essential financial packages
+# Layer size: ~15M (ultra-minimal - only what chat agent needs)
+
+# Financial data and analysis (minimal versions)
+yfinance>=0.2.18
+numpy>=1.24.0,<1.25.0
+pandas>=2.0.0,<2.1.0

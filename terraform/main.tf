@@ -193,91 +193,52 @@ module "cloudwatch" {
 
 
 
-# Multiple Lambda Layers for shared dependencies
-# This approach splits dependencies into logical layers to stay under 64MB limit per layer
+# Container-based Lambda Layer Management
+# Cost-effective approach: container builds layers, Lambda functions stay lightweight
 
-# Core Dependencies Layer - Essential packages for all Lambda functions
-module "lambda_layer_core" {
-  source = "./modules/lambda-layer"
+module "container_layers" {
+  source = "./modules/container-layers"
 
-  project_name        = var.project_name
-  environment         = var.environment
-  requirements_file   = "core-dependencies.txt"
-  layer_name_suffix   = "core"
-  layer_description   = "Core dependencies layer for ${var.project_name} Lambda functions (requests, boto3, essential libraries)"
-  compatible_runtimes = ["python3.11"]
-  python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
-}
+  project_name = var.project_name
+  environment  = var.environment
+  tags         = var.common_tags
 
-# Financial Dependencies Layer - Data analysis and financial packages
-module "lambda_layer_financial" {
-  source = "./modules/lambda-layer"
+  s3_bucket_arn = module.lambda_layers_bucket.bucket_arn
 
-  project_name        = var.project_name
-  environment         = var.environment
-  requirements_file   = "financial-dependencies.txt"
-  layer_name_suffix   = "financial"
-  layer_description   = "Financial data processing dependencies for ${var.project_name} Lambda functions (yfinance, numpy, pandas)"
-  compatible_runtimes = ["python3.11"]
-  python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
-}
+  layer_definitions = {
+    core = {
+      description         = "Core dependencies layer for ${var.project_name} Lambda functions (requests, boto3, essential libraries)"
+      compatible_runtimes = ["python3.11"]
+      requirements_file   = "core-dependencies.txt"
+      size_estimate       = "~18M"
+    }
+    financial = {
+      description         = "Financial data processing dependencies for ${var.project_name} Lambda functions (yfinance, numpy, pandas)"
+      compatible_runtimes = ["python3.11"]
+      requirements_file   = "financial-dependencies.txt"
+      size_estimate       = "~15M"
+    }
+    strands = {
+      description         = "Strands Agents core framework for ${var.project_name} Lambda functions (strands-agents)"
+      compatible_runtimes = ["python3.11"]
+      requirements_file   = "strands-dependencies.txt"
+      size_estimate       = "~20M"
+    }
+    "strands-tools" = {
+      description         = "Strands Agents tools for ${var.project_name} Lambda functions (strands-agents-tools)"
+      compatible_runtimes = ["python3.11"]
+      requirements_file   = "strands-tools-dependencies.txt"
+      size_estimate       = "~15M"
+    }
+    utility = {
+      description         = "Utility packages for ${var.project_name} Lambda functions (pillow, rich, sympy, etc.)"
+      compatible_runtimes = ["python3.11"]
+      requirements_file   = "utility-dependencies.txt"
+      size_estimate       = "~38M"
+    }
+  }
 
-# AI Core Dependencies Layer - CONSOLIDATED INTO CORE LAYER
-# module "lambda_layer_ai_core" {
-#   source = "./modules/lambda-layer"
-#
-#   project_name        = var.project_name
-#   environment         = var.environment
-#   requirements_file   = "ai-core-dependencies.txt"
-#   layer_name_suffix   = "ai-core"
-#   layer_description   = "Core AI dependencies for ${var.project_name} Lambda functions (aiohttp, pyjwt, tenacity, etc.)"
-#   compatible_runtimes = ["python3.11"]
-#   python_command      = "python3.11"
-#   s3_bucket_name      = module.lambda_layers_bucket.bucket_id
-# }
-
-# Strands Core Dependencies Layer - Core AI agent framework
-module "lambda_layer_strands" {
-  source = "./modules/lambda-layer"
-
-  project_name        = var.project_name
-  environment         = var.environment
-  requirements_file   = "strands-dependencies.txt"
-  layer_name_suffix   = "strands"
-  layer_description   = "Strands Agents core framework for ${var.project_name} Lambda functions (strands-agents)"
-  compatible_runtimes = ["python3.11"]
-  python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
-}
-
-# Strands Tools Dependencies Layer - AI agent tools
-module "lambda_layer_strands_tools" {
-  source = "./modules/lambda-layer"
-
-  project_name        = var.project_name
-  environment         = var.environment
-  requirements_file   = "strands-tools-dependencies.txt"
-  layer_name_suffix   = "strands-tools"
-  layer_description   = "Strands Agents tools for ${var.project_name} Lambda functions (strands-agents-tools)"
-  compatible_runtimes = ["python3.11"]
-  python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
-}
-
-# Utility Dependencies Layer - Optional utility packages
-module "lambda_layer_utility" {
-  source = "./modules/lambda-layer"
-
-  project_name        = var.project_name
-  environment         = var.environment
-  requirements_file   = "utility-dependencies.txt"
-  layer_name_suffix   = "utility"
-  layer_description   = "Utility and optional dependencies for ${var.project_name} Lambda functions (pillow, sympy, rich, etc.)"
-  compatible_runtimes = ["python3.11"]
-  python_command      = "python3.11"
-  s3_bucket_name      = module.lambda_layers_bucket.bucket_id
+  depends_on = [module.lambda_layers_bucket]
 }
 
 # S3 bucket for Lambda layers (large files >50MB)

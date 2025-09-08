@@ -1,0 +1,15 @@
+# Python dependencies for layer building container
+# These are used to build layers, not included in the layers themselves
+
+# AWS SDK
+boto3>=1.34.0
+botocore>=1.34.0
+
+# Build tools
+pip>=23.0.0
+setuptools>=65.0.0
+wheel>=0.40.0
+
+# Utilities
+requests>=2.31.0
+python-dotenv>=1.0.0

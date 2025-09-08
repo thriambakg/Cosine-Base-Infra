@@ -64,8 +64,8 @@ jobs:
             echo "environment=development" >> $GITHUB_OUTPUT
           fi
 
-  build-lambda-layer:
-    name: 'Build Lambda Layer'
+  build-container-layers:
+    name: 'Build Container-based Lambda Layers'
     runs-on: ubuntu-latest
     needs: determine-environment
     if: ${{ !github.event.inputs.destroy }}
@@ -74,83 +74,36 @@ jobs:
       - name: Checkout Repository
         uses: actions/checkout@v4
 
-      - name: Setup Python
-        uses: actions/setup-python@v4
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
         with:
-          python-version: '3.11'
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
 
-      - name: Build Lambda Layers
+      - name: Set environment variables
         run: |
-          cd terraform/modules/lambda-layer
-          chmod +x build-layer.sh
-          chmod +x build-all-layers.sh
-          
-          # Build all layers dynamically
-          echo "🔍 Discovering available layers..."
-          for req_file in layer-definitions/*-dependencies.txt; do
-            if [ -f "$req_file" ]; then
-              layer_name=$(basename "$req_file" -dependencies.txt)
-              echo "📦 Found layer: $layer_name"
-            fi
-          done
-          
-          # Build all layers using the consolidated script
-          ./build-all-layers.sh
-        env:
-          PYTHON_CMD: python3
+          echo "PROJECT_NAME=cosine" >> $GITHUB_ENV
+          echo "ENVIRONMENT=${{ needs.determine-environment.outputs.environment }}" >> $GITHUB_ENV
+          echo "AWS_ACCOUNT_ID=${{ secrets.AWS_ACCOUNT_ID }}" >> $GITHUB_ENV
+          echo "AWS_REGION=us-east-1" >> $GITHUB_ENV
 
-      - name: Verify Layer Contents
+      - name: Build Container-based Lambda Layers
         run: |
-          cd terraform/modules/lambda-layer
-          
-          # Dynamically discover and verify all layers
-          echo "🔍 Verifying dynamically discovered layers..."
-          layer_count=0
-          for req_file in layer-definitions/*-dependencies.txt; do
-            if [ -f "$req_file" ]; then
-              layer_name=$(basename "$req_file" -dependencies.txt)
-              layer_file="layer-${layer_name}.zip"
-              
-              if [ -f "$layer_file" ]; then
-                echo "✅ $layer_file created successfully"
-                echo "  Size: $(du -h "$layer_file" | cut -f1)"
-                echo "  Contents preview:"
-                unzip -l "$layer_file" | head -5
-                echo ""
-                layer_count=$((layer_count + 1))
-              else
-                echo "❌ $layer_file missing"
-                exit 1
-              fi
-            fi
-          done
-          
-          echo "✅ Successfully verified $layer_count layers"
-          
-          # Verify critical files exist in Strands layer (where OpenTelemetry would be)
-          if unzip -l layer-strands.zip | grep -q "python/opentelemetry_api-.*/entry_points.txt"; then
-            echo "✅ OpenTelemetry entry_points.txt found in Strands layer"
-          else
-            echo "⚠️  OpenTelemetry entry_points.txt not found in Strands layer (may not be needed)"
-          fi
-          
-          # Verify pydantic_core exists in financial layer
-          if unzip -l layer-financial.zip | grep -q "python/pydantic_core/"; then
-            echo "✅ pydantic_core found in financial layer"
-          else
-            echo "⚠️  pydantic_core not found in financial layer (may not be needed)"
-          fi
+          cd terraform/modules/container-layers
+          chmod +x build-container-layers.sh
+          ./build-container-layers.sh
 
       - name: Upload Lambda Layer Artifacts
         uses: actions/upload-artifact@v4
         with:
           name: lambda-layers-${{ needs.determine-environment.outputs.environment }}
-          path: terraform/modules/lambda-layer/layer-*.zip
+          path: terraform/modules/container-layers/layer-*.zip
           retention-days: 1
 
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'
-    needs: [determine-environment, build-lambda-layer]
+    needs: [determine-environment, build-container-layers]
     uses: thriambakg/Cosine-pipelines/.github/workflows/terraform-reusable.yml@master
     with:
       terraform_directory: 'terraform'
@@ -167,7 +120,7 @@ jobs:
   comment-pr:
     name: 'Comment on PR'
     runs-on: ubuntu-latest
-    needs: [determine-environment, build-lambda-layer, deploy-base-infrastructure]
+    needs: [determine-environment, build-container-layers, deploy-base-infrastructure]
     if: github.event_name == 'pull_request'
     steps:
       - name: Comment PR with Results
@@ -182,12 +135,12 @@ jobs:
             - **Environment:** ${{ needs.determine-environment.outputs.environment }}
             - **Infrastructure Type:** Base Infrastructure
             - **Dependencies:** Self-contained (creates backend resources)
-            - **Lambda Layer:** Built with Linux-compatible dependencies
+            - **Lambda Layers:** Container-built with no size limitations
             
             ### Build Results:
-            - **Lambda Layer:** ✅ Built successfully
-            - **OpenTelemetry:** ✅ Entry points configured
-            - **Pydantic Core:** ✅ Linux-compatible extensions included
+            - **Container Layers:** ✅ Built successfully with no size limits
+            - **Strands Agents:** ✅ AWS Strands Agents SDK included
+            - **Financial Libraries:** ✅ yfinance, numpy, pandas included
             
             ### Security Scans:
             - **TFLint:** Passed

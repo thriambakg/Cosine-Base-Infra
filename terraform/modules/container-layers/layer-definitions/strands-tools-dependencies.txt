@@ -1,0 +1,7 @@
+# Strands Tools Dependencies Layer - AWS Strands Agents Tools
+# Tools package for AWS Strands Agents SDK
+# Repository: https://github.com/strands-agents/sdk-python
+# Layer size: ~15M (minimal version)
+
+# Strands Agents Tools package (using available version)
+strands-agents-tools==0.2.6
