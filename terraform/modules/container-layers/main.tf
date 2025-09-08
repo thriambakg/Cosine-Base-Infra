@@ -110,6 +110,10 @@ resource "aws_s3_bucket_lifecycle_configuration" "layer_artifacts" {
     id     = "cleanup_old_versions"
     status = "Enabled"
 
+    filter {
+      prefix = "layers/"
+    }
+
     noncurrent_version_expiration {
       noncurrent_days = 30
     }
@@ -124,7 +128,7 @@ resource "null_resource" "build_layers" {
     command = <<-EOT
       # Get AWS Account ID
       AWS_ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
-      ECR_REGISTRY="${AWS_ACCOUNT_ID}.dkr.ecr.${var.aws_region}.amazonaws.com"
+      ECR_REGISTRY="$${AWS_ACCOUNT_ID}.dkr.ecr.${var.aws_region}.amazonaws.com"
       ECR_REPOSITORY="${var.project_name}-layer-builder-${var.environment}"
       
       # Login to ECR
