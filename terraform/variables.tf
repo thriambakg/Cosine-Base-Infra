@@ -174,11 +174,6 @@ variable "cognito_google_client_secret" {
   sensitive   = true
 }
 
-variable "cognito_enable_microsoft_provider" {
-  description = "Enable Microsoft as an identity provider"
-  type        = bool
-  default     = false
-}
 
 
 
