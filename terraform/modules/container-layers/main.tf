@@ -158,9 +158,17 @@ resource "null_resource" "build_layers" {
       # Login to ECR
       aws ecr get-login-password --region ${var.aws_region} | docker login --username AWS --password-stdin $ECR_REGISTRY
       
+      # Generate unique tag to force rebuild
+      TIMESTAMP=$(date +%Y%m%d-%H%M%S)
+      IMAGE_TAG="build-$${TIMESTAMP}"
+      
       # Always build and push container image (force rebuild for permission fixes)
-      echo "Building and pushing container image..."
-      docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+      echo "Building and pushing container image with tag: $IMAGE_TAG"
+      docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
+      docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
+      
+      # Also tag as latest for future use
+      docker tag $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG $ECR_REGISTRY/$ECR_REPOSITORY:latest
       docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
       
       # Run container to build specific layer
@@ -172,7 +180,7 @@ resource "null_resource" "build_layers" {
         -e LAYER_NAME=${each.key} \
         -e REQUIREMENTS_FILE=${each.value.requirements_file} \
         -v $(pwd):/app \
-        $ECR_REGISTRY/$ECR_REPOSITORY:latest
+        $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
     EOT
   }
 
