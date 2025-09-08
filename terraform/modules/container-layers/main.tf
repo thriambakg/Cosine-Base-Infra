@@ -5,7 +5,7 @@
 # ECR Repository for Layer Container
 resource "aws_ecr_repository" "layer_builder" {
   name                 = "${var.project_name}-layer-builder-${var.environment}"
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -17,7 +17,7 @@ resource "aws_ecr_repository" "layer_builder" {
 # ECR Repository for Layer Artifacts
 resource "aws_ecr_repository" "layer_artifacts" {
   name                 = "${var.project_name}-layer-artifacts-${var.environment}"
-  image_tag_mutability = "MUTABLE"
+  image_tag_mutability = "IMMUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -94,6 +94,28 @@ resource "aws_s3_bucket" "layer_artifacts" {
   bucket = "${var.project_name}-layer-artifacts-${var.environment}"
 
   tags = var.tags
+}
+
+# S3 Bucket Public Access Block
+resource "aws_s3_bucket_public_access_block" "layer_artifacts" {
+  bucket = aws_s3_bucket.layer_artifacts.id
+
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
+}
+
+# S3 Bucket Encryption
+resource "aws_s3_bucket_server_side_encryption_configuration" "layer_artifacts" {
+  bucket = aws_s3_bucket.layer_artifacts.id
+
+  rule {
+    apply_server_side_encryption_by_default {
+      sse_algorithm = "AES256"
+    }
+    bucket_key_enabled = true
+  }
 }
 
 resource "aws_s3_bucket_versioning" "layer_artifacts" {

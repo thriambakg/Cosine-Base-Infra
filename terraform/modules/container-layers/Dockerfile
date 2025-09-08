@@ -5,11 +5,14 @@
 FROM python:3.11-slim
 
 # Install system dependencies
-RUN apt-get update && apt-get install -y \
+RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
     curl \
     awscli \
     && rm -rf /var/lib/apt/lists/*
+
+# Create non-root user
+RUN groupadd -r layerbuilder && useradd -r -g layerbuilder layerbuilder
 
 # Set working directory
 WORKDIR /app
@@ -24,6 +27,12 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Make build scripts executable
 RUN chmod +x build-scripts/*.sh
+
+# Change ownership to non-root user
+RUN chown -R layerbuilder:layerbuilder /app
+
+# Switch to non-root user
+USER layerbuilder
 
 # Set environment variables
 ENV PYTHONUNBUFFERED=1
