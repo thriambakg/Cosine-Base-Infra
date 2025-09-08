@@ -166,6 +166,8 @@ resource "null_resource" "build_layers" {
       fi
       
       # Run container to build specific layer
+      echo "Running container for layer: ${each.key}"
+      echo "Requirements file: ${each.value.requirements_file}"
       docker run --rm \
         -e AWS_DEFAULT_REGION=${var.aws_region} \
         -e S3_BUCKET_NAME=${aws_s3_bucket.layer_artifacts.bucket} \

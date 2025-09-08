@@ -31,6 +31,9 @@ RUN chmod +x build-scripts/*.sh
 # Change ownership to non-root user
 RUN chown -R layerbuilder:layerbuilder /app
 
+# Ensure build scripts are still executable after ownership change
+RUN chmod +x build-scripts/*.sh
+
 # Switch to non-root user
 USER layerbuilder
 
@@ -39,4 +42,5 @@ ENV PYTHONUNBUFFERED=1
 ENV AWS_DEFAULT_REGION=us-east-1
 
 # Default command - build individual layer based on environment variables
-CMD ["./build-scripts/build-layer.sh"]
+# Add debugging and ensure script exists
+CMD ["sh", "-c", "echo 'Container started' && ls -la build-scripts/ && file build-scripts/build-layer.sh && ./build-scripts/build-layer.sh"]
