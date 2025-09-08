@@ -158,12 +158,10 @@ resource "null_resource" "build_layers" {
       # Login to ECR
       aws ecr get-login-password --region ${var.aws_region} | docker login --username AWS --password-stdin $ECR_REGISTRY
       
-      # Build and push container if not exists
-      if ! docker manifest inspect $ECR_REGISTRY/$ECR_REPOSITORY:latest >/dev/null 2>&1; then
-        echo "Building and pushing container image..."
-        docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
-        docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
-      fi
+      # Always build and push container image (force rebuild for permission fixes)
+      echo "Building and pushing container image..."
+      docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:latest .
+      docker push $ECR_REGISTRY/$ECR_REPOSITORY:latest
       
       # Run container to build specific layer
       echo "Running container for layer: ${each.key}"
