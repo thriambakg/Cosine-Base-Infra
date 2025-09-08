@@ -203,6 +203,7 @@ module "container_layers" {
   environment  = var.environment
   aws_region   = var.aws_region
   tags         = var.common_tags
+  kms_key_id   = module.kms.main_key_arn
 
   s3_bucket_arn = module.lambda_layers_bucket.bucket_arn
 

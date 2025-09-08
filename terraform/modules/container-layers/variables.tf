@@ -43,3 +43,9 @@ variable "container_image_tag" {
   type        = string
   default     = "latest"
 }
+
+variable "kms_key_id" {
+  description = "KMS key ID for S3 bucket encryption"
+  type        = string
+  default     = null
+}
