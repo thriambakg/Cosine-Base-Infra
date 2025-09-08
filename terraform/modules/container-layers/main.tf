@@ -176,6 +176,9 @@ resource "null_resource" "build_layers" {
       echo "Requirements file: ${each.value.requirements_file}"
       docker run --rm \
         -e AWS_DEFAULT_REGION=${var.aws_region} \
+        -e AWS_ACCESS_KEY_ID \
+        -e AWS_SECRET_ACCESS_KEY \
+        -e AWS_SESSION_TOKEN \
         -e S3_BUCKET_NAME=${aws_s3_bucket.layer_artifacts.bucket} \
         -e LAYER_NAME=${each.key} \
         -e REQUIREMENTS_FILE=${each.value.requirements_file} \
