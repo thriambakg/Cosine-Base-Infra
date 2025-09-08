@@ -9,6 +9,12 @@
 AVD-AWS-0087  # Public access block does not block public policies - Required for CloudFront OAC
 AVD-AWS-0093  # Public access block does not restrict public buckets - Required for CloudFront OAC
 
+# ECR mutable tags are required for container layer building
+# We need to overwrite the 'latest' tag during development/deployment
+# This is acceptable for our use case as the container only runs during deployment
+# Ignore any ECR mutable tag security warnings
+# AVD-AWS-*  # ECR image_tag_mutability = "MUTABLE" warnings
+
 # Example of ignoring specific issues:
 # AVD-AWS-0001
 # CVE-2021-12345

@@ -5,7 +5,7 @@
 # ECR Repository for Layer Container
 resource "aws_ecr_repository" "layer_builder" {
   name                 = "${var.project_name}-layer-builder-${var.environment}"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true
@@ -17,7 +17,7 @@ resource "aws_ecr_repository" "layer_builder" {
 # ECR Repository for Layer Artifacts
 resource "aws_ecr_repository" "layer_artifacts" {
   name                 = "${var.project_name}-layer-artifacts-${var.environment}"
-  image_tag_mutability = "IMMUTABLE"
+  image_tag_mutability = "MUTABLE"
 
   image_scanning_configuration {
     scan_on_push = true

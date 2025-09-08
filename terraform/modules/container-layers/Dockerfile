@@ -9,6 +9,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     zip \
     curl \
     awscli \
+    file \
     && rm -rf /var/lib/apt/lists/*
 
 # Create non-root user
@@ -42,5 +43,4 @@ ENV PYTHONUNBUFFERED=1
 ENV AWS_DEFAULT_REGION=us-east-1
 
 # Default command - build individual layer based on environment variables
-# Add debugging and ensure script exists
-CMD ["sh", "-c", "echo 'Container started' && ls -la build-scripts/ && file build-scripts/build-layer.sh && ./build-scripts/build-layer.sh"]
+CMD ["./build-scripts/build-layer.sh"]
