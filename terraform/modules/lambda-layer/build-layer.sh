@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 2.6 - DOCKER FIX: Fixed output directory creation
+# Version: 2.7 - DOCKER FIX: Fixed nested directory structure
 
 set -e  # Exit on any error
 
@@ -126,8 +126,8 @@ RUN find /tmp/python/ -name "build" -type d -exec rm -rf {} + 2>/dev/null || tru
 RUN find /tmp/python/ -name "setup.py" -delete 2>/dev/null || true
 RUN find /tmp/python/ -name "pyproject.toml" -delete 2>/dev/null || true
 
-# Copy the clean python directory to output
-RUN cp -r /tmp/python /output/
+# Copy the clean python directory contents to output/python
+RUN mkdir -p /output/python && cp -r /tmp/python/* /output/python/
 EOF
         
         # Build the layer using Docker
