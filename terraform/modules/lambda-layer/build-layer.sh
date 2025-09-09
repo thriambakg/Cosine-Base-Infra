@@ -103,21 +103,27 @@ print_status "Using pip install with Linux compatibility flags..."
 if [ "${LAYER_NAME}" = "financial" ]; then
     print_status "Installing financial layer with Python 3.11 compatibility fixes..."
     
+    # Clean up any existing numpy directories to avoid source directory conflicts
+    print_status "Cleaning up any existing NumPy installations..."
+    rm -rf python/numpy* 2>/dev/null || true
+    rm -rf python/pandas* 2>/dev/null || true
+    rm -rf python/scipy* 2>/dev/null || true
+    
     # Install NumPy first with specific flags for Lambda compatibility
     print_status "Installing NumPy with Lambda-compatible settings..."
-    if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
+    if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall; then
         print_warning "NumPy installation with platform flags failed, trying without..."
-        if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --upgrade --no-cache-dir; then
+        if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --upgrade --no-cache-dir --force-reinstall; then
             print_error "NumPy installation failed completely. Trying with more flexible version constraints..."
-            ${PYTHON_CMD} -m pip install numpy -t python/ --upgrade --no-cache-dir
+            ${PYTHON_CMD} -m pip install numpy -t python/ --upgrade --no-cache-dir --force-reinstall
         fi
     fi
     
     # Install other financial dependencies
     print_status "Installing other financial dependencies..."
-    if ! ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
+    if ! ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall; then
         print_warning "Financial dependencies installation with platform flags failed, trying without..."
-        ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --upgrade --no-cache-dir
+        ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --upgrade --no-cache-dir --force-reinstall
     fi
     
     print_success "Financial dependencies installed with Python 3.11 compatibility fixes"
@@ -165,17 +171,37 @@ if [ "${LAYER_NAME}" = "financial" ]; then
     find python/ -name "liblapack*.so*" -delete 2>/dev/null || true
     find python/ -name "libblas*.so*" -delete 2>/dev/null || true
     
-    # Remove NumPy's internal shared libraries that aren't needed in Lambda
+    # Fix NumPy source directory conflicts
     if [ -d "python/numpy" ]; then
+        print_status "Fixing NumPy source directory structure..."
+        
+        # Remove any source files that might cause conflicts
+        find python/numpy/ -name "*.py" -path "*/tests/*" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.py" -path "*/doc/*" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.py" -path "*/benchmarks/*" -delete 2>/dev/null || true
+        find python/numpy/ -name "setup.py" -delete 2>/dev/null || true
+        find python/numpy/ -name "pyproject.toml" -delete 2>/dev/null || true
+        
+        # Remove NumPy's internal shared libraries that aren't needed in Lambda
         find python/numpy/ -name "*.so" -not -path "*/core/*" -delete 2>/dev/null || true
         # Keep only essential NumPy core files
         find python/numpy/core/ -name "*.so" -not -name "*multiarray*" -not -name "*umath*" -delete 2>/dev/null || true
+        
+        # Ensure NumPy has proper __init__.py files
+        if [ ! -f "python/numpy/__init__.py" ]; then
+            echo "# NumPy package" > python/numpy/__init__.py
+        fi
     fi
     
     # Remove SciPy shared libraries that might cause issues
     if [ -d "python/scipy" ]; then
         find python/scipy/ -name "*.so" -delete 2>/dev/null || true
     fi
+    
+    # Remove any remaining source directories that might cause conflicts
+    find python/ -name "*.egg-info" -type d -exec rm -rf {} + 2>/dev/null || true
+    find python/ -name "dist" -type d -exec rm -rf {} + 2>/dev/null || true
+    find python/ -name "build" -type d -exec rm -rf {} + 2>/dev/null || true
     
     print_success "NumPy Lambda compatibility fixes applied"
 fi
