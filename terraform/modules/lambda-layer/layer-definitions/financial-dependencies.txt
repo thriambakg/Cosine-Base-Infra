@@ -1,8 +1,9 @@
-# Financial Dependencies Layer - MINIMAL financial packages
-# This layer contains only essential financial packages
-# Layer size: ~15M (ultra-minimal - only what chat agent needs)
+# Financial Dependencies Layer - Lambda-compatible financial packages
+# This layer contains financial packages optimized for AWS Lambda runtime
+# Layer size: ~25M (Lambda-compatible versions)
 
-# Financial data and analysis (minimal versions)
+# Financial data and analysis (Lambda-compatible versions)
 yfinance>=0.2.18
-numpy>=1.24.0,<1.25.0
-pandas>=2.0.0,<2.1.0
+numpy==1.21.6
+pandas==1.5.3
+scipy==1.9.3

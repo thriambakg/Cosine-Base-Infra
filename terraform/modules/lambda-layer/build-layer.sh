@@ -99,20 +99,40 @@ mkdir -p python
 print_status "Installing dependencies from ${REQUIREMENTS_FILE}..."
 print_status "Using pip install with Linux compatibility flags..."
 
-if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
-    print_error "Failed to install dependencies. Trying with more flexible options..."
+# Special handling for financial layer with NumPy
+if [ "${LAYER_NAME}" = "financial" ]; then
+    print_status "Installing financial layer with NumPy compatibility fixes..."
     
-    # Try again without platform restrictions for packages that might not have Linux wheels
-    if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --upgrade --no-cache-dir; then
-        print_error "Failed to install dependencies even with flexible options."
-        print_error "Please check your requirements file: layer-definitions/${REQUIREMENTS_FILE}"
-        print_error "Consider using more flexible version constraints (e.g., >=1.0.0 instead of ==1.0.0)"
-        exit 1
-    else
-        print_warning "Dependencies installed with flexible options (may not be Linux-optimized)"
+    # Install NumPy first with specific flags for Lambda compatibility
+    print_status "Installing NumPy with Lambda-compatible settings..."
+    if ! ${PYTHON_CMD} -m pip install numpy==1.21.6 -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
+        print_warning "NumPy installation with platform flags failed, trying without..."
+        ${PYTHON_CMD} -m pip install numpy==1.21.6 -t python/ --upgrade --no-cache-dir
     fi
+    
+    # Install other financial dependencies
+    print_status "Installing other financial dependencies..."
+    ${PYTHON_CMD} -m pip install pandas==1.5.3 scipy==1.9.3 yfinance>=0.2.18 -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir || \
+    ${PYTHON_CMD} -m pip install pandas==1.5.3 scipy==1.9.3 yfinance>=0.2.18 -t python/ --upgrade --no-cache-dir
+    
+    print_success "Financial dependencies installed with NumPy compatibility fixes"
 else
-    print_success "Dependencies installed successfully with Linux compatibility"
+    # Standard installation for other layers
+    if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
+        print_error "Failed to install dependencies. Trying with more flexible options..."
+        
+        # Try again without platform restrictions for packages that might not have Linux wheels
+        if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --upgrade --no-cache-dir; then
+            print_error "Failed to install dependencies even with flexible options."
+            print_error "Please check your requirements file: layer-definitions/${REQUIREMENTS_FILE}"
+            print_error "Consider using more flexible version constraints (e.g., >=1.0.0 instead of ==1.0.0)"
+            exit 1
+        else
+            print_warning "Dependencies installed with flexible options (may not be Linux-optimized)"
+        fi
+    else
+        print_success "Dependencies installed successfully with Linux compatibility"
+    fi
 fi
 
 # Verify critical packages were installed
@@ -127,6 +147,21 @@ print_status "Installed packages:"
 ls python/ | head -10
 if [ $(ls python/ | wc -l) -gt 10 ]; then
     echo "... and $(($(ls python/ | wc -l) - 10)) more packages"
+fi
+
+# Fix NumPy for Lambda compatibility (financial layer only)
+if [ "${LAYER_NAME}" = "financial" ]; then
+    print_status "Applying NumPy Lambda compatibility fixes..."
+    
+    # Remove problematic NumPy shared libraries that cause import errors
+    find python/ -name "libopenblas*.so*" -delete 2>/dev/null || true
+    find python/ -name "libgfortran*.so*" -delete 2>/dev/null || true
+    find python/ -name "libquadmath*.so*" -delete 2>/dev/null || true
+    
+    # Remove NumPy's internal shared libraries that aren't needed in Lambda
+    find python/numpy/ -name "*.so" -not -path "*/core/*" -delete 2>/dev/null || true
+    
+    print_success "NumPy Lambda compatibility fixes applied"
 fi
 
 # Clean up unnecessary files to reduce layer size

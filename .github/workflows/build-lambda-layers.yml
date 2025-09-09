@@ -1,0 +1,156 @@
+name: Build Lambda Layers
+
+on:
+  push:
+    branches:
+      - main
+      - prod
+      - develop
+      - staging
+    paths:
+      - 'terraform/modules/lambda-layer/**'
+      - '.github/workflows/**'
+  pull_request:
+    branches:
+      - main
+      - prod
+      - develop
+      - staging
+    paths:
+      - 'terraform/modules/lambda-layer/**'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to build layers for'
+        required: true
+        default: 'staging'
+        type: choice
+        options:
+          - development
+          - staging
+          - production
+      layers:
+        description: 'Specific layers to build (comma-separated, leave empty for all)'
+        required: false
+        default: ''
+        type: string
+
+env:
+  TF_VAR_environment: ${{ github.event.inputs.environment || (github.ref == 'refs/heads/main' && 'production' || github.ref == 'refs/heads/prod' && 'production' || github.ref == 'refs/heads/develop' && 'staging' || github.ref == 'refs/heads/staging' && 'staging' || 'development') }}
+
+jobs:
+  determine-environment:
+    name: 'Determine Environment'
+    runs-on: ubuntu-latest
+    outputs:
+      environment: ${{ steps.env.outputs.environment }}
+    steps:
+      - name: Determine Environment
+        id: env
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "environment=${{ github.event.inputs.environment }}" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" == "refs/heads/main" ]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" == "refs/heads/prod" ]; then
+            echo "environment=production" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" == "refs/heads/develop" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          elif [ "${{ github.ref }}" == "refs/heads/staging" ]; then
+            echo "environment=staging" >> $GITHUB_OUTPUT
+          else
+            echo "environment=development" >> $GITHUB_OUTPUT
+          fi
+
+  build-lambda-layers:
+    name: 'Build Lambda Layers'
+    needs: [determine-environment]
+    runs-on: ubuntu-latest
+    outputs:
+      layers-built: ${{ steps.build.outputs.layers-built }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3
+
+      - name: Build Lambda Layers
+        id: build
+        run: |
+          cd terraform/modules/lambda-layer
+          
+          echo "🔧 Building Lambda Layers for environment: ${{ needs.determine-environment.outputs.environment }}"
+          
+          # Make build scripts executable
+          chmod +x build-layer.sh
+          chmod +x build-all-layers.sh
+          
+          # Determine which layers to build
+          if [ -n "${{ github.event.inputs.layers }}" ]; then
+            # Build specific layers from workflow input
+            LAYERS_TO_BUILD="${{ github.event.inputs.layers }}"
+            echo "🎯 Building specified layers: $LAYERS_TO_BUILD"
+            IFS=',' read -ra LAYER_ARRAY <<< "$LAYERS_TO_BUILD"
+            for layer in "${LAYER_ARRAY[@]}"; do
+              layer=$(echo "$layer" | xargs) # trim whitespace
+              echo "🔨 Building layer: $layer"
+              ./build-layer.sh "$layer"
+            done
+          else
+            # Build all layers
+            echo "🔨 Building all layers"
+            ./build-all-layers.sh
+          fi
+          
+          # Verify built layers
+          echo "🔍 Verifying built layers..."
+          layer_count=0
+          for layer_file in layer-*.zip; do
+            if [ -f "$layer_file" ]; then
+              size=$(du -h "$layer_file" | cut -f1)
+              echo "✅ $layer_file found (${size})"
+              layer_count=$((layer_count + 1))
+            fi
+          done
+          
+          if [ $layer_count -eq 0 ]; then
+            echo "❌ No layer files found"
+            exit 1
+          fi
+          
+          echo "✅ Successfully built $layer_count Lambda layer artifacts"
+          echo "layers-built=true" >> $GITHUB_OUTPUT
+
+      - name: Upload Lambda Layer Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-layers-${{ needs.determine-environment.outputs.environment }}
+          path: terraform/modules/lambda-layer/layer-*.zip
+          retention-days: 7
+
+      - name: Build Summary
+        run: |
+          echo "## 🔧 Lambda Layer Build Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "- **Environment:** ${{ needs.determine-environment.outputs.environment }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **Layers Built:** ${{ steps.build.outputs.layers-built }}" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 📦 Available Layers:" >> $GITHUB_STEP_SUMMARY
+          echo "- **Core Layer:** boto3, requests, common utilities" >> $GITHUB_STEP_SUMMARY
+          echo "- **Financial Layer:** yfinance, numpy, pandas" >> $GITHUB_STEP_SUMMARY
+          echo "- **AI Layer:** AI/ML dependencies" >> $GITHUB_STEP_SUMMARY
+          echo "- **Utility Layer:** Additional utilities" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "### 🚀 Next Steps:" >> $GITHUB_STEP_SUMMARY
+          echo "1. Lambda layers are now ready for deployment" >> $GITHUB_STEP_SUMMARY
+          echo "2. Deploy base infrastructure to use these layers" >> $GITHUB_STEP_SUMMARY
+          echo "3. Layers will be automatically attached to Lambda functions" >> $GITHUB_STEP_SUMMARY
