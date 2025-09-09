@@ -238,7 +238,7 @@ module "core_layer" {
 
   project_name        = var.project_name
   environment         = var.environment
-  layer_name_suffix   = "core-deps"
+  layer_name_suffix   = "core"
   layer_description   = "Core dependencies (boto3, requests, common utilities)"
   requirements_file   = "core-dependencies.txt"
   compatible_runtimes = ["python3.11", "python3.12"]
@@ -254,7 +254,7 @@ module "financial_layer" {
 
   project_name        = var.project_name
   environment         = var.environment
-  layer_name_suffix   = "financial-deps"
+  layer_name_suffix   = "financial"
   layer_description   = "Financial analysis dependencies (yfinance, numpy, pandas)"
   requirements_file   = "financial-dependencies.txt"
   compatible_runtimes = ["python3.11", "python3.12"]

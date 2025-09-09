@@ -64,9 +64,16 @@ jobs:
             echo "environment=development" >> $GITHUB_OUTPUT
           fi
 
+  build-lambda-layers:
+    name: 'Build Lambda Layers'
+    needs: [determine-environment]
+    uses: ./.github/workflows/build-lambda-layers.yml
+    with:
+      environment: ${{ needs.determine-environment.outputs.environment }}
+
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'
-    needs: [determine-environment]
+    needs: [determine-environment, build-lambda-layers]
     uses: thriambakg/Cosine-pipelines/.github/workflows/terraform-reusable.yml@master
     with:
       terraform_directory: 'terraform'
@@ -75,7 +82,7 @@ jobs:
       destroy: ${{ github.event.inputs.destroy == 'true' }}
       force_apply: ${{ github.event.inputs.force_apply == 'true' }}
       base_infra_dependency: false
-      has_lambda_layer: false
+      has_lambda_layer: true
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
@@ -83,7 +90,7 @@ jobs:
   comment-pr:
     name: 'Comment on PR'
     runs-on: ubuntu-latest
-    needs: [determine-environment, deploy-base-infrastructure]
+    needs: [determine-environment, build-lambda-layers, deploy-base-infrastructure]
     if: github.event_name == 'pull_request'
     steps:
       - name: Comment PR with Results
@@ -98,7 +105,7 @@ jobs:
             - **Environment:** ${{ needs.determine-environment.outputs.environment }}
             - **Infrastructure Type:** Base Infrastructure
             - **Dependencies:** Self-contained (creates backend resources)
-            - **Lambda Layers:** Not applicable (chat agent uses container deployment)
+            - **Lambda Layers:** ✅ Core and Financial dependencies layers
             
             ### Infrastructure Components:
             - **KMS Keys:** ✅ Encryption keys for all services
@@ -107,6 +114,7 @@ jobs:
             - **CloudWatch:** ✅ Logging and monitoring
             - **Secrets Manager:** ✅ Secure credential storage
             - **S3 Buckets:** ✅ Static hosting and file storage
+            - **Lambda Layers:** ✅ Core and Financial dependencies for Lambda functions
             
             ### Security Scans:
             - **TFLint:** Passed
