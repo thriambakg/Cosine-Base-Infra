@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 2.0 - Added NumPy source directory conflict fixes
+# Version: 2.1 - Enhanced NumPy source directory cleanup
 
 set -e  # Exit on any error
 
@@ -110,6 +110,11 @@ if [ "${LAYER_NAME}" = "financial" ]; then
     rm -rf python/pandas* 2>/dev/null || true
     rm -rf python/scipy* 2>/dev/null || true
     
+    # Additional cleanup to prevent source directory conflicts
+    find python/ -name "*numpy*" -type d -exec rm -rf {} + 2>/dev/null || true
+    find python/ -name "*pandas*" -type d -exec rm -rf {} + 2>/dev/null || true
+    find python/ -name "*scipy*" -type d -exec rm -rf {} + 2>/dev/null || true
+    
     # Install NumPy first with specific flags for Lambda compatibility
     print_status "Installing NumPy with Lambda-compatible settings..."
     if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall; then
@@ -176,21 +181,50 @@ if [ "${LAYER_NAME}" = "financial" ]; then
     if [ -d "python/numpy" ]; then
         print_status "Fixing NumPy source directory structure..."
         
-        # Remove any source files that might cause conflicts
+        # Remove ALL source files that could cause conflicts
         find python/numpy/ -name "*.py" -path "*/tests/*" -delete 2>/dev/null || true
         find python/numpy/ -name "*.py" -path "*/doc/*" -delete 2>/dev/null || true
         find python/numpy/ -name "*.py" -path "*/benchmarks/*" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.py" -path "*/f2py/*" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.py" -path "*/distutils/*" -delete 2>/dev/null || true
         find python/numpy/ -name "setup.py" -delete 2>/dev/null || true
         find python/numpy/ -name "pyproject.toml" -delete 2>/dev/null || true
+        find python/numpy/ -name "setup.cfg" -delete 2>/dev/null || true
+        find python/numpy/ -name "MANIFEST.in" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.c" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.h" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.f" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.f90" -delete 2>/dev/null || true
+        
+        # Remove entire problematic directories
+        rm -rf python/numpy/tests 2>/dev/null || true
+        rm -rf python/numpy/doc 2>/dev/null || true
+        rm -rf python/numpy/benchmarks 2>/dev/null || true
+        rm -rf python/numpy/f2py 2>/dev/null || true
+        rm -rf python/numpy/distutils 2>/dev/null || true
+        rm -rf python/numpy/ma/tests 2>/dev/null || true
+        rm -rf python/numpy/fft/tests 2>/dev/null || true
+        rm -rf python/numpy/linalg/tests 2>/dev/null || true
+        rm -rf python/numpy/random/tests 2>/dev/null || true
         
         # Remove NumPy's internal shared libraries that aren't needed in Lambda
         find python/numpy/ -name "*.so" -not -path "*/core/*" -delete 2>/dev/null || true
         # Keep only essential NumPy core files
         find python/numpy/core/ -name "*.so" -not -name "*multiarray*" -not -name "*umath*" -delete 2>/dev/null || true
         
+        # Remove any remaining build artifacts
+        find python/numpy/ -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+        find python/numpy/ -name "*.pyc" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.pyo" -delete 2>/dev/null || true
+        
         # Ensure NumPy has proper __init__.py files
         if [ ! -f "python/numpy/__init__.py" ]; then
             echo "# NumPy package" > python/numpy/__init__.py
+        fi
+        
+        # Create a minimal __init__.py for core if it doesn't exist
+        if [ ! -f "python/numpy/core/__init__.py" ]; then
+            echo "# NumPy core package" > python/numpy/core/__init__.py
         fi
     fi
     
