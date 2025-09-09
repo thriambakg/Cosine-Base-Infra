@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 2.3 - PLATFORM FIX: Correct AWS Lambda platform flags
+# Version: 2.4 - DOCKER FIX: Build in exact AWS Lambda environment
 
 set -e  # Exit on any error
 
@@ -102,18 +102,53 @@ print_status "Using pip install with Linux compatibility flags..."
 
 # Special handling for financial layer with NumPy
 if [ "${LAYER_NAME}" = "financial" ]; then
-    print_status "Installing financial layer with Python 3.11 compatibility fixes..."
+    print_status "Installing financial layer with Docker-based AWS Lambda compatibility..."
     
-    # Clean up any existing numpy directories to avoid source directory conflicts
-    print_status "Cleaning up any existing NumPy installations..."
-    rm -rf python/numpy* 2>/dev/null || true
-    rm -rf python/pandas* 2>/dev/null || true
-    rm -rf python/scipy* 2>/dev/null || true
-    
-    # Additional cleanup to prevent source directory conflicts
-    find python/ -name "*numpy*" -type d -exec rm -rf {} + 2>/dev/null || true
-    find python/ -name "*pandas*" -type d -exec rm -rf {} + 2>/dev/null || true
-    find python/ -name "*scipy*" -type d -exec rm -rf {} + 2>/dev/null || true
+    # Use Docker to build in exact AWS Lambda environment
+    if command -v docker >/dev/null 2>&1; then
+        print_status "Using Docker to build in AWS Lambda-compatible environment..."
+        
+        # Create a temporary Dockerfile for building the layer
+        cat > Dockerfile.layer << 'EOF'
+FROM public.ecr.aws/lambda/python:3.11
+
+# Install dependencies in the exact Lambda environment
+COPY layer-definitions/financial-dependencies.txt /tmp/requirements.txt
+RUN pip install -r /tmp/requirements.txt -t /tmp/python/ --no-cache-dir --force-reinstall
+
+# Clean up any source directory conflicts
+RUN find /tmp/python/ -name "*.egg-info" -type d -exec rm -rf {} + 2>/dev/null || true
+RUN find /tmp/python/ -name "dist" -type d -exec rm -rf {} + 2>/dev/null || true
+RUN find /tmp/python/ -name "build" -type d -exec rm -rf {} + 2>/dev/null || true
+RUN find /tmp/python/ -name "setup.py" -delete 2>/dev/null || true
+RUN find /tmp/python/ -name "pyproject.toml" -delete 2>/dev/null || true
+
+# Copy the clean python directory
+CMD ["cp", "-r", "/tmp/python", "/output/"]
+EOF
+        
+        # Build the layer using Docker
+        docker build -f Dockerfile.layer -t lambda-layer-builder .
+        docker run --rm -v "$(pwd):/output" lambda-layer-builder
+        
+        # Clean up
+        rm -f Dockerfile.layer
+        docker rmi lambda-layer-builder 2>/dev/null || true
+        
+        print_success "Financial layer built using Docker in AWS Lambda environment"
+    else
+        print_warning "Docker not available, falling back to local build..."
+        
+        # Clean up any existing numpy directories to avoid source directory conflicts
+        print_status "Cleaning up any existing NumPy installations..."
+        rm -rf python/numpy* 2>/dev/null || true
+        rm -rf python/pandas* 2>/dev/null || true
+        rm -rf python/scipy* 2>/dev/null || true
+        
+        # Additional cleanup to prevent source directory conflicts
+        find python/ -name "*numpy*" -type d -exec rm -rf {} + 2>/dev/null || true
+        find python/ -name "*pandas*" -type d -exec rm -rf {} + 2>/dev/null || true
+        find python/ -name "*scipy*" -type d -exec rm -rf {} + 2>/dev/null || true
     
     # Install NumPy with a completely different approach to avoid source directory conflicts
     print_status "Installing NumPy with Lambda-compatible settings..."
@@ -144,7 +179,8 @@ if [ "${LAYER_NAME}" = "financial" ]; then
         fi
     fi
     
-    print_success "Financial dependencies installed with Python 3.11 compatibility fixes"
+        print_success "Financial dependencies installed with Python 3.11 compatibility fixes"
+    fi
 else
     # Standard installation for other layers
     if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
