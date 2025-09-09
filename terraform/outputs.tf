@@ -349,3 +349,27 @@ output "session_management_config" {
     context_ttl_days              = module.session_management.context_ttl_days
   }
 }
+
+# ============================================================================
+# LAMBDA LAYER OUTPUTS
+# ============================================================================
+
+output "core_layer_arn" {
+  description = "ARN of the core dependencies Lambda layer"
+  value       = module.core_layer.layer_arn
+}
+
+output "core_layer_version" {
+  description = "Version of the core dependencies Lambda layer"
+  value       = module.core_layer.layer_version
+}
+
+output "financial_layer_arn" {
+  description = "ARN of the financial dependencies Lambda layer"
+  value       = module.financial_layer.layer_arn
+}
+
+output "financial_layer_version" {
+  description = "Version of the financial dependencies Lambda layer"
+  value       = module.financial_layer.layer_version
+}

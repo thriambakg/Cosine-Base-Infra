@@ -231,3 +231,35 @@ module "session_management" {
 
   depends_on = [module.kms]
 }
+
+# Core Dependencies Layer for Lambda functions
+module "core_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "core-deps"
+  layer_description   = "Core dependencies (boto3, requests, common utilities)"
+  requirements_file   = "core-dependencies.txt"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.s3_static_hosting.bucket_name
+  python_command      = "python3.11"
+
+  depends_on = [module.s3_static_hosting]
+}
+
+# Financial Dependencies Layer for Lambda functions
+module "financial_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "financial-deps"
+  layer_description   = "Financial analysis dependencies (yfinance, numpy, pandas)"
+  requirements_file   = "financial-dependencies.txt"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.s3_static_hosting.bucket_name
+  python_command      = "python3.11"
+
+  depends_on = [module.s3_static_hosting]
+}
