@@ -330,3 +330,22 @@ output "frontend_auth_config" {
     environment     = var.environment
   }
 }
+
+# ============================================================================
+# SESSION MANAGEMENT OUTPUTS
+# ============================================================================
+
+output "session_management_config" {
+  description = "Complete session management configuration for application layer"
+  value = {
+    sessions_table_name           = module.session_management.sessions_table_name
+    sessions_table_arn            = module.session_management.sessions_table_arn
+    session_context_table_name    = module.session_management.session_context_table_name
+    session_context_table_arn     = module.session_management.session_context_table_arn
+    session_archives_bucket_name  = module.session_management.session_archives_bucket_name
+    session_archives_bucket_arn   = module.session_management.session_archives_bucket_arn
+    session_management_policy_arn = module.session_management.session_management_policy_arn
+    session_ttl_days              = module.session_management.session_ttl_days
+    context_ttl_days              = module.session_management.context_ttl_days
+  }
+}
