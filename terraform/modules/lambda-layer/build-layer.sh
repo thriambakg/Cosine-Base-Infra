@@ -7,6 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
+# Version: 2.0 - Added NumPy source directory conflict fixes
 
 set -e  # Exit on any error
 
