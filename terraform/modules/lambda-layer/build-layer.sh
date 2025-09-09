@@ -101,21 +101,26 @@ print_status "Using pip install with Linux compatibility flags..."
 
 # Special handling for financial layer with NumPy
 if [ "${LAYER_NAME}" = "financial" ]; then
-    print_status "Installing financial layer with NumPy compatibility fixes..."
+    print_status "Installing financial layer with Python 3.11 compatibility fixes..."
     
     # Install NumPy first with specific flags for Lambda compatibility
     print_status "Installing NumPy with Lambda-compatible settings..."
-    if ! ${PYTHON_CMD} -m pip install numpy==1.21.6 -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
+    if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
         print_warning "NumPy installation with platform flags failed, trying without..."
-        ${PYTHON_CMD} -m pip install numpy==1.21.6 -t python/ --upgrade --no-cache-dir
+        if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --upgrade --no-cache-dir; then
+            print_error "NumPy installation failed completely. Trying with more flexible version constraints..."
+            ${PYTHON_CMD} -m pip install numpy -t python/ --upgrade --no-cache-dir
+        fi
     fi
     
     # Install other financial dependencies
     print_status "Installing other financial dependencies..."
-    ${PYTHON_CMD} -m pip install pandas==1.5.3 scipy==1.9.3 yfinance>=0.2.18 -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir || \
-    ${PYTHON_CMD} -m pip install pandas==1.5.3 scipy==1.9.3 yfinance>=0.2.18 -t python/ --upgrade --no-cache-dir
+    if ! ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
+        print_warning "Financial dependencies installation with platform flags failed, trying without..."
+        ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --upgrade --no-cache-dir
+    fi
     
-    print_success "Financial dependencies installed with NumPy compatibility fixes"
+    print_success "Financial dependencies installed with Python 3.11 compatibility fixes"
 else
     # Standard installation for other layers
     if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
@@ -153,13 +158,24 @@ fi
 if [ "${LAYER_NAME}" = "financial" ]; then
     print_status "Applying NumPy Lambda compatibility fixes..."
     
-    # Remove problematic NumPy shared libraries that cause import errors
+    # Remove problematic shared libraries that cause import errors
     find python/ -name "libopenblas*.so*" -delete 2>/dev/null || true
     find python/ -name "libgfortran*.so*" -delete 2>/dev/null || true
     find python/ -name "libquadmath*.so*" -delete 2>/dev/null || true
+    find python/ -name "liblapack*.so*" -delete 2>/dev/null || true
+    find python/ -name "libblas*.so*" -delete 2>/dev/null || true
     
     # Remove NumPy's internal shared libraries that aren't needed in Lambda
-    find python/numpy/ -name "*.so" -not -path "*/core/*" -delete 2>/dev/null || true
+    if [ -d "python/numpy" ]; then
+        find python/numpy/ -name "*.so" -not -path "*/core/*" -delete 2>/dev/null || true
+        # Keep only essential NumPy core files
+        find python/numpy/core/ -name "*.so" -not -name "*multiarray*" -not -name "*umath*" -delete 2>/dev/null || true
+    fi
+    
+    # Remove SciPy shared libraries that might cause issues
+    if [ -d "python/scipy" ]; then
+        find python/scipy/ -name "*.so" -delete 2>/dev/null || true
+    fi
     
     print_success "NumPy Lambda compatibility fixes applied"
 fi
