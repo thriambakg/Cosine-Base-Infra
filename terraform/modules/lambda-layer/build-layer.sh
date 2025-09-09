@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 2.5 - DOCKER FIX: Fixed Docker extraction process
+# Version: 2.6 - DOCKER FIX: Fixed output directory creation
 
 set -e  # Exit on any error
 
@@ -111,6 +111,9 @@ if [ "${LAYER_NAME}" = "financial" ]; then
         # Create a temporary Dockerfile for building the layer
         cat > Dockerfile.layer << 'EOF'
 FROM public.ecr.aws/lambda/python:3.11
+
+# Create output directory
+RUN mkdir -p /output
 
 # Install dependencies in the exact Lambda environment
 COPY layer-definitions/financial-dependencies.txt /tmp/requirements.txt
