@@ -25,6 +25,26 @@ resource "aws_dynamodb_table" "sessions" {
     type = "S"
   }
 
+  attribute {
+    name = "GSI1PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI1SK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI2PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI2SK"
+    type = "S"
+  }
+
   # Global Secondary Index for querying sessions by user
   global_secondary_index {
     name            = "UserSessionsIndex"
@@ -78,6 +98,16 @@ resource "aws_dynamodb_table" "session_context" {
 
   attribute {
     name = "SK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI1PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI1SK"
     type = "S"
   }
 
