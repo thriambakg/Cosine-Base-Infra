@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 2.4 - DOCKER FIX: Build in exact AWS Lambda environment
+# Version: 2.5 - DOCKER FIX: Fixed Docker extraction process
 
 set -e  # Exit on any error
 
@@ -123,13 +123,17 @@ RUN find /tmp/python/ -name "build" -type d -exec rm -rf {} + 2>/dev/null || tru
 RUN find /tmp/python/ -name "setup.py" -delete 2>/dev/null || true
 RUN find /tmp/python/ -name "pyproject.toml" -delete 2>/dev/null || true
 
-# Copy the clean python directory
-CMD ["cp", "-r", "/tmp/python", "/output/"]
+# Copy the clean python directory to output
+RUN cp -r /tmp/python /output/
 EOF
         
         # Build the layer using Docker
         docker build -f Dockerfile.layer -t lambda-layer-builder .
-        docker run --rm -v "$(pwd):/output" lambda-layer-builder
+        
+        # Extract the python directory from the Docker container
+        docker create --name temp-container lambda-layer-builder
+        docker cp temp-container:/output/python ./python
+        docker rm temp-container
         
         # Clean up
         rm -f Dockerfile.layer
