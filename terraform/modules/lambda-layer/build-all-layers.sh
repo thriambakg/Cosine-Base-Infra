@@ -22,6 +22,21 @@ for req_file in layer-definitions/*-dependencies.txt; do
   fi
 done
 
+# Also check for other naming patterns
+for req_file in layer-definitions/*dependencies.txt; do
+  if [ -f "$req_file" ]; then
+    filename=$(basename "$req_file" .txt)
+    if [[ $filename == *"-dependencies" ]]; then
+      layer_name=${filename%-dependencies}
+    elif [[ $filename == *"dependencies" ]]; then
+      layer_name=${filename%dependencies}
+    fi
+    if [[ ! " ${AVAILABLE_LAYERS[@]} " =~ " ${layer_name} " ]]; then
+      AVAILABLE_LAYERS+=("$layer_name")
+    fi
+  fi
+done
+
 # Function to print colored output
 print_status() {
     echo -e "${BLUE}[INFO]${NC} $1"

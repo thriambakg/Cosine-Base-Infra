@@ -67,9 +67,85 @@ jobs:
   build-lambda-layers:
     name: 'Build Lambda Layers'
     needs: [determine-environment]
-    uses: ./.github/workflows/build-lambda-layers.yml
-    with:
-      environment: ${{ needs.determine-environment.outputs.environment }}
+    runs-on: ubuntu-latest
+    outputs:
+      layers-built: ${{ steps.build.outputs.layers-built }}
+    
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install Python Dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install boto3
+
+      - name: Build Lambda Layers
+        id: build
+        run: |
+          cd terraform/modules/lambda-layer
+          
+          echo "🔧 Building Lambda Layers for environment: ${{ needs.determine-environment.outputs.environment }}"
+          
+          # Make build scripts executable
+          chmod +x build-layer.sh
+          
+          # Extract layer names from main.tf
+          echo "🔍 Discovering layers defined in main.tf..."
+          LAYERS_TO_BUILD=()
+          
+          # Look for layer_name_suffix in main.tf
+          while IFS= read -r line; do
+            if [[ $line =~ layer_name_suffix.*=.*\"([^\"]+)\" ]]; then
+              layer_name="${BASH_REMATCH[1]}"
+              LAYERS_TO_BUILD+=("$layer_name")
+              echo "📦 Found layer: $layer_name"
+            fi
+          done < ../../main.tf
+          
+          if [ ${#LAYERS_TO_BUILD[@]} -eq 0 ]; then
+            echo "❌ No layers found in main.tf"
+            exit 1
+          fi
+          
+          echo "🎯 Building layers: ${LAYERS_TO_BUILD[*]}"
+          
+          # Build each discovered layer
+          for layer in "${LAYERS_TO_BUILD[@]}"; do
+            echo "🔨 Building layer: $layer"
+            ./build-layer.sh "$layer"
+          done
+          
+          # Verify built layers
+          echo "🔍 Verifying built layers..."
+          layer_count=0
+          for layer_file in layer-*.zip; do
+            if [ -f "$layer_file" ]; then
+              size=$(du -h "$layer_file" | cut -f1)
+              echo "✅ $layer_file found (${size})"
+              layer_count=$((layer_count + 1))
+            fi
+          done
+          
+          if [ $layer_count -eq 0 ]; then
+            echo "❌ No layer files found"
+            exit 1
+          fi
+          
+          echo "✅ Successfully built $layer_count Lambda layer artifacts"
+          echo "layers-built=true" >> $GITHUB_OUTPUT
+
+      - name: Upload Lambda Layer Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: lambda-layers-${{ needs.determine-environment.outputs.environment }}
+          path: terraform/modules/lambda-layer/layer-*.zip
+          retention-days: 7
 
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'

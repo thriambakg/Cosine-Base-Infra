@@ -16,6 +16,17 @@ REQUIREMENTS_FILE="${LAYER_NAME}-dependencies.txt"
 LAYER_FILE="layer-${LAYER_NAME}.zip"
 PYTHON_CMD=${PYTHON_CMD:-"python3"}
 
+# Check for alternative naming patterns
+if [ ! -f "layer-definitions/${REQUIREMENTS_FILE}" ]; then
+    # Try other naming patterns
+    for pattern in "${LAYER_NAME}dependencies.txt" "${LAYER_NAME}-core-dependencies.txt"; do
+        if [ -f "layer-definitions/${pattern}" ]; then
+            REQUIREMENTS_FILE="${pattern}"
+            break
+        fi
+    done
+fi
+
 # Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
