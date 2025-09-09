@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 2.1 - Enhanced NumPy source directory cleanup
+# Version: 2.3 - PLATFORM FIX: Correct AWS Lambda platform flags
 
 set -e  # Exit on any error
 
@@ -115,27 +115,39 @@ if [ "${LAYER_NAME}" = "financial" ]; then
     find python/ -name "*pandas*" -type d -exec rm -rf {} + 2>/dev/null || true
     find python/ -name "*scipy*" -type d -exec rm -rf {} + 2>/dev/null || true
     
-    # Install NumPy first with specific flags for Lambda compatibility
+    # Install NumPy with a completely different approach to avoid source directory conflicts
     print_status "Installing NumPy with Lambda-compatible settings..."
-    if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall; then
-        print_warning "NumPy installation with platform flags failed, trying without..."
-        if ! ${PYTHON_CMD} -m pip install "numpy>=1.24.0,<1.25.0" -t python/ --upgrade --no-cache-dir --force-reinstall; then
-            print_error "NumPy installation failed completely. Trying with more flexible version constraints..."
-            ${PYTHON_CMD} -m pip install numpy -t python/ --upgrade --no-cache-dir --force-reinstall
+    
+    # Try installing NumPy with AWS Lambda-compatible platform flags
+    if ! ${PYTHON_CMD} -m pip install "numpy==1.24.4" -t python/ --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall --no-deps; then
+        print_warning "NumPy installation with manylinux2014_x86_64 failed, trying linux_x86_64..."
+        if ! ${PYTHON_CMD} -m pip install "numpy==1.24.4" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall --no-deps; then
+            print_warning "NumPy installation with platform flags failed, trying without platform constraints..."
+            if ! ${PYTHON_CMD} -m pip install "numpy==1.24.4" -t python/ --upgrade --no-cache-dir --force-reinstall --no-deps; then
+                print_error "NumPy installation failed completely. Trying with more flexible version constraints..."
+                ${PYTHON_CMD} -m pip install "numpy==1.24.4" -t python/ --upgrade --no-cache-dir --force-reinstall --no-deps
+            fi
         fi
     fi
     
+    # Install NumPy dependencies separately
+    print_status "Installing NumPy dependencies..."
+    ${PYTHON_CMD} -m pip install "python-dateutil>=2.8.2" -t python/ --upgrade --no-cache-dir --force-reinstall
+    
     # Install other financial dependencies
     print_status "Installing other financial dependencies..."
-    if ! ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall; then
-        print_warning "Financial dependencies installation with platform flags failed, trying without..."
-        ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --upgrade --no-cache-dir --force-reinstall
+    if ! ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall; then
+        print_warning "Financial dependencies installation with manylinux2014_x86_64 failed, trying linux_x86_64..."
+        if ! ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir --force-reinstall; then
+            print_warning "Financial dependencies installation with platform flags failed, trying without..."
+            ${PYTHON_CMD} -m pip install "pandas>=2.0.0,<2.1.0" "scipy>=1.10.0,<1.11.0" "yfinance>=0.2.18" -t python/ --upgrade --no-cache-dir --force-reinstall
+        fi
     fi
     
     print_success "Financial dependencies installed with Python 3.11 compatibility fixes"
 else
     # Standard installation for other layers
-    if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --platform linux_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
+    if ! ${PYTHON_CMD} -m pip install -r "layer-definitions/${REQUIREMENTS_FILE}" -t python/ --platform manylinux2014_x86_64 --implementation cp --python-version 3.11 --only-binary=:all: --upgrade --no-cache-dir; then
         print_error "Failed to install dependencies. Trying with more flexible options..."
         
         # Try again without platform restrictions for packages that might not have Linux wheels
@@ -217,6 +229,20 @@ if [ "${LAYER_NAME}" = "financial" ]; then
         find python/numpy/ -name "*.pyc" -delete 2>/dev/null || true
         find python/numpy/ -name "*.pyo" -delete 2>/dev/null || true
         
+        # CRITICAL: Remove any files that NumPy uses to detect source directory
+        find python/numpy/ -name "*.egg-info" -type d -exec rm -rf {} + 2>/dev/null || true
+        find python/numpy/ -name "dist" -type d -exec rm -rf {} + 2>/dev/null || true
+        find python/numpy/ -name "build" -type d -exec rm -rf {} + 2>/dev/null || true
+        find python/numpy/ -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
+        find python/numpy/ -name ".gitignore" -delete 2>/dev/null || true
+        find python/numpy/ -name "*.git*" -delete 2>/dev/null || true
+        
+        # Remove any remaining source detection files
+        find python/numpy/ -name "PKG-INFO" -delete 2>/dev/null || true
+        find python/numpy/ -name "SOURCES.txt" -delete 2>/dev/null || true
+        find python/numpy/ -name "dependency_links.txt" -delete 2>/dev/null || true
+        find python/numpy/ -name "top_level.txt" -delete 2>/dev/null || true
+        
         # Ensure NumPy has proper __init__.py files
         if [ ! -f "python/numpy/__init__.py" ]; then
             echo "# NumPy package" > python/numpy/__init__.py
@@ -226,6 +252,9 @@ if [ "${LAYER_NAME}" = "financial" ]; then
         if [ ! -f "python/numpy/core/__init__.py" ]; then
             echo "# NumPy core package" > python/numpy/core/__init__.py
         fi
+        
+        # Create a minimal __init__.py for all subdirectories to prevent import issues
+        find python/numpy/ -type d -exec sh -c 'if [ ! -f "$1/__init__.py" ]; then echo "# Auto-generated" > "$1/__init__.py"; fi' _ {} \;
     fi
     
     # Remove SciPy shared libraries that might cause issues
