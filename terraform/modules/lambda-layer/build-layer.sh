@@ -48,10 +48,8 @@ find python/ -name "*_test.py" -delete 2>/dev/null || true
 
 echo "🗜️ Creating layer zip file..."
 
-# Create the layer zip
-cd python/
-zip -r "../${OUTPUT_FILE}" .
-cd ..
+# Create the layer zip (zip the python directory, not its contents)
+zip -r "${OUTPUT_FILE}" python/
 
 # Clean up
 rm -rf python/
