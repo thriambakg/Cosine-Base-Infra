@@ -1,12 +1,7 @@
-# Financial Dependencies Layer - Python 3.11 compatible financial packages
-# This layer contains financial packages optimized for AWS Lambda runtime with Python 3.11
-# Layer size: ~30M (Python 3.11 compatible versions)
-# Version: 3.5 - NUMPY FIX: Targeted Cython source file cleanup
-# Build Date: 2025-01-09 - Removing specific Cython files that cause source directory detection
-
-# Financial data and analysis (Python 3.11 compatible versions)
-# Using specific versions that are known to work with AWS Lambda
+# Financial Dependencies Layer - SIMPLIFIED
+# Simple requirements for financial analysis
+# Version: 4.0 - SIMPLIFIED: Using standard pip approach
 yfinance>=0.2.18
-numpy==1.26.4
-pandas==2.1.4
-scipy==1.11.4
+numpy>=1.24.0
+pandas>=2.0.0
+scipy>=1.10.0
