@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 2.8 - DOCKER FIX: Fixed Docker extraction path
+# Version: 2.9 - DOCKER FIX: Added NumPy shared library cleanup
 
 set -e  # Exit on any error
 
@@ -125,6 +125,15 @@ RUN find /tmp/python/ -name "dist" -type d -exec rm -rf {} + 2>/dev/null || true
 RUN find /tmp/python/ -name "build" -type d -exec rm -rf {} + 2>/dev/null || true
 RUN find /tmp/python/ -name "setup.py" -delete 2>/dev/null || true
 RUN find /tmp/python/ -name "pyproject.toml" -delete 2>/dev/null || true
+
+# Clean up NumPy shared libraries that cause Lambda import issues
+RUN find /tmp/python/ -name "libopenblas*" -delete 2>/dev/null || true
+RUN find /tmp/python/ -name "libgfortran*" -delete 2>/dev/null || true
+RUN find /tmp/python/ -name "libquadmath*" -delete 2>/dev/null || true
+RUN find /tmp/python/ -name "liblapack*" -delete 2>/dev/null || true
+RUN find /tmp/python/ -name "libblas*" -delete 2>/dev/null || true
+RUN find /tmp/python/ -name "*.so" -path "*/numpy/*" -delete 2>/dev/null || true
+RUN find /tmp/python/ -name "*.so" -path "*/scipy/*" -delete 2>/dev/null || true
 
 # Copy the clean python directory contents to output/python
 RUN mkdir -p /output/python && cp -r /tmp/python/* /output/python/
