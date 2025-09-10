@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 3.1 - NUMPY FIX: Using OpenBLAS_CORETYPE=Haswell for Lambda compatibility
+# Version: 3.2 - NUMPY FIX: Separate NumPy layer approach
 
 set -e  # Exit on any error
 

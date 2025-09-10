@@ -248,6 +248,22 @@ module "core_layer" {
   depends_on = [module.static_hosting_bucket]
 }
 
+# NumPy Dependencies Layer for Lambda functions
+module "numpy_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "numpy"
+  layer_description   = "NumPy and scientific computing dependencies"
+  requirements_file   = "numpy-dependencies.txt"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.static_hosting_bucket.bucket_id
+  python_command      = "python3.11"
+
+  depends_on = [module.static_hosting_bucket]
+}
+
 # Financial Dependencies Layer for Lambda functions
 module "financial_layer" {
   source = "./modules/lambda-layer"
@@ -255,7 +271,7 @@ module "financial_layer" {
   project_name        = var.project_name
   environment         = var.environment
   layer_name_suffix   = "financial"
-  layer_description   = "Financial analysis dependencies (yfinance, numpy, pandas)"
+  layer_description   = "Financial analysis dependencies (yfinance only)"
   requirements_file   = "financial-dependencies.txt"
   compatible_runtimes = ["python3.11", "python3.12"]
   s3_bucket_name      = module.static_hosting_bucket.bucket_id

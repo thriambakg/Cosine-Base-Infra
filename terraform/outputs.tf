@@ -364,6 +364,16 @@ output "core_layer_version" {
   value       = module.core_layer.layer_version
 }
 
+output "numpy_layer_arn" {
+  description = "ARN of the NumPy dependencies Lambda layer"
+  value       = module.numpy_layer.layer_arn
+}
+
+output "numpy_layer_version" {
+  description = "Version of the NumPy dependencies Lambda layer"
+  value       = module.numpy_layer.layer_version
+}
+
 output "financial_layer_arn" {
   description = "ARN of the financial dependencies Lambda layer"
   value       = module.financial_layer.layer_arn
