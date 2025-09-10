@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 3.3 - NUMPY FIX: Using more compatible NumPy version (1.26.4)
+# Version: 3.5 - NUMPY FIX: Targeted Cython source file cleanup
 
 set -e  # Exit on any error
 
@@ -125,6 +125,47 @@ RUN find /tmp/python/ -name "dist" -type d -exec rm -rf {} + 2>/dev/null || true
 RUN find /tmp/python/ -name "build" -type d -exec rm -rf {} + 2>/dev/null || true
 RUN find /tmp/python/ -name "setup.py" -delete 2>/dev/null || true
 RUN find /tmp/python/ -name "pyproject.toml" -delete 2>/dev/null || true
+
+# Aggressive cleanup of NumPy source files to prevent source directory conflicts
+# Remove Cython source files (these are the main culprits!)
+RUN find /tmp/python/numpy/ -name "*.pxd" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "*.pyx" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "*.pxi" -delete 2>/dev/null || true
+
+# Remove C/Fortran source files
+RUN find /tmp/python/numpy/ -name "*.c" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "*.h" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "*.f" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "*.f90" -delete 2>/dev/null || true
+
+# Remove build and setup files
+RUN find /tmp/python/numpy/ -name "setup.py" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "setup.cfg" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "pyproject.toml" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "MANIFEST.in" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "meson.build" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "meson.options" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "*.cmake" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "CMakeLists.txt" -delete 2>/dev/null || true
+
+# Remove specific problematic files that cause source directory detection
+RUN find /tmp/python/numpy/ -name "conftest.py" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "generate_numpy_api.py" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "setup_common.py" -delete 2>/dev/null || true
+
+# Remove NumPy test directories and files
+RUN find /tmp/python/numpy/ -name "tests" -type d -exec rm -rf {} + 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "test_*" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "*_test.py" -delete 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "conftest.py" -delete 2>/dev/null || true
+
+# Remove NumPy documentation and examples
+RUN find /tmp/python/numpy/ -name "doc" -type d -exec rm -rf {} + 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "benchmarks" -type d -exec rm -rf {} + 2>/dev/null || true
+RUN find /tmp/python/numpy/ -name "examples" -type d -exec rm -rf {} + 2>/dev/null || true
+
+# Ensure __init__.py exists in all NumPy subdirectories
+RUN find /tmp/python/numpy/ -type d -exec touch {}/__init__.py \; 2>/dev/null || true
 
 # Set OpenBLAS to use a compatible CPU architecture for Lambda
 # This prevents the libopenblas64_p-r0-15028c96.3.21.so error
