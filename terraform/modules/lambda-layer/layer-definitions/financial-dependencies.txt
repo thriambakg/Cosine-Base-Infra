@@ -1,8 +1,8 @@
 # Financial Dependencies Layer - Python 3.11 compatible financial packages
 # This layer contains financial packages optimized for AWS Lambda runtime with Python 3.11
 # Layer size: ~30M (Python 3.11 compatible versions)
-# Version: 2.7 - DOCKER FIX: Fixed nested directory structure
-# Build Date: 2025-01-09 - Using Docker with correct python/ directory structure
+# Version: 2.8 - DOCKER FIX: Fixed Docker extraction path
+# Build Date: 2025-01-09 - Using Docker with correct extraction from /output/python/. to ./python/
 
 # Financial data and analysis (Python 3.11 compatible versions)
 # Using specific versions that are known to work with AWS Lambda

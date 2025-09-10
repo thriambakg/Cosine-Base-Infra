@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 2.7 - DOCKER FIX: Fixed nested directory structure
+# Version: 2.8 - DOCKER FIX: Fixed Docker extraction path
 
 set -e  # Exit on any error
 
@@ -135,7 +135,7 @@ EOF
         
         # Extract the python directory from the Docker container
         docker create --name temp-container lambda-layer-builder
-        docker cp temp-container:/output/python ./python
+        docker cp temp-container:/output/python/. ./python/
         docker rm temp-container
         
         # Clean up
