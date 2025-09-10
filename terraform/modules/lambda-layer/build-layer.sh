@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 3.0 - DOCKER FIX: Conservative NumPy cleanup approach
+# Version: 3.1 - NUMPY FIX: Using OpenBLAS_CORETYPE=Haswell for Lambda compatibility
 
 set -e  # Exit on any error
 
@@ -126,10 +126,9 @@ RUN find /tmp/python/ -name "build" -type d -exec rm -rf {} + 2>/dev/null || tru
 RUN find /tmp/python/ -name "setup.py" -delete 2>/dev/null || true
 RUN find /tmp/python/ -name "pyproject.toml" -delete 2>/dev/null || true
 
-# Clean up only the specific problematic shared library that causes the error
-# Remove only the libopenblas64_p-r0-15028c96.3.21.so file that causes the error
-RUN find /tmp/python/ -name "libopenblas64_p-r0-15028c96.3.21.so" -delete 2>/dev/null || true
-RUN find /tmp/python/ -name "libopenblas*" -delete 2>/dev/null || true
+# Set OpenBLAS to use a compatible CPU architecture for Lambda
+# This prevents the libopenblas64_p-r0-15028c96.3.21.so error
+ENV OPENBLAS_CORETYPE=Haswell
 
 # Copy the clean python directory contents to output/python
 RUN mkdir -p /output/python && cp -r /tmp/python/* /output/python/

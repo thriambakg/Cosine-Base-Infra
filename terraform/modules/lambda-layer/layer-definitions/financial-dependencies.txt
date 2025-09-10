@@ -1,8 +1,8 @@
 # Financial Dependencies Layer - Python 3.11 compatible financial packages
 # This layer contains financial packages optimized for AWS Lambda runtime with Python 3.11
 # Layer size: ~30M (Python 3.11 compatible versions)
-# Version: 3.0 - DOCKER FIX: Conservative NumPy cleanup approach
-# Build Date: 2025-01-09 - Using Docker with minimal shared library cleanup to preserve NumPy core
+# Version: 3.1 - NUMPY FIX: Using OpenBLAS_CORETYPE=Haswell for Lambda compatibility
+# Build Date: 2025-01-09 - Using OpenBLAS environment variable to prevent shared library errors
 
 # Financial data and analysis (Python 3.11 compatible versions)
 # Using specific versions that are known to work with AWS Lambda
