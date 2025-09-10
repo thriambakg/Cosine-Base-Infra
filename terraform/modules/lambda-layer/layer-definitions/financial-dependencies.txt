@@ -1,10 +1,12 @@
 # Financial Dependencies Layer - Python 3.11 compatible financial packages
 # This layer contains financial packages optimized for AWS Lambda runtime with Python 3.11
 # Layer size: ~30M (Python 3.11 compatible versions)
-# Version: 3.2 - NUMPY FIX: Using pre-built NumPy approach
-# Build Date: 2025-01-09 - Using yfinance only, NumPy will come from pre-built layer
+# Version: 3.3 - NUMPY FIX: Using more compatible NumPy version
+# Build Date: 2025-01-09 - Using NumPy 1.26.4 which is more stable for Lambda
 
 # Financial data and analysis (Python 3.11 compatible versions)
 # Using specific versions that are known to work with AWS Lambda
-# Note: NumPy, pandas, scipy will be provided by pre-built layers
 yfinance>=0.2.18
+numpy==1.26.4
+pandas==2.1.4
+scipy==1.11.4

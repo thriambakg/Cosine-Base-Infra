@@ -7,7 +7,7 @@
 # Example: ./build-layer.sh financial
 # Example: ./build-layer.sh ai
 # Example: ./build-layer.sh utility
-# Version: 3.2 - NUMPY FIX: Separate NumPy layer approach
+# Version: 3.3 - NUMPY FIX: Using more compatible NumPy version (1.26.4)
 
 set -e  # Exit on any error
 
