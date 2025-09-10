@@ -263,3 +263,19 @@ module "financial_layer" {
 
   depends_on = [module.static_hosting_bucket]
 }
+
+# Crypto Dependencies Layer for Lambda functions
+module "crypto_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "crypto"
+  layer_description   = "Cryptocurrency data dependencies (ccxt, cryptocompare, requests)"
+  requirements_file   = "crypto-dependencies.txt"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.static_hosting_bucket.bucket_id
+  python_command      = "python3.11"
+
+  depends_on = [module.static_hosting_bucket]
+}

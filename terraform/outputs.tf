@@ -373,3 +373,13 @@ output "financial_layer_version" {
   description = "Version of the financial dependencies Lambda layer"
   value       = module.financial_layer.layer_version
 }
+
+output "crypto_layer_arn" {
+  description = "ARN of the crypto dependencies Lambda layer"
+  value       = module.crypto_layer.layer_arn
+}
+
+output "crypto_layer_version" {
+  description = "Version of the crypto dependencies Lambda layer"
+  value       = module.crypto_layer.layer_version
+}
