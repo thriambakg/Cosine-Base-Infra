@@ -1,6 +1,6 @@
-# Financial Dependencies Layer - SIMPLIFIED
-# Simple requirements for financial analysis
-# Version: 4.0 - SIMPLIFIED: Using standard pip approach
+# Financial Dependencies Layer - MINIMAL
+# Only financial analysis packages (core layer provides boto3, requests, etc.)
+# Version: 4.1 - MINIMAL: Only financial packages, no core dependencies
 yfinance>=0.2.18
 numpy>=1.24.0
 pandas>=2.0.0

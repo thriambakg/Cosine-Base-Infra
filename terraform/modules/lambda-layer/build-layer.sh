@@ -36,6 +36,16 @@ pip install -r "${REQUIREMENTS_FILE}" -t python/ \
     --only-binary=:all: \
     --no-cache-dir
 
+echo "🧹 Cleaning up unnecessary files..."
+
+# Remove unnecessary files to reduce layer size
+find python/ -name "*.pyc" -delete 2>/dev/null || true
+find python/ -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
+find python/ -name "*.dist-info" -type d -exec rm -rf {} + 2>/dev/null || true
+find python/ -name "tests" -type d -exec rm -rf {} + 2>/dev/null || true
+find python/ -name "test_*" -delete 2>/dev/null || true
+find python/ -name "*_test.py" -delete 2>/dev/null || true
+
 echo "🗜️ Creating layer zip file..."
 
 # Create the layer zip
