@@ -239,66 +239,7 @@ resource "aws_dynamodb_table" "security_events" {
   }
 }
 
-# User Sessions Table
-resource "aws_dynamodb_table" "user_sessions" {
-  name                        = "${var.project_name}-user-sessions-${var.environment}"
-  billing_mode                = var.billing_mode
-  hash_key                    = "session_id"
-  stream_enabled              = var.stream_enabled
-  stream_view_type            = var.stream_enabled ? var.stream_view_type : null
-  deletion_protection_enabled = var.deletion_protection_enabled
-
-  # Capacity settings for provisioned mode
-  read_capacity  = var.billing_mode == "PROVISIONED" ? var.read_capacity : null
-  write_capacity = var.billing_mode == "PROVISIONED" ? var.write_capacity : null
-
-  attribute {
-    name = "session_id"
-    type = "S"
-  }
-
-  attribute {
-    name = "user_id"
-    type = "S"
-  }
-
-  # Global Secondary Index for user-based session queries
-  global_secondary_index {
-    name            = "UserSessionsIndex"
-    hash_key        = "user_id"
-    projection_type = "ALL"
-
-    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
-    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
-  }
-
-  # Server-side encryption
-  server_side_encryption {
-    enabled     = true
-    kms_key_arn = aws_kms_key.dynamodb.arn
-  }
-
-  # Point-in-time recovery
-  point_in_time_recovery {
-    enabled = var.point_in_time_recovery_enabled
-  }
-
-  # TTL for automatic session cleanup
-  ttl {
-    attribute_name = "expires_at"
-    enabled        = true
-  }
-
-  tags = merge(var.tags, {
-    Name    = "${var.project_name}-user-sessions-${var.environment}"
-    Type    = "SessionData"
-    Purpose = "SessionManagement"
-  })
-
-  lifecycle {
-    prevent_destroy = false
-  }
-}
+# REMOVED: User Sessions Table - consolidated into chat_sessions table
 
 # Alerts Table
 resource "aws_dynamodb_table" "alerts" {
@@ -459,12 +400,12 @@ resource "aws_dynamodb_table" "chat_connections" {
   }
 }
 
-# Chat Sessions Table - for storing chat message history
+# Chat Sessions Table - for storing complete chat sessions
 resource "aws_dynamodb_table" "chat_sessions" {
   name                        = "${var.project_name}-chat-sessions-${var.environment}"
   billing_mode                = var.billing_mode
-  hash_key                    = "session_id"
-  range_key                   = "message_id"
+  hash_key                    = "user_id"
+  range_key                   = "session_id"
   stream_enabled              = var.stream_enabled
   stream_view_type            = var.stream_enabled ? var.stream_view_type : null
   deletion_protection_enabled = var.deletion_protection_enabled
@@ -474,40 +415,25 @@ resource "aws_dynamodb_table" "chat_sessions" {
   write_capacity = var.billing_mode == "PROVISIONED" ? var.write_capacity : null
 
   attribute {
-    name = "session_id"
-    type = "S"
-  }
-
-  attribute {
-    name = "message_id"
-    type = "S"
-  }
-
-  attribute {
     name = "user_id"
     type = "S"
   }
 
   attribute {
-    name = "timestamp"
+    name = "session_id"
+    type = "S"
+  }
+
+  attribute {
+    name = "created_at"
     type = "N"
   }
 
-  # Global Secondary Index for user-based session queries
+  # Global Secondary Index for querying sessions by creation date
   global_secondary_index {
-    name            = "UserSessionsIndex"
+    name            = "CreatedAtIndex"
     hash_key        = "user_id"
-    range_key       = "timestamp"
-    projection_type = "ALL"
-
-    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
-    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
-  }
-
-  # Global Secondary Index for timestamp-based queries
-  global_secondary_index {
-    name            = "TimestampIndex"
-    hash_key        = "timestamp"
+    range_key       = "created_at"
     projection_type = "ALL"
 
     read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
@@ -525,7 +451,7 @@ resource "aws_dynamodb_table" "chat_sessions" {
     enabled = var.point_in_time_recovery_enabled
   }
 
-  # TTL for automatic cleanup of old messages (90 days)
+  # TTL for automatic cleanup of old sessions (30 days)
   ttl {
     attribute_name = "expires_at"
     enabled        = true
@@ -534,7 +460,7 @@ resource "aws_dynamodb_table" "chat_sessions" {
   tags = merge(var.tags, {
     Name    = "${var.project_name}-chat-sessions-${var.environment}"
     Type    = "ChatData"
-    Purpose = "MessageHistory"
+    Purpose = "CompleteChatSessions"
   })
 
   lifecycle {

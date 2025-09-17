@@ -53,31 +53,7 @@ output "security_events_table_stream_arn" {
   value       = aws_dynamodb_table.security_events.stream_arn
 }
 
-# User Sessions Table
-output "user_sessions_table_name" {
-  description = "Name of the user sessions DynamoDB table"
-  value       = aws_dynamodb_table.user_sessions.name
-}
-
-output "user_sessions_table_arn" {
-  description = "ARN of the user sessions DynamoDB table"
-  value       = aws_dynamodb_table.user_sessions.arn
-}
-
-output "user_sessions_table_id" {
-  description = "ID of the user sessions DynamoDB table"
-  value       = aws_dynamodb_table.user_sessions.id
-}
-
-output "user_sessions_stream_arn" {
-  description = "ARN of the user sessions DynamoDB stream"
-  value       = aws_dynamodb_table.user_sessions.stream_arn
-}
-
-output "user_sessions_table_stream_arn" {
-  description = "ARN of the user sessions DynamoDB stream (alias)"
-  value       = aws_dynamodb_table.user_sessions.stream_arn
-}
+# REMOVED: User Sessions Table outputs - consolidated into chat_sessions table
 
 # Alerts Table
 output "alerts_table_name" {

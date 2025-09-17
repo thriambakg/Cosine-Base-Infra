@@ -214,23 +214,7 @@ module "static_hosting_bucket" {
   depends_on = [module.kms]
 }
 
-# Session Management Infrastructure
-module "session_management" {
-  source = "./modules/session-management"
-
-  project_name = var.project_name
-  environment  = var.environment
-  kms_key_arn  = module.kms.main_key_arn
-  common_tags  = var.common_tags
-
-  # Configuration
-  session_ttl_days              = 30
-  context_ttl_days              = 7
-  enable_point_in_time_recovery = true
-  log_retention_days            = 14
-
-  depends_on = [module.kms]
-}
+# REMOVED: Session Management Infrastructure - consolidated into chat_sessions table
 
 # Core Dependencies Layer for Lambda functions
 module "core_layer" {

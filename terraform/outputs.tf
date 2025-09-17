@@ -130,26 +130,7 @@ output "security_events_table_stream_arn" {
   value       = module.dynamodb.security_events_table_stream_arn
 }
 
-# User Sessions Table Outputs
-output "user_sessions_table_name" {
-  description = "Name of the user sessions DynamoDB table"
-  value       = module.dynamodb.user_sessions_table_name
-}
-
-output "user_sessions_table_arn" {
-  description = "ARN of the user sessions DynamoDB table"
-  value       = module.dynamodb.user_sessions_table_arn
-}
-
-output "user_sessions_table_id" {
-  description = "ID of the user sessions DynamoDB table"
-  value       = module.dynamodb.user_sessions_table_id
-}
-
-output "user_sessions_table_stream_arn" {
-  description = "Stream ARN of the user sessions DynamoDB table"
-  value       = module.dynamodb.user_sessions_table_stream_arn
-}
+# REMOVED: User Sessions Table Outputs - consolidated into chat_sessions table
 
 # Chat Connections Table Outputs
 output "chat_connections_table_name" {
@@ -335,20 +316,7 @@ output "frontend_auth_config" {
 # SESSION MANAGEMENT OUTPUTS
 # ============================================================================
 
-output "session_management_config" {
-  description = "Complete session management configuration for application layer"
-  value = {
-    sessions_table_name           = module.session_management.sessions_table_name
-    sessions_table_arn            = module.session_management.sessions_table_arn
-    session_context_table_name    = module.session_management.session_context_table_name
-    session_context_table_arn     = module.session_management.session_context_table_arn
-    session_archives_bucket_name  = module.session_management.session_archives_bucket_name
-    session_archives_bucket_arn   = module.session_management.session_archives_bucket_arn
-    session_management_policy_arn = module.session_management.session_management_policy_arn
-    session_ttl_days              = module.session_management.session_ttl_days
-    context_ttl_days              = module.session_management.context_ttl_days
-  }
-}
+# REMOVED: Session Management Config - consolidated into chat_sessions table
 
 # ============================================================================
 # LAMBDA LAYER OUTPUTS
