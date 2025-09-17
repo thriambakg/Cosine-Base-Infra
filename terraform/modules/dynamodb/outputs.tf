@@ -87,7 +87,8 @@ output "all_table_names" {
   value = [
     aws_dynamodb_table.user_profiles.name,
     aws_dynamodb_table.security_events.name,
-    aws_dynamodb_table.user_sessions.name,
+    aws_dynamodb_table.chat_sessions.name,
+    aws_dynamodb_table.chat_connections.name,
     aws_dynamodb_table.alerts.name
   ]
 }
@@ -97,7 +98,8 @@ output "all_table_arns" {
   value = [
     aws_dynamodb_table.user_profiles.arn,
     aws_dynamodb_table.security_events.arn,
-    aws_dynamodb_table.user_sessions.arn,
+    aws_dynamodb_table.chat_sessions.arn,
+    aws_dynamodb_table.chat_connections.arn,
     aws_dynamodb_table.alerts.arn
   ]
 }
