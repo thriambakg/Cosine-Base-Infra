@@ -408,7 +408,7 @@ resource "aws_dynamodb_table" "chat_sessions" {
   range_key                   = "session_id"
   stream_enabled              = var.stream_enabled
   stream_view_type            = var.stream_enabled ? var.stream_view_type : null
-  deletion_protection_enabled = var.deletion_protection_enabled
+  deletion_protection_enabled = false
 
   # Capacity settings for provisioned mode
   read_capacity  = var.billing_mode == "PROVISIONED" ? var.read_capacity : null
