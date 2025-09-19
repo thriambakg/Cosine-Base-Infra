@@ -68,10 +68,36 @@ module "secrets_manager" {
         # Placeholder values - will be updated manually in console
         google_client_id     = "PLACEHOLDER_GOOGLE_CLIENT_ID"
         google_client_secret = "PLACEHOLDER_GOOGLE_CLIENT_SECRET"
-
       }
     }
   } : {}
+}
+
+# Secrets Manager for Alpha Vantage API key
+module "alpha_vantage_secrets_manager" {
+  source = "./modules/secrets-manager"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  tags                 = var.common_tags
+  kms_key_id           = module.kms.main_key_id
+  recovery_window_days = var.secrets_recovery_window_days
+
+  # No automatic rotation for API keys
+  automatic_rotation = {}
+
+  # Create empty secret for console population
+  secrets = {
+    alpha-vantage-api = {
+      description = "Alpha Vantage API key for stock data (populated manually)"
+      secret_data = {
+        # Placeholder value - will be updated manually in console
+        api_key = "PLACEHOLDER_ALPHA_VANTAGE_API_KEY"
+      }
+    }
+  }
+
+  depends_on = [module.kms]
 }
 
 # Cognito User Pool for authentication

@@ -184,6 +184,7 @@ variable "oauth_secrets_enabled" {
   default     = false
 }
 
+
 # DynamoDB Configuration
 variable "dynamodb_billing_mode" {
   description = "DynamoDB billing mode"
