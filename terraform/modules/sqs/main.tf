@@ -9,6 +9,10 @@ resource "aws_sqs_queue" "dlq" {
   message_retention_seconds  = var.dlq_message_retention_seconds
   visibility_timeout_seconds = var.dlq_visibility_timeout_seconds
 
+  # Server-side encryption
+  kms_master_key_id                 = var.kms_key_id
+  kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
+
   tags = merge(var.tags, {
     Name    = "${var.project_name}-${var.queue_name}-dlq-${var.environment}"
     Type    = "DeadLetterQueue"
