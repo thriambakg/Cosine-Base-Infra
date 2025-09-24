@@ -289,3 +289,157 @@ module "crypto_layer" {
 
   depends_on = [module.static_hosting_bucket]
 }
+
+# SQS Queue for Stock Data Processing
+module "stock_data_queue" {
+  source = "./modules/sqs"
+
+  project_name = var.project_name
+  environment  = var.environment
+  queue_name   = "stock-data"
+  purpose      = "StockDataProcessing"
+
+  # Queue configuration
+  message_retention_seconds  = 1209600 # 14 days
+  visibility_timeout_seconds = 60      # 1 minute
+  max_receive_count          = 3
+  enable_dlq                 = true
+
+  # Encryption
+  kms_key_id = module.kms.main_key_id
+
+  tags = var.common_tags
+}
+
+# Stock Data Batch Fetcher Lambda
+module "stock_data_batch_fetcher" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-stock-data-batch-fetcher-${var.environment}"
+  description   = "Fetches stock data from external APIs and sends to SQS"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 300 # 5 minutes
+  memory_size   = 1024
+
+  source_dir = "${path.module}/../backend_app/src/stock_data_batch_fetcher/app"
+
+  # Environment variables
+  environment_variables = {
+    SQS_QUEUE_URL = module.stock_data_queue.queue_url
+    ENVIRONMENT   = var.environment
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn,
+    module.financial_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    module.stock_data_queue.sqs_access_policy_arn,
+    module.alpha_vantage_secrets_manager.secret_access_policy_arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+}
+
+# Stock Data Processor Lambda
+module "stock_data_processor" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-stock-data-processor-${var.environment}"
+  description   = "Processes stock data from SQS and stores in DynamoDB"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 60 # 1 minute
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/stock_data_processor/app"
+
+  # Environment variables
+  environment_variables = {
+    SQS_QUEUE_URL       = module.stock_data_queue.queue_url
+    DYNAMODB_TABLE_NAME = module.dynamodb.stock_data_table_name
+    ENVIRONMENT         = var.environment
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    module.stock_data_queue.sqs_access_policy_arn,
+    module.dynamodb.stock_data_table_policy_arn
+  ]
+
+  tags = var.common_tags
+}
+
+# EventBridge Rule for Stock Data Batch Fetcher (High Priority - every 5 minutes)
+resource "aws_cloudwatch_event_rule" "stock_data_batch_fetcher_high_priority" {
+  name                = "${var.project_name}-stock-data-batch-fetcher-high-${var.environment}"
+  description         = "Trigger stock data batch fetcher for high priority stocks every 5 minutes"
+  schedule_expression = "rate(5 minutes)"
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "stock_data_batch_fetcher_high_priority" {
+  rule      = aws_cloudwatch_event_rule.stock_data_batch_fetcher_high_priority.name
+  target_id = "StockDataBatchFetcherHighPriority"
+  arn       = module.stock_data_batch_fetcher.function_arn
+
+  input = jsonencode({
+    priority_tier = "high"
+    timeframe     = "1d"
+  })
+}
+
+resource "aws_lambda_permission" "allow_eventbridge_high_priority" {
+  statement_id  = "AllowExecutionFromEventBridgeHighPriority"
+  action        = "lambda:InvokeFunction"
+  function_name = module.stock_data_batch_fetcher.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.stock_data_batch_fetcher_high_priority.arn
+}
+
+# EventBridge Rule for Stock Data Batch Fetcher (Medium Priority - every 15 minutes)
+resource "aws_cloudwatch_event_rule" "stock_data_batch_fetcher_medium_priority" {
+  name                = "${var.project_name}-stock-data-batch-fetcher-medium-${var.environment}"
+  description         = "Trigger stock data batch fetcher for medium priority stocks every 15 minutes"
+  schedule_expression = "rate(15 minutes)"
+
+  tags = var.common_tags
+}
+
+resource "aws_cloudwatch_event_target" "stock_data_batch_fetcher_medium_priority" {
+  rule      = aws_cloudwatch_event_rule.stock_data_batch_fetcher_medium_priority.name
+  target_id = "StockDataBatchFetcherMediumPriority"
+  arn       = module.stock_data_batch_fetcher.function_arn
+
+  input = jsonencode({
+    priority_tier = "medium"
+    timeframe     = "1d"
+  })
+}
+
+resource "aws_lambda_permission" "allow_eventbridge_medium_priority" {
+  statement_id  = "AllowExecutionFromEventBridgeMediumPriority"
+  action        = "lambda:InvokeFunction"
+  function_name = module.stock_data_batch_fetcher.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.stock_data_batch_fetcher_medium_priority.arn
+}
+
+# SQS Event Source Mapping for Stock Data Processor
+resource "aws_lambda_event_source_mapping" "stock_data_processor_sqs" {
+  event_source_arn                   = module.stock_data_queue.queue_arn
+  function_name                      = module.stock_data_processor.function_arn
+  batch_size                         = 10
+  maximum_batching_window_in_seconds = 5
+}

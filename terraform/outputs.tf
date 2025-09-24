@@ -195,6 +195,32 @@ output "alerts_table_stream_arn" {
   value       = module.dynamodb.alerts_table_stream_arn
 }
 
+# Stock Data Table outputs
+output "stock_data_table_name" {
+  description = "Name of the stock data DynamoDB table"
+  value       = module.dynamodb.stock_data_table_name
+}
+
+output "stock_data_table_arn" {
+  description = "ARN of the stock data DynamoDB table"
+  value       = module.dynamodb.stock_data_table_arn
+}
+
+output "stock_data_table_id" {
+  description = "ID of the stock data DynamoDB table"
+  value       = module.dynamodb.stock_data_table_id
+}
+
+output "stock_data_stream_arn" {
+  description = "Stream ARN of the stock data DynamoDB table"
+  value       = module.dynamodb.stock_data_stream_arn
+}
+
+output "stock_data_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing stock_data table"
+  value       = module.dynamodb.stock_data_table_policy_arn
+}
+
 # CloudWatch outputs
 output "security_log_group_name" {
   description = "Name of the security CloudWatch log group"
@@ -361,4 +387,40 @@ output "crypto_layer_arn" {
 output "crypto_layer_version" {
   description = "Version of the crypto dependencies Lambda layer"
   value       = module.crypto_layer.layer_version
+}
+
+# Stock Data Infrastructure Outputs
+output "stock_data_queue_name" {
+  description = "Name of the stock data SQS queue"
+  value       = module.stock_data_queue.queue_name
+}
+
+output "stock_data_queue_arn" {
+  description = "ARN of the stock data SQS queue"
+  value       = module.stock_data_queue.queue_arn
+}
+
+output "stock_data_queue_url" {
+  description = "URL of the stock data SQS queue"
+  value       = module.stock_data_queue.queue_url
+}
+
+output "stock_data_batch_fetcher_function_name" {
+  description = "Name of the stock data batch fetcher Lambda function"
+  value       = module.stock_data_batch_fetcher.function_name
+}
+
+output "stock_data_batch_fetcher_function_arn" {
+  description = "ARN of the stock data batch fetcher Lambda function"
+  value       = module.stock_data_batch_fetcher.function_arn
+}
+
+output "stock_data_processor_function_name" {
+  description = "Name of the stock data processor Lambda function"
+  value       = module.stock_data_processor.function_name
+}
+
+output "stock_data_processor_function_arn" {
+  description = "ARN of the stock data processor Lambda function"
+  value       = module.stock_data_processor.function_arn
 }

@@ -56,8 +56,8 @@ variable "tags" {
   default     = {}
 }
 
-variable "existing_role_name" {
-  description = "Optional: Name of an existing IAM role to use for the Lambda. If provided, the module will not create a new role or attach policies."
-  type        = string
-  default     = ""
+variable "layers" {
+  description = "List of Lambda layer ARNs to attach to the function"
+  type        = list(string)
+  default     = []
 }

@@ -89,7 +89,8 @@ output "all_table_names" {
     aws_dynamodb_table.security_events.name,
     aws_dynamodb_table.chat_sessions.name,
     aws_dynamodb_table.chat_connections.name,
-    aws_dynamodb_table.alerts.name
+    aws_dynamodb_table.alerts.name,
+    aws_dynamodb_table.stock_data.name
   ]
 }
 
@@ -100,7 +101,8 @@ output "all_table_arns" {
     aws_dynamodb_table.security_events.arn,
     aws_dynamodb_table.chat_sessions.arn,
     aws_dynamodb_table.chat_connections.arn,
-    aws_dynamodb_table.alerts.arn
+    aws_dynamodb_table.alerts.arn,
+    aws_dynamodb_table.stock_data.arn
   ]
 }
 
@@ -160,4 +162,30 @@ output "chat_sessions_table_id" {
 output "chat_sessions_table_stream_arn" {
   description = "Stream ARN of the chat sessions DynamoDB table"
   value       = aws_dynamodb_table.chat_sessions.stream_arn
+}
+
+# Stock Data Table Outputs
+output "stock_data_table_name" {
+  description = "Name of the stock data DynamoDB table"
+  value       = aws_dynamodb_table.stock_data.name
+}
+
+output "stock_data_table_arn" {
+  description = "ARN of the stock data DynamoDB table"
+  value       = aws_dynamodb_table.stock_data.arn
+}
+
+output "stock_data_table_id" {
+  description = "ID of the stock data DynamoDB table"
+  value       = aws_dynamodb_table.stock_data.id
+}
+
+output "stock_data_stream_arn" {
+  description = "Stream ARN of the stock data DynamoDB table"
+  value       = aws_dynamodb_table.stock_data.stream_arn
+}
+
+output "stock_data_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing stock_data table"
+  value       = aws_iam_policy.stock_data_table_policy.arn
 }

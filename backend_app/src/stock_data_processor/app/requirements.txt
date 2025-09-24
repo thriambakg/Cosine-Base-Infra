@@ -1,0 +1,3 @@
+# Stock Data Processor Lambda Requirements
+# Core dependencies are provided by the core layer
+# No additional dependencies needed for this lambda

@@ -2,22 +2,25 @@
 # modules/lambda/main.tf
 
 # Data source for creating zip file from source directory
+# IMPROVED: Better change detection and path handling
 data "archive_file" "lambda_zip" {
   type        = "zip"
   source_dir  = var.source_dir
   output_path = "${var.source_dir}/deployment.zip"
+
+  # Exclude files that shouldn't trigger rebuilds
+  excludes = [
+    "deployment.zip", # Exclude the output file itself
+    "__pycache__/**", # Exclude Python cache files
+    "*.pyc",          # Exclude compiled Python files
+    ".git/**",        # Exclude git files if present
+    ".DS_Store",      # Exclude macOS files
+    "Thumbs.db"       # Exclude Windows files
+  ]
 }
 
-# Lookup existing role if provided
-data "aws_iam_role" "existing" {
-  count = var.existing_role_name != "" ? 1 : 0
-  name  = var.existing_role_name
-}
-
-# IAM Role for Lambda execution (only when not using existing role)
+# IAM Role for Lambda execution
 resource "aws_iam_role" "lambda_execution_role" {
-  count = var.existing_role_name == "" ? 1 : 0
-
   name = "${var.function_name}-execution-role"
 
   assume_role_policy = jsonencode({
@@ -36,30 +39,24 @@ resource "aws_iam_role" "lambda_execution_role" {
   tags = var.tags
 }
 
-# Basic execution policy attachment (only when creating role)
+# Basic execution policy attachment
 resource "aws_iam_role_policy_attachment" "lambda_basic_execution" {
-  count      = var.existing_role_name == "" ? 1 : 0
-  role       = aws_iam_role.lambda_execution_role[0].name
+  role       = aws_iam_role.lambda_execution_role.name
   policy_arn = "arn:aws:iam::aws:policy/service-role/AWSLambdaBasicExecutionRole"
 }
 
-# Attach additional IAM policies (only when creating role)
+# Attach additional IAM policies
 resource "aws_iam_role_policy_attachment" "additional_policies" {
-  count      = var.existing_role_name == "" ? length(var.additional_policy_arns) : 0
-  role       = aws_iam_role.lambda_execution_role[0].name
+  count      = length(var.additional_policy_arns)
+  role       = aws_iam_role.lambda_execution_role.name
   policy_arn = var.additional_policy_arns[count.index]
-}
-
-# Resolved role ARN
-locals {
-  lambda_role_arn = var.existing_role_name != "" ? data.aws_iam_role.existing[0].arn : aws_iam_role.lambda_execution_role[0].arn
 }
 
 # Lambda Function
 resource "aws_lambda_function" "function" {
   function_name = var.function_name
   description   = var.description
-  role          = local.lambda_role_arn
+  role          = aws_iam_role.lambda_execution_role.arn
   handler       = var.handler
   runtime       = var.runtime
   timeout       = var.timeout
@@ -72,7 +69,7 @@ resource "aws_lambda_function" "function" {
     variables = var.environment_variables
   }
 
+  layers = var.layers
+
   tags = var.tags
 }
-
-
