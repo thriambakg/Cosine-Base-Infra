@@ -1,6 +1,3 @@
 # Stock Data Batch Fetcher Lambda Requirements
 # Financial dependencies are provided by the financial layer
 # Core dependencies are provided by the core layer
-
-# Additional dependencies specific to this lambda
-requests>=2.31.0
