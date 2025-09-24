@@ -58,7 +58,6 @@ output "queue_attributes" {
     url                         = aws_sqs_queue.main.url
     message_retention_seconds   = aws_sqs_queue.main.message_retention_seconds
     visibility_timeout_seconds  = aws_sqs_queue.main.visibility_timeout_seconds
-    max_receive_count           = aws_sqs_queue.main.max_receive_count
     delay_seconds               = aws_sqs_queue.main.delay_seconds
     max_message_size            = aws_sqs_queue.main.max_message_size
     receive_wait_time_seconds   = aws_sqs_queue.main.receive_wait_time_seconds

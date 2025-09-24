@@ -67,3 +67,9 @@ output "all_key_arns" {
     cloudwatch = aws_kms_key.cloudwatch.arn
   }
 }
+
+# IAM Policy Output
+output "kms_access_policy_arn" {
+  description = "ARN of the IAM policy for accessing KMS keys"
+  value       = aws_iam_policy.kms_access_policy.arn
+}

@@ -64,3 +64,32 @@ data "aws_secretsmanager_secret_version" "current" {
 
   depends_on = [aws_secretsmanager_secret_version.secret_versions]
 }
+
+# IAM policy for accessing secrets
+resource "aws_iam_policy" "secret_access_policy" {
+  name        = "${var.project_name}-secrets-access-policy-${var.environment}"
+  description = "IAM policy for accessing secrets in Secrets Manager"
+  path        = "/"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "secretsmanager:GetSecretValue",
+          "secretsmanager:DescribeSecret"
+        ]
+        Resource = [
+          for secret in aws_secretsmanager_secret.secrets : secret.arn
+        ]
+      }
+    ]
+  })
+
+  tags = merge(var.tags, {
+    Name    = "${var.project_name}-secrets-access-policy-${var.environment}"
+    Type    = "IAMPolicy"
+    Purpose = "SecretAccess"
+  })
+}

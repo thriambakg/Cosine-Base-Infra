@@ -241,3 +241,37 @@ resource "aws_kms_alias" "cloudwatch" {
   name          = "alias/${var.project_name}-cloudwatch-${var.environment}"
   target_key_id = aws_kms_key.cloudwatch.key_id
 }
+
+# IAM policy for KMS access
+resource "aws_iam_policy" "kms_access_policy" {
+  name        = "${var.project_name}-kms-access-policy-${var.environment}"
+  description = "IAM policy for accessing KMS keys"
+  path        = "/"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = [
+          aws_kms_key.main.arn,
+          aws_kms_key.dynamodb.arn,
+          aws_kms_key.cloudwatch.arn
+        ]
+      }
+    ]
+  })
+
+  tags = merge(var.tags, {
+    Name    = "${var.project_name}-kms-access-policy-${var.environment}"
+    Type    = "IAMPolicy"
+    Purpose = "KMSAccess"
+  })
+}
