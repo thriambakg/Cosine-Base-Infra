@@ -382,61 +382,64 @@ module "stock_data_processor" {
   tags = var.common_tags
 }
 
-# EventBridge Rule for Stock Data Batch Fetcher (High Priority - every 5 minutes)
-resource "aws_cloudwatch_event_rule" "stock_data_batch_fetcher_high_priority" {
-  name                = "${var.project_name}-stock-data-batch-fetcher-high-${var.environment}"
-  description         = "Trigger stock data batch fetcher for high priority stocks every 5 minutes"
-  schedule_expression = "rate(5 minutes)"
-
-  tags = var.common_tags
-}
-
-resource "aws_cloudwatch_event_target" "stock_data_batch_fetcher_high_priority" {
-  rule      = aws_cloudwatch_event_rule.stock_data_batch_fetcher_high_priority.name
-  target_id = "StockDataBatchFetcherHighPriority"
-  arn       = module.stock_data_batch_fetcher.function_arn
-
-  input = jsonencode({
-    priority_tier = "high"
-    timeframe     = "1d"
-  })
-}
-
-resource "aws_lambda_permission" "allow_eventbridge_high_priority" {
-  statement_id  = "AllowExecutionFromEventBridgeHighPriority"
-  action        = "lambda:InvokeFunction"
-  function_name = module.stock_data_batch_fetcher.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.stock_data_batch_fetcher_high_priority.arn
-}
-
-# EventBridge Rule for Stock Data Batch Fetcher (Medium Priority - every 15 minutes)
-resource "aws_cloudwatch_event_rule" "stock_data_batch_fetcher_medium_priority" {
-  name                = "${var.project_name}-stock-data-batch-fetcher-medium-${var.environment}"
-  description         = "Trigger stock data batch fetcher for medium priority stocks every 15 minutes"
-  schedule_expression = "rate(15 minutes)"
-
-  tags = var.common_tags
-}
-
-resource "aws_cloudwatch_event_target" "stock_data_batch_fetcher_medium_priority" {
-  rule      = aws_cloudwatch_event_rule.stock_data_batch_fetcher_medium_priority.name
-  target_id = "StockDataBatchFetcherMediumPriority"
-  arn       = module.stock_data_batch_fetcher.function_arn
-
-  input = jsonencode({
-    priority_tier = "medium"
-    timeframe     = "1d"
-  })
-}
-
-resource "aws_lambda_permission" "allow_eventbridge_medium_priority" {
-  statement_id  = "AllowExecutionFromEventBridgeMediumPriority"
-  action        = "lambda:InvokeFunction"
-  function_name = module.stock_data_batch_fetcher.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.stock_data_batch_fetcher_medium_priority.arn
-}
+# EventBridge Rules for Stock Data Batch Fetcher - DISABLED FOR NOW
+# TODO: Re-enable once API testing is complete
+# 
+# # EventBridge Rule for Stock Data Batch Fetcher (High Priority - every 5 minutes)
+# resource "aws_cloudwatch_event_rule" "stock_data_batch_fetcher_high_priority" {
+#   name                = "${var.project_name}-stock-data-batch-fetcher-high-${var.environment}"
+#   description         = "Trigger stock data batch fetcher for high priority stocks every 5 minutes"
+#   schedule_expression = "rate(5 minutes)"
+# 
+#   tags = var.common_tags
+# }
+# 
+# resource "aws_cloudwatch_event_target" "stock_data_batch_fetcher_high_priority" {
+#   rule      = aws_cloudwatch_event_rule.stock_data_batch_fetcher_high_priority.name
+#   target_id = "StockDataBatchFetcherHighPriority"
+#   arn       = module.stock_data_batch_fetcher.function_arn
+# 
+#   input = jsonencode({
+#     priority_tier = "high"
+#     timeframe     = "1d"
+#   })
+# }
+# 
+# resource "aws_lambda_permission" "allow_eventbridge_high_priority" {
+#   statement_id  = "AllowExecutionFromEventBridgeHighPriority"
+#   action        = "lambda:InvokeFunction"
+#   function_name = module.stock_data_batch_fetcher.function_name
+#   principal     = "events.amazonaws.com"
+#   source_arn    = aws_cloudwatch_event_rule.stock_data_batch_fetcher_high_priority.arn
+# }
+# 
+# # EventBridge Rule for Stock Data Batch Fetcher (Medium Priority - every 15 minutes)
+# resource "aws_cloudwatch_event_rule" "stock_data_batch_fetcher_medium_priority" {
+#   name                = "${var.project_name}-stock-data-batch-fetcher-medium-${var.environment}"
+#   description         = "Trigger stock data batch fetcher for medium priority stocks every 15 minutes"
+#   schedule_expression = "rate(15 minutes)"
+# 
+#   tags = var.common_tags
+# }
+# 
+# resource "aws_cloudwatch_event_target" "stock_data_batch_fetcher_medium_priority" {
+#   rule      = aws_cloudwatch_event_rule.stock_data_batch_fetcher_medium_priority.name
+#   target_id = "StockDataBatchFetcherMediumPriority"
+#   arn       = module.stock_data_batch_fetcher.function_arn
+# 
+#   input = jsonencode({
+#     priority_tier = "medium"
+#     timeframe     = "1d"
+#   })
+# }
+# 
+# resource "aws_lambda_permission" "allow_eventbridge_medium_priority" {
+#   statement_id  = "AllowExecutionFromEventBridgeMediumPriority"
+#   action        = "lambda:InvokeFunction"
+#   function_name = module.stock_data_batch_fetcher.function_name
+#   principal     = "events.amazonaws.com"
+#   source_arn    = aws_cloudwatch_event_rule.stock_data_batch_fetcher_medium_priority.arn
+# }
 
 # SQS Event Source Mapping for Stock Data Processor
 resource "aws_lambda_event_source_mapping" "stock_data_processor_sqs" {
