@@ -21,7 +21,6 @@ resource "aws_sqs_queue" "main" {
   name                       = "${var.project_name}-${var.queue_name}-${var.environment}"
   message_retention_seconds  = var.message_retention_seconds
   visibility_timeout_seconds = var.visibility_timeout_seconds
-  max_receive_count          = var.max_receive_count
   delay_seconds              = var.delay_seconds
   max_message_size           = var.max_message_size
   receive_wait_time_seconds  = var.receive_wait_time_seconds
@@ -40,14 +39,6 @@ resource "aws_sqs_queue" "main" {
   fifo_queue                  = var.fifo_queue
   content_based_deduplication = var.content_based_deduplication
 
-  # TTL configuration for messages
-  dynamic "message_ttl" {
-    for_each = var.message_ttl_seconds != null ? [1] : []
-    content {
-      attribute_name = "MessageTTL"
-      seconds        = var.message_ttl_seconds
-    }
-  }
 
   tags = merge(var.tags, {
     Name    = "${var.project_name}-${var.queue_name}-${var.environment}"
