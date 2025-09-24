@@ -56,6 +56,7 @@ module "secrets_manager" {
   tags                 = var.common_tags
   kms_key_id           = module.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
+  policy_name_suffix   = "oauth"
 
   # Only enable automatic rotation if secrets are enabled
   automatic_rotation = var.oauth_secrets_enabled ? var.automatic_secret_rotation : {}
@@ -82,6 +83,7 @@ module "alpha_vantage_secrets_manager" {
   tags                 = var.common_tags
   kms_key_id           = module.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
+  policy_name_suffix   = "alpha-vantage"
 
   # No automatic rotation for API keys
   automatic_rotation = {}

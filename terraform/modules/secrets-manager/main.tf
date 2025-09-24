@@ -67,7 +67,7 @@ data "aws_secretsmanager_secret_version" "current" {
 
 # IAM policy for accessing secrets
 resource "aws_iam_policy" "secret_access_policy" {
-  name        = "${var.project_name}-secrets-access-policy-${var.environment}"
+  name        = "${var.project_name}-${var.policy_name_suffix}-access-policy-${var.environment}"
   description = "IAM policy for accessing secrets in Secrets Manager"
   path        = "/"
 
@@ -88,7 +88,7 @@ resource "aws_iam_policy" "secret_access_policy" {
   })
 
   tags = merge(var.tags, {
-    Name    = "${var.project_name}-secrets-access-policy-${var.environment}"
+    Name    = "${var.project_name}-${var.policy_name_suffix}-access-policy-${var.environment}"
     Type    = "IAMPolicy"
     Purpose = "SecretAccess"
   })

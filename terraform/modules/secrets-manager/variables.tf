@@ -60,3 +60,9 @@ variable "automatic_rotation" {
     error_message = "CKV_AWS_304: Automatic rotation must be configured between 1 and 90 days for compliance requirements. Current values exceed the 90-day maximum."
   }
 }
+
+variable "policy_name_suffix" {
+  description = "Suffix to append to the IAM policy name to make it unique"
+  type        = string
+  default     = "secrets"
+}
