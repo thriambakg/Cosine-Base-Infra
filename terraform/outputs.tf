@@ -319,15 +319,15 @@ output "oauth_secret_names" {
   value       = var.oauth_secrets_enabled ? module.secrets_manager.secret_names : {}
 }
 
-# Alpha Vantage Secrets Manager Outputs
-output "alpha_vantage_secret_arns" {
-  description = "ARNs of Alpha Vantage secrets in Secrets Manager"
-  value       = module.alpha_vantage_secrets_manager.secret_arns
+# NewsData Secrets Manager Outputs
+output "newsdata_secret_arns" {
+  description = "ARNs of NewsData secrets in Secrets Manager"
+  value       = module.newsdata_secrets_manager.secret_arns
 }
 
-output "alpha_vantage_secret_names" {
-  description = "Names of Alpha Vantage secrets in Secrets Manager"
-  value       = module.alpha_vantage_secrets_manager.secret_names
+output "newsdata_secret_names" {
+  description = "Names of NewsData secrets in Secrets Manager"
+  value       = module.newsdata_secrets_manager.secret_names
 }
 
 
