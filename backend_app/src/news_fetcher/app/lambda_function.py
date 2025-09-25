@@ -14,7 +14,7 @@ def lambda_handler(event, context):
     """News fetcher Lambda using NewsData.io Python client"""
     
     # Initialize NewsData.io client
-    api_key = get_secret_value('newsdata-api-key')
+    api_key = get_secret_value()  # No parameter needed, hardcoded secret name
     api = NewsDataApiClient(apikey=api_key)
     
     # Fetch financial news
@@ -94,19 +94,20 @@ def fetch_financial_news(api):
     
     return all_articles
 
-def get_secret_value(secret_name):
-    """Get API key from AWS Secrets Manager"""
+def get_secret_value():
+    """Get NewsData.io API key from AWS Secrets Manager"""
     try:
         client = boto3.client('secretsmanager')
-        # Assuming PROJECT_NAME and ENVIRONMENT are set as environment variables in Lambda
-        secret_full_name = f"{os.environ['PROJECT_NAME']}-{secret_name}-{os.environ['ENVIRONMENT']}"
+        # The secret name format is: project_name-secret_name-environment
+        # Actual secret name: cosine-newsdata-api-production
+        secret_full_name = f"{os.environ['PROJECT_NAME']}-newsdata-api-{os.environ['ENVIRONMENT']}"
         response = client.get_secret_value(
             SecretId=secret_full_name
         )
         secret_data = json.loads(response['SecretString'])
         return secret_data['api_key']
     except Exception as e:
-        logger.error(f"Error retrieving secret {secret_name}: {str(e)}")
+        logger.error(f"Error retrieving secret {secret_full_name}: {str(e)}")
         raise
 
 def send_to_sqs(articles):
