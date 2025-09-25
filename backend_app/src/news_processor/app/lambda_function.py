@@ -59,18 +59,18 @@ def store_article(table, article):
         'source_url': article['link'],
         'source_name': article.get('source_name', article.get('source_id', 'Unknown')),
         'published_date': article['pubDate'],
-        'keywords': ','.join(article.get('keywords', [])),
-        'category': ','.join(article.get('category', [])),
+        'keywords': ','.join(article.get('keywords', []) or []),
+        'category': ','.join(article.get('category', []) or []),
         'sentiment': article.get('sentiment', 'neutral'),
-        'ai_tag': ','.join(article.get('ai_tag', [])),
+        'ai_tag': ','.join(article.get('ai_tag', []) or []),
         'image_url': article.get('image_url'),
-        'creator': ','.join(article.get('creator', [])),
-        'country': ','.join(article.get('country', [])),
+        'creator': ','.join(article.get('creator', []) or []),
+        'country': ','.join(article.get('country', []) or []),
         'language': article.get('language', 'english'),
         'ttl': ttl,
         
         # GSI1: Category-based search
-        'GSI1PK': f"CATEGORY#{article.get('category', ['general'])[0]}",  # Use first category
+        'GSI1PK': f"CATEGORY#{(article.get('category', []) or ['general'])[0]}",  # Use first category
         'GSI1SK': article['pubDate'],
         
         # GSI2: Sentiment-based search
@@ -78,11 +78,11 @@ def store_article(table, article):
         'GSI2SK': article['pubDate'],
         
         # GSI3: AI Tag-based search
-        'GSI3PK': f"TAG#{article.get('ai_tag', ['general'])[0]}",  # Use first AI tag
+        'GSI3PK': f"TAG#{(article.get('ai_tag', []) or ['general'])[0]}",  # Use first AI tag
         'GSI3SK': article['pubDate'],
         
         # GSI4: Keywords-based search
-        'GSI4PK': f"KEYWORD#{article.get('keywords', ['general'])[0]}",  # Use first keyword
+        'GSI4PK': f"KEYWORD#{(article.get('keywords', []) or ['general'])[0]}",  # Use first keyword
         'GSI4SK': article['pubDate'],
         
         # GSI5: Source-based search
