@@ -9,6 +9,7 @@ on:
       - staging
     paths:
       - 'terraform/**'
+      - 'backend_app/**'
       - '.github/workflows/**'
   pull_request:
     branches:
@@ -18,6 +19,7 @@ on:
       - staging
     paths:
       - 'terraform/**'
+      - 'backend_app/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -181,16 +183,20 @@ jobs:
             - **Environment:** ${{ needs.determine-environment.outputs.environment }}
             - **Infrastructure Type:** Base Infrastructure
             - **Dependencies:** Self-contained (creates backend resources)
-            - **Lambda Layers:** ✅ Core and Financial dependencies layers
+            - **Lambda Layers:** ✅ Core, Financial, Crypto, and News dependencies layers
+            - **Lambda Functions:** ✅ Backend application code included
             
             ### Infrastructure Components:
             - **KMS Keys:** ✅ Encryption keys for all services
             - **Cognito:** ✅ User authentication and authorization
-            - **DynamoDB:** ✅ Data storage tables
+            - **DynamoDB:** ✅ Data storage tables (including news table)
             - **CloudWatch:** ✅ Logging and monitoring
-            - **Secrets Manager:** ✅ Secure credential storage
+            - **Secrets Manager:** ✅ Secure credential storage (OAuth + NewsData)
             - **S3 Buckets:** ✅ Static hosting and file storage
-            - **Lambda Layers:** ✅ Core and Financial dependencies for Lambda functions
+            - **Lambda Layers:** ✅ Core, Financial, Crypto, and News dependencies
+            - **Lambda Functions:** ✅ Stock data fetchers, news fetchers, and processors
+            - **SQS Queues:** ✅ Message queuing for async processing
+            - **EventBridge:** ✅ Scheduled triggers for data fetching
             
             ### Security Scans:
             - **TFLint:** Passed
