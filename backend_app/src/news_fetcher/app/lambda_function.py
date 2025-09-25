@@ -72,7 +72,7 @@ def fetch_financial_news(api):
             category="business,science,technology,politics",  # Multiple categories for broader coverage
             # No timeframe parameter - gets latest articles to avoid overlap issues
             size=10,  # Free tier limit: 10 articles per request
-            removeduplicate=1,  # Remove duplicates at API level
+            removeduplicate=True,  # Remove duplicates at API level (boolean)
             prioritydomain="top",  # Get articles from top 10% news domains
             image=True,  # Only articles with featured images (boolean)
             full_content=False  # Don't fetch full content to save bandwidth (boolean)
