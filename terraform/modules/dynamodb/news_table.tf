@@ -52,7 +52,27 @@ resource "aws_dynamodb_table" "news" {
     type = "S"
   }
 
-  # Global Secondary Index 1: Title-based search
+  attribute {
+    name = "GSI4PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI4SK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI5PK"
+    type = "S"
+  }
+
+  attribute {
+    name = "GSI5SK"
+    type = "S"
+  }
+
+  # Global Secondary Index 1: Category-based search
   global_secondary_index {
     name            = "GSI1"
     hash_key        = "GSI1PK"
@@ -63,7 +83,7 @@ resource "aws_dynamodb_table" "news" {
     write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
   }
 
-  # Global Secondary Index 2: Date-based chronological
+  # Global Secondary Index 2: Sentiment-based search
   global_secondary_index {
     name            = "GSI2"
     hash_key        = "GSI2PK"
@@ -74,11 +94,33 @@ resource "aws_dynamodb_table" "news" {
     write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
   }
 
-  # Global Secondary Index 3: Source-based
+  # Global Secondary Index 3: AI Tag-based search
   global_secondary_index {
     name            = "GSI3"
     hash_key        = "GSI3PK"
     range_key       = "GSI3SK"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Global Secondary Index 4: Keywords-based search
+  global_secondary_index {
+    name            = "GSI4"
+    hash_key        = "GSI4PK"
+    range_key       = "GSI4SK"
+    projection_type = "ALL"
+
+    read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null
+    write_capacity = var.billing_mode == "PROVISIONED" ? var.gsi_write_capacity : null
+  }
+
+  # Global Secondary Index 5: Source-based search
+  global_secondary_index {
+    name            = "GSI5"
+    hash_key        = "GSI5PK"
+    range_key       = "GSI5SK"
     projection_type = "ALL"
 
     read_capacity  = var.billing_mode == "PROVISIONED" ? var.gsi_read_capacity : null

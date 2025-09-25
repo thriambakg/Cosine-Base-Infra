@@ -34,7 +34,12 @@ def lambda_handler(event, context):
     }
 
 def store_article(table, article):
-    """Store article in DynamoDB with proper GSI structure"""
+    """Store article in DynamoDB with proper GSI structure and duplicate detection"""
+    
+    # Check for duplicate before storing
+    if is_duplicate_article(table, article):
+        logger.info(f"Skipping duplicate article: {article.get('title', 'Unknown')}")
+        return
     
     # Calculate TTL (30 days from now)
     ttl = int((datetime.utcnow() + timedelta(days=30)).timestamp())
@@ -52,73 +57,74 @@ def store_article(table, article):
         'title': article['title'],
         'description': article.get('description', ''),
         'source_url': article['link'],
-        'source_name': article.get('source_priority', article.get('source_id', 'Unknown')),
+        'source_name': article.get('source_name', article.get('source_id', 'Unknown')),
         'published_date': article['pubDate'],
-        'keywords': ','.join(extract_keywords(article)),
-        'sector': classify_sector(article),
-        'sentiment': analyze_sentiment(article),
+        'keywords': ','.join(article.get('keywords', [])),
+        'category': ','.join(article.get('category', [])),
+        'sentiment': article.get('sentiment', 'neutral'),
+        'ai_tag': ','.join(article.get('ai_tag', [])),
         'image_url': article.get('image_url'),
         'creator': ','.join(article.get('creator', [])),
+        'country': ','.join(article.get('country', [])),
+        'language': article.get('language', 'english'),
         'ttl': ttl,
         
-        # GSI1: Title-based search
-        'GSI1PK': 'TITLE',
-        'GSI1SK': article['title'],
+        # GSI1: Category-based search
+        'GSI1PK': f"CATEGORY#{article.get('category', ['general'])[0]}",  # Use first category
+        'GSI1SK': article['pubDate'],
         
-        # GSI2: Date-based chronological
-        'GSI2PK': 'DATE',
+        # GSI2: Sentiment-based search
+        'GSI2PK': f"SENTIMENT#{article.get('sentiment', 'neutral')}",
         'GSI2SK': article['pubDate'],
         
-        # GSI3: Source-based
-        'GSI3PK': f"SOURCE#{article.get('source_priority', article.get('source_id', 'Unknown'))}",
-        'GSI3SK': article['pubDate']
+        # GSI3: AI Tag-based search
+        'GSI3PK': f"TAG#{article.get('ai_tag', ['general'])[0]}",  # Use first AI tag
+        'GSI3SK': article['pubDate'],
+        
+        # GSI4: Keywords-based search
+        'GSI4PK': f"KEYWORD#{article.get('keywords', ['general'])[0]}",  # Use first keyword
+        'GSI4SK': article['pubDate'],
+        
+        # GSI5: Source-based search
+        'GSI5PK': f"SOURCE#{article.get('source_name', article.get('source_id', 'Unknown'))}",
+        'GSI5SK': article['pubDate']
     }
     
     table.put_item(Item=item)
+    logger.info(f"Stored new article: {article.get('title', 'Unknown')}")
 
-def extract_keywords(article):
-    """Extract keywords from article title and description"""
-    text = f"{article.get('title', '')} {article.get('description', '')}"
-    
-    # Common stock symbols to look for (example, expand as needed)
-    stock_symbols = ['AAPL', 'GOOGL', 'MSFT', 'AMZN', 'TSLA', 'META', 'NVDA', 'NFLX']
-    found_symbols = []
-    
-    for symbol in stock_symbols:
-        if symbol in text.upper():
-            found_symbols.append(symbol)
-    
-    # Also consider using article.get('keywords', []) if NewsData.io provides them
-    return found_symbols
+def is_duplicate_article(table, article):
+    """Check if article already exists in database"""
+    try:
+        # Check by article_id (primary key)
+        response = table.get_item(
+            Key={
+                'PK': f"NEWS#{datetime.fromisoformat(article['pubDate'].replace('Z', '+00:00')).strftime('%Y-%m-%d')}",
+                'SK': article['article_id']
+            }
+        )
+        
+        if 'Item' in response:
+            return True
+        
+        # Also check by URL to catch duplicates with different article_ids
+        response = table.scan(
+            FilterExpression='source_url = :url',
+            ExpressionAttributeValues={
+                ':url': article['link']
+            },
+            Limit=1
+        )
+        
+        return len(response['Items']) > 0
+        
+    except Exception as e:
+        logger.error(f"Error checking for duplicate article: {str(e)}")
+        # If we can't check, assume it's not a duplicate to avoid missing articles
+        return False
 
-def classify_sector(article):
-    """Classify article into business sectors"""
-    text = f"{article.get('title', '')} {article.get('description', '')}".lower()
-    
-    if any(word in text for word in ['technology', 'tech', 'software', 'ai', 'artificial intelligence']):
-        return 'Technology'
-    elif any(word in text for word in ['bank', 'financial', 'finance', 'banking']):
-        return 'Financial'
-    elif any(word in text for word in ['healthcare', 'medical', 'pharmaceutical']):
-        return 'Healthcare'
-    elif any(word in text for word in ['energy', 'oil', 'gas', 'renewable']):
-        return 'Energy'
-    else:
-        return 'General'
-
-def analyze_sentiment(article):
-    """Basic sentiment analysis"""
-    text = f"{article.get('title', '')} {article.get('description', '')}".lower()
-    
-    positive_words = ['surge', 'rise', 'gain', 'up', 'positive', 'growth', 'profit']
-    negative_words = ['fall', 'drop', 'decline', 'down', 'negative', 'loss', 'crash']
-    
-    positive_count = sum(1 for word in positive_words if word in text)
-    negative_count = sum(1 for word in negative_words if word in text)
-    
-    if positive_count > negative_count:
-        return 'positive'
-    elif negative_count > positive_count:
-        return 'negative'
-    else:
-        return 'neutral'
+# Removed helper functions - now using NewsData.io's built-in fields:
+# - keywords: article.get('keywords', [])
+# - category: article.get('category', [])  
+# - sentiment: article.get('sentiment', 'neutral')
+# - ai_tag: article.get('ai_tag', [])

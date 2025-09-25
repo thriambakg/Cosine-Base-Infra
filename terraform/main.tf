@@ -574,3 +574,26 @@ resource "aws_lambda_event_source_mapping" "news_processor_sqs" {
   batch_size                         = 10
   maximum_batching_window_in_seconds = 5
 }
+
+# EventBridge Scheduler for News Fetcher (every 7.5 minutes)
+module "news_fetcher_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-news-fetcher-${var.environment}"
+  rule_description    = "Trigger news fetcher every 7.5 minutes to distribute 200 credits evenly across 24 hours"
+  schedule_expression = "rate(7.5 minutes)"
+  enabled             = true
+
+  target_arn           = module.news_fetcher.function_arn
+  target_id            = "NewsFetcherScheduler"
+  target_type          = "lambda"
+  target_function_name = module.news_fetcher.function_name
+  target_input = jsonencode({
+    source    = "scheduler"
+    timestamp = "{{.Timestamp}}"
+  })
+
+  purpose     = "NewsFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}

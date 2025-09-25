@@ -32,37 +32,65 @@ def lambda_handler(event, context):
     }
 
 def fetch_financial_news(api):
-    """Fetch financial news using NewsData.io Python client"""
+    """Fetch financial news using NewsData.io Python client with timeframe filtering"""
     
-    queries = [
+    import time
+    
+    # Use latest endpoint to get the most recent articles
+    # This avoids timezone overlap issues and ensures fresh content
+    # The removeduplicate=1 parameter handles duplicates within the query
+    logger.info("Fetching latest articles (no timeframe to avoid overlap issues)")
+    
+    # Rotate queries to get diverse content
+    query_sets = [
         'stock market OR trading OR "market analysis"',
         'earnings OR "quarterly results" OR "financial results"',
         'IPO OR merger OR acquisition OR "stock split"',
         '"Federal Reserve" OR "interest rates" OR inflation',
-        '"market rally" OR "market crash" OR "bull market" OR "bear market"'
+        '"market rally" OR "market crash" OR "bull market" OR "bear market"',
+        'technology OR "tech stocks" OR "AI stocks"',
+        'energy OR "oil prices" OR "renewable energy"',
+        'volatility OR "market volatility" OR "VIX"'
     ]
     
-    all_articles = []
+    # Select query based on current time to rotate through different topics
+    current_time_unix = int(time.time())
+    query_index = (current_time_unix // 450) % len(query_sets)  # Rotate every 7.5 minutes
+    selected_query = query_sets[query_index]
     
-    for query in queries:
-        try:
-            # Use the official Python client with qInMeta
-            response = api.news_api(
-                qInMeta=query,
-                country="us",
-                language="en",
-                category="business"
-            )
-            
-            articles = response.get('results', [])
-            all_articles.extend(articles)
-            
-            # Rate limiting
-            time.sleep(1)
-            
-        except Exception as e:
-            logger.error(f"Error fetching news for query '{query}': {str(e)}")
-            continue
+    logger.info(f"Using query: {selected_query}")
+    
+    all_articles = []
+    seen_articles = set()  # Track article IDs to avoid duplicates within this fetch
+    
+    try:
+        # Use the official Python client with latest endpoint (no timeframe)
+        response = api.news_api(
+            qInMeta=selected_query,
+            country="us",
+            language="en",
+            category="business,science,technology,politics",  # Multiple categories for broader coverage
+            # No timeframe parameter - gets latest articles to avoid overlap issues
+            size=10,  # Free tier limit: 10 articles per request
+            removeduplicate=1,  # Remove duplicates at API level
+            prioritydomain="top",  # Get articles from top 10% news domains
+            image=1,  # Only articles with featured images
+            full_content=0  # Don't fetch full content to save bandwidth
+        )
+        
+        articles = response.get('results', [])
+        
+        # Filter out duplicates within this fetch
+        for article in articles:
+            article_id = article.get('article_id')
+            if article_id and article_id not in seen_articles:
+                seen_articles.add(article_id)
+                all_articles.append(article)
+        
+        logger.info(f"Fetched {len(all_articles)} unique latest articles")
+        
+    except Exception as e:
+        logger.error(f"Error fetching news for query '{selected_query}': {str(e)}")
     
     return all_articles
 
