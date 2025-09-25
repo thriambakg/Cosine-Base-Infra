@@ -150,9 +150,6 @@ resource "aws_dynamodb_table" "news" {
     Purpose = "FinancialNews"
   })
 
-  lifecycle {
-    prevent_destroy = var.deletion_protection_enabled
-  }
 }
 
 # IAM Policy for News Table access
