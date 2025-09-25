@@ -1,0 +1,6 @@
+# News Fetcher Lambda Requirements
+# Dependencies are provided by the news layer
+# Only add lambda-specific dependencies here
+
+# No additional dependencies needed
+# newsdataapi and requests are in the news layer

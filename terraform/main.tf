@@ -74,8 +74,8 @@ module "secrets_manager" {
   } : {}
 }
 
-# Secrets Manager for Alpha Vantage API key
-module "alpha_vantage_secrets_manager" {
+# Secrets Manager for NewsData API key
+module "newsdata_secrets_manager" {
   source = "./modules/secrets-manager"
 
   project_name         = var.project_name
@@ -83,18 +83,18 @@ module "alpha_vantage_secrets_manager" {
   tags                 = var.common_tags
   kms_key_id           = module.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
-  policy_name_suffix   = "alpha-vantage"
+  policy_name_suffix   = "newsdata"
 
   # No automatic rotation for API keys
   automatic_rotation = {}
 
   # Create empty secret for console population
   secrets = {
-    alpha-vantage-api = {
-      description = "Alpha Vantage API key for stock data (populated manually)"
+    newsdata-api = {
+      description = "NewsData.io API key for news data (populated manually)"
       secret_data = {
         # Placeholder value - will be updated manually in console
-        api_key = "PLACEHOLDER_ALPHA_VANTAGE_API_KEY"
+        api_key = "PLACEHOLDER_NEWSDATA_API_KEY"
       }
     }
   }
@@ -292,6 +292,22 @@ module "crypto_layer" {
   depends_on = [module.static_hosting_bucket]
 }
 
+# News Dependencies Layer for Lambda functions (Python 3.9)
+module "news_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "news"
+  layer_description   = "News data dependencies (newsdataapi, requests, urllib3)"
+  requirements_file   = "news-dependencies.txt"
+  compatible_runtimes = ["python3.9", "python3.10"]
+  s3_bucket_name      = module.static_hosting_bucket.bucket_id
+  python_command      = "python3.9"
+
+  depends_on = [module.static_hosting_bucket]
+}
+
 # SQS Queue for Stock Data Processing
 module "stock_data_queue" {
   source = "./modules/sqs"
@@ -341,7 +357,7 @@ module "stock_data_batch_fetcher" {
   # IAM policies
   additional_policy_arns = [
     module.stock_data_queue.sqs_access_policy_arn,
-    module.alpha_vantage_secrets_manager.secret_access_policy_arn,
+    module.newsdata_secrets_manager.secret_access_policy_arn,
     module.kms.kms_access_policy_arn
   ]
 
@@ -455,10 +471,106 @@ module "stock_data_processor" {
 #   tags        = var.common_tags
 # }
 
+# SQS Queue for News Processing
+module "news_queue" {
+  source = "./modules/sqs"
+
+  project_name = var.project_name
+  environment  = var.environment
+  queue_name   = "news"
+  purpose      = "NewsProcessing"
+
+  # Queue configuration
+  message_retention_seconds  = 1209600 # 14 days
+  visibility_timeout_seconds = 60      # 1 minute
+  max_receive_count          = 3
+  enable_dlq                 = true
+
+  # Encryption
+  kms_key_id = module.kms.main_key_id
+
+  tags = var.common_tags
+}
+
+# News Fetcher Lambda (Python 3.9)
+module "news_fetcher" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-news-fetcher-${var.environment}"
+  description   = "Fetches financial news from NewsData.io and sends to SQS"
+  runtime       = "python3.9"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 300 # 5 minutes
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/news_fetcher/app"
+
+  # Environment variables
+  environment_variables = {
+    SQS_QUEUE_URL = module.news_queue.queue_url
+    PROJECT_NAME  = var.project_name
+    ENVIRONMENT   = var.environment
+  }
+
+  # Lambda layers (Python 3.9)
+  layers = [
+    module.news_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    module.news_queue.sqs_access_policy_arn,
+    module.newsdata_secrets_manager.secret_access_policy_arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+}
+
+# News Processor Lambda (Python 3.11)
+module "news_processor" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-news-processor-${var.environment}"
+  description   = "Processes news articles from SQS and stores in DynamoDB"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 60 # 1 minute
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/news_processor/app"
+
+  # Environment variables
+  environment_variables = {
+    NEWS_TABLE_NAME = module.dynamodb.news_table_name
+  }
+
+  # Lambda layers (Python 3.11)
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    module.news_queue.sqs_access_policy_arn,
+    module.dynamodb.news_table_policy_arn
+  ]
+
+  tags = var.common_tags
+}
+
 # SQS Event Source Mapping for Stock Data Processor
 resource "aws_lambda_event_source_mapping" "stock_data_processor_sqs" {
   event_source_arn                   = module.stock_data_queue.queue_arn
   function_name                      = module.stock_data_processor.function_arn
+  batch_size                         = 10
+  maximum_batching_window_in_seconds = 5
+}
+
+# SQS Event Source Mapping for News Processor
+resource "aws_lambda_event_source_mapping" "news_processor_sqs" {
+  event_source_arn                   = module.news_queue.queue_arn
+  function_name                      = module.news_processor.function_arn
   batch_size                         = 10
   maximum_batching_window_in_seconds = 5
 }

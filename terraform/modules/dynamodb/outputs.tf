@@ -90,7 +90,8 @@ output "all_table_names" {
     aws_dynamodb_table.chat_sessions.name,
     aws_dynamodb_table.chat_connections.name,
     aws_dynamodb_table.alerts.name,
-    aws_dynamodb_table.stock_data.name
+    aws_dynamodb_table.stock_data.name,
+    aws_dynamodb_table.news.name
   ]
 }
 
@@ -102,7 +103,8 @@ output "all_table_arns" {
     aws_dynamodb_table.chat_sessions.arn,
     aws_dynamodb_table.chat_connections.arn,
     aws_dynamodb_table.alerts.arn,
-    aws_dynamodb_table.stock_data.arn
+    aws_dynamodb_table.stock_data.arn,
+    aws_dynamodb_table.news.arn
   ]
 }
 
@@ -188,4 +190,30 @@ output "stock_data_stream_arn" {
 output "stock_data_table_policy_arn" {
   description = "ARN of the IAM policy for accessing stock_data table"
   value       = aws_iam_policy.stock_data_table_policy.arn
+}
+
+# News Table Outputs
+output "news_table_name" {
+  description = "Name of the news DynamoDB table"
+  value       = aws_dynamodb_table.news.name
+}
+
+output "news_table_arn" {
+  description = "ARN of the news DynamoDB table"
+  value       = aws_dynamodb_table.news.arn
+}
+
+output "news_table_id" {
+  description = "ID of the news DynamoDB table"
+  value       = aws_dynamodb_table.news.id
+}
+
+output "news_table_stream_arn" {
+  description = "ARN of the news DynamoDB stream (alias)"
+  value       = aws_dynamodb_table.news.stream_arn
+}
+
+output "news_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing news table"
+  value       = aws_iam_policy.news_table_policy.arn
 }
