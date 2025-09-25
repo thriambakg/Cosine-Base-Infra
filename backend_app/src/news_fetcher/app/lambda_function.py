@@ -74,8 +74,8 @@ def fetch_financial_news(api):
             size=10,  # Free tier limit: 10 articles per request
             removeduplicate=1,  # Remove duplicates at API level
             prioritydomain="top",  # Get articles from top 10% news domains
-            image=1,  # Only articles with featured images
-            full_content=0  # Don't fetch full content to save bandwidth
+            image=True,  # Only articles with featured images (boolean)
+            full_content=False  # Don't fetch full content to save bandwidth (boolean)
         )
         
         articles = response.get('results', [])
