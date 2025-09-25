@@ -55,7 +55,7 @@ def fetch_financial_news(api):
     
     # Select query based on current time to rotate through different topics
     current_time_unix = int(time.time())
-    query_index = (current_time_unix // 450) % len(query_sets)  # Rotate every 7.5 minutes (450 seconds)
+    query_index = (current_time_unix // 480) % len(query_sets)  # Rotate every 8 minutes (480 seconds)
     selected_query = query_sets[query_index]
     
     logger.info(f"Using query: {selected_query}")
