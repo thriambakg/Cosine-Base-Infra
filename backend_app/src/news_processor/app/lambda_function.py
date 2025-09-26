@@ -1,7 +1,9 @@
 import json
 import boto3
 import os
+import re
 from datetime import datetime, timedelta
+from financial_keywords import find_keywords_in_text
 
 # Placeholder for logger
 import logging
@@ -33,6 +35,25 @@ def lambda_handler(event, context):
         })
     }
 
+def extract_title_keywords(title):
+    """Extract meaningful keywords from article title using comprehensive keyword database"""
+    if not title:
+        return []
+    
+    # Use the comprehensive keyword database for title analysis
+    title_keywords = find_keywords_in_text(title, use_binary_search=True)
+    
+    # Also extract company/ticker symbols (uppercase words, 1-5 chars)
+    ticker_pattern = r'\b[A-Z]{1,5}\b'
+    tickers = re.findall(ticker_pattern, title)
+    
+    # Combine and deduplicate
+    all_keywords = title_keywords + tickers
+    unique_keywords = list(dict.fromkeys(all_keywords))  # Preserves order
+    
+    # Return top 10 most relevant keywords (increased from 5 for better coverage)
+    return unique_keywords[:10]
+
 def store_article(table, article):
     """Store article in DynamoDB with proper GSI structure and duplicate detection"""
     
@@ -50,6 +71,15 @@ def store_article(table, article):
     published_date = datetime.fromisoformat(published_date_str)
     date_str = published_date.strftime('%Y-%m-%d')
     
+    # Extract meaningful keywords from title and description
+    title_keywords = extract_title_keywords(article['title'])
+    description_keywords = find_keywords_in_text(article.get('description', ''), use_binary_search=True)
+    
+    # Combine all keyword sources
+    api_keywords = article.get('keywords', []) or []
+    combined_keywords = title_keywords + description_keywords + api_keywords
+    unique_keywords = list(dict.fromkeys(combined_keywords))  # Remove duplicates, preserve order
+    
     # Main table item
     item = {
         'PK': f"NEWS#{date_str}",
@@ -59,7 +89,7 @@ def store_article(table, article):
         'source_url': article['link'],
         'source_name': article.get('source_name', article.get('source_id', 'Unknown')),
         'published_date': article['pubDate'],
-        'keywords': ','.join(article.get('keywords', []) or []),
+        'keywords': ','.join(unique_keywords),  # Use improved keywords
         'category': ','.join(article.get('category', []) or []),
         'sentiment': article.get('sentiment', 'neutral'),
         'ai_tag': ','.join(article.get('ai_tag', []) or []),
@@ -81,8 +111,8 @@ def store_article(table, article):
         'GSI3PK': f"TAG#{(article.get('ai_tag', []) or ['general'])[0]}",  # Use first AI tag
         'GSI3SK': article['pubDate'],
         
-        # GSI4: Keywords-based search
-        'GSI4PK': f"KEYWORD#{(article.get('keywords', []) or ['general'])[0]}",  # Use first keyword
+        # GSI4: Keywords-based search (use first meaningful keyword from title)
+        'GSI4PK': f"KEYWORD#{(unique_keywords or ['general'])[0]}",  # Use first improved keyword
         'GSI4SK': article['pubDate'],
         
         # GSI5: Source-based search
