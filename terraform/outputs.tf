@@ -389,6 +389,32 @@ output "crypto_layer_version" {
   value       = module.crypto_layer.layer_version
 }
 
+# News Table Outputs
+output "news_table_name" {
+  description = "Name of the news DynamoDB table"
+  value       = module.dynamodb.news_table_name
+}
+
+output "news_table_arn" {
+  description = "ARN of the news DynamoDB table"
+  value       = module.dynamodb.news_table_arn
+}
+
+output "news_table_id" {
+  description = "ID of the news DynamoDB table"
+  value       = module.dynamodb.news_table_id
+}
+
+output "news_table_stream_arn" {
+  description = "Stream ARN of the news DynamoDB table"
+  value       = module.dynamodb.news_table_stream_arn
+}
+
+output "news_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing news table"
+  value       = module.dynamodb.news_table_policy_arn
+}
+
 # Stock Data Infrastructure Outputs
 output "stock_data_queue_name" {
   description = "Name of the stock data SQS queue"
