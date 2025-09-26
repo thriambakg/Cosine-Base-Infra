@@ -36,6 +36,25 @@ def load_nasdaq_companies():
 # Load comprehensive company names (4,297+ NASDAQ companies)
 COMPANIES = load_nasdaq_companies()
 
+# Industry-Specific Keywords
+# Load industry keywords from file
+def load_industry_keywords():
+    """Load industry-specific keywords from the parsed data file."""
+    try:
+        with open('industry_keywords.txt', 'r') as f:
+            return [line.strip().lower() for line in f if line.strip()]
+    except FileNotFoundError:
+        # Fallback to basic industry keywords if file not found
+        return [
+            "aerospace", "agriculture", "automotive", "banking", "biotechnology", 
+            "chemicals", "construction", "defense", "energy", "healthcare", 
+            "manufacturing", "mining", "oil", "pharmaceuticals", "retail", 
+            "technology", "telecommunications", "utilities"
+        ]
+
+# Load industry keywords
+INDUSTRY_KEYWORDS = load_industry_keywords()
+
 # Stock Tickers (NASDAQ + Major Exchanges)
 # Load comprehensive ticker list from NASDAQ data
 def load_nasdaq_tickers():
@@ -193,7 +212,8 @@ REGULATORY_TERMS = [
 ALL_KEYWORDS = sorted(list(set(
     EXCHANGES + INDICES + COMPANIES + TICKERS + FINANCIAL_TERMS + ECONOMIC_INDICATORS +
     CENTRAL_BANKS + FED_TERMS + CRYPTO + COMMODITIES + CURRENCIES + SECTORS +
-    MARKET_CONDITIONS + TRADING_TERMS + EARNINGS_TERMS + M_A_TERMS + REGULATORY_TERMS
+    MARKET_CONDITIONS + TRADING_TERMS + EARNINGS_TERMS + M_A_TERMS + REGULATORY_TERMS +
+    INDUSTRY_KEYWORDS
 )))
 
 # Create a set for O(1) lookup as well

@@ -1,0 +1,122 @@
+aerospace
+agriculture
+agricultural
+aircraft
+airline
+airlines
+airport
+aluminum
+apparel
+artificial intelligence
+automotive
+automobile
+automobiles
+aviation
+banking
+beverage
+beverages
+biotechnology
+biotech
+broadcasting
+building materials
+cement
+chemical
+chemicals
+coal
+commercial real estate
+construction
+consumer goods
+consumer products
+cosmetics
+defense
+defense contractor
+dental
+diesel
+distribution
+drug
+drugs
+education
+educational
+electric
+electrical
+electricity
+electronics
+energy
+entertainment
+environmental
+equipment
+farming
+fertilizer
+financial services
+food
+food processing
+forestry
+gaming
+gas
+gasoline
+glass
+gold
+grain
+healthcare
+heavy machinery
+hospitality
+hotel
+hotels
+housing
+hydroelectric
+hydroelectric power
+industrial
+infrastructure
+insurance
+iron
+iron ore
+leisure
+lumber
+machinery
+manufacturing
+marine
+media
+medical
+medical devices
+metals
+mining
+natural gas
+nuclear
+nuclear power
+oil
+oil and gas
+paper
+petrochemical
+petroleum
+pharmaceutical
+pharmaceuticals
+plastics
+power
+power generation
+publishing
+pulp
+railroad
+real estate
+renewable energy
+retail
+rubber
+semiconductor
+shipping
+shipbuilding
+software
+steel
+telecommunications
+telecom
+textile
+textiles
+tobacco
+transportation
+travel
+trucking
+utilities
+utility
+waste management
+water
+water treatment
+wind energy
+wind power
