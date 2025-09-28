@@ -80,8 +80,8 @@ def store_article(table, article):
     combined_keywords = title_keywords + description_keywords + api_keywords
     unique_keywords = list(dict.fromkeys(combined_keywords))  # Remove duplicates, preserve order
     
-    # Main table item
-    item = {
+    # Store the main article record
+    main_item = {
         'PK': f"NEWS#{date_str}",
         'SK': article['article_id'],
         'title': article['title'],
@@ -111,8 +111,8 @@ def store_article(table, article):
         'GSI3PK': f"TAG#{(article.get('ai_tag', []) or ['general'])[0]}",  # Use first AI tag
         'GSI3SK': article['pubDate'],
         
-        # GSI4: Keywords-based search (use first meaningful keyword from title)
-        'GSI4PK': f"KEYWORD#{(unique_keywords or ['general'])[0]}",  # Use first improved keyword
+        # GSI4: Keywords-based search (use first keyword for primary GSI entry)
+        'GSI4PK': f"KEYWORD#{(unique_keywords or ['general'])[0]}",  # Use first keyword for GSI
         'GSI4SK': article['pubDate'],
         
         # GSI5: Source-based search
@@ -120,8 +120,42 @@ def store_article(table, article):
         'GSI5SK': article['pubDate']
     }
     
-    table.put_item(Item=item)
-    logger.info(f"Stored new article: {article.get('title', 'Unknown')}")
+    # Store main article record
+    table.put_item(Item=main_item)
+    
+    # Store individual keyword entries for efficient keyword search (Map-Reduce approach)
+    # Each keyword gets its own GSI entry for O(1) keyword lookup
+    if unique_keywords:
+        for keyword in unique_keywords[:10]:  # Limit to top 10 keywords to avoid too many entries
+            keyword_item = {
+                'PK': f"NEWS#{date_str}",
+                'SK': f"KEYWORD#{keyword}#{article['article_id']}",  # Unique sort key for keyword
+                'title': article['title'],
+                'description': article.get('description', ''),
+                'source_url': article['link'],
+                'source_name': article.get('source_name', article.get('source_id', 'Unknown')),
+                'published_date': article['pubDate'],
+                'keywords': ','.join(unique_keywords),
+                'category': ','.join(article.get('category', []) or []),
+                'sentiment': article.get('sentiment', 'neutral'),
+                'ai_tag': ','.join(article.get('ai_tag', []) or []),
+                'image_url': article.get('image_url'),
+                'creator': ','.join(article.get('creator', []) or []),
+                'country': ','.join(article.get('country', []) or []),
+                'language': article.get('language', 'english'),
+                'ttl': ttl,
+                
+                # GSI4: Individual keyword entries for fast lookup
+                'GSI4PK': f"KEYWORD#{keyword}",
+                'GSI4SK': article['pubDate'],
+                
+                # Reference to main article
+                'main_article_id': article['article_id'],
+                'keyword': keyword
+            }
+            table.put_item(Item=keyword_item)
+    
+    logger.info(f"Stored new article with {len(unique_keywords)} keyword entries: {article.get('title', 'Unknown')}")
 
 def is_duplicate_article(table, article):
     """Check if article already exists in database"""
