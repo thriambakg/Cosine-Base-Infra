@@ -3,7 +3,7 @@ import boto3
 import os
 import re
 from datetime import datetime, timedelta
-from comprehend_keyword_extractor import ComprehendKeywordExtractor
+from enhanced_keyword_extractor import EnhancedKeywordExtractor
 
 # Placeholder for logger
 import logging
@@ -36,23 +36,23 @@ def lambda_handler(event, context):
     }
 
 def extract_title_keywords(title, description=""):
-    """Extract meaningful keywords from article title using Amazon Comprehend"""
+    """Extract meaningful keywords from article title using enhanced extraction"""
     if not title:
         return []
     
     try:
-        # Initialize Comprehend extractor
-        extractor = ComprehendKeywordExtractor()
+        # Initialize enhanced extractor with real ticker data
+        extractor = EnhancedKeywordExtractor()
         
-        # Extract keywords using Comprehend (much more accurate)
+        # Extract keywords using enhanced approach (real ticker data + Comprehend)
         keywords = extractor.extract_comprehensive_keywords(title, description)
         
-        logger.info(f"Extracted {len(keywords)} keywords using Comprehend")
+        logger.info(f"Extracted {len(keywords)} keywords using enhanced extraction")
         return keywords
         
     except Exception as e:
-        logger.error(f"Error extracting keywords with Comprehend: {str(e)}")
-        # Fallback to simple regex extraction if Comprehend fails
+        logger.error(f"Error extracting keywords with enhanced extractor: {str(e)}")
+        # Fallback to simple regex extraction if enhanced extractor fails
         ticker_pattern = r'\b[A-Z]{1,5}\b'
         tickers = re.findall(ticker_pattern, title)
         return tickers[:5]
