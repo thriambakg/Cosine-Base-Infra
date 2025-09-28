@@ -183,6 +183,15 @@ resource "aws_iam_policy" "news_table_policy" {
           "kms:DescribeKey"
         ]
         Resource = aws_kms_key.dynamodb.arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "comprehend:DetectKeyPhrases",
+          "comprehend:DetectEntities",
+          "comprehend:DetectSentiment"
+        ]
+        Resource = "*"
       }
     ]
   })

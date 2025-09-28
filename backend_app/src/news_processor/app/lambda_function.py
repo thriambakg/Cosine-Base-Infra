@@ -3,7 +3,7 @@ import boto3
 import os
 import re
 from datetime import datetime, timedelta
-from financial_keywords import find_keywords_in_text
+from comprehend_keyword_extractor import ComprehendKeywordExtractor
 
 # Placeholder for logger
 import logging
@@ -35,24 +35,27 @@ def lambda_handler(event, context):
         })
     }
 
-def extract_title_keywords(title):
-    """Extract meaningful keywords from article title using comprehensive keyword database"""
+def extract_title_keywords(title, description=""):
+    """Extract meaningful keywords from article title using Amazon Comprehend"""
     if not title:
         return []
     
-    # Use the comprehensive keyword database for title analysis
-    title_keywords = find_keywords_in_text(title, use_binary_search=True)
-    
-    # Also extract company/ticker symbols (uppercase words, 1-5 chars)
-    ticker_pattern = r'\b[A-Z]{1,5}\b'
-    tickers = re.findall(ticker_pattern, title)
-    
-    # Combine and deduplicate
-    all_keywords = title_keywords + tickers
-    unique_keywords = list(dict.fromkeys(all_keywords))  # Preserves order
-    
-    # Return top 10 most relevant keywords (increased from 5 for better coverage)
-    return unique_keywords[:10]
+    try:
+        # Initialize Comprehend extractor
+        extractor = ComprehendKeywordExtractor()
+        
+        # Extract keywords using Comprehend (much more accurate)
+        keywords = extractor.extract_comprehensive_keywords(title, description)
+        
+        logger.info(f"Extracted {len(keywords)} keywords using Comprehend")
+        return keywords
+        
+    except Exception as e:
+        logger.error(f"Error extracting keywords with Comprehend: {str(e)}")
+        # Fallback to simple regex extraction if Comprehend fails
+        ticker_pattern = r'\b[A-Z]{1,5}\b'
+        tickers = re.findall(ticker_pattern, title)
+        return tickers[:5]
 
 def store_article(table, article):
     """Store article in DynamoDB with proper GSI structure and duplicate detection"""
@@ -71,13 +74,12 @@ def store_article(table, article):
     published_date = datetime.fromisoformat(published_date_str)
     date_str = published_date.strftime('%Y-%m-%d')
     
-    # Extract meaningful keywords from title and description
-    title_keywords = extract_title_keywords(article['title'])
-    description_keywords = find_keywords_in_text(article.get('description', ''), use_binary_search=True)
+    # Extract meaningful keywords using Amazon Comprehend
+    title_keywords = extract_title_keywords(article['title'], article.get('description', ''))
     
-    # Combine all keyword sources
+    # Combine with API-provided keywords
     api_keywords = article.get('keywords', []) or []
-    combined_keywords = title_keywords + description_keywords + api_keywords
+    combined_keywords = title_keywords + api_keywords
     unique_keywords = list(dict.fromkeys(combined_keywords))  # Remove duplicates, preserve order
     
     # Store the main article record
