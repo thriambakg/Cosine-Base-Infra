@@ -3,7 +3,7 @@ import boto3
 import os
 import re
 from datetime import datetime, timedelta
-from enhanced_keyword_extractor import EnhancedKeywordExtractor
+from deterministic_tokenizer import tokenizer
 
 # Placeholder for logger
 import logging
@@ -36,23 +36,25 @@ def lambda_handler(event, context):
     }
 
 def extract_title_keywords(title, description=""):
-    """Extract meaningful keywords from article title using enhanced extraction"""
+    """Extract meaningful keywords from article using deterministic tokenization"""
     if not title:
         return []
     
     try:
-        # Initialize enhanced extractor with real ticker data
-        extractor = EnhancedKeywordExtractor()
+        # Use deterministic tokenizer for consistent results
+        tokenization_result = tokenizer.tokenize_article(title, description, max_tokens=100)
         
-        # Extract keywords using enhanced approach (real ticker data + Comprehend)
-        keywords = extractor.extract_comprehensive_keywords(title, description)
+        # Combine tokens and phrases for comprehensive indexing
+        all_keywords = tokenization_result['tokens'] + tokenization_result['phrases']
         
-        logger.info(f"Extracted {len(keywords)} keywords using enhanced extraction")
-        return keywords
+        logger.info(f"Extracted {len(all_keywords)} keywords using deterministic tokenization")
+        logger.info(f"Sample keywords: {all_keywords[:10]}")
+        
+        return all_keywords
         
     except Exception as e:
-        logger.error(f"Error extracting keywords with enhanced extractor: {str(e)}")
-        # Fallback to simple regex extraction if enhanced extractor fails
+        logger.error(f"Error extracting keywords with deterministic tokenizer: {str(e)}")
+        # Fallback to simple regex extraction
         ticker_pattern = r'\b[A-Z]{1,5}\b'
         tickers = re.findall(ticker_pattern, title)
         return tickers[:5]
@@ -82,7 +84,7 @@ def store_article(table, article):
     combined_keywords = title_keywords + api_keywords
     unique_keywords = list(dict.fromkeys(combined_keywords))  # Remove duplicates, preserve order
     
-    # Store the main article record
+    # Store the main article record with all tokens for scan-based search
     main_item = {
         'PK': f"NEWS#{date_str}",
         'SK': article['article_id'],
@@ -91,7 +93,10 @@ def store_article(table, article):
         'source_url': article['link'],
         'source_name': article.get('source_name', article.get('source_id', 'Unknown')),
         'published_date': article['pubDate'],
-        'keywords': ','.join(unique_keywords),  # Use improved keywords
+        
+        # Store all tokens as comma-separated string for scan filtering
+        'tokens': ','.join(unique_keywords),  # All deterministic tokens
+        'keywords': ','.join(api_keywords),   # Original API keywords for reference
         'category': ','.join(article.get('category', []) or []),
         'sentiment': article.get('sentiment', 'neutral'),
         'ai_tag': ','.join(article.get('ai_tag', []) or []),
@@ -101,63 +106,25 @@ def store_article(table, article):
         'language': article.get('language', 'english'),
         'ttl': ttl,
         
-        # GSI1: Category-based search
-        'GSI1PK': f"CATEGORY#{(article.get('category', []) or ['general'])[0]}",  # Use first category
+        # Keep some GSIs for non-keyword searches (source, category, sentiment)
+        'GSI1PK': f"CATEGORY#{(article.get('category', []) or ['general'])[0]}",
         'GSI1SK': article['pubDate'],
         
-        # GSI2: Sentiment-based search
         'GSI2PK': f"SENTIMENT#{article.get('sentiment', 'neutral')}",
         'GSI2SK': article['pubDate'],
         
-        # GSI3: AI Tag-based search
-        'GSI3PK': f"TAG#{(article.get('ai_tag', []) or ['general'])[0]}",  # Use first AI tag
+        'GSI3PK': f"TAG#{(article.get('ai_tag', []) or ['general'])[0]}",
         'GSI3SK': article['pubDate'],
         
-        # GSI4: Keywords-based search (use first keyword for primary GSI entry)
-        'GSI4PK': f"KEYWORD#{(unique_keywords or ['general'])[0]}",  # Use first keyword for GSI
-        'GSI4SK': article['pubDate'],
-        
-        # GSI5: Source-based search
-        'GSI5PK': f"SOURCE#{article.get('source_name', article.get('source_id', 'Unknown'))}",
-        'GSI5SK': article['pubDate']
+        'GSI4PK': f"SOURCE#{article.get('source_name', article.get('source_id', 'Unknown'))}",
+        'GSI4SK': article['pubDate']
     }
     
-    # Store main article record
+    # Store only the main article record - no separate keyword entries
     table.put_item(Item=main_item)
     
-    # Store individual keyword entries for efficient keyword search (Map-Reduce approach)
-    # Each keyword gets its own GSI entry for O(1) keyword lookup
-    if unique_keywords:
-        for keyword in unique_keywords[:10]:  # Limit to top 10 keywords to avoid too many entries
-            keyword_item = {
-                'PK': f"NEWS#{date_str}",
-                'SK': f"KEYWORD#{keyword}#{article['article_id']}",  # Unique sort key for keyword
-                'title': article['title'],
-                'description': article.get('description', ''),
-                'source_url': article['link'],
-                'source_name': article.get('source_name', article.get('source_id', 'Unknown')),
-                'published_date': article['pubDate'],
-                'keywords': ','.join(unique_keywords),
-                'category': ','.join(article.get('category', []) or []),
-                'sentiment': article.get('sentiment', 'neutral'),
-                'ai_tag': ','.join(article.get('ai_tag', []) or []),
-                'image_url': article.get('image_url'),
-                'creator': ','.join(article.get('creator', []) or []),
-                'country': ','.join(article.get('country', []) or []),
-                'language': article.get('language', 'english'),
-                'ttl': ttl,
-                
-                # GSI4: Individual keyword entries for fast lookup
-                'GSI4PK': f"KEYWORD#{keyword}",
-                'GSI4SK': article['pubDate'],
-                
-                # Reference to main article
-                'main_article_id': article['article_id'],
-                'keyword': keyword
-            }
-            table.put_item(Item=keyword_item)
-    
-    logger.info(f"Stored new article with {len(unique_keywords)} keyword entries: {article.get('title', 'Unknown')}")
+    logger.info(f"Stored article with {len(unique_keywords)} deterministic tokens: {article.get('title', 'Unknown')}")
+    logger.info(f"Sample tokens: {unique_keywords[:10]}")
 
 def is_duplicate_article(table, article):
     """Check if article already exists in database"""
