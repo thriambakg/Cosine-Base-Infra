@@ -1,12 +1,9 @@
 import json
 import boto3
 import os
-import re
 from datetime import datetime, timedelta
-from deterministic_tokenizer import tokenizer
-
-# Placeholder for logger
 import logging
+
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
@@ -35,32 +32,8 @@ def lambda_handler(event, context):
         })
     }
 
-def extract_title_keywords(title, description=""):
-    """Extract meaningful keywords from article using deterministic tokenization"""
-    if not title:
-        return []
-    
-    try:
-        # Use deterministic tokenizer for consistent results
-        tokenization_result = tokenizer.tokenize_article(title, description, max_tokens=100)
-        
-        # Combine tokens and phrases for comprehensive indexing
-        all_keywords = tokenization_result['tokens'] + tokenization_result['phrases']
-        
-        logger.info(f"Extracted {len(all_keywords)} keywords using deterministic tokenization")
-        logger.info(f"Sample keywords: {all_keywords[:10]}")
-        
-        return all_keywords
-        
-    except Exception as e:
-        logger.error(f"Error extracting keywords with deterministic tokenizer: {str(e)}")
-        # Fallback to simple regex extraction
-        ticker_pattern = r'\b[A-Z]{1,5}\b'
-        tickers = re.findall(ticker_pattern, title)
-        return tickers[:5]
-
 def store_article(table, article):
-    """Store article in DynamoDB with proper GSI structure and duplicate detection"""
+    """Store article in DynamoDB with title-based GSI5 for searching"""
     
     # Check for duplicate before storing
     if is_duplicate_article(table, article):
@@ -71,20 +44,15 @@ def store_article(table, article):
     ttl = int((datetime.utcnow() + timedelta(days=30)).timestamp())
     
     # Extract date for partition key
-    # Ensure pubDate is in a format compatible with fromisoformat
     published_date_str = article['pubDate'].replace('Z', '+00:00') if 'Z' in article['pubDate'] else article['pubDate']
     published_date = datetime.fromisoformat(published_date_str)
     date_str = published_date.strftime('%Y-%m-%d')
     
-    # Extract meaningful keywords using Amazon Comprehend
-    title_keywords = extract_title_keywords(article['title'], article.get('description', ''))
-    
-    # Combine with API-provided keywords
+    # Get API-provided keywords (if any)
     api_keywords = article.get('keywords', []) or []
-    combined_keywords = title_keywords + api_keywords
-    unique_keywords = list(dict.fromkeys(combined_keywords))  # Remove duplicates, preserve order
+    keywords_str = ','.join(api_keywords) if api_keywords else ''
     
-    # Store the main article record with all tokens for scan-based search
+    # Store the main article record
     main_item = {
         'PK': f"NEWS#{date_str}",
         'SK': article['article_id'],
@@ -94,9 +62,8 @@ def store_article(table, article):
         'source_name': article.get('source_name', article.get('source_id', 'Unknown')),
         'published_date': article['pubDate'],
         
-        # Store all tokens as comma-separated string for scan filtering
-        'tokens': ','.join(unique_keywords),  # All deterministic tokens
-        'keywords': ','.join(api_keywords),   # Original API keywords for reference
+        # Store API keywords for reference (optional)
+        'keywords': keywords_str,
         'category': ','.join(article.get('category', []) or []),
         'sentiment': article.get('sentiment', 'neutral'),
         'ai_tag': ','.join(article.get('ai_tag', []) or []),
@@ -106,37 +73,44 @@ def store_article(table, article):
         'language': article.get('language', 'english'),
         'ttl': ttl,
         
-        # Keep some GSIs for non-keyword searches (source, category, sentiment)
+        # GSI1: Category-based search
         'GSI1PK': f"CATEGORY#{(article.get('category', []) or ['general'])[0]}",
         'GSI1SK': article['pubDate'],
         
+        # GSI2: Sentiment-based search
         'GSI2PK': f"SENTIMENT#{article.get('sentiment', 'neutral')}",
         'GSI2SK': article['pubDate'],
         
+        # GSI3: AI Tag-based search
         'GSI3PK': f"TAG#{(article.get('ai_tag', []) or ['general'])[0]}",
         'GSI3SK': article['pubDate'],
         
+        # GSI4: Source-based search
         'GSI4PK': f"SOURCE#{article.get('source_name', article.get('source_id', 'Unknown'))}",
         'GSI4SK': article['pubDate'],
         
-        # GSI5: Title-based search using contains filter
+        # GSI5: Title-based search using contains() filter
         'GSI5PK': "TITLE_SEARCH",  # Constant for all articles
-        'GSI5SK': article['title']  # Full title as sort key for contains filtering
+        'GSI5SK': article['title'].lower()  # Lowercase title for case-insensitive search
     }
     
-    # Store only the main article record - no separate keyword entries
+    # Store the article
     table.put_item(Item=main_item)
     
-    logger.info(f"Stored article with {len(unique_keywords)} deterministic tokens: {article.get('title', 'Unknown')}")
-    logger.info(f"Sample tokens: {unique_keywords[:10]}")
+    logger.info(f"Stored article: {article.get('title', 'Unknown')}")
 
 def is_duplicate_article(table, article):
     """Check if article already exists in database"""
     try:
+        # Extract date for partition key
+        published_date_str = article['pubDate'].replace('Z', '+00:00') if 'Z' in article['pubDate'] else article['pubDate']
+        published_date = datetime.fromisoformat(published_date_str)
+        date_str = published_date.strftime('%Y-%m-%d')
+        
         # Check by article_id (primary key)
         response = table.get_item(
             Key={
-                'PK': f"NEWS#{datetime.fromisoformat(article['pubDate'].replace('Z', '+00:00')).strftime('%Y-%m-%d')}",
+                'PK': f"NEWS#{date_str}",
                 'SK': article['article_id']
             }
         )
@@ -159,9 +133,3 @@ def is_duplicate_article(table, article):
         logger.error(f"Error checking for duplicate article: {str(e)}")
         # If we can't check, assume it's not a duplicate to avoid missing articles
         return False
-
-# Removed helper functions - now using NewsData.io's built-in fields:
-# - keywords: article.get('keywords', [])
-# - category: article.get('category', [])  
-# - sentiment: article.get('sentiment', 'neutral')
-# - ai_tag: article.get('ai_tag', [])
