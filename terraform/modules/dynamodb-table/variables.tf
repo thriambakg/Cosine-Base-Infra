@@ -125,12 +125,6 @@ variable "table_purpose" {
   default     = "General"
 }
 
-variable "lifecycle_prevent_destroy" {
-  description = "Prevent accidental deletion"
-  type        = bool
-  default     = false
-}
-
 variable "iam_policy_actions" {
   description = "List of IAM actions allowed for this table"
   type        = list(string)

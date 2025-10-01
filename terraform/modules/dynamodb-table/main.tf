@@ -60,7 +60,7 @@ resource "aws_dynamodb_table" "this" {
   })
 
   lifecycle {
-    prevent_destroy = var.lifecycle_prevent_destroy
+    prevent_destroy = false
   }
 }
 
