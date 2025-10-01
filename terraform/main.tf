@@ -133,25 +133,481 @@ module "cognito" {
   depends_on = [module.secrets_manager, module.user_profile_creation_lambda]
 }
 
-# DynamoDB tables for user data
-module "dynamodb" {
-  source = "./modules/dynamodb"
+# ============================================================================
+# DYNAMODB TABLES - Individual table modules
+# ============================================================================
 
-  project_name                   = var.project_name
-  environment                    = var.environment
-  tags                           = var.common_tags
-  kms_key_id                     = module.kms.dynamodb_key_arn
+# User Profiles Table
+module "user_profiles_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "user-profiles"
+
+  hash_key  = "user_id"
+  range_key = null
+
+  attributes = [
+    { name = "user_id", type = "S" },
+    { name = "email", type = "S" },
+    { name = "created_at", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "EmailIndex"
+      hash_key        = "email"
+      range_key       = null
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "CreatedAtIndex"
+      hash_key        = "created_at"
+      range_key       = null
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
   billing_mode                   = var.dynamodb_billing_mode
   read_capacity                  = var.dynamodb_read_capacity
   write_capacity                 = var.dynamodb_write_capacity
-  gsi_read_capacity              = var.dynamodb_gsi_read_capacity
-  gsi_write_capacity             = var.dynamodb_gsi_write_capacity
   stream_enabled                 = var.dynamodb_stream_enabled
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
   ttl_enabled                    = var.dynamodb_ttl_enabled
   ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "UserData"
+  table_purpose = "UserProfiles"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# Security Events Table
+module "security_events_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "security-events"
+
+  hash_key  = "event_id"
+  range_key = "timestamp"
+
+  attributes = [
+    { name = "event_id", type = "S" },
+    { name = "timestamp", type = "S" },
+    { name = "user_id", type = "S" },
+    { name = "event_type", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "UserIndex"
+      hash_key        = "user_id"
+      range_key       = "timestamp"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "EventTypeIndex"
+      hash_key        = "event_type"
+      range_key       = "timestamp"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = true
+  ttl_attribute_name             = "expires_at"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "SecurityData"
+  table_purpose = "AuditLogs"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# Alerts Table
+module "alerts_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "alerts"
+
+  hash_key  = "alert_status"
+  range_key = "created_at"
+
+  attributes = [
+    { name = "alert_status", type = "S" },
+    { name = "created_at", type = "S" },
+    { name = "alert_id", type = "S" },
+    { name = "user_email", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "AlertIdIndex"
+      hash_key        = "alert_id"
+      range_key       = null
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "UserAlertsIndex"
+      hash_key        = "user_email"
+      range_key       = "created_at"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = true
+  ttl_attribute_name             = "expires_at"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "AlertData"
+  table_purpose = "StockAlerts"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# Chat Connections Table
+module "chat_connections_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "chat-connections"
+
+  hash_key  = "connection_id"
+  range_key = null
+
+  attributes = [
+    { name = "connection_id", type = "S" },
+    { name = "user_id", type = "S" },
+    { name = "session_id", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "UserConnectionsIndex"
+      hash_key        = "user_id"
+      range_key       = null
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "SessionConnectionsIndex"
+      hash_key        = "session_id"
+      range_key       = null
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = true
+  ttl_attribute_name             = "expires_at"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "ConnectionData"
+  table_purpose = "WebSocketConnections"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# Chat Sessions Table
+module "chat_sessions_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "chat-sessions"
+
+  hash_key  = "user_id"
+  range_key = "session_id"
+
+  attributes = [
+    { name = "user_id", type = "S" },
+    { name = "session_id", type = "S" },
+    { name = "created_at", type = "N" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "CreatedAtIndex"
+      hash_key        = "user_id"
+      range_key       = "created_at"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = false
+  ttl_enabled                    = true
+  ttl_attribute_name             = "expires_at"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "ChatData"
+  table_purpose = "CompleteChatSessions"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# Stock Data Table
+module "stock_data_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "stock-data"
+
+  hash_key  = "PK"
+  range_key = "SK"
+
+  attributes = [
+    { name = "PK", type = "S" },
+    { name = "SK", type = "S" },
+    { name = "GSI1PK", type = "S" },
+    { name = "GSI1SK", type = "S" },
+    { name = "GSI2PK", type = "S" },
+    { name = "GSI2SK", type = "S" },
+    { name = "GSI3PK", type = "S" },
+    { name = "GSI3SK", type = "S" },
+    { name = "GSI4PK", type = "S" },
+    { name = "GSI4SK", type = "S" },
+    { name = "GSI5PK", type = "S" },
+    { name = "GSI5SK", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "IndustryIndex"
+      hash_key        = "GSI1PK"
+      range_key       = "GSI1SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "VolatilityIndex"
+      hash_key        = "GSI2PK"
+      range_key       = "GSI2SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PriceChangeIndex"
+      hash_key        = "GSI3PK"
+      range_key       = "GSI3SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "MarketCapIndex"
+      hash_key        = "GSI4PK"
+      range_key       = "GSI4SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PriceIndex"
+      hash_key        = "GSI5PK"
+      range_key       = "GSI5SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = var.dynamodb_ttl_enabled
+  ttl_attribute_name             = "expires_at"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "StockData"
+  table_purpose = "RealTimeStockData"
+
+  iam_policy_actions = [
+    "dynamodb:GetItem",
+    "dynamodb:PutItem",
+    "dynamodb:UpdateItem",
+    "dynamodb:DeleteItem",
+    "dynamodb:Query",
+    "dynamodb:Scan",
+    "dynamodb:BatchGetItem",
+    "dynamodb:BatchWriteItem"
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# News Table - for storing financial news articles
+module "news_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "news"
+
+  hash_key  = "PK"
+  range_key = "SK"
+
+  attributes = [
+    { name = "PK", type = "S" },
+    { name = "SK", type = "S" },
+    { name = "GSI1PK", type = "S" },
+    { name = "GSI1SK", type = "S" },
+    { name = "GSI2PK", type = "S" },
+    { name = "GSI2SK", type = "S" },
+    { name = "GSI3PK", type = "S" },
+    { name = "GSI3SK", type = "S" },
+    { name = "GSI4PK", type = "S" },
+    { name = "GSI4SK", type = "S" },
+    { name = "GSI5PK", type = "S" },
+    { name = "GSI5SK", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "GSI1"
+      hash_key        = "GSI1PK"
+      range_key       = "GSI1SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "GSI2"
+      hash_key        = "GSI2PK"
+      range_key       = "GSI2SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "GSI3"
+      hash_key        = "GSI3PK"
+      range_key       = "GSI3SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "GSI4"
+      hash_key        = "GSI4PK"
+      range_key       = "GSI4SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "GSI5"
+      hash_key        = "GSI5PK"
+      range_key       = "GSI5SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = true
+  ttl_attribute_name             = "ttl"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "NewsData"
+  table_purpose = "FinancialNews"
+
+  additional_iam_policy_statements = [
+    {
+      Effect = "Allow"
+      Action = [
+        "comprehend:DetectKeyPhrases",
+        "comprehend:DetectEntities",
+        "comprehend:DetectSentiment"
+      ]
+      Resource = "*"
+    }
+  ]
+
+  tags = var.common_tags
 
   depends_on = [module.kms]
 }
@@ -172,17 +628,17 @@ module "user_profile_creation_lambda" {
 
   # Environment variables
   environment_variables = {
-    USER_PROFILES_TABLE_NAME = module.dynamodb.user_profiles_table_name
+    USER_PROFILES_TABLE_NAME = module.user_profiles_table.table_name
   }
 
   # IAM policies for DynamoDB access
   additional_policy_arns = [
-    module.dynamodb.user_profiles_table_policy_arn
+    module.user_profiles_table.table_policy_arn
   ]
 
   tags = var.common_tags
 
-  depends_on = [module.dynamodb]
+  depends_on = [module.user_profiles_table]
 }
 
 # Lambda permission for Cognito to invoke the user profile creation function
@@ -206,7 +662,7 @@ module "cloudwatch" {
   kms_key_id                     = module.kms.cloudwatch_key_arn
   aws_region                     = var.aws_region
   cognito_user_pool_id           = module.cognito.user_pool_id
-  user_profiles_table_name       = module.dynamodb.user_profiles_table_name
+  user_profiles_table_name       = module.user_profiles_table.table_name
   security_log_retention_days    = var.cloudwatch_security_log_retention_days
   auth_log_retention_days        = var.cloudwatch_auth_log_retention_days
   application_log_retention_days = var.cloudwatch_application_log_retention_days
@@ -216,7 +672,7 @@ module "cloudwatch" {
   suspicious_activity_threshold  = var.cloudwatch_suspicious_activity_threshold
   alarm_notification_topic_arn   = var.cloudwatch_alarm_notification_topic_arn
 
-  depends_on = [module.kms, module.cognito, module.dynamodb]
+  depends_on = [module.kms, module.cognito, module.user_profiles_table]
 }
 
 
@@ -380,7 +836,7 @@ module "stock_data_processor" {
   # Environment variables
   environment_variables = {
     SQS_QUEUE_URL       = module.stock_data_queue.queue_url
-    DYNAMODB_TABLE_NAME = module.dynamodb.stock_data_table_name
+    DYNAMODB_TABLE_NAME = module.stock_data_table.table_name
     ENVIRONMENT         = var.environment
   }
 
@@ -392,7 +848,7 @@ module "stock_data_processor" {
   # IAM policies
   additional_policy_arns = [
     module.stock_data_queue.sqs_access_policy_arn,
-    module.dynamodb.stock_data_table_policy_arn
+    module.stock_data_table.table_policy_arn
   ]
 
   tags = var.common_tags
@@ -542,7 +998,7 @@ module "news_processor" {
 
   # Environment variables
   environment_variables = {
-    NEWS_TABLE_NAME = module.dynamodb.news_table_name
+    NEWS_TABLE_NAME = module.news_table.table_name
   }
 
   # Lambda layers (Python 3.11)
@@ -553,7 +1009,7 @@ module "news_processor" {
   # IAM policies
   additional_policy_arns = [
     module.news_queue.sqs_access_policy_arn,
-    module.dynamodb.news_table_policy_arn
+    module.news_table.table_policy_arn
   ]
 
   tags = var.common_tags

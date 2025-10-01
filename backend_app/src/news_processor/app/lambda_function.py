@@ -117,7 +117,11 @@ def store_article(table, article):
         'GSI3SK': article['pubDate'],
         
         'GSI4PK': f"SOURCE#{article.get('source_name', article.get('source_id', 'Unknown'))}",
-        'GSI4SK': article['pubDate']
+        'GSI4SK': article['pubDate'],
+        
+        # GSI5: Title-based search using contains filter
+        'GSI5PK': "TITLE_SEARCH",  # Constant for all articles
+        'GSI5SK': article['title']  # Full title as sort key for contains filtering
     }
     
     # Store only the main article record - no separate keyword entries
