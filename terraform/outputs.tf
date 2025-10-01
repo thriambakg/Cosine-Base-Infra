@@ -80,54 +80,54 @@ output "cognito_user_pool_domain_cloudfront_distribution_arn" {
 # DynamoDB outputs
 output "user_profiles_table_name" {
   description = "Name of the user profiles DynamoDB table"
-  value       = module.dynamodb.user_profiles_table_name
+  value       = module.user_profiles_table.table_name
 }
 
 output "user_profiles_table_arn" {
   description = "ARN of the user profiles DynamoDB table"
-  value       = module.dynamodb.user_profiles_table_arn
+  value       = module.user_profiles_table.table_arn
 }
 
 output "user_profiles_table_id" {
   description = "ID of the user profiles DynamoDB table"
-  value       = module.dynamodb.user_profiles_table_id
+  value       = module.user_profiles_table.table_id
 }
 
 output "user_profiles_table_stream_arn" {
   description = "Stream ARN of the user profiles DynamoDB table"
-  value       = module.dynamodb.user_profiles_table_stream_arn
+  value       = module.user_profiles_table.stream_arn
 }
 
 # DynamoDB KMS Key outputs
 output "dynamodb_module_kms_key_arn" {
   description = "ARN of the KMS key used for DynamoDB encryption"
-  value       = module.dynamodb.dynamodb_kms_key_arn
+  value       = module.kms.dynamodb_key_arn
 }
 
 output "dynamodb_module_kms_key_id" {
   description = "ID of the KMS key used for DynamoDB encryption"
-  value       = module.dynamodb.dynamodb_kms_key_id
+  value       = module.kms.dynamodb_key_id
 }
 
 # Security Events Table Outputs
 output "security_events_table_name" {
   description = "Name of the security events DynamoDB table"
-  value       = module.dynamodb.security_events_table_name
+  value       = module.security_events_table.table_name
 }
 
 output "security_events_table_arn" {
   description = "ARN of the security events DynamoDB table"
-  value       = module.dynamodb.security_events_table_arn
+  value       = module.security_events_table.table_arn
 }
 
 output "security_events_table_id" {
   description = "ID of the security events DynamoDB table"
-  value       = module.dynamodb.security_events_table_id
+  value       = module.security_events_table.table_id
 }
 
 output "security_events_table_stream_arn" {
   description = "Stream ARN of the security events DynamoDB table"
-  value       = module.dynamodb.security_events_table_stream_arn
+  value       = module.security_events_table.stream_arn
 }
 
 # REMOVED: User Sessions Table Outputs - consolidated into chat_sessions table
@@ -135,90 +135,90 @@ output "security_events_table_stream_arn" {
 # Chat Connections Table Outputs
 output "chat_connections_table_name" {
   description = "Name of the chat connections DynamoDB table"
-  value       = module.dynamodb.chat_connections_table_name
+  value       = module.chat_connections_table.table_name
 }
 
 output "chat_connections_table_arn" {
   description = "ARN of the chat connections DynamoDB table"
-  value       = module.dynamodb.chat_connections_table_arn
+  value       = module.chat_connections_table.table_arn
 }
 
 output "chat_connections_table_id" {
   description = "ID of the chat connections DynamoDB table"
-  value       = module.dynamodb.chat_connections_table_id
+  value       = module.chat_connections_table.table_id
 }
 
 output "chat_connections_table_stream_arn" {
   description = "Stream ARN of the chat connections DynamoDB table"
-  value       = module.dynamodb.chat_connections_table_stream_arn
+  value       = module.chat_connections_table.stream_arn
 }
 
 # Chat Sessions Table Outputs
 output "chat_sessions_table_name" {
   description = "Name of the chat sessions DynamoDB table"
-  value       = module.dynamodb.chat_sessions_table_name
+  value       = module.chat_sessions_table.table_name
 }
 
 output "chat_sessions_table_arn" {
   description = "ARN of the chat sessions DynamoDB table"
-  value       = module.dynamodb.chat_sessions_table_arn
+  value       = module.chat_sessions_table.table_arn
 }
 
 output "chat_sessions_table_id" {
   description = "ID of the chat sessions DynamoDB table"
-  value       = module.dynamodb.chat_sessions_table_id
+  value       = module.chat_sessions_table.table_id
 }
 
 output "chat_sessions_table_stream_arn" {
   description = "Stream ARN of the chat sessions DynamoDB table"
-  value       = module.dynamodb.chat_sessions_table_stream_arn
+  value       = module.chat_sessions_table.stream_arn
 }
 
 # Alerts Table outputs
 output "alerts_table_name" {
   description = "Name of the alerts DynamoDB table"
-  value       = module.dynamodb.alerts_table_name
+  value       = module.alerts_table.table_name
 }
 
 output "alerts_table_arn" {
   description = "ARN of the alerts DynamoDB table"
-  value       = module.dynamodb.alerts_table_arn
+  value       = module.alerts_table.table_arn
 }
 
 output "alerts_table_id" {
   description = "ID of the alerts DynamoDB table"
-  value       = module.dynamodb.alerts_table_id
+  value       = module.alerts_table.table_id
 }
 
 output "alerts_table_stream_arn" {
   description = "Stream ARN of the alerts DynamoDB table"
-  value       = module.dynamodb.alerts_table_stream_arn
+  value       = module.alerts_table.stream_arn
 }
 
 # Stock Data Table outputs
 output "stock_data_table_name" {
   description = "Name of the stock data DynamoDB table"
-  value       = module.dynamodb.stock_data_table_name
+  value       = module.stock_data_table.table_name
 }
 
 output "stock_data_table_arn" {
   description = "ARN of the stock data DynamoDB table"
-  value       = module.dynamodb.stock_data_table_arn
+  value       = module.stock_data_table.table_arn
 }
 
 output "stock_data_table_id" {
   description = "ID of the stock data DynamoDB table"
-  value       = module.dynamodb.stock_data_table_id
+  value       = module.stock_data_table.table_id
 }
 
 output "stock_data_stream_arn" {
   description = "Stream ARN of the stock data DynamoDB table"
-  value       = module.dynamodb.stock_data_stream_arn
+  value       = module.stock_data_table.stream_arn
 }
 
 output "stock_data_table_policy_arn" {
   description = "ARN of the IAM policy for accessing stock_data table"
-  value       = module.dynamodb.stock_data_table_policy_arn
+  value       = module.stock_data_table.table_policy_arn
 }
 
 # CloudWatch outputs
@@ -392,27 +392,27 @@ output "crypto_layer_version" {
 # News Table Outputs
 output "news_table_name" {
   description = "Name of the news DynamoDB table"
-  value       = module.dynamodb.news_table_name
+  value       = module.news_table.table_name
 }
 
 output "news_table_arn" {
   description = "ARN of the news DynamoDB table"
-  value       = module.dynamodb.news_table_arn
+  value       = module.news_table.table_arn
 }
 
 output "news_table_id" {
   description = "ID of the news DynamoDB table"
-  value       = module.dynamodb.news_table_id
+  value       = module.news_table.table_id
 }
 
 output "news_table_stream_arn" {
   description = "Stream ARN of the news DynamoDB table"
-  value       = module.dynamodb.news_table_stream_arn
+  value       = module.news_table.stream_arn
 }
 
 output "news_table_policy_arn" {
   description = "ARN of the IAM policy for accessing news table"
-  value       = module.dynamodb.news_table_policy_arn
+  value       = module.news_table.table_policy_arn
 }
 
 # Stock Data Infrastructure Outputs
