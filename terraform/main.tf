@@ -423,23 +423,23 @@ module "stock_data_table" {
   range_key = "SK"
 
   attributes = [
-    { name = "PK", type = "S" },
-    { name = "SK", type = "S" },
-    { name = "GSI1PK", type = "S" },
-    { name = "GSI1SK", type = "S" },
-    { name = "GSI2PK", type = "S" },
-    { name = "GSI2SK", type = "S" },
-    { name = "GSI3PK", type = "S" },
-    { name = "GSI3SK", type = "S" },
-    { name = "GSI4PK", type = "S" },
-    { name = "GSI4SK", type = "S" },
-    { name = "GSI5PK", type = "S" },
-    { name = "GSI5SK", type = "S" }
+    { name = "PK", type = "S" },     # STOCK#{symbol}
+    { name = "SK", type = "S" },     # {timeframe}#CURRENT (e.g., "1d#CURRENT", "7d#CURRENT")
+    { name = "GSI1PK", type = "S" }, # INDUSTRY#{industry}#{timeframe}
+    { name = "GSI1SK", type = "N" }, # Volatility (numeric)
+    { name = "GSI2PK", type = "S" }, # VOLATILITY#{timeframe}
+    { name = "GSI2SK", type = "N" }, # Volatility value (numeric)
+    { name = "GSI3PK", type = "S" }, # PRICE_CHANGE#{timeframe}
+    { name = "GSI3SK", type = "N" }, # Price change % (numeric)
+    { name = "GSI4PK", type = "S" }, # MARKET_CAP#{timeframe}
+    { name = "GSI4SK", type = "N" }, # Market cap (numeric)
+    { name = "GSI5PK", type = "S" }, # PRICE#{timeframe}
+    { name = "GSI5SK", type = "N" }  # Price (numeric)
   ]
 
   global_secondary_indexes = [
     {
-      name            = "IndustryIndex"
+      name            = "IndustryVolatilityIndex"
       hash_key        = "GSI1PK"
       range_key       = "GSI1SK"
       projection_type = "ALL"
@@ -447,7 +447,7 @@ module "stock_data_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "VolatilityIndex"
+      name            = "VolatilityRangeIndex"
       hash_key        = "GSI2PK"
       range_key       = "GSI2SK"
       projection_type = "ALL"
@@ -455,7 +455,7 @@ module "stock_data_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "PriceChangeIndex"
+      name            = "PriceChangeRangeIndex"
       hash_key        = "GSI3PK"
       range_key       = "GSI3SK"
       projection_type = "ALL"
@@ -463,7 +463,7 @@ module "stock_data_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "MarketCapIndex"
+      name            = "MarketCapRangeIndex"
       hash_key        = "GSI4PK"
       range_key       = "GSI4SK"
       projection_type = "ALL"
@@ -471,7 +471,7 @@ module "stock_data_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "PriceIndex"
+      name            = "PriceRangeIndex"
       hash_key        = "GSI5PK"
       range_key       = "GSI5SK"
       projection_type = "ALL"
@@ -800,8 +800,13 @@ module "stock_data_batch_fetcher" {
 
   # Environment variables
   environment_variables = {
-    SQS_QUEUE_URL = module.stock_data_queue.queue_url
-    ENVIRONMENT   = var.environment
+    SQS_QUEUE_URL        = module.stock_data_queue.queue_url
+    ENVIRONMENT          = var.environment
+    BATCH_SIZE_HIGH      = "100" # Fortune 500 companies
+    BATCH_SIZE_MEDIUM    = "75"  # Mid-cap stocks
+    BATCH_SIZE_LOW       = "50"  # Small-cap stocks
+    MAX_PARALLEL_THREADS = "10"  # Parallel HTTP requests
+    REQUEST_RATE_LIMIT   = "1.0" # Requests per second per thread
   }
 
   # Lambda layers
@@ -835,9 +840,12 @@ module "stock_data_processor" {
 
   # Environment variables
   environment_variables = {
-    SQS_QUEUE_URL       = module.stock_data_queue.queue_url
-    DYNAMODB_TABLE_NAME = module.stock_data_table.table_name
-    ENVIRONMENT         = var.environment
+    SQS_QUEUE_URL        = module.stock_data_queue.queue_url
+    DYNAMODB_TABLE_NAME  = module.stock_data_table.table_name
+    ENVIRONMENT          = var.environment
+    MAX_PARALLEL_THREADS = "10"  # Parallel HTTP requests
+    REQUEST_RATE_LIMIT   = "1.0" # Requests per second per thread
+    BATCH_TIMEOUT        = "50"  # Seconds before timeout warning
   }
 
   # Lambda layers
@@ -856,76 +864,293 @@ module "stock_data_processor" {
 
 # EventBridge Schedulers for Stock Data Batch Fetcher
 # Using reusable scheduler module with priority-based scheduling
-# TODO: Uncomment when ready to enable scheduled data fetching
+# ENABLED: Populate DynamoDB cache for stock screener
 
-# # High Priority Scheduler (every 5 minutes) - DISABLED FOR NOW
-# module "stock_data_batch_fetcher_high_priority_scheduler" {
-#   source = "./modules/eventbridge-scheduler"
-# 
-#   rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-${var.environment}"
-#   rule_description    = "Trigger stock data batch fetcher for high priority stocks every 5 minutes"
-#   schedule_expression = "rate(5 minutes)"
-#   enabled             = false # Disabled for API testing
-# 
-#   target_arn          = module.stock_data_batch_fetcher.function_arn
-#   target_id           = "StockDataBatchFetcherHighPriority"
-#   target_type         = "lambda"
-#   target_function_name = module.stock_data_batch_fetcher.function_name
-#   target_input        = jsonencode({
-#     priority_tier = "high"
-#     timeframe     = "1d"
-#   })
-# 
-#   purpose     = "StockDataBatchFetching"
-#   environment = var.environment
-#   tags        = var.common_tags
-# }
+# High Priority Scheduler (every 5 minutes)
+module "stock_data_batch_fetcher_high_priority_scheduler" {
+  source = "./modules/eventbridge-scheduler"
 
-# # Medium Priority Scheduler (every 15 minutes) - DISABLED FOR NOW
-# module "stock_data_batch_fetcher_medium_priority_scheduler" {
-#   source = "./modules/eventbridge-scheduler"
-# 
-#   rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-${var.environment}"
-#   rule_description    = "Trigger stock data batch fetcher for medium priority stocks every 15 minutes"
-#   schedule_expression = "rate(15 minutes)"
-#   enabled             = false # Disabled for API testing
-# 
-#   target_arn          = module.stock_data_batch_fetcher.function_arn
-#   target_id           = "StockDataBatchFetcherMediumPriority"
-#   target_type         = "lambda"
-#   target_function_name = module.stock_data_batch_fetcher.function_name
-#   target_input        = jsonencode({
-#     priority_tier = "medium"
-#     timeframe     = "1d"
-#   })
-# 
-#   purpose     = "StockDataBatchFetching"
-#   environment = var.environment
-#   tags        = var.common_tags
-# }
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for high priority stocks every 5 minutes"
+  schedule_expression = "rate(5 minutes)"
+  enabled             = true # ENABLED for stock screener
 
-# # Low Priority Scheduler (every 60 minutes) - DISABLED FOR NOW
-# module "stock_data_batch_fetcher_low_priority_scheduler" {
-#   source = "./modules/eventbridge-scheduler"
-# 
-#   rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-${var.environment}"
-#   rule_description    = "Trigger stock data batch fetcher for low priority stocks every 60 minutes"
-#   schedule_expression = "rate(60 minutes)"
-#   enabled             = false # Disabled for API testing
-# 
-#   target_arn          = module.stock_data_batch_fetcher.function_arn
-#   target_id           = "StockDataBatchFetcherLowPriority"
-#   target_type         = "lambda"
-#   target_function_name = module.stock_data_batch_fetcher.function_name
-#   target_input        = jsonencode({
-#     priority_tier = "low"
-#     timeframe     = "1d"
-#   })
-# 
-#   purpose     = "StockDataBatchFetching"
-#   environment = var.environment
-#   tags        = var.common_tags
-# }
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherHighPriority"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "high"
+    timeframe     = "1d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# Medium Priority Scheduler (every 15 minutes)
+module "stock_data_batch_fetcher_medium_priority_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for medium priority stocks every 15 minutes"
+  schedule_expression = "rate(15 minutes)"
+  enabled             = true # ENABLED for stock screener
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherMediumPriority"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "medium"
+    timeframe     = "1d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# Low Priority Scheduler (every 60 minutes)
+module "stock_data_batch_fetcher_low_priority_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for low priority stocks every 60 minutes"
+  schedule_expression = "rate(60 minutes)"
+  enabled             = true # ENABLED for stock screener
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherLowPriority"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "low"
+    timeframe     = "1d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# ============================================================================
+# TIMEFRAME-SPECIFIC SCHEDULERS
+# ============================================================================
+
+# 7-Day Timeframe Schedulers
+
+# High Priority - 7 Day (every 30 minutes)
+module "stock_data_batch_fetcher_high_7d_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-7d-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for high priority stocks (7 day timeframe) every 30 minutes"
+  schedule_expression = "rate(30 minutes)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherHigh7d"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "high"
+    timeframe     = "7d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# Medium Priority - 7 Day (every 60 minutes)
+module "stock_data_batch_fetcher_medium_7d_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-7d-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for medium priority stocks (7 day timeframe) every 60 minutes"
+  schedule_expression = "rate(60 minutes)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherMedium7d"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "medium"
+    timeframe     = "7d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# Low Priority - 7 Day (every 3 hours)
+module "stock_data_batch_fetcher_low_7d_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-7d-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for low priority stocks (7 day timeframe) every 3 hours"
+  schedule_expression = "rate(3 hours)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherLow7d"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "low"
+    timeframe     = "7d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# 30-Day Timeframe Schedulers
+
+# High Priority - 30 Day (every 2 hours)
+module "stock_data_batch_fetcher_high_30d_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-30d-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for high priority stocks (30 day timeframe) every 2 hours"
+  schedule_expression = "rate(2 hours)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherHigh30d"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "high"
+    timeframe     = "30d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# Medium Priority - 30 Day (every 4 hours)
+module "stock_data_batch_fetcher_medium_30d_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-30d-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for medium priority stocks (30 day timeframe) every 4 hours"
+  schedule_expression = "rate(4 hours)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherMedium30d"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "medium"
+    timeframe     = "30d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# Low Priority - 30 Day (every 6 hours)
+module "stock_data_batch_fetcher_low_30d_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-30d-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for low priority stocks (30 day timeframe) every 6 hours"
+  schedule_expression = "rate(6 hours)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherLow30d"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "low"
+    timeframe     = "30d"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# 1-Year Timeframe Schedulers
+
+# High Priority - 1 Year (every 6 hours)
+module "stock_data_batch_fetcher_high_1y_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-1y-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for high priority stocks (1 year timeframe) every 6 hours"
+  schedule_expression = "rate(6 hours)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherHigh1y"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "high"
+    timeframe     = "1y"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# Medium Priority - 1 Year (every 12 hours)
+module "stock_data_batch_fetcher_medium_1y_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-1y-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for medium priority stocks (1 year timeframe) every 12 hours"
+  schedule_expression = "rate(12 hours)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherMedium1y"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "medium"
+    timeframe     = "1y"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
+
+# Low Priority - 1 Year (once daily)
+module "stock_data_batch_fetcher_low_1y_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-1y-${var.environment}"
+  rule_description    = "Trigger stock data batch fetcher for low priority stocks (1 year timeframe) once daily"
+  schedule_expression = "rate(1 day)"
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataBatchFetcherLow1y"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority_tier = "low"
+    timeframe     = "1y"
+  })
+
+  purpose     = "StockDataBatchFetching"
+  environment = var.environment
+  tags        = var.common_tags
+}
 
 # SQS Queue for News Processing
 module "news_queue" {

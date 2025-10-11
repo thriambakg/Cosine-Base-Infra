@@ -1,6 +1,6 @@
 """
 Stock Data Processor Lambda
-Processes stock data from SQS and stores in DynamoDB
+Processes stock data from SQS, fetches from Yahoo Finance, and stores in DynamoDB
 """
 
 import json
@@ -9,7 +9,12 @@ import logging
 import boto3
 from typing import Dict, List, Any, Optional
 from datetime import datetime, timedelta
+from decimal import Decimal
 import time
+import random
+import requests
+from concurrent.futures import ThreadPoolExecutor, as_completed
+import numpy as np
 
 # Configure logging
 logger = logging.getLogger()
@@ -19,10 +24,42 @@ logger.setLevel(logging.INFO)
 dynamodb = boto3.resource('dynamodb')
 sqs = boto3.client('sqs')
 
-# Configuration
-MAX_BATCH_SIZE = 25  # DynamoDB batch write limit
-RETRY_ATTEMPTS = 3
-RETRY_DELAY = 1.0
+# Configuration from environment variables
+MAX_PARALLEL_THREADS = int(os.environ.get('MAX_PARALLEL_THREADS', '10'))
+REQUEST_RATE_LIMIT = float(os.environ.get('REQUEST_RATE_LIMIT', '1.0'))
+BATCH_TIMEOUT = int(os.environ.get('BATCH_TIMEOUT', '50'))
+
+# Rate limiting state
+_last_request_time = {}
+_request_lock = None
+
+def get_rate_limit_lock():
+    """Get or create threading lock for rate limiting"""
+    global _request_lock
+    if _request_lock is None:
+        import threading
+        _request_lock = threading.Lock()
+    return _request_lock
+
+def enforce_rate_limit(symbol: str):
+    """Enforce rate limiting between requests"""
+    global _last_request_time
+    
+    lock = get_rate_limit_lock()
+    with lock:
+        current_time = time.time()
+        last_time = _last_request_time.get(symbol, 0)
+        time_since_last = current_time - last_time
+        
+        min_interval = 1.0 / REQUEST_RATE_LIMIT  # e.g., 1.0 req/sec = 1.0 second interval
+        
+        if time_since_last < min_interval:
+            sleep_time = min_interval - time_since_last
+            # Add small jitter to avoid synchronized requests
+            sleep_time += random.uniform(0.1, 0.3)
+            time.sleep(sleep_time)
+        
+        _last_request_time[symbol] = time.time()
 
 def get_dynamodb_table():
     """Get DynamoDB table reference"""
@@ -31,85 +68,445 @@ def get_dynamodb_table():
         raise ValueError("DYNAMODB_TABLE_NAME environment variable not set")
     return dynamodb.Table(table_name)
 
-def calculate_historical_metrics(stock_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Calculate historical metrics for different timeframes"""
+def fetch_stock_data_yahoo(symbol: str, timeframe: str = '1d') -> Optional[Dict[str, Any]]:
+    """
+    Fetch stock data from Yahoo Finance using direct HTTP calls.
+    Based on the working stock_data lambda implementation.
     
-    # For now, we'll use the current volatility for all timeframes
-    # In a full implementation, you would calculate these from historical data
-    current_volatility = stock_data.get('volatility', 0)
+    Args:
+        symbol: Stock ticker symbol
+        timeframe: Time period ('1d', '7d', '30d', '1y')
+        
+    Returns:
+        Dictionary with stock data or None if failed
+    """
+    try:
+        logger.info(f"Fetching data for {symbol} (timeframe: {timeframe})")
+        
+        # Enforce rate limiting
+        enforce_rate_limit(symbol)
+        
+        # Step 1: Get current price and basic data
+        current_data = fetch_current_price_yahoo(symbol)
+        if not current_data or 'error' in current_data:
+            logger.error(f"Failed to get current price for {symbol}")
+            return None
+        
+        # Step 2: Get historical data for volatility and returns calculation
+        chart_data = fetch_historical_data_yahoo(symbol, timeframe)
+        if not chart_data:
+            logger.warning(f"No historical data for {symbol}, using current data only")
+        
+        # Step 3: Get additional metrics (industry, sector, market cap, etc.)
+        additional_data = fetch_additional_metrics_yahoo(symbol)
+        
+        # Step 4: Calculate statistics from chart data
+        current_price = current_data.get('current_price', 0)
+        week_return, annual_return, volatility = calculate_stats_from_chart_data(
+            chart_data, current_price, timeframe
+        )
+        
+        # Combine all data
+        result = {
+            'symbol': symbol,
+            'timeframe': timeframe,
+            'current_price': current_price,
+            'previous_close': current_data.get('previous_close', current_price),
+            'price_change': current_price - current_data.get('previous_close', current_price),
+            'price_change_percent': current_data.get('price_change_24h', 0),
+            'week_return': week_return,
+            'annual_return': annual_return,
+            'volatility': volatility,
+            'volume': additional_data.get('volume', 0),
+            'avg_volume': additional_data.get('avg_volume', 0),
+            'market_cap': additional_data.get('market_cap', 0),
+            'pe_ratio': additional_data.get('pe_ratio', 0),
+            'beta': additional_data.get('beta', 1.0),
+            'dividend_yield': additional_data.get('dividend_yield', 0),
+            'eps': additional_data.get('eps', 0),
+            'industry': additional_data.get('industry', 'Unknown'),
+            'sector': additional_data.get('sector', 'Unknown'),
+            'day_high': additional_data.get('day_high', current_price),
+            'day_low': additional_data.get('day_low', current_price),
+            'year_high': additional_data.get('year_high', current_price),
+            'year_low': additional_data.get('year_low', current_price),
+            'data_source': 'Yahoo Finance HTTP',
+            'last_updated': datetime.utcnow().isoformat()
+        }
+        
+        logger.info(f"Successfully fetched data for {symbol}: ${current_price:.2f}, vol={volatility:.4f}")
+        return result
+        
+    except Exception as e:
+        logger.error(f"Error fetching stock data for {symbol}: {str(e)}")
+        return None
+
+def fetch_current_price_yahoo(symbol: str) -> Optional[Dict[str, Any]]:
+    """Fetch current price using direct HTTP call to Yahoo Finance"""
+    try:
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive'
+        }
+        
+        response = requests.get(url, headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            return {'error': f"HTTP {response.status_code}"}
+        
+        data = response.json()
+        
+        if 'chart' not in data or not data['chart']['result']:
+            return {'error': 'No data'}
+        
+        result = data['chart']['result'][0]
+        meta = result.get('meta', {})
+        
+        current_price = meta.get('regularMarketPrice', 0)
+        previous_close = meta.get('previousClose', current_price)
+        price_change_24h = ((current_price - previous_close) / previous_close * 100) if previous_close > 0 else 0
+        
+        return {
+            'current_price': current_price,
+            'previous_close': previous_close,
+            'price_change_24h': price_change_24h
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching current price for {symbol}: {str(e)}")
+        return {'error': str(e)}
+
+def fetch_historical_data_yahoo(symbol: str, timeframe: str = '1d') -> List[Dict[str, Any]]:
+    """Fetch historical data for chart using direct HTTP call"""
+    try:
+        # Map timeframe to Yahoo Finance parameters
+        timeframe_map = {
+            '1d': {'range': '1d', 'interval': '1m'},
+            '7d': {'range': '7d', 'interval': '1h'},
+            '30d': {'range': '1mo', 'interval': '1d'},
+            '1y': {'range': '1y', 'interval': '1d'}
+        }
+        
+        config = timeframe_map.get(timeframe, timeframe_map['1y'])
+        
+        url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+        params = {
+            'range': config['range'],
+            'interval': config['interval'],
+            'includePrePost': 'true'
+        }
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9'
+        }
+        
+        # Add small delay to avoid overwhelming the API
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            logger.error(f"Historical data request failed: {response.status_code}")
+            return []
+        
+        data = response.json()
+        
+        if 'chart' not in data or not data['chart']['result']:
+            return []
+        
+        result = data['chart']['result'][0]
+        timestamps = result.get('timestamp', [])
+        quotes = result.get('indicators', {}).get('quote', [{}])[0]
+        closes = quotes.get('close', [])
+        
+        # Format data for calculations
+        chart_data = []
+        for i, timestamp in enumerate(timestamps):
+            if i < len(closes) and closes[i] is not None:
+                chart_data.append({
+                    'time': timestamp,
+                    'close': closes[i]
+                })
+        
+        logger.info(f"Retrieved {len(chart_data)} historical data points for {symbol}")
+        return chart_data
+        
+    except Exception as e:
+        logger.error(f"Error fetching historical data for {symbol}: {str(e)}")
+        return []
+
+def fetch_additional_metrics_yahoo(symbol: str) -> Dict[str, Any]:
+    """Fetch additional metrics (industry, sector, market cap, etc.) from Yahoo Finance"""
+    try:
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+        params = {
+            'modules': 'price,summaryDetail,assetProfile,defaultKeyStatistics'
+        }
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'Accept': 'application/json'
+        }
+        
+        # Add delay to avoid rate limiting
+        time.sleep(random.uniform(0.5, 1.5))
+        
+        response = requests.get(url, params=params, headers=headers, timeout=15)
+        
+        if response.status_code != 200:
+            logger.warning(f"Additional metrics request failed for {symbol}: {response.status_code}")
+            return {}
+        
+        data = response.json()
+        
+        if 'quoteSummary' not in data or not data['quoteSummary']['result']:
+            return {}
+        
+        result = data['quoteSummary']['result'][0]
+        
+        # Extract metrics from different modules
+        price_info = result.get('price', {})
+        summary_detail = result.get('summaryDetail', {})
+        asset_profile = result.get('assetProfile', {})
+        key_stats = result.get('defaultKeyStatistics', {})
+        
+        # Helper function to extract raw value from Yahoo's nested structure
+        def get_raw(obj, key, default=0):
+            val = obj.get(key, {})
+            if isinstance(val, dict):
+                return val.get('raw', default)
+            return val if val is not None else default
+        
+        return {
+            'volume': get_raw(price_info, 'regularMarketVolume', 0),
+            'avg_volume': get_raw(summary_detail, 'averageVolume', 0),
+            'market_cap': get_raw(price_info, 'marketCap', 0),
+            'pe_ratio': get_raw(summary_detail, 'trailingPE', 0),
+            'beta': get_raw(key_stats, 'beta', 1.0),
+            'dividend_yield': get_raw(summary_detail, 'dividendYield', 0),
+            'eps': get_raw(key_stats, 'trailingEps', 0),
+            'industry': asset_profile.get('industry', 'Unknown'),
+            'sector': asset_profile.get('sector', 'Unknown'),
+            'day_high': get_raw(summary_detail, 'dayHigh', 0),
+            'day_low': get_raw(summary_detail, 'dayLow', 0),
+            'year_high': get_raw(summary_detail, 'fiftyTwoWeekHigh', 0),
+            'year_low': get_raw(summary_detail, 'fiftyTwoWeekLow', 0)
+        }
+        
+    except Exception as e:
+        logger.error(f"Error fetching additional metrics for {symbol}: {str(e)}")
+        return {}
+
+def calculate_stats_from_chart_data(
+    chart_data: List[Dict[str, Any]], 
+    current_price: float, 
+    timeframe: str
+) -> tuple:
+    """
+    Calculate week_return, annual_return, and volatility from chart data.
+    Based on portfolio risk formulas.
     
-    # Simulate different timeframes with slight variations
-    # In production, these would be calculated from actual historical data
-    historical_metrics = {
-        'volatility_1d': current_volatility * 0.8,  # Daily volatility typically lower
-        'volatility_1w': current_volatility * 0.9,  # Weekly volatility
-        'volatility_1mo': current_volatility,       # Monthly volatility (current)
-        'volatility_3mo': current_volatility * 1.1, # Quarterly volatility
-        'volatility_6mo': current_volatility * 1.2, # Semi-annual volatility
-        'volatility_1y': current_volatility * 1.3,  # Annual volatility
-        'volatility_2y': current_volatility * 1.4,  # 2-year volatility
-        'volatility_5y': current_volatility * 1.5   # 5-year volatility
-    }
-    
-    return historical_metrics
+    Args:
+        chart_data: List of {'time': timestamp, 'close': price} dictionaries
+        current_price: Current price
+        timeframe: Time period ('1d', '7d', '30d', '1y')
+        
+    Returns:
+        tuple: (week_return, annual_return, volatility)
+    """
+    try:
+        if not chart_data or not current_price or len(chart_data) < 2:
+            return 0.0, 0.0, 0.0
+        
+        # Extract prices
+        prices = [point['close'] for point in chart_data if point.get('close')]
+        if len(prices) < 2:
+            return 0.0, 0.0, 0.0
+        
+        # Calculate total return
+        start_price = prices[0]
+        total_return = (current_price / start_price) - 1 if start_price > 0 else 0.0
+        
+        # Calculate annual return using portfolio risk formula: total_return * (252 / len(df))
+        annual_return = total_return * (252 / len(prices)) * 100.0  # Percentage
+        
+        # Calculate week return (last 7 data points if available)
+        week_return = 0.0
+        if len(prices) >= 7:
+            week_ago_price = prices[-7]
+            week_total_return = (current_price / week_ago_price) - 1 if week_ago_price > 0 else 0.0
+            week_return = week_total_return * (252 / 7) * 100.0  # Percentage
+        else:
+            # If less than 7 points, scale annual return to week
+            week_return = annual_return / 52
+        
+        # Calculate volatility using log returns with sqrt(252) annualization
+        volatility = 0.0
+        if len(prices) > 1:
+            log_returns = []
+            for i in range(1, len(prices)):
+                if prices[i-1] > 0:
+                    log_return = np.log(prices[i] / prices[i-1])
+                    log_returns.append(log_return)
+            
+            if log_returns:
+                # Annualize volatility: std * sqrt(252)
+                volatility = np.std(log_returns) * np.sqrt(252)
+        
+        return round(week_return, 2), round(annual_return, 2), round(volatility, 4)
+        
+    except Exception as e:
+        logger.error(f"Error calculating stats: {str(e)}")
+        return 0.0, 0.0, 0.0
 
 def create_dynamodb_item(stock_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Create DynamoDB item from stock data"""
+    """
+    Create DynamoDB item from stock data with new GSI structure.
+    Uses numeric sort keys for efficient range queries.
     
+    Args:
+        stock_data: Stock data dictionary
+        
+    Returns:
+        DynamoDB item dictionary
+    """
     symbol = stock_data.get('symbol', '')
-    timestamp = datetime.utcnow().isoformat()
+    timeframe = stock_data.get('timeframe', '1d')
     
-    # Calculate historical metrics
-    historical_metrics = calculate_historical_metrics(stock_data)
+    # Extract numeric values (use Decimal for DynamoDB)
+    current_price = Decimal(str(stock_data.get('current_price', 0)))
+    volatility = Decimal(str(stock_data.get('volatility', 0)))
+    market_cap = Decimal(str(stock_data.get('market_cap', 0)))
+    price_change_percent = Decimal(str(stock_data.get('price_change_percent', 0)))
     
-    # Create the main item
+    industry = stock_data.get('industry', 'Unknown')
+    sector = stock_data.get('sector', 'Unknown')
+    
+    # Create the DynamoDB item with new GSI structure
     item = {
+        # Primary Key
         'PK': f'STOCK#{symbol}',
-        'SK': 'CURRENT',
+        'SK': f'{timeframe}#CURRENT',
+        
+        # Stock data (all numeric fields as Decimal)
         'symbol': symbol,
-        'current_price': stock_data.get('current_price', 0),
-        'price_change': stock_data.get('price_change', 0),
-        'price_change_percent': stock_data.get('price_change_percent', 0),
-        'volatility': stock_data.get('volatility', 0),
-        'market_cap': stock_data.get('market_cap', 0),
-        'industry': stock_data.get('industry', 'Unknown'),
-        'sector': stock_data.get('sector', 'Unknown'),
-        'volume': stock_data.get('volume', 0),
-        'pe_ratio': stock_data.get('pe_ratio', 0),
-        'eps': stock_data.get('eps', 0),
-        'dividend_yield': stock_data.get('dividend_yield', 0),
-        'beta': stock_data.get('beta', 0),
-        'last_updated': timestamp,
-        'data_source': stock_data.get('data_source', 'unknown'),
+        'timeframe': timeframe,
+        'current_price': current_price,
+        'previous_close': Decimal(str(stock_data.get('previous_close', 0))),
+        'price_change': Decimal(str(stock_data.get('price_change', 0))),
+        'price_change_percent': price_change_percent,
+        'week_return': Decimal(str(stock_data.get('week_return', 0))),
+        'annual_return': Decimal(str(stock_data.get('annual_return', 0))),
+        'volatility': volatility,
+        'volume': int(stock_data.get('volume', 0)),
+        'avg_volume': int(stock_data.get('avg_volume', 0)),
+        'market_cap': market_cap,
+        'pe_ratio': Decimal(str(stock_data.get('pe_ratio', 0))),
+        'beta': Decimal(str(stock_data.get('beta', 1.0))),
+        'dividend_yield': Decimal(str(stock_data.get('dividend_yield', 0))),
+        'eps': Decimal(str(stock_data.get('eps', 0))),
+        'industry': industry,
+        'sector': sector,
+        'day_high': Decimal(str(stock_data.get('day_high', 0))),
+        'day_low': Decimal(str(stock_data.get('day_low', 0))),
+        'year_high': Decimal(str(stock_data.get('year_high', 0))),
+        'year_low': Decimal(str(stock_data.get('year_low', 0))),
+        'data_source': stock_data.get('data_source', 'Yahoo Finance'),
+        'last_updated': stock_data.get('last_updated', datetime.utcnow().isoformat()),
         
-        # GSI Keys for fast filtering
-        'GSI1PK': f'INDUSTRY#{stock_data.get("industry", "Unknown")}',
-        'GSI1SK': 'CURRENT',
-        'GSI2PK': f'VOLATILITY#{stock_data.get("volatility_category", "MEDIUM")}',
-        'GSI2SK': 'CURRENT',
-        'GSI3PK': f'PRICE_CHANGE#{stock_data.get("price_change_category", "MEDIUM")}',
-        'GSI3SK': 'CURRENT',
-        'GSI4PK': f'MARKET_CAP#{stock_data.get("market_cap_category", "MEDIUM")}',
-        'GSI4SK': 'CURRENT',
-        'GSI5PK': f'PRICE#{stock_data.get("price_category", "MEDIUM")}',
-        'GSI5SK': 'CURRENT',
+        # GSI1: Industry-based queries sorted by volatility
+        'GSI1PK': f'INDUSTRY#{industry}#{timeframe}',
+        'GSI1SK': volatility,  # Numeric sort key
         
-        # Historical metrics
-        **historical_metrics,
+        # GSI2: Volatility range queries
+        'GSI2PK': f'VOLATILITY#{timeframe}',
+        'GSI2SK': volatility,  # Numeric sort key
         
-        # TTL for automatic cleanup (optional - set to 30 days from now)
+        # GSI3: Price change range queries
+        'GSI3PK': f'PRICE_CHANGE#{timeframe}',
+        'GSI3SK': price_change_percent,  # Numeric sort key
+        
+        # GSI4: Market cap range queries
+        'GSI4PK': f'MARKET_CAP#{timeframe}',
+        'GSI4SK': market_cap,  # Numeric sort key
+        
+        # GSI5: Price range queries
+        'GSI5PK': f'PRICE#{timeframe}',
+        'GSI5SK': current_price,  # Numeric sort key
+        
+        # TTL for automatic cleanup (30 days)
         'expires_at': int((datetime.utcnow() + timedelta(days=30)).timestamp())
     }
     
     return item
 
+def process_stock_batch(symbols: List[str], timeframe: str, priority: str) -> List[Dict[str, Any]]:
+    """
+    Process a batch of stock symbols in parallel using ThreadPoolExecutor.
+    
+    Args:
+        symbols: List of stock symbols
+        timeframe: Time period ('1d', '7d', '30d', '1y')
+        priority: Priority tier ('high', 'medium', 'low')
+        
+    Returns:
+        List of DynamoDB items ready to write
+    """
+    items = []
+    
+    logger.info(f"Processing batch of {len(symbols)} stocks (timeframe: {timeframe}, priority: {priority})")
+    
+    # Process stocks in parallel
+    with ThreadPoolExecutor(max_workers=MAX_PARALLEL_THREADS) as executor:
+        # Submit all tasks
+        future_to_symbol = {
+            executor.submit(fetch_stock_data_yahoo, symbol, timeframe): symbol 
+            for symbol in symbols
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_symbol):
+            symbol = future_to_symbol[future]
+            try:
+                stock_data = future.result(timeout=30)
+                if stock_data:
+                    # Create DynamoDB item
+                    item = create_dynamodb_item(stock_data)
+                    items.append(item)
+                else:
+                    logger.warning(f"No data returned for {symbol}")
+            except Exception as e:
+                logger.error(f"Error processing {symbol}: {str(e)}")
+    
+    logger.info(f"Successfully processed {len(items)}/{len(symbols)} stocks")
+    return items
+
 def batch_write_to_dynamodb(table, items: List[Dict[str, Any]]) -> bool:
     """Write items to DynamoDB in batches"""
     try:
+        if not items:
+            return True
+        
         # DynamoDB batch_write_item can handle up to 25 items
-        with table.batch_writer() as batch:
-            for item in items:
-                batch.put_item(Item=item)
+        MAX_BATCH_SIZE = 25
+        
+        success_count = 0
+        for i in range(0, len(items), MAX_BATCH_SIZE):
+            batch = items[i:i + MAX_BATCH_SIZE]
+            
+            with table.batch_writer() as writer:
+                for item in batch:
+                    writer.put_item(Item=item)
+            
+            success_count += len(batch)
+            logger.info(f"Wrote batch of {len(batch)} items ({success_count}/{len(items)} total)")
         
         logger.info(f"Successfully wrote {len(items)} items to DynamoDB")
         return True
@@ -118,94 +515,88 @@ def batch_write_to_dynamodb(table, items: List[Dict[str, Any]]) -> bool:
         logger.error(f"Error writing to DynamoDB: {str(e)}")
         return False
 
-def process_sqs_messages(queue_url: str) -> int:
-    """Process messages from SQS queue"""
-    processed_count = 0
+def lambda_handler(event, context):
+    """
+    Main Lambda handler - processes stock data from SQS.
     
+    Expected SQS message format:
+    {
+        "symbols": ["AAPL", "MSFT", "GOOGL"],
+        "timeframe": "1d",
+        "priority": "high",
+        "batch_number": 0
+    }
+    """
     try:
-        # Receive messages from SQS
-        response = sqs.receive_message(
-            QueueUrl=queue_url,
-            MaxNumberOfMessages=10,  # Maximum messages per batch
-            WaitTimeSeconds=20,      # Long polling
-            MessageAttributeNames=['All']
-        )
+        logger.info(f"Stock Data Processor started")
+        logger.info(f"Event: {json.dumps(event, default=str)}")
         
-        messages = response.get('Messages', [])
-        if not messages:
-            logger.info("No messages to process")
-            return 0
-        
-        logger.info(f"Processing {len(messages)} messages from SQS")
+        # Check if invoked by SQS
+        if 'Records' not in event:
+            logger.error("Not invoked by SQS - missing Records")
+            return {
+                'statusCode': 400,
+                'body': json.dumps({'error': 'Expected SQS event'})
+            }
         
         # Get DynamoDB table
         table = get_dynamodb_table()
         
-        # Process messages in batches
-        items_to_write = []
+        # Process each SQS record
+        total_processed = 0
+        all_items = []
         
-        for message in messages:
+        for record in event['Records']:
             try:
-                # Parse message body
-                message_body = json.loads(message['Body'])
+                # Parse SQS message
+                message_body = json.loads(record['body'])
+                logger.info(f"Processing SQS message: {message_body}")
                 
-                # Create DynamoDB item
-                dynamodb_item = create_dynamodb_item(message_body)
-                items_to_write.append(dynamodb_item)
+                symbols = message_body.get('symbols', [])
+                timeframe = message_body.get('timeframe', '1d')
+                priority = message_body.get('priority', 'medium')
+                batch_number = message_body.get('batch_number', 0)
                 
-                # Delete message from SQS after successful processing
-                sqs.delete_message(
-                    QueueUrl=queue_url,
-                    ReceiptHandle=message['ReceiptHandle']
-                )
+                if not symbols:
+                    logger.warning("No symbols in message")
+                    continue
                 
-                processed_count += 1
+                logger.info(f"Processing batch #{batch_number}: {len(symbols)} symbols, timeframe={timeframe}, priority={priority}")
+                
+                # Fetch and process stock data
+                items = process_stock_batch(symbols, timeframe, priority)
+                all_items.extend(items)
+                
+                total_processed += len(symbols)
                 
             except Exception as e:
-                logger.error(f"Error processing message: {str(e)}")
+                logger.error(f"Error processing SQS record: {str(e)}")
                 continue
         
-        # Write items to DynamoDB in batches
-        if items_to_write:
-            # Split into batches of 25 (DynamoDB limit)
-            for i in range(0, len(items_to_write), MAX_BATCH_SIZE):
-                batch = items_to_write[i:i + MAX_BATCH_SIZE]
-                if batch_write_to_dynamodb(table, batch):
-                    logger.info(f"Successfully processed batch of {len(batch)} items")
+        # Write all items to DynamoDB
+        if all_items:
+            success = batch_write_to_dynamodb(table, all_items)
+            if success:
+                logger.info(f"Successfully wrote {len(all_items)} items to DynamoDB")
                 else:
-                    logger.error(f"Failed to process batch of {len(batch)} items")
+                logger.error("Failed to write some items to DynamoDB")
         
-        return processed_count
-        
-    except Exception as e:
-        logger.error(f"Error processing SQS messages: {str(e)}")
-        return 0
-
-def lambda_handler(event, context):
-    """Main Lambda handler"""
-    try:
-        logger.info(f"Stock Data Processor started: {json.dumps(event)}")
-        
-        # Get SQS queue URL from environment
-        queue_url = os.environ.get('SQS_QUEUE_URL')
-        if not queue_url:
-            raise ValueError("SQS_QUEUE_URL environment variable not set")
-        
-        # Process messages from SQS
-        processed_count = process_sqs_messages(queue_url)
-        
-        logger.info(f"Successfully processed {processed_count} stock data records")
+        logger.info(f"Stock Data Processor completed: processed {total_processed} symbols, wrote {len(all_items)} items")
         
         return {
             'statusCode': 200,
             'body': json.dumps({
                 'message': 'Stock data processing completed',
-                'processed_count': processed_count
+                'symbols_processed': total_processed,
+                'items_written': len(all_items)
             })
         }
         
     except Exception as e:
         logger.error(f"Error in stock data processor: {str(e)}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        
         return {
             'statusCode': 500,
             'body': json.dumps({
