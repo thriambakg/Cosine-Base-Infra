@@ -16,19 +16,21 @@ import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
 import urllib.request
+import gzip
 
 # Configure logging
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
 # AWS clients
-dynamodb = boto3.resource('dynamodb')
 sqs = boto3.client('sqs')
+s3_client = boto3.client('s3')
 
 # Configuration from environment variables
 MAX_PARALLEL_THREADS = int(os.environ.get('MAX_PARALLEL_THREADS', '10'))
 REQUEST_RATE_LIMIT = float(os.environ.get('REQUEST_RATE_LIMIT', '1.0'))
 BATCH_TIMEOUT = int(os.environ.get('BATCH_TIMEOUT', '50'))
+S3_BUCKET = os.environ.get('S3_BUCKET', 'cosine-stock-data-production')
 
 # Rate limiting state
 _last_request_time = {}
@@ -66,12 +68,6 @@ def enforce_rate_limit(symbol: str):
         
         _last_request_time[symbol] = time.time()
 
-def get_dynamodb_table():
-    """Get DynamoDB table reference"""
-    table_name = os.environ.get('DYNAMODB_TABLE_NAME')
-    if not table_name:
-        raise ValueError("DYNAMODB_TABLE_NAME environment variable not set")
-    return dynamodb.Table(table_name)
 
 def load_sec_company_tickers() -> Dict[str, Any]:
     """
@@ -138,7 +134,14 @@ def fetch_shares_outstanding_sec(symbol: str) -> int:
         facts_req = urllib.request.Request(facts_url, headers=facts_headers)
         
         with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
-            facts_data = json.loads(facts_response.read().decode())
+            # Handle gzip-compressed response
+            response_data = facts_response.read()
+            
+            # Check if response is gzipped (starts with 0x1f8b magic bytes)
+            if response_data[:2] == b'\x1f\x8b':
+                response_data = gzip.decompress(response_data)
+            
+            facts_data = json.loads(response_data.decode('utf-8'))
             
             us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
             
@@ -503,90 +506,11 @@ def calculate_stats_from_chart_data(
         logger.error(f"Error calculating stats: {str(e)}")
         return 0.0, 0.0, 0.0
 
-def create_dynamodb_item(stock_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Create DynamoDB item from stock data with new GSI structure.
-    Uses numeric sort keys for efficient range queries.
-    
-    Args:
-        stock_data: Stock data dictionary
-        
-    Returns:
-        DynamoDB item dictionary
-    """
-    symbol = stock_data.get('symbol', '')
-    timeframe = stock_data.get('timeframe', '1d')
-    
-    # Extract numeric values (use Decimal for DynamoDB)
-    current_price = Decimal(str(stock_data.get('current_price', 0)))
-    volatility = Decimal(str(stock_data.get('volatility', 0)))
-    market_cap = Decimal(str(stock_data.get('market_cap', 0)))
-    price_change_percent = Decimal(str(stock_data.get('price_change_percent', 0)))
-    
-    industry = stock_data.get('industry', 'Unknown')
-    sector = stock_data.get('sector', 'Unknown')
-    
-    # Create the DynamoDB item with new GSI structure
-    item = {
-        # Primary Key
-        'PK': f'STOCK#{symbol}',
-        'SK': f'{timeframe}#CURRENT',
-        
-        # Stock data (all numeric fields as Decimal)
-        'symbol': symbol,
-        'timeframe': timeframe,
-        'current_price': current_price,
-        'previous_close': Decimal(str(stock_data.get('previous_close', 0))),
-        'price_change': Decimal(str(stock_data.get('price_change', 0))),
-        'price_change_percent': price_change_percent,
-        'week_return': Decimal(str(stock_data.get('week_return', 0))),
-        'annual_return': Decimal(str(stock_data.get('annual_return', 0))),
-        'volatility': volatility,
-        'volume': int(stock_data.get('volume', 0)),
-        'avg_volume': int(stock_data.get('avg_volume', 0)),
-        'market_cap': market_cap,
-        'pe_ratio': Decimal(str(stock_data.get('pe_ratio', 0))),
-        'beta': Decimal(str(stock_data.get('beta', 1.0))),
-        'dividend_yield': Decimal(str(stock_data.get('dividend_yield', 0))),
-        'eps': Decimal(str(stock_data.get('eps', 0))),
-        'industry': industry,
-        'sector': sector,
-        'day_high': Decimal(str(stock_data.get('day_high', 0))),
-        'day_low': Decimal(str(stock_data.get('day_low', 0))),
-        'year_high': Decimal(str(stock_data.get('year_high', 0))),
-        'year_low': Decimal(str(stock_data.get('year_low', 0))),
-        'data_source': stock_data.get('data_source', 'Yahoo Finance'),
-        'last_updated': stock_data.get('last_updated', datetime.utcnow().isoformat()),
-        
-        # GSI1: Industry-based queries sorted by volatility
-        'GSI1PK': f'INDUSTRY#{industry}#{timeframe}',
-        'GSI1SK': volatility,  # Numeric sort key
-        
-        # GSI2: Volatility range queries
-        'GSI2PK': f'VOLATILITY#{timeframe}',
-        'GSI2SK': volatility,  # Numeric sort key
-        
-        # GSI3: Price change range queries
-        'GSI3PK': f'PRICE_CHANGE#{timeframe}',
-        'GSI3SK': price_change_percent,  # Numeric sort key
-        
-        # GSI4: Market cap range queries
-        'GSI4PK': f'MARKET_CAP#{timeframe}',
-        'GSI4SK': market_cap,  # Numeric sort key
-        
-        # GSI5: Price range queries
-        'GSI5PK': f'PRICE#{timeframe}',
-        'GSI5SK': current_price,  # Numeric sort key
-        
-        # TTL for automatic cleanup (30 days)
-        'expires_at': int((datetime.utcnow() + timedelta(days=30)).timestamp())
-    }
-    
-    return item
 
-def process_stock_batch(symbols: List[str], timeframe: str, priority: str) -> List[Dict[str, Any]]:
+def process_stock_batch(symbols: List[str], timeframe: str, priority: str) -> Dict[str, int]:
     """
     Process a batch of stock symbols in parallel using ThreadPoolExecutor.
+    Updates S3 historical data files by appending new data points.
     
     Args:
         symbols: List of stock symbols
@@ -594,11 +518,12 @@ def process_stock_batch(symbols: List[str], timeframe: str, priority: str) -> Li
         priority: Priority tier ('high', 'medium', 'low')
         
     Returns:
-        List of DynamoDB items ready to write
+        Dictionary with success/failure counts
     """
-    items = []
+    success_count = 0
+    failure_count = 0
     
-    logger.info(f"Processing batch of {len(symbols)} stocks (timeframe: {timeframe}, priority: {priority})")
+    logger.info(f"Processing batch of {len(symbols)} stocks (priority: {priority})")
     
     # Process stocks in parallel
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_THREADS) as executor:
@@ -614,47 +539,106 @@ def process_stock_batch(symbols: List[str], timeframe: str, priority: str) -> Li
             try:
                 stock_data = future.result(timeout=30)
                 if stock_data:
-                    # Create DynamoDB item
-                    item = create_dynamodb_item(stock_data)
-                    items.append(item)
+                    # Update S3 historical data (append new data point)
+                    if update_s3_historical_data(symbol, stock_data, priority):
+                        success_count += 1
+                    else:
+                        failure_count += 1
                 else:
                     logger.warning(f"No data returned for {symbol}")
+                    failure_count += 1
             except Exception as e:
                 logger.error(f"Error processing {symbol}: {str(e)}")
+                failure_count += 1
     
-    logger.info(f"Successfully processed {len(items)}/{len(symbols)} stocks")
-    return items
+    logger.info(f"Batch complete: {success_count} successful, {failure_count} failed out of {len(symbols)} symbols")
+    return {'success': success_count, 'failure': failure_count}
 
-def batch_write_to_dynamodb(table, items: List[Dict[str, Any]]) -> bool:
-    """Write items to DynamoDB in batches"""
+
+def update_s3_historical_data(symbol: str, current_data: Dict[str, Any], priority: str = 'high') -> bool:
+    """
+    Update S3 historical data file by appending new data point and updating metadata.
+    
+    Args:
+        symbol: Stock ticker symbol
+        current_data: Current stock data from Yahoo Finance
+        priority: Priority tier for S3 path
+        
+    Returns:
+        True if successful, False otherwise
+    """
     try:
-        if not items:
-            return True
+        s3_key = f"stock-data/{priority}/{symbol}.json"
         
-        # DynamoDB batch_write_item can handle up to 25 items
-        MAX_BATCH_SIZE = 25
+        # Try to read existing file
+        try:
+            response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
+            existing_data = json.loads(response['Body'].read().decode('utf-8'))
+            logger.info(f"Found existing S3 data for {symbol}")
+        except s3_client.exceptions.NoSuchKey:
+            logger.warning(f"No existing S3 data for {symbol}, skipping update")
+            return False
+        except Exception as e:
+            logger.error(f"Error reading S3 file for {symbol}: {e}")
+            return False
         
-        success_count = 0
-        for i in range(0, len(items), MAX_BATCH_SIZE):
-            batch = items[i:i + MAX_BATCH_SIZE]
-            
-            with table.batch_writer() as writer:
-                for item in batch:
-                    writer.put_item(Item=item)
-            
-            success_count += len(batch)
-            logger.info(f"Wrote batch of {len(batch)} items ({success_count}/{len(items)} total)")
+        # Create new data point for history array
+        current_price = float(current_data.get('current_price', 0))
+        timestamp = int(datetime.utcnow().timestamp())
+        current_date = datetime.utcnow().isoformat()
         
-        logger.info(f"Successfully wrote {len(items)} items to DynamoDB")
+        # Get shares outstanding (use existing or fetch new)
+        shares_outstanding = existing_data.get('shares_outstanding', 0)
+        if not shares_outstanding or shares_outstanding == 0:
+            shares_outstanding = fetch_shares_outstanding_sec(symbol)
+        
+        # Calculate market cap for this data point
+        market_cap = int(shares_outstanding * current_price) if shares_outstanding > 0 and current_price > 0 else 0
+        
+        new_data_point = {
+            'timestamp': timestamp,
+            'date': current_date,
+            'open': float(current_data.get('previous_close', current_price)),  # Approximate
+            'high': float(current_data.get('day_high', current_price)),
+            'low': float(current_data.get('day_low', current_price)),
+            'close': current_price,
+            'volume': int(current_data.get('volume', 0)),
+            'market_cap': market_cap
+        }
+        
+        # Append to history array
+        if 'history' not in existing_data:
+            existing_data['history'] = []
+        
+        existing_data['history'].append(new_data_point)
+        
+        # Update top-level metadata
+        existing_data['market_cap'] = market_cap  # Current market cap
+        existing_data['shares_outstanding'] = shares_outstanding
+        existing_data['data_points'] = len(existing_data['history'])
+        existing_data['last_date'] = current_date
+        existing_data['last_updated'] = current_date
+        
+        # Write back to S3
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=s3_key,
+            Body=json.dumps(existing_data, default=str),
+            ContentType='application/json'
+        )
+        
+        logger.info(f"✅ Updated S3 historical data for {symbol}: added data point, total points: {existing_data['data_points']}")
         return True
         
     except Exception as e:
-        logger.error(f"Error writing to DynamoDB: {str(e)}")
+        logger.error(f"Error updating S3 historical data for {symbol}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
         return False
 
 def lambda_handler(event, context):
     """
-    Main Lambda handler - processes stock data from SQS.
+    Main Lambda handler - updates S3 historical data from SQS bi-hourly schedule.
     
     Expected SQS message format:
     {
@@ -665,7 +649,7 @@ def lambda_handler(event, context):
     }
     """
     try:
-        logger.info(f"Stock Data Processor started")
+        logger.info(f"=== Stock Data Processor (S3 Updater) Started ===")
         logger.info(f"Event: {json.dumps(event, default=str)}")
         
         # Check if invoked by SQS
@@ -676,12 +660,10 @@ def lambda_handler(event, context):
                 'body': json.dumps({'error': 'Expected SQS event'})
             }
         
-        # Get DynamoDB table
-        table = get_dynamodb_table()
-        
         # Process each SQS record
-        total_processed = 0
-        all_items = []
+        total_symbols = 0
+        total_success = 0
+        total_failure = 0
         
         for record in event['Records']:
             try:
@@ -698,34 +680,29 @@ def lambda_handler(event, context):
                     logger.warning("No symbols in message")
                     continue
                 
-                logger.info(f"Processing batch #{batch_number}: {len(symbols)} symbols, timeframe={timeframe}, priority={priority}")
+                logger.info(f"Processing batch #{batch_number}: {len(symbols)} symbols, priority={priority}")
                 
-                # Fetch and process stock data
-                items = process_stock_batch(symbols, timeframe, priority)
-                all_items.extend(items)
+                # Update S3 files with new data points
+                result = process_stock_batch(symbols, timeframe, priority)
                 
-                total_processed += len(symbols)
+                total_symbols += len(symbols)
+                total_success += result['success']
+                total_failure += result['failure']
                 
             except Exception as e:
                 logger.error(f"Error processing SQS record: {str(e)}")
                 continue
         
-        # Write all items to DynamoDB
-        if all_items:
-            success = batch_write_to_dynamodb(table, all_items)
-            if success:
-                logger.info(f"Successfully wrote {len(all_items)} items to DynamoDB")
-            else:
-                logger.error("Failed to write some items to DynamoDB")
-        
-        logger.info(f"Stock Data Processor completed: processed {total_processed} symbols, wrote {len(all_items)} items")
+        logger.info(f"=== Stock Data Processor Complete ===")
+        logger.info(f"Total symbols: {total_symbols}, Success: {total_success}, Failed: {total_failure}")
         
         return {
             'statusCode': 200,
             'body': json.dumps({
-                'message': 'Stock data processing completed',
-                'symbols_processed': total_processed,
-                'items_written': len(all_items)
+                'message': 'S3 historical data update completed',
+                'symbols_processed': total_symbols,
+                'successful': total_success,
+                'failed': total_failure
             })
         }
         

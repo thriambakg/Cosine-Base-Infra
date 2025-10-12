@@ -454,6 +454,7 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
         
         # Fetch shares outstanding BEFORE building history (needed for market cap in each data point)
         shares_outstanding = None
+        shares_outstanding_history = []  # Will store all historical shares outstanding filings
         try:
             # Use SEC's company tickers to get CIK
             sec_tickers = load_sec_company_tickers()
@@ -495,17 +496,35 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
                         'CommonStockSharesIssued'
                     ]
                     
+                    # Get ALL historical shares outstanding (not just most recent)
+                    shares_outstanding_history = []
+                    
                     for field in share_fields:
                         if field in us_gaap:
                             units = us_gaap[field].get('units', {}).get('shares', [])
                             if units:
-                                # Filter for non-zero values FIRST, then sort by date
+                                # Get all non-zero values with their dates
                                 non_zero_units = [u for u in units if u.get('val', 0) > 0]
                                 if non_zero_units:
-                                    most_recent = sorted(non_zero_units, key=lambda x: x.get('end', ''), reverse=True)[0]
-                                    shares_outstanding = most_recent.get('val', 0)
-                                    if shares_outstanding > 0:
-                                        logger.info(f"✅ Found shares outstanding for {symbol}: {shares_outstanding:,} (field: {field}, date: {most_recent.get('end')})")
+                                    # Convert to list of (date, shares) tuples
+                                    for unit in non_zero_units:
+                                        end_date = unit.get('end', '')
+                                        shares = unit.get('val', 0)
+                                        if end_date and shares > 0:
+                                            shares_outstanding_history.append({
+                                                'date': end_date,
+                                                'shares': shares,
+                                                'field': field
+                                            })
+                                    
+                                    # If we found any data, use this field
+                                    if shares_outstanding_history:
+                                        # Sort by date (oldest first)
+                                        shares_outstanding_history.sort(key=lambda x: x['date'])
+                                        logger.info(f"✅ Found {len(shares_outstanding_history)} shares outstanding records for {symbol} (field: {field}, range: {shares_outstanding_history[0]['date']} to {shares_outstanding_history[-1]['date']})")
+                                        
+                                        # Set the most recent as current shares outstanding
+                                        shares_outstanding = shares_outstanding_history[-1]['shares']
                                         break
                 
         except Exception as e:
@@ -528,17 +547,46 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             except Exception as fmp_error:
                 logger.warning(f"Could not fetch shares from FMP for {symbol}: {fmp_error}")
         
-        # Add market cap to each historical data point now that we have shares outstanding
-        if shares_outstanding and shares_outstanding > 0:
+        # Add market cap to each historical data point using historically accurate shares outstanding
+        if shares_outstanding_history:
+            # We have historical shares outstanding data - use the correct value for each period
+            for point in history:
+                close_price = point.get('close', 0)
+                point_date = point.get('date', '')  # ISO format date string
+                
+                if close_price and close_price > 0 and point_date:
+                    # Find the most recent shares outstanding filing BEFORE or AT this date
+                    applicable_shares = None
+                    for shares_record in shares_outstanding_history:
+                        if shares_record['date'] <= point_date:
+                            applicable_shares = shares_record['shares']
+                        else:
+                            # We've gone past the point date, stop searching
+                            break
+                    
+                    if applicable_shares:
+                        point['market_cap'] = int(applicable_shares * close_price)
+                    else:
+                        # No filing before this date, use the earliest available
+                        point['market_cap'] = int(shares_outstanding_history[0]['shares'] * close_price)
+                else:
+                    point['market_cap'] = 0
+            
+            logger.info(f"✅ Added historically accurate market cap to {len(history)} data points for {symbol} using {len(shares_outstanding_history)} SEC filings")
+        
+        elif shares_outstanding and shares_outstanding > 0:
+            # Fallback: Only have current shares outstanding (from FMP), apply to all periods
+            # This is less accurate but better than nothing
             for point in history:
                 close_price = point.get('close', 0)
                 if close_price and close_price > 0:
                     point['market_cap'] = int(shares_outstanding * close_price)
                 else:
                     point['market_cap'] = 0
-            logger.info(f"✅ Added market cap to {len(history)} historical data points for {symbol}")
+            logger.warning(f"⚠️ Using current shares outstanding for all historical periods for {symbol} (historical data not available)")
+        
         else:
-            # No shares outstanding available, set market cap to 0 for all points
+            # No shares outstanding available at all, set market cap to 0 for all points
             for point in history:
                 point['market_cap'] = 0
             logger.warning(f"⚠️ No shares outstanding found for {symbol}, market cap set to 0")

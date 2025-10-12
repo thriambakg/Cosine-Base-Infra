@@ -825,23 +825,22 @@ module "stock_data_batch_fetcher" {
   tags = var.common_tags
 }
 
-# Stock Data Processor Lambda
+# Stock Data Processor Lambda - Updates S3 historical files bi-hourly
 module "stock_data_processor" {
   source = "./modules/lambda"
 
   function_name = "${var.project_name}-stock-data-processor-${var.environment}"
-  description   = "Processes stock data from SQS and stores in DynamoDB"
+  description   = "Processes stock data from SQS and updates S3 historical files (bi-hourly during market hours)"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
-  timeout       = 60 # 1 minute
-  memory_size   = 512
+  timeout       = 300 # 5 minutes (may need to process many stocks)
+  memory_size   = 1024
 
   source_dir = "${path.module}/../backend_app/src/stock_data_processor/app"
 
   # Environment variables
   environment_variables = {
-    SQS_QUEUE_URL        = module.stock_data_queue.queue_url
-    DYNAMODB_TABLE_NAME  = module.stock_data_table.table_name
+    S3_BUCKET            = module.stock_data_historical_s3.bucket_id
     ENVIRONMENT          = var.environment
     MAX_PARALLEL_THREADS = "10"  # Parallel HTTP requests
     REQUEST_RATE_LIMIT   = "1.0" # Requests per second per thread
@@ -850,25 +849,106 @@ module "stock_data_processor" {
 
   # Lambda layers
   layers = [
-    module.core_layer.layer_arn
+    module.core_layer.layer_arn,
+    module.financial_layer.layer_arn
   ]
 
   # IAM policies
   additional_policy_arns = [
     module.stock_data_queue.sqs_access_policy_arn,
-    module.stock_data_table.table_policy_arn
+    aws_iam_policy.stock_data_historical_s3_access.arn,
+    module.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
+
+  depends_on = [module.stock_data_historical_s3]
 }
 
 # ==============================================================================
-# STOCK DATA ARCHITECTURE NOTE
+# STOCK DATA BI-HOURLY UPDATE SCHEDULERS (During Market Hours Only)
 # ==============================================================================
-# EventBridge schedulers for stock_data_batch_fetcher have been removed.
-# The new architecture uses Step Functions for one-time historical load,
-# then a nightly aggregator Lambda will handle DynamoDB updates from S3.
-# See STOCK_DATA_ARCHITECTURE.md for details.
+# These schedulers trigger the stock_data_batch_fetcher to send batches to SQS
+# The stock_data_processor Lambda (triggered by SQS) updates S3 historical files
+
+# High Priority Stocks - Every 30 minutes during market hours (9:00 AM - 4:00 PM ET)
+# Note: EventBridge uses UTC, so we need to adjust for ET timezone
+# During DST (March-November): ET = UTC-4, so 9:00 AM ET = 1:00 PM UTC
+# During Standard (November-March): ET = UTC-5, so 9:00 AM ET = 2:00 PM UTC
+# Using DST times: 13:00-20:00 UTC (covers 9:00 AM - 4:00 PM ET during DST)
+module "stock_data_high_priority_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-high-priority-${var.environment}"
+  rule_description    = "Trigger high-priority stock data updates every 30 minutes during market hours (9:00 AM - 4:00 PM ET)"
+  schedule_expression = "cron(0,30 13,14,15,16,17,18,19 ? * MON-FRI *)" # Every 30 min from 1:00 PM-8:00 PM UTC (9 AM-4 PM ET DST)
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataHighPriorityScheduler"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority = "high"
+    source   = "scheduler-market-hours"
+  })
+
+  purpose     = "StockDataHighPriorityUpdate"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [module.stock_data_batch_fetcher]
+}
+
+# Medium Priority Stocks - Every hour during market hours
+module "stock_data_medium_priority_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-medium-priority-${var.environment}"
+  rule_description    = "Trigger medium-priority stock data updates every hour during market hours (9:00 AM - 4:00 PM ET)"
+  schedule_expression = "cron(0 13,14,15,16,17,18,19,20 ? * MON-FRI *)" # Every hour from 1:00 PM-8:00 PM UTC (9 AM-4 PM ET DST)
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataMediumPriorityScheduler"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority = "medium"
+    source   = "scheduler-market-hours"
+  })
+
+  purpose     = "StockDataMediumPriorityUpdate"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [module.stock_data_batch_fetcher]
+}
+
+# Low Priority Stocks - Every 2 hours during market hours
+module "stock_data_low_priority_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-stock-data-low-priority-${var.environment}"
+  rule_description    = "Trigger low-priority stock data updates every 2 hours during market hours (9:00 AM - 4:00 PM ET)"
+  schedule_expression = "cron(0 13,15,17,19 ? * MON-FRI *)" # Every 2 hours from 1:00 PM-7:00 PM UTC (9 AM-3 PM ET DST)
+  enabled             = true
+
+  target_arn           = module.stock_data_batch_fetcher.function_arn
+  target_id            = "StockDataLowPriorityScheduler"
+  target_type          = "lambda"
+  target_function_name = module.stock_data_batch_fetcher.function_name
+  target_input = jsonencode({
+    priority = "low"
+    source   = "scheduler-market-hours"
+  })
+
+  purpose     = "StockDataLowPriorityUpdate"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [module.stock_data_batch_fetcher]
+}
 
 # SQS Queue for News Processing
 module "news_queue" {
