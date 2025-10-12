@@ -503,6 +503,23 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
         except Exception as e:
             logger.warning(f"Could not fetch shares outstanding from SEC for {symbol}: {e}")
         
+        # Fallback: Try Financial Modeling Prep free API if SEC failed
+        if not shares_outstanding or shares_outstanding == 0:
+            try:
+                fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}?apikey=demo"
+                fmp_headers = {'User-Agent': 'Mozilla/5.0'}
+                fmp_req = urllib.request.Request(fmp_url, headers=fmp_headers)
+                
+                with urllib.request.urlopen(fmp_req, timeout=5) as fmp_response:
+                    fmp_data = json.loads(fmp_response.read().decode())
+                    if fmp_data and len(fmp_data) > 0:
+                        profile = fmp_data[0]
+                        shares_outstanding = profile.get('sharesOutstanding', 0)
+                        if shares_outstanding > 0:
+                            logger.info(f"✅ Found shares outstanding for {symbol} from FMP: {shares_outstanding:,}")
+            except Exception as fmp_error:
+                logger.warning(f"Could not fetch shares from FMP for {symbol}: {fmp_error}")
+        
         # Add market cap to each historical data point now that we have shares outstanding
         if shares_outstanding and shares_outstanding > 0:
             for point in history:
@@ -645,13 +662,40 @@ def lambda_handler(event, context):
     """
     Main Lambda handler.
     
-    Can be invoked in two modes:
-    1. Batch Generation Mode (no 'symbols' in event): Generates batches for Step Functions
+    Can be invoked in three modes:
+    1. Single Stock Mode ('symbol' in event): Fetches data for one symbol and returns it
     2. Batch Processing Mode ('symbols' in event): Processes a batch of symbols
+    3. Batch Generation Mode (neither): Generates batches for Step Functions
     """
     try:
         logger.info("=== Stock Data Historical Loader Started ===")
         logger.info(f"Event: {json.dumps(event, default=str)}")
+        
+        # Check for single stock mode (for manual testing/API Gateway)
+        if 'symbol' in event and 'symbols' not in event:
+            logger.info("Mode: Single Stock")
+            symbol = event['symbol']
+            years = event.get('years', 5)
+            
+            logger.info(f"Fetching historical data for {symbol} ({years} years)")
+            
+            # Fetch the data
+            data = fetch_yahoo_finance_data(symbol, years)
+            
+            if data.get('status') == 'failed':
+                return {
+                    'statusCode': 400,
+                    'body': json.dumps({
+                        'error': data.get('error', 'Failed to fetch data'),
+                        'symbol': symbol
+                    })
+                }
+            
+            # Return the data directly (for testing/debugging)
+            return {
+                'statusCode': 200,
+                'body': json.dumps(data, default=str)
+            }
         
         # Check if this is batch generation or batch processing
         if 'symbols' not in event:
