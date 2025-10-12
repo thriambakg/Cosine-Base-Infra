@@ -461,23 +461,63 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
         if market_cap == 0:
             market_cap = detailed_metadata.get('market_cap', 0)
         
-        # Third try: Fetch directly from Yahoo Finance quote API if still zero
+        # Third try: Calculate from SEC data (CIK-based financial statements)
         if market_cap == 0:
             try:
-                quote_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
-                quote_headers = {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-                }
-                quote_req = urllib.request.Request(quote_url, headers=quote_headers)
-                with urllib.request.urlopen(quote_req, timeout=5) as quote_response:
-                    quote_data = json.loads(quote_response.read().decode())
-                    quote_result = quote_data.get('quoteResponse', {}).get('result', [])
-                    if quote_result and len(quote_result) > 0:
-                        market_cap = quote_result[0].get('marketCap', 0)
-                        if market_cap > 0:
-                            logger.info(f"✅ Fetched market cap for {symbol}: ${market_cap:,}")
+                # Use SEC's company tickers to get CIK
+                sec_tickers = load_sec_company_tickers()
+                company_info = None
+                for key, company in sec_tickers.items():
+                    if company.get('ticker', '').upper() == symbol.upper():
+                        company_info = company
+                        break
+                
+                if company_info:
+                    cik = str(company_info.get('cik_str', '')).zfill(10)
+                    
+                    # Get company facts (includes shares outstanding and other financials)
+                    time.sleep(0.2)  # SEC rate limiting
+                    facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+                    facts_headers = {
+                        'User-Agent': 'Cosine-AI stock-data-loader contact@cosine-ai.com',
+                        'Accept-Encoding': 'gzip, deflate'
+                    }
+                    facts_req = urllib.request.Request(facts_url, headers=facts_headers)
+                    
+                    with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
+                        facts_data = json.loads(facts_response.read().decode())
+                        
+                        # Try to find shares outstanding (EntityCommonStockSharesOutstanding or CommonStockSharesOutstanding)
+                        shares_outstanding = None
+                        current_price = history[-1]['close'] if history else 0
+                        
+                        us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
+                        
+                        # Try multiple fields for shares outstanding
+                        share_fields = [
+                            'EntityCommonStockSharesOutstanding',
+                            'CommonStockSharesOutstanding',
+                            'CommonStockSharesIssued',
+                            'WeightedAverageNumberOfSharesOutstandingBasic'
+                        ]
+                        
+                        for field in share_fields:
+                            if field in us_gaap:
+                                units = us_gaap[field].get('units', {}).get('shares', [])
+                                if units:
+                                    # Get most recent value
+                                    most_recent = sorted(units, key=lambda x: x.get('end', ''), reverse=True)[0]
+                                    shares_outstanding = most_recent.get('val', 0)
+                                    if shares_outstanding > 0:
+                                        logger.info(f"✅ Found shares outstanding for {symbol} from SEC: {shares_outstanding:,}")
+                                        break
+                        
+                        if shares_outstanding and shares_outstanding > 0 and current_price > 0:
+                            market_cap = int(shares_outstanding * current_price)
+                            logger.info(f"✅ Calculated market cap for {symbol}: ${market_cap:,} ({shares_outstanding:,} shares @ ${current_price:.2f})")
+                        
             except Exception as e:
-                logger.debug(f"Could not fetch market cap from quote API for {symbol}: {e}")
+                logger.debug(f"Could not fetch market cap from SEC for {symbol}: {e}")
         
         return {
             'symbol': symbol,
