@@ -76,11 +76,12 @@ s3://cosine-stock-historical-{environment}/
   "exchange": "NASDAQ",
   "instrument_type": "EQUITY",
   
-  "company_name": "APPLE INC",
-  "industry": "Electronic Computers",
-  "sector": "Information Technology",
-  "market_cap": 2500000000000,
-  "country": "US",
+    "company_name": "APPLE INC",
+    "industry": "Electronic Computers",
+    "sector": "Information Technology",
+    "market_cap": 3450000000000,  // Current market cap (from last data point)
+    "shares_outstanding": 15204839000,  // Shares outstanding from SEC (relatively static)
+    "country": "US",
   
   "data_points": 1825,
   "first_date": "2020-10-12T00:00:00",
@@ -93,7 +94,8 @@ s3://cosine-stock-historical-{environment}/
       "high": 125.30,
       "low": 119.80,
       "close": 124.40,
-      "volume": 89234500
+      "volume": 89234500,
+      "market_cap": 1891362093600  // Calculated from shares_outstanding × close price
     },
     ...
   ]

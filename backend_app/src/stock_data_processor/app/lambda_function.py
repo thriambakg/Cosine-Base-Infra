@@ -15,6 +15,7 @@ import random
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
+import urllib.request
 
 # Configure logging
 logger = logging.getLogger()
@@ -32,6 +33,10 @@ BATCH_TIMEOUT = int(os.environ.get('BATCH_TIMEOUT', '50'))
 # Rate limiting state
 _last_request_time = {}
 _request_lock = None
+
+# Global cache for SEC data (persists across invocations in same Lambda container)
+_sec_company_tickers_cache = None
+_shares_outstanding_cache = {}  # Cache shares outstanding by symbol
 
 def get_rate_limit_lock():
     """Get or create threading lock for rate limiting"""
@@ -68,6 +73,105 @@ def get_dynamodb_table():
         raise ValueError("DYNAMODB_TABLE_NAME environment variable not set")
     return dynamodb.Table(table_name)
 
+def load_sec_company_tickers() -> Dict[str, Any]:
+    """
+    Load SEC company tickers JSON (cached globally per Lambda execution).
+    """
+    global _sec_company_tickers_cache
+    if _sec_company_tickers_cache is not None:
+        return _sec_company_tickers_cache
+    
+    try:
+        url = "https://www.sec.gov/files/company_tickers.json"
+        headers = {
+            'User-Agent': 'Cosine-AI stock-data-processor contact@cosine-ai.com',
+            'Accept-Encoding': 'gzip, deflate'
+        }
+        req = urllib.request.Request(url, headers=headers)
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            _sec_company_tickers_cache = json.loads(response.read().decode())
+            logger.info(f"✅ Loaded SEC company tickers: {len(_sec_company_tickers_cache)} companies")
+            return _sec_company_tickers_cache
+    
+    except Exception as e:
+        logger.error(f"Failed to load SEC company tickers: {e}")
+        return {}
+
+def fetch_shares_outstanding_sec(symbol: str) -> int:
+    """
+    Fetch shares outstanding from SEC EDGAR API.
+    Results are cached globally per Lambda execution.
+    
+    Returns:
+        Shares outstanding as integer, or 0 if not found
+    """
+    global _shares_outstanding_cache
+    
+    # Check cache first
+    if symbol in _shares_outstanding_cache:
+        return _shares_outstanding_cache[symbol]
+    
+    try:
+        # Use SEC's company tickers to get CIK
+        sec_tickers = load_sec_company_tickers()
+        company_info = None
+        for key, company in sec_tickers.items():
+            if company.get('ticker', '').upper() == symbol.upper():
+                company_info = company
+                break
+        
+        if not company_info:
+            logger.warning(f"Symbol {symbol} not found in SEC tickers")
+            _shares_outstanding_cache[symbol] = 0
+            return 0
+        
+        cik = str(company_info.get('cik_str', '')).zfill(10)
+        
+        # Get company facts (includes shares outstanding)
+        time.sleep(0.2)  # SEC rate limiting: 5 req/sec
+        facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+        facts_headers = {
+            'User-Agent': 'Cosine-AI stock-data-processor contact@cosine-ai.com',
+            'Accept-Encoding': 'gzip, deflate'
+        }
+        facts_req = urllib.request.Request(facts_url, headers=facts_headers)
+        
+        with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
+            facts_data = json.loads(facts_response.read().decode())
+            
+            us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
+            
+            # Try multiple fields for shares outstanding
+            share_fields = [
+                'EntityCommonStockSharesOutstanding',
+                'CommonStockSharesOutstanding',
+                'CommonStockSharesIssued',
+                'WeightedAverageNumberOfSharesOutstandingBasic'
+            ]
+            
+            for field in share_fields:
+                if field in us_gaap:
+                    units = us_gaap[field].get('units', {}).get('shares', [])
+                    if units:
+                        # Get most recent value
+                        most_recent = sorted(units, key=lambda x: x.get('end', ''), reverse=True)[0]
+                        shares = most_recent.get('val', 0)
+                        if shares > 0:
+                            logger.info(f"✅ Found shares outstanding for {symbol}: {shares:,} (field: {field})")
+                            _shares_outstanding_cache[symbol] = shares
+                            return shares
+        
+        # Not found
+        logger.warning(f"⚠️ No shares outstanding found in SEC data for {symbol}")
+        _shares_outstanding_cache[symbol] = 0
+        return 0
+        
+    except Exception as e:
+        logger.error(f"Error fetching shares outstanding from SEC for {symbol}: {e}")
+        _shares_outstanding_cache[symbol] = 0
+        return 0
+
 def fetch_stock_data_yahoo(symbol: str, timeframe: str = '1d') -> Optional[Dict[str, Any]]:
     """
     Fetch stock data from Yahoo Finance using direct HTTP calls.
@@ -92,16 +196,19 @@ def fetch_stock_data_yahoo(symbol: str, timeframe: str = '1d') -> Optional[Dict[
             logger.error(f"Failed to get current price for {symbol}")
             return None
         
-        # Step 2: Get historical data for volatility and returns calculation
+        # Step 2: Get current price first (needed for market cap calculation)
+        current_price = current_data.get('current_price', 0)
+        
+        # Step 3: Get historical data for volatility and returns calculation
         chart_data = fetch_historical_data_yahoo(symbol, timeframe)
         if not chart_data:
             logger.warning(f"No historical data for {symbol}, using current data only")
         
-        # Step 3: Get additional metrics (industry, sector, market cap, etc.)
-        additional_data = fetch_additional_metrics_yahoo(symbol)
+        # Step 4: Get additional metrics (industry, sector, market cap, etc.)
+        # Pass current_price for market cap calculation from SEC shares outstanding
+        additional_data = fetch_additional_metrics_yahoo(symbol, current_price)
         
-        # Step 4: Calculate statistics from chart data
-        current_price = current_data.get('current_price', 0)
+        # Step 5: Calculate statistics from chart data
         week_return, annual_return, volatility = calculate_stats_from_chart_data(
             chart_data, current_price, timeframe
         )
@@ -242,8 +349,36 @@ def fetch_historical_data_yahoo(symbol: str, timeframe: str = '1d') -> List[Dict
         logger.error(f"Error fetching historical data for {symbol}: {str(e)}")
         return []
 
-def fetch_additional_metrics_yahoo(symbol: str) -> Dict[str, Any]:
-    """Fetch additional metrics (industry, sector, market cap, etc.) from Yahoo Finance"""
+def fetch_additional_metrics_yahoo(symbol: str, current_price: float = 0) -> Dict[str, Any]:
+    """
+    Fetch additional metrics (industry, sector, market cap, etc.).
+    Market cap is calculated from SEC shares outstanding × current price.
+    Other metrics attempted from Yahoo Finance quoteSummary (often fails with auth).
+    """
+    metrics = {
+        'volume': 0,
+        'avg_volume': 0,
+        'market_cap': 0,
+        'pe_ratio': 0,
+        'beta': 1.0,
+        'dividend_yield': 0,
+        'eps': 0,
+        'industry': 'Unknown',
+        'sector': 'Unknown',
+        'day_high': 0,
+        'day_low': 0,
+        'year_high': 0,
+        'year_low': 0
+    }
+    
+    # Calculate market cap from SEC shares outstanding
+    if current_price > 0:
+        shares_outstanding = fetch_shares_outstanding_sec(symbol)
+        if shares_outstanding > 0:
+            metrics['market_cap'] = int(shares_outstanding * current_price)
+            logger.info(f"✅ Calculated market cap for {symbol}: ${metrics['market_cap']:,} ({shares_outstanding:,} shares @ ${current_price:.2f})")
+    
+    # Try to get other metrics from Yahoo (often fails, so we have defaults)
     try:
         url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
         params = {
@@ -260,49 +395,49 @@ def fetch_additional_metrics_yahoo(symbol: str) -> Dict[str, Any]:
         
         response = requests.get(url, params=params, headers=headers, timeout=15)
         
-        if response.status_code != 200:
-            logger.warning(f"Additional metrics request failed for {symbol}: {response.status_code}")
-            return {}
-        
-        data = response.json()
-        
-        if 'quoteSummary' not in data or not data['quoteSummary']['result']:
-            return {}
-        
-        result = data['quoteSummary']['result'][0]
-        
-        # Extract metrics from different modules
-        price_info = result.get('price', {})
-        summary_detail = result.get('summaryDetail', {})
-        asset_profile = result.get('assetProfile', {})
-        key_stats = result.get('defaultKeyStatistics', {})
-        
-        # Helper function to extract raw value from Yahoo's nested structure
-        def get_raw(obj, key, default=0):
-            val = obj.get(key, {})
-            if isinstance(val, dict):
-                return val.get('raw', default)
-            return val if val is not None else default
-        
-        return {
-            'volume': get_raw(price_info, 'regularMarketVolume', 0),
-            'avg_volume': get_raw(summary_detail, 'averageVolume', 0),
-            'market_cap': get_raw(price_info, 'marketCap', 0),
-            'pe_ratio': get_raw(summary_detail, 'trailingPE', 0),
-            'beta': get_raw(key_stats, 'beta', 1.0),
-            'dividend_yield': get_raw(summary_detail, 'dividendYield', 0),
-            'eps': get_raw(key_stats, 'trailingEps', 0),
-            'industry': asset_profile.get('industry', 'Unknown'),
-            'sector': asset_profile.get('sector', 'Unknown'),
-            'day_high': get_raw(summary_detail, 'dayHigh', 0),
-            'day_low': get_raw(summary_detail, 'dayLow', 0),
-            'year_high': get_raw(summary_detail, 'fiftyTwoWeekHigh', 0),
-            'year_low': get_raw(summary_detail, 'fiftyTwoWeekLow', 0)
-        }
+        if response.status_code == 200:
+            data = response.json()
+            
+            if 'quoteSummary' in data and data['quoteSummary']['result']:
+                result = data['quoteSummary']['result'][0]
+                
+                # Extract metrics from different modules
+                price_info = result.get('price', {})
+                summary_detail = result.get('summaryDetail', {})
+                asset_profile = result.get('assetProfile', {})
+                key_stats = result.get('defaultKeyStatistics', {})
+                
+                # Helper function to extract raw value from Yahoo's nested structure
+                def get_raw(obj, key, default=0):
+                    val = obj.get(key, {})
+                    if isinstance(val, dict):
+                        return val.get('raw', default)
+                    return val if val is not None else default
+                
+                # Update metrics with Yahoo data (but keep SEC market cap)
+                metrics.update({
+                    'volume': get_raw(price_info, 'regularMarketVolume', metrics['volume']),
+                    'avg_volume': get_raw(summary_detail, 'averageVolume', metrics['avg_volume']),
+                    # 'market_cap': keep SEC calculation
+                    'pe_ratio': get_raw(summary_detail, 'trailingPE', metrics['pe_ratio']),
+                    'beta': get_raw(key_stats, 'beta', metrics['beta']),
+                    'dividend_yield': get_raw(summary_detail, 'dividendYield', metrics['dividend_yield']),
+                    'eps': get_raw(key_stats, 'trailingEps', metrics['eps']),
+                    'industry': asset_profile.get('industry', metrics['industry']),
+                    'sector': asset_profile.get('sector', metrics['sector']),
+                    'day_high': get_raw(summary_detail, 'dayHigh', metrics['day_high']),
+                    'day_low': get_raw(summary_detail, 'dayLow', metrics['day_low']),
+                    'year_high': get_raw(summary_detail, 'fiftyTwoWeekHigh', metrics['year_high']),
+                    'year_low': get_raw(summary_detail, 'fiftyTwoWeekLow', metrics['year_low'])
+                })
+                logger.info(f"✅ Fetched additional Yahoo metrics for {symbol}")
+        else:
+            logger.warning(f"Yahoo quoteSummary failed for {symbol}: {response.status_code} (using defaults)")
         
     except Exception as e:
-        logger.error(f"Error fetching additional metrics for {symbol}: {str(e)}")
-        return {}
+        logger.warning(f"Could not fetch Yahoo quoteSummary for {symbol}: {e} (using defaults)")
+    
+    return metrics
 
 def calculate_stats_from_chart_data(
     chart_data: List[Dict[str, Any]], 
@@ -578,7 +713,7 @@ def lambda_handler(event, context):
             success = batch_write_to_dynamodb(table, all_items)
             if success:
                 logger.info(f"Successfully wrote {len(all_items)} items to DynamoDB")
-                else:
+            else:
                 logger.error("Failed to write some items to DynamoDB")
         
         logger.info(f"Stock Data Processor completed: processed {total_processed} symbols, wrote {len(all_items)} items")

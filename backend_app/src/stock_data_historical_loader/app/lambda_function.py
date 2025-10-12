@@ -423,7 +423,7 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
         closes = indicators.get('close', [])
         volumes = indicators.get('volume', [])
         
-        # Build historical data points
+        # Build historical data points (market cap will be added after fetching shares outstanding)
         history = []
         for i in range(len(timestamps)):
             # Skip if any required field is None
@@ -451,73 +451,73 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
         logger.info(f"Fetching metadata for {symbol}")
         detailed_metadata = fetch_stock_metadata(symbol)
         
-        # Get market cap - try multiple sources
-        market_cap = 0
-        
-        # First try: Yahoo Finance chart meta
-        market_cap = meta.get('marketCap', 0)
-        
-        # Second try: From detailed metadata (Yahoo quote API or SEC fallback)
-        if market_cap == 0:
-            market_cap = detailed_metadata.get('market_cap', 0)
-        
-        # Third try: Calculate from SEC data (CIK-based financial statements)
-        if market_cap == 0:
-            try:
-                # Use SEC's company tickers to get CIK
-                sec_tickers = load_sec_company_tickers()
-                company_info = None
-                for key, company in sec_tickers.items():
-                    if company.get('ticker', '').upper() == symbol.upper():
-                        company_info = company
-                        break
+        # Fetch shares outstanding BEFORE building history (needed for market cap in each data point)
+        shares_outstanding = None
+        try:
+            # Use SEC's company tickers to get CIK
+            sec_tickers = load_sec_company_tickers()
+            company_info = None
+            for key, company in sec_tickers.items():
+                if company.get('ticker', '').upper() == symbol.upper():
+                    company_info = company
+                    break
+            
+            if company_info:
+                cik = str(company_info.get('cik_str', '')).zfill(10)
                 
-                if company_info:
-                    cik = str(company_info.get('cik_str', '')).zfill(10)
+                # Get company facts (includes shares outstanding)
+                time.sleep(0.2)  # SEC rate limiting
+                facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+                facts_headers = {
+                    'User-Agent': 'Cosine-AI stock-data-loader contact@cosine-ai.com',
+                    'Accept-Encoding': 'gzip, deflate'
+                }
+                facts_req = urllib.request.Request(facts_url, headers=facts_headers)
+                
+                with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
+                    facts_data = json.loads(facts_response.read().decode())
                     
-                    # Get company facts (includes shares outstanding and other financials)
-                    time.sleep(0.2)  # SEC rate limiting
-                    facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
-                    facts_headers = {
-                        'User-Agent': 'Cosine-AI stock-data-loader contact@cosine-ai.com',
-                        'Accept-Encoding': 'gzip, deflate'
-                    }
-                    facts_req = urllib.request.Request(facts_url, headers=facts_headers)
+                    us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
                     
-                    with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
-                        facts_data = json.loads(facts_response.read().decode())
-                        
-                        # Try to find shares outstanding (EntityCommonStockSharesOutstanding or CommonStockSharesOutstanding)
-                        shares_outstanding = None
-                        current_price = history[-1]['close'] if history else 0
-                        
-                        us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
-                        
-                        # Try multiple fields for shares outstanding
-                        share_fields = [
-                            'EntityCommonStockSharesOutstanding',
-                            'CommonStockSharesOutstanding',
-                            'CommonStockSharesIssued',
-                            'WeightedAverageNumberOfSharesOutstandingBasic'
-                        ]
-                        
-                        for field in share_fields:
-                            if field in us_gaap:
-                                units = us_gaap[field].get('units', {}).get('shares', [])
-                                if units:
-                                    # Get most recent value
-                                    most_recent = sorted(units, key=lambda x: x.get('end', ''), reverse=True)[0]
-                                    shares_outstanding = most_recent.get('val', 0)
-                                    if shares_outstanding > 0:
-                                        logger.info(f"✅ Found shares outstanding for {symbol} from SEC: {shares_outstanding:,}")
-                                        break
-                        
-                        if shares_outstanding and shares_outstanding > 0 and current_price > 0:
-                            market_cap = int(shares_outstanding * current_price)
-                            logger.info(f"✅ Calculated market cap for {symbol}: ${market_cap:,} ({shares_outstanding:,} shares @ ${current_price:.2f})")
-                        
-            except Exception as e:
-                logger.debug(f"Could not fetch market cap from SEC for {symbol}: {e}")
+                    # Try multiple fields for shares outstanding
+                    share_fields = [
+                        'EntityCommonStockSharesOutstanding',
+                        'CommonStockSharesOutstanding',
+                        'CommonStockSharesIssued',
+                        'WeightedAverageNumberOfSharesOutstandingBasic'
+                    ]
+                    
+                    for field in share_fields:
+                        if field in us_gaap:
+                            units = us_gaap[field].get('units', {}).get('shares', [])
+                            if units:
+                                # Get most recent value
+                                most_recent = sorted(units, key=lambda x: x.get('end', ''), reverse=True)[0]
+                                shares_outstanding = most_recent.get('val', 0)
+                                if shares_outstanding > 0:
+                                    logger.info(f"✅ Found shares outstanding for {symbol}: {shares_outstanding:,} (field: {field})")
+                                    break
+                
+        except Exception as e:
+            logger.warning(f"Could not fetch shares outstanding from SEC for {symbol}: {e}")
+        
+        # Add market cap to each historical data point now that we have shares outstanding
+        if shares_outstanding and shares_outstanding > 0:
+            for point in history:
+                close_price = point.get('close', 0)
+                if close_price and close_price > 0:
+                    point['market_cap'] = int(shares_outstanding * close_price)
+                else:
+                    point['market_cap'] = 0
+            logger.info(f"✅ Added market cap to {len(history)} historical data points for {symbol}")
+        else:
+            # No shares outstanding available, set market cap to 0 for all points
+            for point in history:
+                point['market_cap'] = 0
+            logger.warning(f"⚠️ No shares outstanding found for {symbol}, market cap set to 0")
+        
+        # Get current market cap (from last data point - already calculated above)
+        market_cap = history[-1].get('market_cap', 0) if history else 0
         
         return {
             'symbol': symbol,
@@ -529,13 +529,14 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             'company_name': detailed_metadata['company_name'],
             'industry': detailed_metadata['industry'],
             'sector': detailed_metadata['sector'],
-            'market_cap': market_cap,
+            'market_cap': market_cap,  # Current market cap (from last data point)
+            'shares_outstanding': shares_outstanding if shares_outstanding else 0,  # Shares outstanding (relatively static)
             'country': detailed_metadata['country'],
             
             'data_points': len(history),
             'first_date': history[0]['date'] if history else None,
             'last_date': history[-1]['date'] if history else None,
-            'history': history
+            'history': history  # Each point now includes market_cap calculated from price × shares
         }
         
     except urllib.error.HTTPError as e:
