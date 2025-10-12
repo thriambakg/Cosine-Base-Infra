@@ -1055,7 +1055,8 @@ module "stock_data_historical_loader" {
 
   # Lambda layers (Python 3.11)
   layers = [
-    module.core_layer.layer_arn
+    module.core_layer.layer_arn,
+    module.financial_layer.layer_arn
   ]
 
   # IAM policies

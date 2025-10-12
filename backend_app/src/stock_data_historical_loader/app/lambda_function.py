@@ -161,7 +161,7 @@ def generate_batches(event: Dict[str, Any]) -> Dict[str, Any]:
 
 def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
     """
-    Fetch company metadata (industry, sector, company name, market cap) from Yahoo Finance.
+    Fetch company metadata (industry, sector, company name, market cap) from Yahoo Finance using yfinance.
     
     Args:
         symbol: Stock ticker symbol
@@ -170,34 +170,40 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
         Dict with metadata fields
     """
     try:
-        # Use Yahoo Finance quoteSummary endpoint for detailed metadata
-        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
-        params = "modules=assetProfile,price,summaryDetail"
+        import yfinance as yf
         
-        headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        # Fetch stock info using yfinance
+        ticker = yf.Ticker(symbol)
+        info = ticker.info
+        
+        # Get sector with fallback
+        yahoo_sector = info.get('sector', 'Unknown')
+        
+        # Map Yahoo Finance sectors to GICS sectors
+        sector_mapping = {
+            'Technology': 'Information Technology',
+            'Healthcare': 'Health Care',
+            'Financial Services': 'Financials',
+            'Consumer Cyclical': 'Consumer Discretionary',
+            'Consumer Defensive': 'Consumer Staples',
+            'Communication Services': 'Communication Services',
+            'Energy': 'Energy',
+            'Industrials': 'Industrials',
+            'Basic Materials': 'Materials',
+            'Real Estate': 'Real Estate',
+            'Utilities': 'Utilities',
+            'Financial': 'Financials'
         }
-        
-        req = urllib.request.Request(f"{url}?{params}", headers=headers)
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
-        
-        result = data.get('quoteSummary', {}).get('result', [{}])[0]
-        
-        # Extract metadata from different modules
-        asset_profile = result.get('assetProfile', {})
-        price = result.get('price', {})
-        summary_detail = result.get('summaryDetail', {})
+        gics_sector = sector_mapping.get(yahoo_sector, yahoo_sector)
         
         return {
-            'company_name': price.get('longName', price.get('shortName', symbol)),
-            'industry': asset_profile.get('industry', 'Unknown'),
-            'sector': asset_profile.get('sector', 'Unknown'),
-            'market_cap': summary_detail.get('marketCap', {}).get('raw', 0) if isinstance(summary_detail.get('marketCap'), dict) else summary_detail.get('marketCap', 0),
-            'country': asset_profile.get('country', 'US'),
-            'website': asset_profile.get('website', ''),
-            'description': asset_profile.get('longBusinessSummary', '')[:500] if asset_profile.get('longBusinessSummary') else ''
+            'company_name': info.get('longName', info.get('shortName', symbol)),
+            'industry': info.get('industry', 'Unknown'),
+            'sector': gics_sector,
+            'market_cap': info.get('marketCap', 0),
+            'country': info.get('country', 'US'),
+            'website': info.get('website', ''),
+            'description': info.get('longBusinessSummary', '')[:500] if info.get('longBusinessSummary') else ''
         }
         
     except Exception as e:
