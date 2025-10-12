@@ -1005,6 +1005,12 @@ module "news_fetcher_scheduler" {
 module "stock_data_historical_s3" {
   source = "./modules/s3"
 
+  # Required providers
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
   bucket_name = "${var.project_name}-stock-historical-${var.environment}"
   environment = var.environment
   purpose     = "StockHistoricalData"
