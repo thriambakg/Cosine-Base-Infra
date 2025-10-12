@@ -679,14 +679,14 @@ def lambda_handler(event, context):
             
             logger.info(f"Fetching historical data for {symbol} ({years} years)")
             
-            # Fetch the data
-            data = fetch_yahoo_finance_data(symbol, years)
+            # Fetch the data using the same function as batch processing
+            data = fetch_historical_data(symbol, years)
             
-            if data.get('status') == 'failed':
+            if data is None:
                 return {
                     'statusCode': 400,
                     'body': json.dumps({
-                        'error': data.get('error', 'Failed to fetch data'),
+                        'error': 'Failed to fetch data from Yahoo Finance',
                         'symbol': symbol
                     })
                 }
