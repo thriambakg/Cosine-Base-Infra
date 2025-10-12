@@ -75,6 +75,15 @@ s3://cosine-stock-historical-{environment}/
   "currency": "USD",
   "exchange": "NASDAQ",
   "instrument_type": "EQUITY",
+  
+  "company_name": "Apple Inc.",
+  "industry": "Consumer Electronics",
+  "sector": "Technology",
+  "market_cap": 2500000000000,
+  "country": "US",
+  "website": "https://www.apple.com",
+  "description": "Apple Inc. designs, manufactures, and markets smartphones...",
+  
   "data_points": 1825,
   "first_date": "2020-10-12T00:00:00",
   "last_date": "2025-10-12T00:00:00",

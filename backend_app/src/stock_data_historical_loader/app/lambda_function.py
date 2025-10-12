@@ -159,6 +159,61 @@ def generate_batches(event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
+    """
+    Fetch company metadata (industry, sector, company name, market cap) from Yahoo Finance.
+    
+    Args:
+        symbol: Stock ticker symbol
+        
+    Returns:
+        Dict with metadata fields
+    """
+    try:
+        # Use Yahoo Finance quoteSummary endpoint for detailed metadata
+        url = f"https://query2.finance.yahoo.com/v10/finance/quoteSummary/{symbol}"
+        params = "modules=assetProfile,price,summaryDetail"
+        
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        }
+        
+        req = urllib.request.Request(f"{url}?{params}", headers=headers)
+        
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+        
+        result = data.get('quoteSummary', {}).get('result', [{}])[0]
+        
+        # Extract metadata from different modules
+        asset_profile = result.get('assetProfile', {})
+        price = result.get('price', {})
+        summary_detail = result.get('summaryDetail', {})
+        
+        return {
+            'company_name': price.get('longName', price.get('shortName', symbol)),
+            'industry': asset_profile.get('industry', 'Unknown'),
+            'sector': asset_profile.get('sector', 'Unknown'),
+            'market_cap': summary_detail.get('marketCap', {}).get('raw', 0) if isinstance(summary_detail.get('marketCap'), dict) else summary_detail.get('marketCap', 0),
+            'country': asset_profile.get('country', 'US'),
+            'website': asset_profile.get('website', ''),
+            'description': asset_profile.get('longBusinessSummary', '')[:500] if asset_profile.get('longBusinessSummary') else ''
+        }
+        
+    except Exception as e:
+        logger.warning(f"Could not fetch metadata for {symbol}: {str(e)}")
+        # Return defaults if metadata fetch fails
+        return {
+            'company_name': symbol,
+            'industry': 'Unknown',
+            'sector': 'Unknown',
+            'market_cap': 0,
+            'country': 'US',
+            'website': '',
+            'description': ''
+        }
+
+
 def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any]]:
     """
     Fetch historical data for a single symbol from Yahoo Finance.
@@ -221,14 +276,28 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             logger.warning(f"No valid data points for {symbol}")
             return None
         
-        # Get metadata
+        # Get basic metadata from chart response
         meta = quote.get('meta', {})
+        
+        # Fetch detailed metadata (industry, sector, etc.)
+        logger.info(f"Fetching metadata for {symbol}")
+        detailed_metadata = fetch_stock_metadata(symbol)
         
         return {
             'symbol': symbol,
             'currency': meta.get('currency', 'USD'),
             'exchange': meta.get('exchangeName', 'UNKNOWN'),
             'instrument_type': meta.get('instrumentType', 'EQUITY'),
+            
+            # Company metadata
+            'company_name': detailed_metadata['company_name'],
+            'industry': detailed_metadata['industry'],
+            'sector': detailed_metadata['sector'],
+            'market_cap': detailed_metadata['market_cap'],
+            'country': detailed_metadata['country'],
+            'website': detailed_metadata['website'],
+            'description': detailed_metadata['description'],
+            
             'data_points': len(history),
             'first_date': history[0]['date'] if history else None,
             'last_date': history[-1]['date'] if history else None,
