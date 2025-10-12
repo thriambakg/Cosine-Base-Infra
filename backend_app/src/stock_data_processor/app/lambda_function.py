@@ -501,8 +501,8 @@ def calculate_stats_from_chart_data(
                 volatility = np.std(log_returns) * np.sqrt(252)
         
         return round(week_return, 2), round(annual_return, 2), round(volatility, 4)
-        
-    except Exception as e:
+                
+            except Exception as e:
         logger.error(f"Error calculating stats: {str(e)}")
         return 0.0, 0.0, 0.0
 

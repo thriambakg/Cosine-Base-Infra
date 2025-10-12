@@ -1079,9 +1079,10 @@ module "news_fetcher_scheduler" {
 
 # ==============================================================================
 # STOCK DATA HISTORICAL LOADER (One-Time Load via Step Functions)
+# COMMENTED OUT - Already ran, don't want to overwrite S3 data
 # ==============================================================================
 
-# S3 Bucket for Historical Stock Data
+# S3 Bucket for Historical Stock Data (KEEP - needed by EOD aggregator)
 module "stock_data_historical_s3" {
   source = "./modules/s3"
 
@@ -1113,7 +1114,10 @@ module "stock_data_historical_s3" {
   tags        = var.common_tags
 }
 
-# Historical Loader Lambda (Python 3.11)
+# Historical Loader Lambda (Python 3.11) - COMMENTED OUT
+# IMPORTANT: Already ran once to populate S3, don't run again to avoid overwriting data
+# Uncomment only if you need to reload all historical data
+/*
 module "stock_data_historical_loader" {
   source = "./modules/lambda"
 
@@ -1147,6 +1151,7 @@ module "stock_data_historical_loader" {
 
   tags = var.common_tags
 }
+*/
 
 # IAM Policy for Lambda to access S3 historical data bucket
 resource "aws_iam_policy" "stock_data_historical_s3_access" {
@@ -1175,7 +1180,9 @@ resource "aws_iam_policy" "stock_data_historical_s3_access" {
   tags = var.common_tags
 }
 
-# Step Functions State Machine for Historical Data Loading
+# Step Functions State Machine for Historical Data Loading - COMMENTED OUT
+# IMPORTANT: Already ran once, don't run again to avoid overwriting S3 data
+/*
 module "stock_data_historical_loader_state_machine" {
   source = "./modules/step-functions"
 
@@ -1281,4 +1288,263 @@ module "stock_data_historical_loader_state_machine" {
   include_execution_data = true
 
   tags = var.common_tags
+}
+*/
+
+# ==============================================================================
+# EOD (END OF DAY) AGGREGATOR SYSTEM
+# ==============================================================================
+# Runs daily at 4:30 PM ET to aggregate S3 historical data into DynamoDB
+# Uses Step Functions for parallel batch processing (40 batches in parallel)
+
+# EOD Batch Generator Lambda - Lists S3 files and creates batches
+module "eod_batch_generator" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-eod-batch-generator-${var.environment}"
+  description   = "Generates batches of stock symbols from S3 for EOD aggregator processing"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 60 # 1 minute
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/eod_batch_generator/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET  = module.stock_data_historical_s3.bucket_id
+    BATCH_SIZE = "200" # Stocks per batch for parallel processing
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    aws_iam_policy.stock_data_historical_s3_access.arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.stock_data_historical_s3]
+}
+
+# EOD Aggregator Lambda - Reads S3, calculates metrics, writes to DynamoDB
+module "eod_aggregator" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-eod-aggregator-${var.environment}"
+  description   = "Aggregates historical stock data from S3 into DynamoDB for querying (runs daily after market close)"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 300 # 5 minutes per batch
+  memory_size   = 1024
+
+  source_dir = "${path.module}/../backend_app/src/eod_aggregator/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET           = module.stock_data_historical_s3.bucket_id
+    DYNAMODB_TABLE_NAME = module.stock_data_table.table_name
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn,
+    module.financial_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    aws_iam_policy.stock_data_historical_s3_access.arn,
+    module.stock_data_table.table_policy_arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.stock_data_historical_s3, module.stock_data_table]
+}
+
+# Step Functions State Machine for EOD Aggregation
+module "eod_aggregator_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-eod-aggregator-${var.environment}"
+  environment        = var.environment
+
+  # Step Functions definition
+  definition = jsonencode({
+    Comment = "Daily EOD aggregator - reads S3 historical data and updates DynamoDB with calculated metrics"
+    StartAt = "GenerateBatches"
+    States = {
+      # Step 1: Generate batches from S3 file list
+      GenerateBatches = {
+        Type       = "Task"
+        Resource   = module.eod_batch_generator.function_arn
+        Comment    = "List S3 stock files and create batches for parallel processing"
+        ResultPath = "$.batchConfig"
+        Next       = "ProcessBatches"
+        Retry = [
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 5
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+      }
+
+      # Step 2: Process batches in parallel (Map state - 40 concurrent executions)
+      ProcessBatches = {
+        Type           = "Map"
+        ItemsPath      = "$.batchConfig.batches"
+        MaxConcurrency = 40 # Process up to 40 batches in parallel for speed
+        ResultPath     = "$.results"
+
+        Iterator = {
+          StartAt = "AggregateBatch"
+          States = {
+            AggregateBatch = {
+              Type           = "Task"
+              Resource       = module.eod_aggregator.function_arn
+              Comment        = "Read S3, calculate metrics for all timeframes, write to DynamoDB"
+              TimeoutSeconds = 300 # 5 minutes per batch
+              Retry = [
+                {
+                  ErrorEquals     = ["States.TaskFailed", "States.Timeout"]
+                  IntervalSeconds = 30
+                  MaxAttempts     = 2
+                  BackoffRate     = 2.0
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  ResultPath  = "$.error"
+                  Next        = "BatchFailed"
+                }
+              ]
+              End = true
+            }
+
+            BatchFailed = {
+              Type = "Pass"
+              Result = {
+                status = "failed"
+              }
+              End = true
+            }
+          }
+        }
+
+        Next = "AggregateResults"
+      }
+
+      # Step 3: Aggregate results
+      AggregateResults = {
+        Type    = "Pass"
+        Comment = "Summarize EOD aggregation results"
+        Parameters = {
+          "totalBatches.$" = "$.batchConfig.total_batches"
+          "totalStocks.$"  = "$.batchConfig.total_stocks"
+          "results.$"      = "$.results"
+          "completedAt.$"  = "$$.State.EnteredTime"
+        }
+        Next = "Success"
+      }
+
+      # Final state
+      Success = {
+        Type = "Succeed"
+      }
+    }
+  })
+
+  # Lambda ARNs for IAM permissions
+  lambda_function_arns = [
+    module.eod_batch_generator.function_arn,
+    module.eod_aggregator.function_arn
+  ]
+
+  # Logging configuration
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [module.eod_batch_generator, module.eod_aggregator]
+}
+
+# EventBridge Scheduler for Daily EOD Aggregation (4:30 PM ET after market close)
+# Runs Monday-Friday at 4:30 PM ET = 8:30 PM UTC (DST) or 9:30 PM UTC (Standard)
+module "eod_aggregator_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-eod-aggregator-${var.environment}"
+  rule_description    = "Trigger EOD aggregator daily at 4:30 PM ET (after market close) to update DynamoDB from S3"
+  schedule_expression = "cron(30 20 ? * MON-FRI *)" # 4:30 PM ET = 8:30 PM UTC during DST
+  enabled             = true
+
+  # Target is Step Functions state machine, not Lambda
+  target_arn = module.eod_aggregator_state_machine.state_machine_arn
+  target_id  = "EODAggregatorScheduler"
+
+  # For Step Functions, we need to provide a role
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
+
+  target_input = jsonencode({
+    source    = "scheduler-eod"
+    timestamp = "scheduled"
+  })
+
+  purpose     = "EODDataAggregation"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [module.eod_aggregator_state_machine]
+}
+
+# IAM Role for EventBridge to invoke Step Functions
+resource "aws_iam_role" "eventbridge_stepfunctions_role" {
+  name = "${var.project_name}-eventbridge-stepfunctions-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for EventBridge to start Step Functions
+resource "aws_iam_role_policy" "eventbridge_stepfunctions_policy" {
+  name = "stepfunctions-execution"
+  role = aws_iam_role.eventbridge_stepfunctions_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = module.eod_aggregator_state_machine.state_machine_arn
+      }
+    ]
+  })
 }
