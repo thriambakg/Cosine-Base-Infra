@@ -1048,7 +1048,7 @@ module "stock_data_historical_loader" {
 
   # Environment variables
   environment_variables = {
-    S3_BUCKET   = module.stock_data_historical_s3.bucket_name
+    S3_BUCKET   = module.stock_data_historical_s3.bucket_id
     RATE_LIMIT  = "2.0" # 2 requests/second to Yahoo Finance
     MAX_WORKERS = "5"   # Parallel workers for batch processing
   }
@@ -1060,9 +1060,36 @@ module "stock_data_historical_loader" {
 
   # IAM policies
   additional_policy_arns = [
-    module.stock_data_historical_s3.bucket_policy_arn,
+    aws_iam_policy.stock_data_historical_s3_access.arn,
     module.kms.kms_access_policy_arn
   ]
+
+  tags = var.common_tags
+}
+
+# IAM Policy for Lambda to access S3 historical data bucket
+resource "aws_iam_policy" "stock_data_historical_s3_access" {
+  name        = "${var.project_name}-stock-historical-s3-access-${var.environment}"
+  description = "Allows Lambda to read/write to stock historical data S3 bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          module.stock_data_historical_s3.bucket_arn,
+          "${module.stock_data_historical_s3.bucket_arn}/*"
+        ]
+      }
+    ]
+  })
 
   tags = var.common_tags
 }
