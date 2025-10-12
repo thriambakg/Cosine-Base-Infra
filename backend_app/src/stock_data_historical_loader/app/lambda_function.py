@@ -248,10 +248,8 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
                     'company_name': company_name,
                     'industry': sic_description,
                     'sector': gics_sector,
-                    'market_cap': 0,  # SEC doesn't provide market cap
-                    'country': 'US',
-                    'website': '',
-                    'description': ''
+                    'market_cap': 0,  # SEC doesn't provide market cap (fetched from Yahoo chart meta)
+                    'country': 'US'
                 }
             except Exception as e:
                 logger.warning(f"Could not fetch SIC for {symbol}: {e}")
@@ -297,9 +295,7 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
                 'industry': quote.get('industry', 'Unknown'),
                 'sector': gics_sector,
                 'market_cap': quote.get('marketCap', 0),
-                'country': 'US',
-                'website': '',
-                'description': ''
+                'country': 'US'
             }
     except Exception as e:
         logger.warning(f"Yahoo Finance API failed for {symbol}: {e}")
@@ -311,9 +307,7 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
         'industry': 'Unknown',
         'sector': 'Unknown',
         'market_cap': 0,
-        'country': 'US',
-        'website': '',
-        'description': ''
+        'country': 'US'
     }
 
 
@@ -457,6 +451,34 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
         logger.info(f"Fetching metadata for {symbol}")
         detailed_metadata = fetch_stock_metadata(symbol)
         
+        # Get market cap - try multiple sources
+        market_cap = 0
+        
+        # First try: Yahoo Finance chart meta
+        market_cap = meta.get('marketCap', 0)
+        
+        # Second try: From detailed metadata (Yahoo quote API or SEC fallback)
+        if market_cap == 0:
+            market_cap = detailed_metadata.get('market_cap', 0)
+        
+        # Third try: Fetch directly from Yahoo Finance quote API if still zero
+        if market_cap == 0:
+            try:
+                quote_url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
+                quote_headers = {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+                }
+                quote_req = urllib.request.Request(quote_url, headers=quote_headers)
+                with urllib.request.urlopen(quote_req, timeout=5) as quote_response:
+                    quote_data = json.loads(quote_response.read().decode())
+                    quote_result = quote_data.get('quoteResponse', {}).get('result', [])
+                    if quote_result and len(quote_result) > 0:
+                        market_cap = quote_result[0].get('marketCap', 0)
+                        if market_cap > 0:
+                            logger.info(f"✅ Fetched market cap for {symbol}: ${market_cap:,}")
+            except Exception as e:
+                logger.debug(f"Could not fetch market cap from quote API for {symbol}: {e}")
+        
         return {
             'symbol': symbol,
             'currency': meta.get('currency', 'USD'),
@@ -467,10 +489,8 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             'company_name': detailed_metadata['company_name'],
             'industry': detailed_metadata['industry'],
             'sector': detailed_metadata['sector'],
-            'market_cap': detailed_metadata['market_cap'],
+            'market_cap': market_cap,
             'country': detailed_metadata['country'],
-            'website': detailed_metadata['website'],
-            'description': detailed_metadata['description'],
             
             'data_points': len(history),
             'first_date': history[0]['date'] if history else None,
