@@ -479,24 +479,26 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
                     
                     us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
                     
-                    # Try multiple fields for shares outstanding
+                    # Try multiple fields for shares outstanding (in priority order)
                     share_fields = [
-                        'EntityCommonStockSharesOutstanding',
+                        'WeightedAverageNumberOfSharesOutstandingBasic',  # Most reliable
                         'CommonStockSharesOutstanding',
-                        'CommonStockSharesIssued',
-                        'WeightedAverageNumberOfSharesOutstandingBasic'
+                        'EntityCommonStockSharesOutstanding',
+                        'CommonStockSharesIssued'
                     ]
                     
                     for field in share_fields:
                         if field in us_gaap:
                             units = us_gaap[field].get('units', {}).get('shares', [])
                             if units:
-                                # Get most recent value
-                                most_recent = sorted(units, key=lambda x: x.get('end', ''), reverse=True)[0]
-                                shares_outstanding = most_recent.get('val', 0)
-                                if shares_outstanding > 0:
-                                    logger.info(f"✅ Found shares outstanding for {symbol}: {shares_outstanding:,} (field: {field})")
-                                    break
+                                # Filter for non-zero values FIRST, then sort by date
+                                non_zero_units = [u for u in units if u.get('val', 0) > 0]
+                                if non_zero_units:
+                                    most_recent = sorted(non_zero_units, key=lambda x: x.get('end', ''), reverse=True)[0]
+                                    shares_outstanding = most_recent.get('val', 0)
+                                    if shares_outstanding > 0:
+                                        logger.info(f"✅ Found shares outstanding for {symbol}: {shares_outstanding:,} (field: {field}, date: {most_recent.get('end')})")
+                                        break
                 
         except Exception as e:
             logger.warning(f"Could not fetch shares outstanding from SEC for {symbol}: {e}")
