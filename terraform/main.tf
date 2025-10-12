@@ -862,295 +862,13 @@ module "stock_data_processor" {
   tags = var.common_tags
 }
 
-# EventBridge Schedulers for Stock Data Batch Fetcher
-# Using reusable scheduler module with priority-based scheduling
-# ENABLED: Populate DynamoDB cache for stock screener
-
-# High Priority Scheduler (every 5 minutes)
-module "stock_data_batch_fetcher_high_priority_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for high priority stocks every 5 minutes"
-  schedule_expression = "rate(5 minutes)"
-  enabled             = true # ENABLED for stock screener
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherHighPriority"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "high"
-    timeframe     = "1d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# Medium Priority Scheduler (every 15 minutes)
-module "stock_data_batch_fetcher_medium_priority_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for medium priority stocks every 15 minutes"
-  schedule_expression = "rate(15 minutes)"
-  enabled             = true # ENABLED for stock screener
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherMediumPriority"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "medium"
-    timeframe     = "1d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# Low Priority Scheduler (every 60 minutes)
-module "stock_data_batch_fetcher_low_priority_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for low priority stocks every 60 minutes"
-  schedule_expression = "rate(60 minutes)"
-  enabled             = true # ENABLED for stock screener
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherLowPriority"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "low"
-    timeframe     = "1d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# ============================================================================
-# TIMEFRAME-SPECIFIC SCHEDULERS
-# ============================================================================
-
-# 7-Day Timeframe Schedulers
-
-# High Priority - 7 Day (every 30 minutes)
-module "stock_data_batch_fetcher_high_7d_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-7d-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for high priority stocks (7 day timeframe) every 30 minutes"
-  schedule_expression = "rate(30 minutes)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherHigh7d"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "high"
-    timeframe     = "7d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# Medium Priority - 7 Day (every 60 minutes)
-module "stock_data_batch_fetcher_medium_7d_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-7d-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for medium priority stocks (7 day timeframe) every 60 minutes"
-  schedule_expression = "rate(60 minutes)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherMedium7d"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "medium"
-    timeframe     = "7d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# Low Priority - 7 Day (every 3 hours)
-module "stock_data_batch_fetcher_low_7d_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-7d-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for low priority stocks (7 day timeframe) every 3 hours"
-  schedule_expression = "rate(3 hours)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherLow7d"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "low"
-    timeframe     = "7d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# 30-Day Timeframe Schedulers
-
-# High Priority - 30 Day (every 2 hours)
-module "stock_data_batch_fetcher_high_30d_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-30d-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for high priority stocks (30 day timeframe) every 2 hours"
-  schedule_expression = "rate(2 hours)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherHigh30d"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "high"
-    timeframe     = "30d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# Medium Priority - 30 Day (every 4 hours)
-module "stock_data_batch_fetcher_medium_30d_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-30d-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for medium priority stocks (30 day timeframe) every 4 hours"
-  schedule_expression = "rate(4 hours)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherMedium30d"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "medium"
-    timeframe     = "30d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# Low Priority - 30 Day (every 6 hours)
-module "stock_data_batch_fetcher_low_30d_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-30d-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for low priority stocks (30 day timeframe) every 6 hours"
-  schedule_expression = "rate(6 hours)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherLow30d"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "low"
-    timeframe     = "30d"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# 1-Year Timeframe Schedulers
-
-# High Priority - 1 Year (every 6 hours)
-module "stock_data_batch_fetcher_high_1y_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-high-1y-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for high priority stocks (1 year timeframe) every 6 hours"
-  schedule_expression = "rate(6 hours)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherHigh1y"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "high"
-    timeframe     = "1y"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# Medium Priority - 1 Year (every 12 hours)
-module "stock_data_batch_fetcher_medium_1y_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-medium-1y-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for medium priority stocks (1 year timeframe) every 12 hours"
-  schedule_expression = "rate(12 hours)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherMedium1y"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "medium"
-    timeframe     = "1y"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
-
-# Low Priority - 1 Year (once daily)
-module "stock_data_batch_fetcher_low_1y_scheduler" {
-  source = "./modules/eventbridge-scheduler"
-
-  rule_name           = "${var.project_name}-stock-data-batch-fetcher-low-1y-${var.environment}"
-  rule_description    = "Trigger stock data batch fetcher for low priority stocks (1 year timeframe) once daily"
-  schedule_expression = "rate(1 day)"
-  enabled             = true
-
-  target_arn           = module.stock_data_batch_fetcher.function_arn
-  target_id            = "StockDataBatchFetcherLow1y"
-  target_type          = "lambda"
-  target_function_name = module.stock_data_batch_fetcher.function_name
-  target_input = jsonencode({
-    priority_tier = "low"
-    timeframe     = "1y"
-  })
-
-  purpose     = "StockDataBatchFetching"
-  environment = var.environment
-  tags        = var.common_tags
-}
+# ==============================================================================
+# STOCK DATA ARCHITECTURE NOTE
+# ==============================================================================
+# EventBridge schedulers for stock_data_batch_fetcher have been removed.
+# The new architecture uses Step Functions for one-time historical load,
+# then a nightly aggregator Lambda will handle DynamoDB updates from S3.
+# See STOCK_DATA_ARCHITECTURE.md for details.
 
 # SQS Queue for News Processing
 module "news_queue" {
@@ -1277,4 +995,176 @@ module "news_fetcher_scheduler" {
   purpose     = "NewsFetching"
   environment = var.environment
   tags        = var.common_tags
+}
+
+# ==============================================================================
+# STOCK DATA HISTORICAL LOADER (One-Time Load via Step Functions)
+# ==============================================================================
+
+# S3 Bucket for Historical Stock Data
+module "stock_data_historical_s3" {
+  source = "./modules/s3"
+
+  bucket_name = "${var.project_name}-stock-historical-${var.environment}"
+  environment = var.environment
+  purpose     = "StockHistoricalData"
+
+  # Enable lifecycle transitions to Glacier
+  enable_lifecycle_transitions = true
+  transition_to_glacier_days   = 90
+
+  # Enable expiration after 5 years
+  enable_expiration = true
+  expiration_days   = 1825 # 5 years
+
+  # Abort incomplete multipart uploads after 7 days
+  abort_incomplete_multipart_upload_days = 7
+
+  # Noncurrent version expiration
+  noncurrent_version_expiration_days = 30
+
+  kms_key_arn = module.kms.main_key_arn
+  tags        = var.common_tags
+}
+
+# Historical Loader Lambda (Python 3.11)
+module "stock_data_historical_loader" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-stock-data-historical-loader-${var.environment}"
+  description   = "Loads 5 years of historical stock data from Yahoo Finance to S3 (orchestrated by Step Functions)"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 900  # 15 minutes (max)
+  memory_size   = 3008 # Max memory for faster processing
+
+  source_dir = "${path.module}/../backend_app/src/stock_data_historical_loader/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET   = module.stock_data_historical_s3.bucket_name
+    RATE_LIMIT  = "2.0" # 2 requests/second to Yahoo Finance
+    MAX_WORKERS = "5"   # Parallel workers for batch processing
+  }
+
+  # Lambda layers (Python 3.11)
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    module.stock_data_historical_s3.bucket_policy_arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+}
+
+# Step Functions State Machine for Historical Data Loading
+module "stock_data_historical_loader_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-stock-historical-loader-${var.environment}"
+  environment        = var.environment
+
+  # Step Functions definition with self-contained batch generation
+  definition = jsonencode({
+    Comment = "Load historical stock data in parallel batches with automatic batch generation"
+    StartAt = "GenerateBatches"
+    States = {
+      # Step 1: Generate batches (Lambda reads CSVs and creates batch configs)
+      GenerateBatches = {
+        Type       = "Task"
+        Resource   = module.stock_data_historical_loader.function_arn
+        Comment    = "Generate batches from CSV files (no input required)"
+        ResultPath = "$.batchConfig"
+        Next       = "ProcessBatches"
+        Retry = [
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 5
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+      }
+
+      # Step 2: Process batches in parallel (Map state)
+      ProcessBatches = {
+        Type           = "Map"
+        ItemsPath      = "$.batchConfig.batches"
+        MaxConcurrency = 5 # Process 5 batches at a time (rate limiting)
+        ResultPath     = "$.results"
+
+        Iterator = {
+          StartAt = "LoadBatch"
+          States = {
+            LoadBatch = {
+              Type           = "Task"
+              Resource       = module.stock_data_historical_loader.function_arn
+              Comment        = "Load historical data for a batch of stocks"
+              TimeoutSeconds = 900 # 15 minutes per batch
+              Retry = [
+                {
+                  ErrorEquals     = ["States.TaskFailed", "States.Timeout"]
+                  IntervalSeconds = 60
+                  MaxAttempts     = 3
+                  BackoffRate     = 2.0
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  ResultPath  = "$.error"
+                  Next        = "BatchFailed"
+                }
+              ]
+              End = true
+            }
+
+            BatchFailed = {
+              Type = "Pass"
+              Result = {
+                status = "failed"
+              }
+              End = true
+            }
+          }
+        }
+
+        Next = "AggregateResults"
+      }
+
+      # Step 3: Aggregate results and log summary
+      AggregateResults = {
+        Type    = "Pass"
+        Comment = "Summarize batch processing results"
+        Parameters = {
+          "totalBatches.$" = "$.batchConfig.total_batches"
+          "totalSymbols.$" = "$.batchConfig.total_symbols"
+          "results.$"      = "$.results"
+          "completedAt.$"  = "$$.State.EnteredTime"
+        }
+        Next = "Success"
+      }
+
+      # Final state
+      Success = {
+        Type = "Succeed"
+      }
+    }
+  })
+
+  # Lambda ARNs for IAM permissions
+  lambda_function_arns = [
+    module.stock_data_historical_loader.function_arn
+  ]
+
+  # Logging configuration
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
 }

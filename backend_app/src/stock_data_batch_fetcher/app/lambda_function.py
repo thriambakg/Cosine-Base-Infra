@@ -117,8 +117,8 @@ def load_all_symbols() -> List[str]:
         _all_symbols = symbols
         logger.info(f"✅ Loaded {len(symbols)} low-cap symbols")
         return symbols
-                
-            except Exception as e:
+        
+    except Exception as e:
         logger.error(f"Error loading low-cap symbols: {str(e)}")
         return []
 
