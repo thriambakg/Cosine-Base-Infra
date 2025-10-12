@@ -21,6 +21,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 import urllib.request
 import urllib.error
 from decimal import Decimal
+import gzip
 
 # Configure logging
 logger = logging.getLogger()
@@ -475,7 +476,14 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
                 facts_req = urllib.request.Request(facts_url, headers=facts_headers)
                 
                 with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
-                    facts_data = json.loads(facts_response.read().decode())
+                    # Handle gzip-compressed response
+                    response_data = facts_response.read()
+                    
+                    # Check if response is gzipped (starts with 0x1f8b magic bytes)
+                    if response_data[:2] == b'\x1f\x8b':
+                        response_data = gzip.decompress(response_data)
+                    
+                    facts_data = json.loads(response_data.decode('utf-8'))
                     
                     us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
                     
