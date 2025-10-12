@@ -36,6 +36,9 @@ YAHOO_FINANCE_URL = "https://query1.finance.yahoo.com/v8/finance/chart/{symbol}?
 import boto3
 s3_client = boto3.client('s3')
 
+# Global cache for SEC company tickers (loaded once per Lambda execution)
+_sec_company_tickers_cache = None
+
 
 def load_symbols_from_event(event: Dict[str, Any]) -> tuple[List[str], str]:
     """
@@ -159,9 +162,44 @@ def generate_batches(event: Dict[str, Any]) -> Dict[str, Any]:
     }
 
 
+def load_sec_company_tickers() -> Dict[str, Any]:
+    """
+    Load SEC company tickers JSON (cached globally per Lambda execution).
+    This file is updated daily by the SEC and contains ~13,000 companies.
+    
+    Returns:
+        Dict of company ticker data
+    """
+    global _sec_company_tickers_cache
+    
+    if _sec_company_tickers_cache is not None:
+        return _sec_company_tickers_cache
+    
+    try:
+        sec_url = "https://www.sec.gov/files/company_tickers.json"
+        headers = {
+            'User-Agent': 'CosineApp admin@cosine.com'  # SEC requires user agent
+        }
+        
+        logger.info("📥 Loading SEC company tickers (once per batch)...")
+        req = urllib.request.Request(sec_url, headers=headers)
+        with urllib.request.urlopen(req, timeout=15) as response:
+            _sec_company_tickers_cache = json.loads(response.read().decode())
+        
+        logger.info(f"✅ Loaded {len(_sec_company_tickers_cache)} companies from SEC")
+        return _sec_company_tickers_cache
+        
+    except Exception as e:
+        logger.error(f"Failed to load SEC company tickers: {e}")
+        return {}
+
+
 def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
     """
-    Fetch company metadata (industry, sector, company name, market cap) from Yahoo Finance using yfinance.
+    Fetch company metadata from multiple sources with fallback chain:
+    1. SEC EDGAR API (official, free, reliable)
+    2. Yahoo Finance direct API
+    3. Default values
     
     Args:
         symbol: Stock ticker symbol
@@ -169,55 +207,185 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
     Returns:
         Dict with metadata fields
     """
+    # Try SEC EDGAR first
     try:
-        import yfinance as yf
+        # Load cached company tickers
+        sec_data = load_sec_company_tickers()
         
-        # Fetch stock info using yfinance
-        ticker = yf.Ticker(symbol)
-        info = ticker.info
+        # Find company by ticker symbol
+        company_info = None
+        for key, company in sec_data.items():
+            if company.get('ticker', '').upper() == symbol.upper():
+                company_info = company
+                break
         
-        # Get sector with fallback
-        yahoo_sector = info.get('sector', 'Unknown')
-        
-        # Map Yahoo Finance sectors to GICS sectors
-        sector_mapping = {
-            'Technology': 'Information Technology',
-            'Healthcare': 'Health Care',
-            'Financial Services': 'Financials',
-            'Consumer Cyclical': 'Consumer Discretionary',
-            'Consumer Defensive': 'Consumer Staples',
-            'Communication Services': 'Communication Services',
-            'Energy': 'Energy',
-            'Industrials': 'Industrials',
-            'Basic Materials': 'Materials',
-            'Real Estate': 'Real Estate',
-            'Utilities': 'Utilities',
-            'Financial': 'Financials'
-        }
-        gics_sector = sector_mapping.get(yahoo_sector, yahoo_sector)
-        
-        return {
-            'company_name': info.get('longName', info.get('shortName', symbol)),
-            'industry': info.get('industry', 'Unknown'),
-            'sector': gics_sector,
-            'market_cap': info.get('marketCap', 0),
-            'country': info.get('country', 'US'),
-            'website': info.get('website', ''),
-            'description': info.get('longBusinessSummary', '')[:500] if info.get('longBusinessSummary') else ''
-        }
+        if company_info:
+            cik = str(company_info.get('cik_str', '')).zfill(10)
+            company_name = company_info.get('title', symbol)
+            
+            # Fetch SIC code for industry classification
+            # Rate limit: SEC allows 10 requests/second, we'll do 5/second to be safe
+            time.sleep(0.2)  # 200ms delay = 5 requests/second
+            
+            try:
+                submissions_url = f"https://data.sec.gov/submissions/CIK{cik}.json"
+                headers_sec = {
+                    'User-Agent': 'CosineApp admin@cosine.com'
+                }
+                req = urllib.request.Request(submissions_url, headers=headers_sec)
+                with urllib.request.urlopen(req, timeout=10) as response:
+                    submissions = json.loads(response.read().decode())
+                
+                sic_code = submissions.get('sic', '')
+                sic_description = submissions.get('sicDescription', 'Unknown')
+                
+                # Map SIC to GICS Sector
+                gics_sector = map_sic_to_gics(sic_code, sic_description)
+                
+                logger.info(f"✅ Found SEC data for {symbol}: {company_name}, Sector: {gics_sector}")
+                
+                return {
+                    'company_name': company_name,
+                    'industry': sic_description,
+                    'sector': gics_sector,
+                    'market_cap': 0,  # SEC doesn't provide market cap
+                    'country': 'US',
+                    'website': '',
+                    'description': ''
+                }
+            except Exception as e:
+                logger.warning(f"Could not fetch SIC for {symbol}: {e}")
         
     except Exception as e:
-        logger.warning(f"Could not fetch metadata for {symbol}: {str(e)}")
-        # Return defaults if metadata fetch fails
-        return {
-            'company_name': symbol,
-            'industry': 'Unknown',
-            'sector': 'Unknown',
-            'market_cap': 0,
-            'country': 'US',
-            'website': '',
-            'description': ''
+        logger.warning(f"SEC EDGAR API failed for {symbol}: {e}")
+    
+    # Fallback to Yahoo Finance direct API
+    try:
+        url = f"https://query1.finance.yahoo.com/v7/finance/quote?symbols={symbol}"
+        headers = {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
+        
+        req = urllib.request.Request(url, headers=headers)
+        with urllib.request.urlopen(req, timeout=10) as response:
+            data = json.loads(response.read().decode())
+        
+        result = data.get('quoteResponse', {}).get('result', [])
+        if result and len(result) > 0:
+            quote = result[0]
+            
+            # Map Yahoo sectors to GICS
+            yahoo_sector = quote.get('sector', 'Unknown')
+            sector_mapping = {
+                'Technology': 'Information Technology',
+                'Healthcare': 'Health Care',
+                'Financial Services': 'Financials',
+                'Consumer Cyclical': 'Consumer Discretionary',
+                'Consumer Defensive': 'Consumer Staples',
+                'Communication Services': 'Communication Services',
+                'Energy': 'Energy',
+                'Industrials': 'Industrials',
+                'Basic Materials': 'Materials',
+                'Real Estate': 'Real Estate',
+                'Utilities': 'Utilities',
+                'Financial': 'Financials'
+            }
+            gics_sector = sector_mapping.get(yahoo_sector, yahoo_sector)
+            
+            return {
+                'company_name': quote.get('longName', quote.get('shortName', symbol)),
+                'industry': quote.get('industry', 'Unknown'),
+                'sector': gics_sector,
+                'market_cap': quote.get('marketCap', 0),
+                'country': 'US',
+                'website': '',
+                'description': ''
+            }
+    except Exception as e:
+        logger.warning(f"Yahoo Finance API failed for {symbol}: {e}")
+    
+    # Final fallback - return defaults
+    logger.warning(f"All metadata sources failed for {symbol}, using defaults")
+    return {
+        'company_name': symbol,
+        'industry': 'Unknown',
+        'sector': 'Unknown',
+        'market_cap': 0,
+        'country': 'US',
+        'website': '',
+        'description': ''
+    }
+
+
+def map_sic_to_gics(sic_code: str, sic_description: str) -> str:
+    """
+    Map SEC SIC code to GICS Sector.
+    
+    Args:
+        sic_code: Standard Industrial Classification code
+        sic_description: SIC description text
+        
+    Returns:
+        GICS Sector name
+    """
+    try:
+        sic_int = int(sic_code)
+    except:
+        return 'Unknown'
+    
+    # SIC to GICS mapping based on standard classifications
+    if 100 <= sic_int <= 999:
+        return 'Materials'  # Agriculture, Mining
+    elif 1000 <= sic_int <= 1499:
+        return 'Energy'  # Mining, Oil & Gas
+    elif 1500 <= sic_int <= 1799:
+        return 'Industrials'  # Construction
+    elif 2000 <= sic_int <= 3999:
+        if 2800 <= sic_int <= 2899:
+            return 'Materials'  # Chemicals
+        elif 2830 <= sic_int <= 2836:
+            return 'Health Care'  # Pharmaceuticals
+        elif 3570 <= sic_int <= 3579:
+            return 'Information Technology'  # Computers
+        elif 3600 <= sic_int <= 3699:
+            return 'Information Technology'  # Electronics
+        elif 3700 <= sic_int <= 3799:
+            return 'Consumer Discretionary'  # Automobiles
+        else:
+            return 'Industrials'  # Manufacturing
+    elif 4000 <= sic_int <= 4999:
+        if 4800 <= sic_int <= 4899:
+            return 'Communication Services'  # Communications
+        else:
+            return 'Utilities'  # Transportation, Utilities
+    elif 5000 <= sic_int <= 5999:
+        if 5200 <= sic_int <= 5399:
+            return 'Consumer Staples'  # Retail - Food & Staples
+        else:
+            return 'Consumer Discretionary'  # Retail - General
+    elif 6000 <= sic_int <= 6999:
+        return 'Financials'  # Finance, Insurance, Real Estate
+    elif 7000 <= sic_int <= 7999:
+        if 7370 <= sic_int <= 7379:
+            return 'Information Technology'  # Software & Services
+        else:
+            return 'Industrials'  # Services
+    elif 8000 <= sic_int <= 8999:
+        if 8000 <= sic_int <= 8099:
+            return 'Health Care'  # Health Services
+        else:
+            return 'Industrials'  # Services
+    else:
+        # Check description keywords as fallback
+        desc_lower = sic_description.lower()
+        if any(word in desc_lower for word in ['software', 'computer', 'electronic']):
+            return 'Information Technology'
+        elif any(word in desc_lower for word in ['pharmaceutical', 'drug', 'medical', 'health']):
+            return 'Health Care'
+        elif any(word in desc_lower for word in ['bank', 'financial', 'insurance']):
+            return 'Financials'
+        else:
+            return 'Unknown'
 
 
 def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any]]:
