@@ -257,8 +257,8 @@ def create_dynamodb_item(symbol: str, stock_data: Dict[str, Any], metrics: Dict[
         'data_source': 'S3-Historical-EOD',
         'last_updated': datetime.utcnow().isoformat(),
         
-        # GSI1: Industry-based queries sorted by volatility
-        'GSI1PK': f'INDUSTRY#{industry}#{timeframe}',
+        # GSI1: Sector-based queries sorted by volatility (using sector for broader filtering)
+        'GSI1PK': f'SECTOR#{sector}#{timeframe}',
         'GSI1SK': volatility,  # Numeric (Decimal) for range queries
         
         # GSI2: Volatility range queries

@@ -425,7 +425,7 @@ module "stock_data_table" {
   attributes = [
     { name = "PK", type = "S" },     # STOCK#{symbol}
     { name = "SK", type = "S" },     # {timeframe}#CURRENT (e.g., "1d#CURRENT", "7d#CURRENT")
-    { name = "GSI1PK", type = "S" }, # INDUSTRY#{industry}#{timeframe}
+    { name = "GSI1PK", type = "S" }, # SECTOR#{sector}#{timeframe} (e.g., "SECTOR#Financials#1d")
     { name = "GSI1SK", type = "N" }, # Volatility (numeric)
     { name = "GSI2PK", type = "S" }, # VOLATILITY#{timeframe}
     { name = "GSI2SK", type = "N" }, # Volatility value (numeric)
@@ -439,7 +439,7 @@ module "stock_data_table" {
 
   global_secondary_indexes = [
     {
-      name            = "IndustryVolatilityIndex"
+      name            = "SectorVolatilityIndex"
       hash_key        = "GSI1PK"
       range_key       = "GSI1SK"
       projection_type = "ALL"
