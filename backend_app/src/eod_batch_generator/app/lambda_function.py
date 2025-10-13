@@ -9,6 +9,9 @@ import os
 import logging
 import boto3
 from typing import List, Dict, Any
+import pandas_market_calendars as mcal
+import pytz
+from datetime import datetime
 
 # Configure logging
 logger = logging.getLogger()
@@ -20,6 +23,36 @@ s3_client = boto3.client('s3')
 # Environment variables
 S3_BUCKET = os.environ.get('S3_BUCKET')
 BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '200'))
+
+
+def is_trading_day() -> bool:
+    """
+    Check if today is a valid NYSE trading day (excludes weekends and holidays).
+    
+    Returns:
+        True if market is open, False if closed (holiday or weekend)
+    """
+    try:
+        nyse = mcal.get_calendar('NYSE')
+        et_tz = pytz.timezone('America/New_York')
+        today = datetime.now(et_tz).date()
+        
+        # Check if today is in the NYSE trading schedule
+        schedule = nyse.schedule(start_date=today, end_date=today)
+        
+        is_open = not schedule.empty
+        
+        if is_open:
+            logger.info(f"✅ Today ({today}) is a trading day")
+        else:
+            logger.info(f"🎄 Today ({today}) is NOT a trading day (market holiday or weekend)")
+        
+        return is_open
+        
+    except Exception as e:
+        # If check fails, assume it's a trading day (fail-safe to avoid missing updates)
+        logger.warning(f"Could not verify trading day status: {e}, assuming market is open")
+        return True
 
 
 def list_all_stocks_from_s3() -> Dict[str, List[str]]:

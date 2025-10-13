@@ -10,6 +10,8 @@ import boto3
 import csv
 from typing import Dict, List, Any
 from datetime import datetime
+import pandas_market_calendars as mcal
+import pytz
 
 # Configure logging
 logger = logging.getLogger()
@@ -28,6 +30,37 @@ SQS_QUEUE_URL = os.environ.get('SQS_QUEUE_URL')
 _fortune500_symbols = None
 _midcap_symbols = None
 _all_symbols = None
+
+
+def is_trading_day() -> bool:
+    """
+    Check if today is a valid NYSE trading day (excludes weekends and holidays).
+    
+    Returns:
+        True if market is open, False if closed (holiday or weekend)
+    """
+    try:
+        nyse = mcal.get_calendar('NYSE')
+        et_tz = pytz.timezone('America/New_York')
+        today = datetime.now(et_tz).date()
+        
+        # Check if today is in the NYSE trading schedule
+        schedule = nyse.schedule(start_date=today, end_date=today)
+        
+        is_open = not schedule.empty
+        
+        if is_open:
+            logger.info(f"✅ Today ({today}) is a trading day")
+        else:
+            logger.info(f"🎄 Today ({today}) is NOT a trading day (market holiday or weekend)")
+        
+        return is_open
+        
+    except Exception as e:
+        # If check fails, assume it's a trading day (fail-safe to avoid missing updates)
+        logger.warning(f"Could not verify trading day status: {e}, assuming market is open")
+        return True
+
 
 def load_highcap_symbols() -> List[str]:
     """Load high-cap stock symbols from CSV (HIGH priority)"""
@@ -232,6 +265,17 @@ def lambda_handler(event, context):
         logger.info(f"=== Stock Data Batch Fetcher Started ===")
         logger.info(f"Event: {json.dumps(event, default=str)}")
         logger.info(f"Environment: BATCH_SIZE_HIGH={BATCH_SIZE_HIGH}, MEDIUM={BATCH_SIZE_MEDIUM}, LOW={BATCH_SIZE_LOW}")
+        
+        # Check if today is a trading day (skip on holidays/weekends)
+        if not is_trading_day():
+            logger.info("Market is closed today (holiday or weekend), skipping batch generation")
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'message': 'Market closed - no batches sent',
+                    'reason': 'Not a trading day'
+                })
+            }
         
         # Extract parameters from event
         priority_tier = event.get('priority_tier', 'medium')
