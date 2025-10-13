@@ -126,16 +126,7 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
                 # Annualize volatility: std * sqrt(252)
                 volatility = float(np.std(log_returns) * np.sqrt(252))
         
-        # Calculate returns
-        total_return = ((current_price - previous_close) / previous_close) if previous_close > 0 else 0
-        
-        # Annualize returns based on the actual period
-        if lookback_days > 0:
-            annual_return = total_return * (252 / lookback_days) * 100  # Percentage
-        else:
-            annual_return = 0.0
-        
-        # Calculate week return (for 7d+ timeframes)
+        # Calculate week return (annualized)
         week_return = 0.0
         if len(prices) >= 7:
             week_ago_price = prices[-7]
@@ -143,7 +134,9 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
                 week_total_return = (current_price - week_ago_price) / week_ago_price
                 week_return = week_total_return * (252 / 7) * 100  # Annualized percentage
         else:
-            week_return = annual_return / 52  # Approximate
+            # For short timeframes, approximate from price change
+            total_return = ((current_price - previous_close) / previous_close) if previous_close > 0 else 0
+            week_return = total_return * (252 / max(lookback_days, 1)) * 100 / 52
         
         # Calculate average volume
         volumes = [point.get('volume', 0) for point in relevant_history if point.get('volume', 0) > 0]
@@ -164,7 +157,6 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
             'price_change': price_change,
             'price_change_percent': price_change_percent,
             'week_return': week_return,
-            'annual_return': annual_return,
             'volatility': volatility,
             'volume': current_volume,
             'avg_volume': avg_volume,
@@ -247,7 +239,6 @@ def create_dynamodb_item(symbol: str, stock_data: Dict[str, Any], metrics: Dict[
         
         # Returns and volatility
         'week_return': Decimal(str(metrics['week_return'])),
-        'annual_return': Decimal(str(metrics['annual_return'])),
         'volatility': volatility,
         
         # Volume
