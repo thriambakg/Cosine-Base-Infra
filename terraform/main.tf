@@ -1316,9 +1316,10 @@ module "eod_batch_generator" {
     BATCH_SIZE = "200" # Stocks per batch for parallel processing
   }
 
-  # Lambda layers
+  # Lambda layers - includes financial layer for pandas_market_calendars
   layers = [
-    module.core_layer.layer_arn
+    module.core_layer.layer_arn,
+    module.financial_layer.layer_arn
   ]
 
   # IAM policies

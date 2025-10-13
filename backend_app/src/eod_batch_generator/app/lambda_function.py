@@ -9,9 +9,10 @@ import os
 import logging
 import boto3
 from typing import List, Dict, Any
-import pandas_market_calendars as mcal
-import pytz
 from datetime import datetime
+# TODO: Uncomment after rebuilding financial layer with pandas_market_calendars
+# import pandas_market_calendars as mcal
+# import pytz
 
 # Configure logging
 logger = logging.getLogger()
