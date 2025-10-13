@@ -1,3 +1,3 @@
 boto3>=1.28.0
-numpy>=1.24.0
+# Note: pandas_market_calendars, pytz, pandas, numpy provided by financial-layer
 

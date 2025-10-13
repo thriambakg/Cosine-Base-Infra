@@ -143,6 +143,17 @@ def lambda_handler(event, context):
         logger.info("=== EOD Batch Generator Started ===")
         logger.info(f"Event: {json.dumps(event, default=str)}")
         
+        # Check if today is a trading day (skip on holidays/weekends)
+        if not is_trading_day():
+            logger.info("Market is closed today (holiday or weekend), skipping EOD aggregation")
+            return {
+                'batches': [],
+                'total_batches': 0,
+                'total_stocks': 0,
+                'batch_size': BATCH_SIZE,
+                'skipped_reason': 'Not a trading day'
+            }
+        
         # List all stocks from S3
         stocks_by_priority = list_all_stocks_from_s3()
         

@@ -1,3 +1,3 @@
 # Stock Data Batch Fetcher Lambda Requirements
-# Financial dependencies are provided by the financial layer
-# Core dependencies are provided by the core layer
+# Core dependencies (boto3, requests, etc.) provided by core layer
+# Financial dependencies (pandas_market_calendars, pytz, numpy, pandas) provided by financial layer
