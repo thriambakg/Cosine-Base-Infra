@@ -568,7 +568,7 @@ def update_s3_historical_data(symbol: str, current_data: Dict[str, Any], priorit
         True if successful, False otherwise
     """
     try:
-        s3_key = f"stock-data/{priority}/{symbol}.json"
+        s3_key = f"historical/{priority}/{symbol}.json"
         
         # Try to read existing file
         try:

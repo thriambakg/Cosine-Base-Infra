@@ -71,7 +71,7 @@ def list_all_stocks_from_s3() -> Dict[str, List[str]]:
     
     try:
         for priority in ['high', 'medium', 'low']:
-            prefix = f"stock-data/{priority}/"
+            prefix = f"historical/{priority}/"
             logger.info(f"Listing stocks from s3://{S3_BUCKET}/{prefix}")
             
             paginator = s3_client.get_paginator('list_objects_v2')

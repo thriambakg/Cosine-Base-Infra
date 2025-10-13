@@ -47,7 +47,7 @@ def read_stock_from_s3(symbol: str, priority: str) -> Optional[Dict[str, Any]]:
         Stock data dict or None if not found
     """
     try:
-        s3_key = f"stock-data/{priority}/{symbol}.json"
+        s3_key = f"historical/{priority}/{symbol}.json"
         
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
         stock_data = json.loads(response['Body'].read().decode('utf-8'))
