@@ -144,7 +144,10 @@ def lambda_handler(event, context):
         logger.info(f"Event: {json.dumps(event, default=str)}")
         
         # Check if today is a trading day (skip on holidays/weekends)
-        if not is_trading_day():
+        # Allow bypass for manual testing
+        bypass_holiday_check = event.get('bypass_holiday_check', False)
+        
+        if not bypass_holiday_check and not is_trading_day():
             logger.info("Market is closed today (holiday or weekend), skipping EOD aggregation")
             return {
                 'batches': [],
@@ -153,6 +156,9 @@ def lambda_handler(event, context):
                 'batch_size': BATCH_SIZE,
                 'skipped_reason': 'Not a trading day'
             }
+        
+        if bypass_holiday_check:
+            logger.info("⚠️ Bypass flag set - running EOD aggregation even though market may be closed")
         
         # List all stocks from S3
         stocks_by_priority = list_all_stocks_from_s3()

@@ -267,7 +267,10 @@ def lambda_handler(event, context):
         logger.info(f"Environment: BATCH_SIZE_HIGH={BATCH_SIZE_HIGH}, MEDIUM={BATCH_SIZE_MEDIUM}, LOW={BATCH_SIZE_LOW}")
         
         # Check if today is a trading day (skip on holidays/weekends)
-        if not is_trading_day():
+        # Allow bypass for manual testing
+        bypass_holiday_check = event.get('bypass_holiday_check', False)
+        
+        if not bypass_holiday_check and not is_trading_day():
             logger.info("Market is closed today (holiday or weekend), skipping batch generation")
             return {
                 'statusCode': 200,
@@ -276,6 +279,9 @@ def lambda_handler(event, context):
                     'reason': 'Not a trading day'
                 })
             }
+        
+        if bypass_holiday_check:
+            logger.info("⚠️ Bypass flag set - running batch generation even though market may be closed")
         
         # Extract parameters from event
         priority_tier = event.get('priority_tier', 'medium')
