@@ -1399,11 +1399,11 @@ module "eod_aggregator_state_machine" {
         ]
       }
 
-      # Step 2: Process batches in parallel (Map state - 40 concurrent executions)
+      # Step 2: Process batches in parallel (Map state - 10 concurrent executions)
       ProcessBatches = {
         Type           = "Map"
         ItemsPath      = "$.batchConfig.batches"
-        MaxConcurrency = 40 # Process up to 40 batches in parallel for speed
+        MaxConcurrency = 10 # Reduced from 40 to avoid Lambda throttling (429 errors)
         ResultPath     = "$.results"
 
         Iterator = {
@@ -1415,6 +1415,12 @@ module "eod_aggregator_state_machine" {
               Comment        = "Read S3, calculate metrics for all timeframes, write to DynamoDB"
               TimeoutSeconds = 300 # 5 minutes per batch
               Retry = [
+                {
+                  ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                  IntervalSeconds = 5
+                  MaxAttempts     = 5
+                  BackoffRate     = 2.0
+                },
                 {
                   ErrorEquals     = ["States.TaskFailed", "States.Timeout"]
                   IntervalSeconds = 30
