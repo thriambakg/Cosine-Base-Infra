@@ -268,23 +268,23 @@ def create_dynamodb_item(symbol: str, stock_data: Dict[str, Any], metrics: Dict[
         
         # GSI1: Industry-based queries sorted by volatility
         'GSI1PK': f'INDUSTRY#{industry}#{timeframe}',
-        'GSI1SK': volatility,
+        'GSI1SK': volatility,  # Numeric (Decimal) for range queries
         
         # GSI2: Volatility range queries
         'GSI2PK': f'VOLATILITY#{timeframe}',
-        'GSI2SK': volatility,
+        'GSI2SK': volatility,  # Numeric (Decimal) for range queries
         
         # GSI3: Price change range queries
         'GSI3PK': f'PRICE_CHANGE#{timeframe}',
-        'GSI3SK': price_change_percent,
+        'GSI3SK': price_change_percent,  # Numeric (Decimal) for range queries
         
         # GSI4: Market cap range queries
         'GSI4PK': f'MARKET_CAP#{timeframe}',
-        'GSI4SK': market_cap,
+        'GSI4SK': market_cap,  # Numeric (Decimal) for range queries
         
         # GSI5: Price range queries
         'GSI5PK': f'PRICE#{timeframe}',
-        'GSI5SK': current_price,
+        'GSI5SK': current_price,  # Numeric (Decimal) for range queries
         
         # TTL for automatic cleanup (7 days - refreshed daily)
         'expires_at': int((datetime.utcnow() + timedelta(days=7)).timestamp())
