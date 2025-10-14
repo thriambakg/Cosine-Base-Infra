@@ -234,7 +234,6 @@ def send_batches_to_sqs(batches: List[Dict[str, Any]], queue_url: str) -> int:
                 
                 sent_count += 1
                 
-                
                 if (i + 1) % 10 == 0:  # Log every 10 batches
                     logger.info(f"📤 Sent {i + 1}/{len(batches)} batches to SQS")
                     
