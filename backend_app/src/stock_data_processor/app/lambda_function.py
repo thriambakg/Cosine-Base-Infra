@@ -354,11 +354,101 @@ def fetch_historical_data_yahoo(symbol: str, timeframe: str = '1d') -> List[Dict
         logger.error(f"Error fetching historical data for {symbol}: {str(e)}")
         return []
 
+def fetch_pe_and_dividend_from_sec(symbol: str, current_price: float) -> Dict[str, float]:
+    """
+    Calculate P/E ratio and dividend yield from SEC EDGAR data.
+    More reliable than Yahoo Finance API which blocks programmatic access.
+    
+    Returns:
+        Dict with pe_ratio and dividend_yield
+    """
+    result = {'pe_ratio': 0, 'dividend_yield': 0}
+    
+    if current_price <= 0:
+        return result
+    
+    try:
+        # Get CIK for the symbol
+        sec_tickers = load_sec_company_tickers()
+        company_info = None
+        for key, company in sec_tickers.items():
+            if company.get('ticker', '').upper() == symbol.upper():
+                company_info = company
+                break
+        
+        if not company_info:
+            return result
+        
+        cik = str(company_info.get('cik_str', '')).zfill(10)
+        
+        # Rate limiting for SEC API
+        time.sleep(random.uniform(0.2, 0.5))
+        
+        # Fetch company facts
+        facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+        facts_headers = {
+            'User-Agent': 'Cosine-AI stock-data-processor contact@cosine-ai.com',
+            'Accept-Encoding': 'gzip, deflate'
+        }
+        facts_req = urllib.request.Request(facts_url, headers=facts_headers)
+        
+        with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
+            response_data = facts_response.read()
+            if response_data[:2] == b'\x1f\x8b':
+                response_data = gzip.decompress(response_data)
+            facts_data = json.loads(response_data.decode('utf-8'))
+        
+        us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
+        
+        # Get EPS for P/E calculation
+        eps_fields = ['EarningsPerShareDiluted', 'EarningsPerShareBasic']
+        for field in eps_fields:
+            if field in us_gaap:
+                units = us_gaap[field].get('units', {}).get('USD/shares', [])
+                if units:
+                    non_zero = [u for u in units if u.get('val', 0) != 0]
+                    if non_zero:
+                        most_recent = sorted(non_zero, key=lambda x: x.get('end', ''), reverse=True)[0]
+                        eps_value = most_recent.get('val', 0)
+                        if eps_value > 0:
+                            result['pe_ratio'] = current_price / eps_value
+                            logger.info(f"✅ Calculated PE ratio for {symbol}: {result['pe_ratio']:.2f} (Price: ${current_price:.2f} / EPS: ${eps_value:.2f})")
+                            break
+        
+        # Get dividends for dividend yield calculation
+        dividend_fields = ['CommonStockDividendsPerShareDeclared', 'CommonStockDividendsPerShareCashPaid']
+        for field in dividend_fields:
+            if field in us_gaap:
+                units = us_gaap[field].get('units', {}).get('USD/shares', [])
+                if units:
+                    non_zero = [u for u in units if u.get('val', 0) != 0]
+                    if len(non_zero) >= 4:
+                        # Sum last 4 quarters for annual dividend
+                        sorted_divs = sorted(non_zero, key=lambda x: x.get('end', ''), reverse=True)[:4]
+                        annual_dividend = sum(d.get('val', 0) for d in sorted_divs)
+                        if annual_dividend > 0:
+                            result['dividend_yield'] = annual_dividend / current_price
+                            logger.info(f"✅ Calculated dividend yield for {symbol}: {result['dividend_yield']:.4f} ({result['dividend_yield']*100:.2f}%)")
+                            break
+                    elif non_zero:
+                        # Single filing, use as-is
+                        most_recent = sorted(non_zero, key=lambda x: x.get('end', ''), reverse=True)[0]
+                        dividend_value = most_recent.get('val', 0)
+                        if dividend_value > 0:
+                            result['dividend_yield'] = dividend_value / current_price
+                            logger.info(f"✅ Calculated dividend yield for {symbol}: {result['dividend_yield']:.4f} ({result['dividend_yield']*100:.2f}%)")
+                            break
+        
+    except Exception as e:
+        logger.warning(f"Could not fetch PE/dividend from SEC for {symbol}: {e}")
+    
+    return result
+
 def fetch_additional_metrics_yahoo(symbol: str, current_price: float = 0) -> Dict[str, Any]:
     """
     Fetch additional metrics (industry, sector, market cap, etc.).
     Market cap is calculated from SEC shares outstanding × current price.
-    Other metrics attempted from Yahoo Finance quoteSummary (often fails with auth).
+    P/E ratio and dividend yield calculated from SEC earnings data.
     """
     metrics = {
         'volume': 0,
@@ -382,6 +472,12 @@ def fetch_additional_metrics_yahoo(symbol: str, current_price: float = 0) -> Dic
         if shares_outstanding > 0:
             metrics['market_cap'] = int(shares_outstanding * current_price)
             logger.info(f"✅ Calculated market cap for {symbol}: ${metrics['market_cap']:,} ({shares_outstanding:,} shares @ ${current_price:.2f})")
+    
+    # Calculate P/E ratio and dividend yield from SEC data
+    if current_price > 0:
+        sec_financials = fetch_pe_and_dividend_from_sec(symbol, current_price)
+        metrics['pe_ratio'] = sec_financials['pe_ratio']
+        metrics['dividend_yield'] = sec_financials['dividend_yield']
     
     # Try to get other metrics from Yahoo (often fails, so we have defaults)
     try:
@@ -419,14 +515,14 @@ def fetch_additional_metrics_yahoo(symbol: str, current_price: float = 0) -> Dic
                         return val.get('raw', default)
                     return val if val is not None else default
                 
-                # Update metrics with Yahoo data (but keep SEC market cap)
+                # Update metrics with Yahoo data (but keep SEC market cap, PE, dividend yield)
                 metrics.update({
                     'volume': get_raw(price_info, 'regularMarketVolume', metrics['volume']),
                     'avg_volume': get_raw(summary_detail, 'averageVolume', metrics['avg_volume']),
                     # 'market_cap': keep SEC calculation
-                    'pe_ratio': get_raw(summary_detail, 'trailingPE', metrics['pe_ratio']),
+                    # 'pe_ratio': keep SEC calculation
+                    # 'dividend_yield': keep SEC calculation
                     'beta': get_raw(key_stats, 'beta', metrics['beta']),
-                    'dividend_yield': get_raw(summary_detail, 'dividendYield', metrics['dividend_yield']),
                     'eps': get_raw(key_stats, 'trailingEps', metrics['eps']),
                     'industry': asset_profile.get('industry', metrics['industry']),
                     'sector': asset_profile.get('sector', metrics['sector']),

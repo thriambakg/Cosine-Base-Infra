@@ -245,14 +245,16 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
                 
                 logger.info(f"✅ Found SEC data for {symbol}: {company_name}, Sector: {gics_sector}")
                 
+                # Store SEC metadata to return later (after we calculate PE/dividend from current price)
                 return {
                     'company_name': company_name,
                     'industry': sic_description,
                     'sector': gics_sector,
-                    'market_cap': 0,  # SEC doesn't provide market cap (fetched from Yahoo chart meta)
-                    'pe_ratio': 0,  # SEC doesn't provide P/E ratio
-                    'dividend_yield': 0,  # SEC doesn't provide dividend yield
-                    'country': 'US'
+                    'market_cap': 0,
+                    'pe_ratio': 0,  # Will be calculated after we have current price
+                    'dividend_yield': 0,  # Will be calculated after we have current price
+                    'country': 'US',
+                    '_cik': cik  # Store CIK for later use
                 }
             except Exception as e:
                 logger.warning(f"Could not fetch SIC for {symbol}: {e}")
@@ -267,6 +269,7 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
         
+        logger.info(f"Fetching Yahoo Finance metadata for {symbol}")
         req = urllib.request.Request(url, headers=headers)
         with urllib.request.urlopen(req, timeout=10) as response:
             data = json.loads(response.read().decode())
@@ -274,6 +277,12 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
         result = data.get('quoteResponse', {}).get('result', [])
         if result and len(result) > 0:
             quote = result[0]
+            
+            # Log raw quote data for debugging
+            pe_ratio = quote.get('trailingPE', 0)
+            dividend_yield = quote.get('dividendYield', 0)
+            logger.info(f"Yahoo metadata for {symbol}: PE={pe_ratio}, DivYield={dividend_yield}, MarketCap={quote.get('marketCap', 0)}")
+            logger.info(f"Available quote fields: {list(quote.keys())}")
             
             # Map Yahoo sectors to GICS
             yahoo_sector = quote.get('sector', 'Unknown')
@@ -298,8 +307,8 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
                 'industry': quote.get('industry', 'Unknown'),
                 'sector': gics_sector,
                 'market_cap': quote.get('marketCap', 0),
-                'pe_ratio': quote.get('trailingPE', 0),
-                'dividend_yield': quote.get('dividendYield', 0),
+                'pe_ratio': 0,  # Will be calculated from SEC data after we have current price
+                'dividend_yield': 0,  # Will be calculated from SEC data after we have current price
                 'country': 'US'
             }
     except Exception as e:
@@ -387,6 +396,70 @@ def map_sic_to_gics(sic_code: str, sic_description: str) -> str:
             return 'Financials'
         else:
             return 'Unknown'
+
+
+def calculate_pe_and_dividend_from_sec(cik: str, symbol: str, current_price: float) -> Dict[str, float]:
+    """
+    Calculate P/E ratio and dividend yield from SEC company facts.
+    Uses most recent EPS and sums last 4 quarterly dividends.
+    """
+    result = {'pe_ratio': 0, 'dividend_yield': 0}
+    
+    if current_price <= 0:
+        return result
+    
+    try:
+        time.sleep(0.2)  # SEC rate limiting
+        
+        facts_url = f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik}.json"
+        facts_headers = {
+            'User-Agent': 'Cosine-AI stock-data-loader contact@cosine-ai.com',
+            'Accept-Encoding': 'gzip, deflate'
+        }
+        facts_req = urllib.request.Request(facts_url, headers=facts_headers)
+        
+        with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
+            response_data = facts_response.read()
+            if response_data[:2] == b'\x1f\x8b':
+                response_data = gzip.decompress(response_data)
+            facts_data = json.loads(response_data.decode('utf-8'))
+        
+        us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
+        
+        # Get EPS
+        eps_fields = ['EarningsPerShareDiluted', 'EarningsPerShareBasic']
+        for field in eps_fields:
+            if field in us_gaap:
+                units = us_gaap[field].get('units', {}).get('USD/shares', [])
+                if units:
+                    non_zero = [u for u in units if u.get('val', 0) != 0]
+                    if non_zero:
+                        most_recent = sorted(non_zero, key=lambda x: x.get('end', ''), reverse=True)[0]
+                        eps_value = most_recent.get('val', 0)
+                        if eps_value > 0:
+                            result['pe_ratio'] = current_price / eps_value
+                            logger.info(f"✅ PE for {symbol}: {result['pe_ratio']:.2f} (${current_price:.2f} / ${eps_value:.2f})")
+                            break
+        
+        # Get dividends (sum last 4 quarters)
+        dividend_fields = ['CommonStockDividendsPerShareDeclared', 'CommonStockDividendsPerShareCashPaid']
+        for field in dividend_fields:
+            if field in us_gaap:
+                units = us_gaap[field].get('units', {}).get('USD/shares', [])
+                if units:
+                    non_zero = [u for u in units if u.get('val', 0) != 0]
+                    if len(non_zero) >= 4:
+                        sorted_divs = sorted(non_zero, key=lambda x: x.get('end', ''), reverse=True)[:4]
+                        annual_dividend = sum(d.get('val', 0) for d in sorted_divs)
+                        if annual_dividend > 0:
+                            result['dividend_yield'] = annual_dividend / current_price
+                            logger.info(f"✅ DivYield for {symbol}: {result['dividend_yield']:.4f} ({result['dividend_yield']*100:.2f}%)")
+                            break
+        
+    except Exception as e:
+        logger.warning(f"Could not calculate PE/dividend from SEC for {symbol}: {e}")
+    
+    return result
 
 
 def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any]]:
@@ -597,8 +670,19 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
                 point['market_cap'] = 0
             logger.warning(f"⚠️ No shares outstanding found for {symbol}, market cap set to 0")
         
-        # Get current market cap (from last data point - already calculated above)
+        # Get current market cap and price (from last data point)
         market_cap = history[-1].get('market_cap', 0) if history else 0
+        current_price = history[-1].get('close', 0) if history else 0
+        
+        # Calculate P/E ratio and dividend yield from SEC if we have CIK
+        pe_ratio = detailed_metadata.get('pe_ratio', 0)
+        dividend_yield = detailed_metadata.get('dividend_yield', 0)
+        
+        if current_price > 0 and detailed_metadata.get('_cik'):
+            cik = detailed_metadata['_cik']
+            sec_financials = calculate_pe_and_dividend_from_sec(cik, symbol, current_price)
+            pe_ratio = sec_financials['pe_ratio']
+            dividend_yield = sec_financials['dividend_yield']
         
         return {
             'symbol': symbol,
@@ -612,8 +696,8 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             'sector': detailed_metadata['sector'],
             'market_cap': market_cap,  # Current market cap (from last data point)
             'shares_outstanding': shares_outstanding if shares_outstanding else 0,  # Shares outstanding (relatively static)
-            'pe_ratio': detailed_metadata.get('pe_ratio', 0),  # P/E ratio
-            'dividend_yield': detailed_metadata.get('dividend_yield', 0),  # Dividend yield
+            'pe_ratio': pe_ratio,  # P/E ratio from SEC
+            'dividend_yield': dividend_yield,  # Dividend yield from SEC
             'country': detailed_metadata['country'],
             
             'data_points': len(history),
