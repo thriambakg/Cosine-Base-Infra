@@ -65,6 +65,7 @@ def read_stock_from_s3(symbol: str, priority: str) -> Optional[Dict[str, Any]]:
 def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: str) -> Dict[str, Any]:
     """
     Calculate metrics for a specific timeframe from historical data.
+    Handles mixed-frequency data (daily + intraday) by normalizing volatility.
     
     Args:
         history: List of historical data points (sorted oldest to newest)
@@ -77,12 +78,12 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
         if not history or len(history) < 2:
             return get_default_metrics()
         
-        # Map timeframe to number of days
+        # Map timeframe to number of calendar days
         days_map = {
             '1d': 1,
             '7d': 7,
             '30d': 30,
-            '1y': 252  # Trading days in a year
+            '1y': 365  # Calendar days (not trading days)
         }
         
         lookback_days = days_map.get(timeframe, 1)
@@ -93,17 +94,24 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
         current_volume = current_point.get('volume', 0)
         current_market_cap = current_point.get('market_cap', 0)
         
-        # Get previous close based on timeframe
-        # For safety, we look back a bit more than needed to handle missing data
-        lookback_index = max(0, len(history) - lookback_days - 5)
-        relevant_history = history[lookback_index:]
+        # Filter history by DATE (not by count) to get the correct timeframe
+        from datetime import datetime, timedelta
+        
+        try:
+            current_date = datetime.fromisoformat(current_point.get('date', '').replace('Z', '+00:00'))
+        except:
+            current_date = datetime.utcnow()
+        
+        cutoff_date = current_date - timedelta(days=lookback_days)
+        
+        # Get all data points within the timeframe (by date, not count)
+        relevant_history = [p for p in history if datetime.fromisoformat(p.get('date', '').replace('Z', '+00:00')) >= cutoff_date]
         
         if len(relevant_history) < 2:
             return get_default_metrics()
         
-        # Find the point closest to the lookback period
-        target_index = max(0, len(relevant_history) - lookback_days - 1)
-        previous_point = relevant_history[target_index]
+        # Get the oldest point in this timeframe for price change calculation
+        previous_point = relevant_history[0]
         previous_close = previous_point.get('close', current_price)
         
         # Calculate price change
@@ -112,24 +120,45 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
         
         # Extract prices for volatility calculation
         prices = [point.get('close', 0) for point in relevant_history if point.get('close', 0) > 0]
+        timestamps = [point.get('timestamp', 0) for point in relevant_history if point.get('close', 0) > 0]
         
-        # Calculate volatility (annualized standard deviation of log returns)
+        # Calculate volatility with frequency normalization
         volatility = 0.0
-        if len(prices) > 1:
+        if len(prices) > 1 and len(timestamps) > 1:
             log_returns = []
+            time_deltas = []
+            
             for i in range(1, len(prices)):
                 if prices[i-1] > 0:
                     log_return = np.log(prices[i] / prices[i-1])
                     log_returns.append(log_return)
+                    
+                    # Calculate time between observations in days
+                    if timestamps[i] > timestamps[i-1]:
+                        time_delta_days = (timestamps[i] - timestamps[i-1]) / 86400  # seconds to days
+                        time_deltas.append(time_delta_days)
             
-            if log_returns:
-                # Annualize volatility: std * sqrt(252)
-                volatility = float(np.std(log_returns) * np.sqrt(252))
+            if log_returns and time_deltas:
+                # Calculate average sampling frequency (observations per day)
+                avg_time_delta = np.mean(time_deltas)
+                observations_per_day = 1.0 / avg_time_delta if avg_time_delta > 0 else 1.0
+                
+                # Standard deviation of log returns
+                std_log_returns = np.std(log_returns)
+                
+                # Annualize: std * sqrt(observations_per_day * 252 trading days)
+                # This normalizes regardless of whether we have hourly, daily, or mixed data
+                volatility = float(std_log_returns * np.sqrt(observations_per_day * 252))
+                
+                logger.info(f"Volatility calc: {len(prices)} points over {lookback_days} days, avg_delta={avg_time_delta:.2f} days, obs/day={observations_per_day:.2f}")
         
-        # Calculate week return (annualized)
+        # Calculate week return (7 days back, regardless of data frequency)
         week_return = 0.0
-        if len(prices) >= 7:
-            week_ago_price = prices[-7]
+        week_cutoff = current_date - timedelta(days=7)
+        week_history = [p for p in history if datetime.fromisoformat(p.get('date', '').replace('Z', '+00:00')) >= week_cutoff]
+        
+        if len(week_history) >= 2:
+            week_ago_price = week_history[0].get('close', 0)
             if week_ago_price > 0:
                 week_total_return = (current_price - week_ago_price) / week_ago_price
                 week_return = week_total_return * (252 / 7) * 100  # Annualized percentage
@@ -138,18 +167,21 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
             total_return = ((current_price - previous_close) / previous_close) if previous_close > 0 else 0
             week_return = total_return * (252 / max(lookback_days, 1)) * 100 / 52
         
-        # Calculate average volume
+        # Calculate average volume (across all points in timeframe)
         volumes = [point.get('volume', 0) for point in relevant_history if point.get('volume', 0) > 0]
         avg_volume = int(np.mean(volumes)) if volumes else current_volume
         
-        # Get day high/low (from most recent point)
-        day_high = current_point.get('high', current_price)
-        day_low = current_point.get('low', current_price)
+        # Get day high/low (max/min from last 24 hours of data)
+        day_cutoff = current_date - timedelta(days=1)
+        day_points = [p for p in history if datetime.fromisoformat(p.get('date', '').replace('Z', '+00:00')) >= day_cutoff]
+        day_high = max((p.get('high', 0) for p in day_points), default=current_price) if day_points else current_price
+        day_low = min((p.get('low', current_price) for p in day_points if p.get('low', 0) > 0), default=current_price) if day_points else current_price
         
-        # Get year high/low (from last 252 trading days)
-        year_lookback = history[-252:] if len(history) >= 252 else history
-        year_high = max((p.get('high', 0) for p in year_lookback), default=current_price)
-        year_low = min((p.get('low', current_price) for p in year_lookback if p.get('low', 0) > 0), default=current_price)
+        # Get year high/low (from last 365 calendar days)
+        year_cutoff = current_date - timedelta(days=365)
+        year_history = [p for p in history if datetime.fromisoformat(p.get('date', '').replace('Z', '+00:00')) >= year_cutoff]
+        year_high = max((p.get('high', 0) for p in year_history), default=current_price) if year_history else current_price
+        year_low = min((p.get('low', current_price) for p in year_history if p.get('low', 0) > 0), default=current_price) if year_history else current_price
         
         return {
             'current_price': current_price,
