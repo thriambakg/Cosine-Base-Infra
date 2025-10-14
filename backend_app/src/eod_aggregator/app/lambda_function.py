@@ -210,12 +210,16 @@ def create_dynamodb_item(symbol: str, stock_data: Dict[str, Any], metrics: Dict[
     sector = stock_data.get('sector', 'Unknown')
     company_name = stock_data.get('company_name', symbol)
     shares_outstanding = stock_data.get('shares_outstanding', 0)
+    pe_ratio = stock_data.get('pe_ratio', 0)
+    dividend_yield = stock_data.get('dividend_yield', 0)
     
     # Convert to Decimal for DynamoDB
     current_price = Decimal(str(metrics['current_price']))
     volatility = Decimal(str(metrics['volatility']))
     market_cap = Decimal(str(metrics['market_cap']))
     price_change_percent = Decimal(str(metrics['price_change_percent']))
+    pe_ratio_decimal = Decimal(str(pe_ratio)) if pe_ratio else Decimal('0')
+    dividend_yield_decimal = Decimal(str(dividend_yield)) if dividend_yield else Decimal('0')
     
     item = {
         # Primary Key
@@ -248,6 +252,8 @@ def create_dynamodb_item(symbol: str, stock_data: Dict[str, Any], metrics: Dict[
         # Market data
         'market_cap': market_cap,
         'shares_outstanding': int(shares_outstanding),
+        'pe_ratio': pe_ratio_decimal,
+        'dividend_yield': dividend_yield_decimal,
         
         # Company metadata
         'industry': industry,
@@ -276,6 +282,14 @@ def create_dynamodb_item(symbol: str, stock_data: Dict[str, Any], metrics: Dict[
         # GSI5: Price range queries
         'GSI5PK': f'PRICE#{timeframe}',
         'GSI5SK': current_price,  # Numeric (Decimal) for range queries
+        
+        # GSI6: P/E ratio range queries
+        'GSI6PK': f'PE_RATIO#{timeframe}',
+        'GSI6SK': pe_ratio_decimal,  # Numeric (Decimal) for range queries
+        
+        # GSI7: Dividend yield range queries
+        'GSI7PK': f'DIVIDEND_YIELD#{timeframe}',
+        'GSI7SK': dividend_yield_decimal,  # Numeric (Decimal) for range queries
         
         # TTL for automatic cleanup (7 days - refreshed daily)
         'expires_at': int((datetime.utcnow() + timedelta(days=7)).timestamp())

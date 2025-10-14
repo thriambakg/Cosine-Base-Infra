@@ -434,7 +434,11 @@ module "stock_data_table" {
     { name = "GSI4PK", type = "S" }, # MARKET_CAP#{timeframe}
     { name = "GSI4SK", type = "N" }, # Market cap (numeric)
     { name = "GSI5PK", type = "S" }, # PRICE#{timeframe}
-    { name = "GSI5SK", type = "N" }  # Price (numeric)
+    { name = "GSI5SK", type = "N" }, # Price (numeric)
+    { name = "GSI6PK", type = "S" }, # PE_RATIO#{timeframe}
+    { name = "GSI6SK", type = "N" }, # P/E ratio (numeric)
+    { name = "GSI7PK", type = "S" }, # DIVIDEND_YIELD#{timeframe}
+    { name = "GSI7SK", type = "N" }  # Dividend yield (numeric)
   ]
 
   global_secondary_indexes = [
@@ -474,6 +478,22 @@ module "stock_data_table" {
       name            = "PriceRangeIndex"
       hash_key        = "GSI5PK"
       range_key       = "GSI5SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PERatioRangeIndex"
+      hash_key        = "GSI6PK"
+      range_key       = "GSI6SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "DividendYieldRangeIndex"
+      hash_key        = "GSI7PK"
+      range_key       = "GSI7SK"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
@@ -1114,10 +1134,8 @@ module "stock_data_historical_s3" {
   tags        = var.common_tags
 }
 
-# Historical Loader Lambda (Python 3.11) - COMMENTED OUT
-# IMPORTANT: Already ran once to populate S3, don't run again to avoid overwriting data
-# Uncomment only if you need to reload all historical data
-/*
+# Historical Loader Lambda (Python 3.11) - UNCOMMENTED TO ADD P/E & DIVIDEND YIELD
+# Loads 5 years of historical stock data with P/E ratio and dividend yield
 module "stock_data_historical_loader" {
   source = "./modules/lambda"
 
@@ -1151,7 +1169,6 @@ module "stock_data_historical_loader" {
 
   tags = var.common_tags
 }
-*/
 
 # IAM Policy for Lambda to access S3 historical data bucket
 resource "aws_iam_policy" "stock_data_historical_s3_access" {
@@ -1180,9 +1197,8 @@ resource "aws_iam_policy" "stock_data_historical_s3_access" {
   tags = var.common_tags
 }
 
-# Step Functions State Machine for Historical Data Loading - COMMENTED OUT
-# IMPORTANT: Already ran once, don't run again to avoid overwriting S3 data
-/*
+# Step Functions State Machine for Historical Data Loading - UNCOMMENTED
+# Re-running to populate S3 with P/E ratio and dividend yield data
 module "stock_data_historical_loader_state_machine" {
   source = "./modules/step-functions"
 
@@ -1289,7 +1305,6 @@ module "stock_data_historical_loader_state_machine" {
 
   tags = var.common_tags
 }
-*/
 
 # ==============================================================================
 # EOD (END OF DAY) AGGREGATOR SYSTEM

@@ -502,7 +502,7 @@ def calculate_stats_from_chart_data(
         
         return round(week_return, 2), round(annual_return, 2), round(volatility, 4)
                 
-            except Exception as e:
+    except Exception as e:
         logger.error(f"Error calculating stats: {str(e)}")
         return 0.0, 0.0, 0.0
 
@@ -615,6 +615,8 @@ def update_s3_historical_data(symbol: str, current_data: Dict[str, Any], priorit
         # Update top-level metadata
         existing_data['market_cap'] = market_cap  # Current market cap
         existing_data['shares_outstanding'] = shares_outstanding
+        existing_data['pe_ratio'] = float(current_data.get('pe_ratio', 0))
+        existing_data['dividend_yield'] = float(current_data.get('dividend_yield', 0))
         existing_data['data_points'] = len(existing_data['history'])
         existing_data['last_date'] = current_date
         existing_data['last_updated'] = current_date

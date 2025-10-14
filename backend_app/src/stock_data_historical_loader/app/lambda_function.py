@@ -250,6 +250,8 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
                     'industry': sic_description,
                     'sector': gics_sector,
                     'market_cap': 0,  # SEC doesn't provide market cap (fetched from Yahoo chart meta)
+                    'pe_ratio': 0,  # SEC doesn't provide P/E ratio
+                    'dividend_yield': 0,  # SEC doesn't provide dividend yield
                     'country': 'US'
                 }
             except Exception as e:
@@ -296,6 +298,8 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
                 'industry': quote.get('industry', 'Unknown'),
                 'sector': gics_sector,
                 'market_cap': quote.get('marketCap', 0),
+                'pe_ratio': quote.get('trailingPE', 0),
+                'dividend_yield': quote.get('dividendYield', 0),
                 'country': 'US'
             }
     except Exception as e:
@@ -308,6 +312,8 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
         'industry': 'Unknown',
         'sector': 'Unknown',
         'market_cap': 0,
+        'pe_ratio': 0,
+        'dividend_yield': 0,
         'country': 'US'
     }
 
@@ -606,6 +612,8 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             'sector': detailed_metadata['sector'],
             'market_cap': market_cap,  # Current market cap (from last data point)
             'shares_outstanding': shares_outstanding if shares_outstanding else 0,  # Shares outstanding (relatively static)
+            'pe_ratio': detailed_metadata.get('pe_ratio', 0),  # P/E ratio
+            'dividend_yield': detailed_metadata.get('dividend_yield', 0),  # Dividend yield
             'country': detailed_metadata['country'],
             
             'data_points': len(history),
