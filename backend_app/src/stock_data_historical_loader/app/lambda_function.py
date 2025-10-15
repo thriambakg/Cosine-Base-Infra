@@ -665,10 +665,11 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             logger.warning(f"⚠️ Using current shares outstanding for all historical periods for {symbol} (historical data not available)")
         
         else:
-            # No shares outstanding available at all, set market cap to 0 for all points
+            # No shares outstanding available at all, set market cap to 0
+            # (Frontend will display as "N/A", but 0 allows for numeric filtering in DynamoDB)
             for point in history:
                 point['market_cap'] = 0
-            logger.warning(f"⚠️ No shares outstanding found for {symbol}, market cap set to 0")
+            logger.warning(f"⚠️ No shares outstanding found for {symbol}, market cap set to 0 (displays as N/A)")
         
         # Get current market cap and price (from last data point)
         market_cap = history[-1].get('market_cap', 0) if history else 0
