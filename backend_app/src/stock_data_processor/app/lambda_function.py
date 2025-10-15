@@ -32,6 +32,11 @@ REQUEST_RATE_LIMIT = float(os.environ.get('REQUEST_RATE_LIMIT', '1.0'))
 BATCH_TIMEOUT = int(os.environ.get('BATCH_TIMEOUT', '50'))
 S3_BUCKET = os.environ.get('S3_BUCKET', 'cosine-stock-data-production')
 
+# Rate limiting configuration - Enhanced to avoid 401/429 errors
+RATE_LIMIT_DELAY = 5.0  # Minimum delay between requests
+MAX_RETRIES = 5  # Number of retries for failed requests
+RETRY_DELAY = 10.0  # Base delay for retries
+
 # Rate limiting state
 _last_request_time = {}
 _request_lock = None
@@ -49,7 +54,10 @@ def get_rate_limit_lock():
     return _request_lock
 
 def enforce_rate_limit(symbol: str):
-    """Enforce rate limiting between requests"""
+    """
+    Enhanced rate limiting to avoid Yahoo Finance blocks.
+    Uses progressive delays and jitter to spread out requests.
+    """
     global _last_request_time
     
     lock = get_rate_limit_lock()
@@ -58,15 +66,75 @@ def enforce_rate_limit(symbol: str):
         last_time = _last_request_time.get(symbol, 0)
         time_since_last = current_time - last_time
         
-        min_interval = 1.0 / REQUEST_RATE_LIMIT  # e.g., 1.0 req/sec = 1.0 second interval
+        # Use longer delays to avoid rate limits (5 seconds minimum)
+        required_delay = RATE_LIMIT_DELAY
         
-        if time_since_last < min_interval:
-            sleep_time = min_interval - time_since_last
-            # Add small jitter to avoid synchronized requests
-            sleep_time += random.uniform(0.1, 0.3)
-            time.sleep(sleep_time)
+        # Progressive delays if we've made many recent requests
+        if len(_last_request_time) > 3:
+            required_delay = RATE_LIMIT_DELAY * 2
+        
+        if time_since_last < required_delay:
+            sleep_time = required_delay - time_since_last
+            # Add jitter to make requests less predictable
+            jitter = random.uniform(1.0, 3.0)
+            total_delay = sleep_time + jitter
+            time.sleep(total_delay)
         
         _last_request_time[symbol] = time.time()
+        
+        # Clean up old timestamps to prevent memory issues
+        if len(_last_request_time) > 50:
+            cutoff_time = current_time - 3600  # Remove timestamps older than 1 hour
+            _last_request_time = {k: v for k, v in _last_request_time.items() if v > cutoff_time}
+
+
+def make_yahoo_request_with_retry(url: str, headers: dict, params: dict = None) -> requests.Response:
+    """
+    Make Yahoo Finance request with robust retry logic.
+    Handles 401, 403, 429 errors with exponential backoff.
+    """
+    for attempt in range(MAX_RETRIES):
+        try:
+            # Add random delay to spread out requests
+            delay = random.uniform(2.0, 5.0)
+            time.sleep(delay)
+            
+            response = requests.get(url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                return response
+            elif response.status_code == 401:
+                # Unauthorized - wait and retry with exponential backoff
+                wait_time = RETRY_DELAY * (2 ** attempt) + random.uniform(5.0, 15.0)
+                logger.warning(f"⚠️ 401 Unauthorized (attempt {attempt + 1}/{MAX_RETRIES}). Waiting {wait_time:.2f}s")
+                time.sleep(wait_time)
+                continue
+            elif response.status_code == 429:
+                # Rate limited - exponential backoff with jitter
+                wait_time = RETRY_DELAY * (2 ** attempt) + random.uniform(5.0, 15.0)
+                logger.warning(f"⚠️ Rate limited 429 (attempt {attempt + 1}/{MAX_RETRIES}). Waiting {wait_time:.2f}s")
+                time.sleep(wait_time)
+                continue
+            elif response.status_code == 403:
+                # Forbidden - likely IP blocked, wait much longer
+                wait_time = RETRY_DELAY * (3 ** attempt) + random.uniform(10.0, 30.0)
+                logger.warning(f"⚠️ Forbidden 403 (attempt {attempt + 1}/{MAX_RETRIES}). Waiting {wait_time:.2f}s")
+                time.sleep(wait_time)
+                continue
+            else:
+                logger.error(f"❌ HTTP {response.status_code} for {url}")
+                if attempt == MAX_RETRIES - 1:
+                    return response
+                time.sleep(RETRY_DELAY + random.uniform(2.0, 5.0))
+                continue
+                
+        except requests.exceptions.RequestException as e:
+            logger.error(f"❌ Request exception (attempt {attempt + 1}/{MAX_RETRIES}): {str(e)}")
+            if attempt == MAX_RETRIES - 1:
+                raise
+            time.sleep(RETRY_DELAY)
+    
+    raise Exception(f"All {MAX_RETRIES} attempts failed for {url}")
 
 
 def load_sec_company_tickers() -> Dict[str, Any]:
@@ -246,7 +314,7 @@ def fetch_stock_data_yahoo(symbol: str, timeframe: str = '1d') -> Optional[Dict[
             'last_updated': datetime.utcnow().isoformat()
         }
         
-        logger.info(f"Successfully fetched data for {symbol}: ${current_price:.2f}, vol={volatility:.4f}")
+        # Removed verbose per-stock logging
         return result
         
     except Exception as e:
@@ -254,19 +322,21 @@ def fetch_stock_data_yahoo(symbol: str, timeframe: str = '1d') -> Optional[Dict[
         return None
 
 def fetch_current_price_yahoo(symbol: str) -> Optional[Dict[str, Any]]:
-    """Fetch current price using direct HTTP call to Yahoo Finance"""
+    """Fetch current price using direct HTTP call to Yahoo Finance with retry logic"""
     try:
         url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
             'Accept-Language': 'en-US,en;q=0.9',
             'Accept-Encoding': 'gzip, deflate, br',
-            'Connection': 'keep-alive'
+            'Connection': 'keep-alive',
+            'Referer': 'https://finance.yahoo.com/'
         }
         
-        response = requests.get(url, headers=headers, timeout=15)
+        # Use retry logic to handle rate limiting
+        response = make_yahoo_request_with_retry(url, headers)
         
         if response.status_code != 200:
             return {'error': f"HTTP {response.status_code}"}
@@ -314,18 +384,19 @@ def fetch_historical_data_yahoo(symbol: str, timeframe: str = '1d') -> List[Dict
         }
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept': 'application/json',
-            'Accept-Language': 'en-US,en;q=0.9'
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Referer': 'https://finance.yahoo.com/'
         }
         
-        # Add small delay to avoid overwhelming the API
-        time.sleep(random.uniform(0.5, 1.5))
-        
-        response = requests.get(url, params=params, headers=headers, timeout=15)
+        # Use retry logic to handle rate limiting
+        response = make_yahoo_request_with_retry(url, headers, params=params)
         
         if response.status_code != 200:
-            logger.error(f"Historical data request failed: {response.status_code}")
+            logger.error(f"❌ Historical data request failed: {response.status_code}")
             return []
         
         data = response.json()
@@ -487,14 +558,16 @@ def fetch_additional_metrics_yahoo(symbol: str, current_price: float = 0) -> Dic
         }
         
         headers = {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-            'Accept': 'application/json'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'application/json',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Referer': 'https://finance.yahoo.com/'
         }
         
-        # Add delay to avoid rate limiting
-        time.sleep(random.uniform(0.5, 1.5))
-        
-        response = requests.get(url, params=params, headers=headers, timeout=15)
+        # Use retry logic to handle rate limiting
+        response = make_yahoo_request_with_retry(url, headers, params=params)
         
         if response.status_code == 200:
             data = response.json()
@@ -619,7 +692,7 @@ def process_stock_batch(symbols: List[str], timeframe: str, priority: str) -> Di
     success_count = 0
     failure_count = 0
     
-    logger.info(f"Processing batch of {len(symbols)} stocks (priority: {priority})")
+    logger.info(f"📦 Processing batch of {len(symbols)} stocks (priority: {priority}, timeframe: {timeframe})")
     
     # Process stocks in parallel
     with ThreadPoolExecutor(max_workers=MAX_PARALLEL_THREADS) as executor:
@@ -641,13 +714,13 @@ def process_stock_batch(symbols: List[str], timeframe: str, priority: str) -> Di
                     else:
                         failure_count += 1
                 else:
-                    logger.warning(f"No data returned for {symbol}")
+                    logger.warning(f"⚠️ No data returned for {symbol}")
                     failure_count += 1
             except Exception as e:
-                logger.error(f"Error processing {symbol}: {str(e)}")
+                logger.error(f"❌ Error processing {symbol}: {str(e)}")
                 failure_count += 1
     
-    logger.info(f"Batch complete: {success_count} successful, {failure_count} failed out of {len(symbols)} symbols")
+    logger.info(f"✅ Batch complete: {success_count} successful, {failure_count} failed out of {len(symbols)} symbols")
     return {'success': success_count, 'failure': failure_count}
 
 
@@ -670,12 +743,12 @@ def update_s3_historical_data(symbol: str, current_data: Dict[str, Any], priorit
         try:
             response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
             existing_data = json.loads(response['Body'].read().decode('utf-8'))
-            logger.info(f"Found existing S3 data for {symbol}")
+            # Removed verbose logging - only log errors
         except s3_client.exceptions.NoSuchKey:
-            logger.warning(f"No existing S3 data for {symbol}, skipping update")
+            logger.warning(f"⚠️ No existing S3 data for {symbol}, skipping update")
             return False
         except Exception as e:
-            logger.error(f"Error reading S3 file for {symbol}: {e}")
+            logger.error(f"❌ Error reading S3 file for {symbol}: {e}")
             return False
         
         # Create new data point for history array
@@ -725,7 +798,7 @@ def update_s3_historical_data(symbol: str, current_data: Dict[str, Any], priorit
             ContentType='application/json'
         )
         
-        logger.info(f"✅ Updated S3 historical data for {symbol}: added data point, total points: {existing_data['data_points']}")
+        # Removed verbose per-stock logging - only log at batch level
         return True
         
     except Exception as e:
@@ -778,7 +851,7 @@ def lambda_handler(event, context):
                     logger.warning("No symbols in message")
                     continue
                 
-                logger.info(f"Processing batch #{batch_number}: {len(symbols)} symbols, priority={priority}")
+                logger.info(f"📦 Processing batch #{batch_number}: {len(symbols)} symbols, priority={priority}, timeframe={timeframe}")
                 
                 # Update S3 files with new data points
                 result = process_stock_batch(symbols, timeframe, priority)

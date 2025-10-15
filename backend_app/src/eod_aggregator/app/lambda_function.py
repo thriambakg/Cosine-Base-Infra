@@ -107,7 +107,17 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
         # Get all data points within the timeframe (by date, not count)
         relevant_history = [p for p in history if datetime.fromisoformat(p.get('date', '').replace('Z', '+00:00')) >= cutoff_date]
         
+        # Debug logging for 1d timeframe
+        if timeframe == '1d':
+            logger.info(f"📊 1d timeframe debug: current_date={current_date}, cutoff_date={cutoff_date}")
+            logger.info(f"📊 Total history points: {len(history)}, Relevant points: {len(relevant_history)}")
+            if len(history) > 0:
+                first_date = history[0].get('date', 'N/A')
+                last_date = history[-1].get('date', 'N/A')
+                logger.info(f"📊 History date range: {first_date} to {last_date}")
+        
         if len(relevant_history) < 2:
+            logger.warning(f"⚠️ Not enough data for {timeframe}: found {len(relevant_history)} points (need 2+)")
             return get_default_metrics()
         
         # Get the oldest point in this timeframe for price change calculation
