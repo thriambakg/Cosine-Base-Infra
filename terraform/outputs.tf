@@ -416,37 +416,32 @@ output "news_table_policy_arn" {
 }
 
 # Stock Data Infrastructure Outputs
-output "stock_data_queue_name" {
-  description = "Name of the stock data SQS queue"
-  value       = module.stock_data_queue.queue_name
+output "stock_data_historical_loader_function_name" {
+  description = "Name of the stock data historical loader Lambda function"
+  value       = module.stock_data_historical_loader.function_name
 }
 
-output "stock_data_queue_arn" {
-  description = "ARN of the stock data SQS queue"
-  value       = module.stock_data_queue.queue_arn
+output "stock_data_historical_loader_function_arn" {
+  description = "ARN of the stock data historical loader Lambda function"
+  value       = module.stock_data_historical_loader.function_arn
 }
 
-output "stock_data_queue_url" {
-  description = "URL of the stock data SQS queue"
-  value       = module.stock_data_queue.queue_url
+output "stock_data_historical_loader_state_machine_arn" {
+  description = "ARN of the historical loader Step Functions state machine"
+  value       = module.stock_data_historical_loader_state_machine.state_machine_arn
 }
 
-output "stock_data_batch_fetcher_function_name" {
-  description = "Name of the stock data batch fetcher Lambda function"
-  value       = module.stock_data_batch_fetcher.function_name
+output "eod_aggregator_function_name" {
+  description = "Name of the EOD aggregator Lambda function"
+  value       = module.eod_aggregator.function_name
 }
 
-output "stock_data_batch_fetcher_function_arn" {
-  description = "ARN of the stock data batch fetcher Lambda function"
-  value       = module.stock_data_batch_fetcher.function_arn
+output "eod_aggregator_function_arn" {
+  description = "ARN of the EOD aggregator Lambda function"
+  value       = module.eod_aggregator.function_arn
 }
 
-output "stock_data_processor_function_name" {
-  description = "Name of the stock data processor Lambda function"
-  value       = module.stock_data_processor.function_name
-}
-
-output "stock_data_processor_function_arn" {
-  description = "ARN of the stock data processor Lambda function"
-  value       = module.stock_data_processor.function_arn
+output "eod_aggregator_state_machine_arn" {
+  description = "ARN of the EOD aggregator Step Functions state machine"
+  value       = module.eod_aggregator_state_machine.state_machine_arn
 }

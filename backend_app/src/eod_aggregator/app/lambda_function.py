@@ -102,65 +102,74 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
         except:
             current_date = datetime.utcnow()
         
-        cutoff_date = current_date - timedelta(days=lookback_days)
-        
-        # Get all data points within the timeframe (by date, not count)
-        relevant_history = [p for p in history if datetime.fromisoformat(p.get('date', '').replace('Z', '+00:00')) >= cutoff_date]
-        
-        # Debug logging for 1d timeframe
+        # Special handling for 1d timeframe with EOD data (1 point per day)
+        # For 1d: compare today's close vs yesterday's close (last 2 points, not date-based)
         if timeframe == '1d':
-            logger.info(f"📊 1d timeframe debug: current_date={current_date}, cutoff_date={cutoff_date}")
-            logger.info(f"📊 Total history points: {len(history)}, Relevant points: {len(relevant_history)}")
-            if len(history) > 0:
-                first_date = history[0].get('date', 'N/A')
-                last_date = history[-1].get('date', 'N/A')
-                logger.info(f"📊 History date range: {first_date} to {last_date}")
-        
-        if len(relevant_history) < 2:
-            logger.warning(f"⚠️ Not enough data for {timeframe}: found {len(relevant_history)} points (need 2+)")
-            return get_default_metrics()
-        
-        # Get the oldest point in this timeframe for price change calculation
-        previous_point = relevant_history[0]
-        previous_close = previous_point.get('close', current_price)
+            if len(history) < 2:
+                logger.warning(f"⚠️ Not enough data for 1d: found {len(history)} points (need 2+)")
+                return get_default_metrics()
+            
+            # Use the last 2 data points (today and yesterday)
+            relevant_history = history[-2:]
+            previous_point = relevant_history[0]
+            previous_close = previous_point.get('close', current_price)
+            
+            logger.info(f"📊 1d: Using last 2 points - today: {current_point.get('date')}, yesterday: {previous_point.get('date')}")
+        else:
+            # For other timeframes, use date-based filtering
+            cutoff_date = current_date - timedelta(days=lookback_days)
+            
+            # Get all data points within the timeframe (by date, not count)
+            relevant_history = [p for p in history if datetime.fromisoformat(p.get('date', '').replace('Z', '+00:00')) >= cutoff_date]
+            
+            if len(relevant_history) < 2:
+                logger.warning(f"⚠️ Not enough data for {timeframe}: found {len(relevant_history)} points (need 2+)")
+                return get_default_metrics()
+            
+            # Get the oldest point in this timeframe for price change calculation
+            previous_point = relevant_history[0]
+            previous_close = previous_point.get('close', current_price)
         
         # Calculate price change
         price_change = current_price - previous_close
         price_change_percent = ((current_price - previous_close) / previous_close * 100) if previous_close > 0 else 0
         
-        # Extract prices for volatility calculation
-        prices = [point.get('close', 0) for point in relevant_history if point.get('close', 0) > 0]
-        timestamps = [point.get('timestamp', 0) for point in relevant_history if point.get('close', 0) > 0]
-        
-        # Calculate volatility with frequency normalization
+        # Calculate volatility based on timeframe
         volatility = 0.0
-        if len(prices) > 1 and len(timestamps) > 1:
-            log_returns = []
-            time_deltas = []
+        
+        if timeframe == '1d':
+            # For 1d with EOD data: use Parkinson's volatility estimator (high-low range)
+            # This estimates intraday volatility from a single day's high/low
+            # Formula: sqrt(1/(4*ln(2))) * ln(High/Low) * sqrt(252) for annualization
+            day_high = current_point.get('high', 0)
+            day_low = current_point.get('low', 0)
             
-            for i in range(1, len(prices)):
-                if prices[i-1] > 0:
-                    log_return = np.log(prices[i] / prices[i-1])
-                    log_returns.append(log_return)
+            if day_high > 0 and day_low > 0 and day_high > day_low:
+                # Parkinson's volatility (annualized)
+                volatility = float(np.sqrt(1 / (4 * np.log(2))) * np.log(day_high / day_low) * np.sqrt(252))
+                logger.info(f"📊 1d volatility (Parkinson): high={day_high:.2f}, low={day_low:.2f}, vol={volatility:.4f}")
+            else:
+                logger.warning(f"⚠️ Invalid high/low for 1d volatility: high={day_high}, low={day_low}")
+        else:
+            # For other timeframes: use standard historical volatility from daily returns
+            prices = [point.get('close', 0) for point in relevant_history if point.get('close', 0) > 0]
+            
+            if len(prices) > 1:
+                log_returns = []
+                
+                for i in range(1, len(prices)):
+                    if prices[i-1] > 0:
+                        log_return = np.log(prices[i] / prices[i-1])
+                        log_returns.append(log_return)
+                
+                if log_returns:
+                    # Standard deviation of log returns
+                    std_log_returns = np.std(log_returns)
                     
-                    # Calculate time between observations in days
-                    if timestamps[i] > timestamps[i-1]:
-                        time_delta_days = (timestamps[i] - timestamps[i-1]) / 86400  # seconds to days
-                        time_deltas.append(time_delta_days)
-            
-            if log_returns and time_deltas:
-                # Calculate average sampling frequency (observations per day)
-                avg_time_delta = np.mean(time_deltas)
-                observations_per_day = 1.0 / avg_time_delta if avg_time_delta > 0 else 1.0
-                
-                # Standard deviation of log returns
-                std_log_returns = np.std(log_returns)
-                
-                # Annualize: std * sqrt(observations_per_day * 252 trading days)
-                # This normalizes regardless of whether we have hourly, daily, or mixed data
-                volatility = float(std_log_returns * np.sqrt(observations_per_day * 252))
-                
-                logger.info(f"Volatility calc: {len(prices)} points over {lookback_days} days, avg_delta={avg_time_delta:.2f} days, obs/day={observations_per_day:.2f}")
+                    # Annualize: std * sqrt(252) for daily data
+                    volatility = float(std_log_returns * np.sqrt(252))
+                    
+                    logger.info(f"📊 Volatility ({timeframe}): {len(prices)} daily points ({len(log_returns)} returns), vol={volatility:.4f}")
         
         # Calculate week return (7 days back, regardless of data frequency)
         week_return = 0.0
@@ -181,11 +190,10 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
         volumes = [point.get('volume', 0) for point in relevant_history if point.get('volume', 0) > 0]
         avg_volume = int(np.mean(volumes)) if volumes else current_volume
         
-        # Get day high/low (max/min from last 24 hours of data)
-        day_cutoff = current_date - timedelta(days=1)
-        day_points = [p for p in history if datetime.fromisoformat(p.get('date', '').replace('Z', '+00:00')) >= day_cutoff]
-        day_high = max((p.get('high', 0) for p in day_points), default=current_price) if day_points else current_price
-        day_low = min((p.get('low', current_price) for p in day_points if p.get('low', 0) > 0), default=current_price) if day_points else current_price
+        # Get day high/low from today's EOD bar (not historical lookback)
+        # For EOD data, the current point already contains the day's high/low
+        day_high = current_point.get('high', current_price)
+        day_low = current_point.get('low', current_price)
         
         # Get year high/low (from last 365 calendar days)
         year_cutoff = current_date - timedelta(days=365)

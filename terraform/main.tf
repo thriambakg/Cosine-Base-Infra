@@ -873,14 +873,6 @@ module "news_processor" {
   tags = var.common_tags
 }
 
-# SQS Event Source Mapping for Stock Data Processor
-resource "aws_lambda_event_source_mapping" "stock_data_processor_sqs" {
-  event_source_arn                   = module.stock_data_queue.queue_arn
-  function_name                      = module.stock_data_processor.function_arn
-  batch_size                         = 10
-  maximum_batching_window_in_seconds = 5
-}
-
 # SQS Event Source Mapping for News Processor
 resource "aws_lambda_event_source_mapping" "news_processor_sqs" {
   event_source_arn                   = module.news_queue.queue_arn
