@@ -957,8 +957,8 @@ module "chat_files_s3" {
 
   # Enable lifecycle transitions to IA and Glacier for cost optimization
   enable_lifecycle_transitions = true
-  transition_to_ia_days        = 7  # Move to IA after 7 days
-  transition_to_glacier_days   = 30 # Move to Glacier after 30 days
+  transition_to_ia_days        = 30 # Move to IA after 30 days (AWS minimum)
+  transition_to_glacier_days   = 60 # Move to Glacier after 60 days
 
   # Enable expiration after 90 days (chat files TTL)
   # Files automatically deleted after 90 days to handle message editing scenarios
