@@ -975,7 +975,9 @@ module "chat_files_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 7
 
-  # S3 notifications will be configured separately to avoid circular dependency
+  # S3 notifications configuration
+  notification_topic_arn = module.chat_file_upload_notifications.topic_arn
+  notification_events    = ["s3:ObjectCreated:*"]
 
   kms_key_arn = module.kms.main_key_arn
   tags        = var.common_tags
@@ -999,15 +1001,7 @@ module "chat_file_upload_notifications" {
   })
 }
 
-# S3 Bucket Notification for Chat Files (separate resource to avoid circular dependency)
-resource "aws_s3_bucket_notification" "chat_files_notification" {
-  bucket = module.chat_files_s3.bucket_id
-
-  topic {
-    topic_arn = module.chat_file_upload_notifications.topic_arn
-    events    = ["s3:ObjectCreated:*"]
-  }
-}
+# S3 Bucket Notification is now handled by the S3 module
 
 
 # Historical Loader Lambda (Python 3.11) - UNCOMMENTED TO ADD P/E & DIVIDEND YIELD

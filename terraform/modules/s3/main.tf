@@ -304,3 +304,14 @@ resource "aws_s3_bucket_replication_configuration" "this" {
     aws_s3_bucket_versioning.replica
   ]
 }
+
+# S3 Bucket Notification for primary bucket
+resource "aws_s3_bucket_notification" "this" {
+  count  = var.notification_topic_arn != "" ? 1 : 0
+  bucket = aws_s3_bucket.this.id
+
+  topic {
+    topic_arn = var.notification_topic_arn
+    events    = var.notification_events
+  }
+}
