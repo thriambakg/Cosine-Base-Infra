@@ -1002,6 +1002,33 @@ module "chat_file_upload_notifications" {
 
 # S3 Bucket Notification is now handled by the S3 module
 
+# IAM Policy for Lambda to access S3 chat files bucket
+resource "aws_iam_policy" "lambda_s3_chat_files_policy" {
+  name        = "${var.project_name}-lambda-s3-chat-files-access-${var.environment}"
+  description = "Allows Lambda to read/write to chat files S3 bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          module.chat_files_s3.bucket_arn,
+          "${module.chat_files_s3.bucket_arn}/*"
+        ]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
 
 # Historical Loader Lambda (Python 3.11) - UNCOMMENTED TO ADD P/E & DIVIDEND YIELD
 # Loads 5 years of historical stock data with P/E ratio and dividend yield
