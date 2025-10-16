@@ -990,7 +990,9 @@ module "chat_file_upload_notifications" {
   purpose      = "ChatFileUploadNotifications"
   kms_key_arn  = module.kms.main_key_arn
 
-  # S3 bucket policy will be configured separately to avoid circular dependency
+  # Allow S3 to publish to this topic (using wildcard to avoid circular dependency)
+  allow_s3_publish = true
+  s3_bucket_arns   = ["arn:aws:s3:::${var.project_name}-chat-files-${var.environment}"]
 
   tags = merge(var.common_tags, {
     Environment = var.environment
@@ -1007,32 +1009,6 @@ resource "aws_s3_bucket_notification" "chat_files_notification" {
   }
 }
 
-# SNS Topic Policy to allow S3 to publish to the topic
-resource "aws_sns_topic_policy" "chat_file_upload_policy" {
-  arn = module.chat_file_upload_notifications.topic_arn
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Service = "s3.amazonaws.com"
-        }
-        Action   = "sns:Publish"
-        Resource = module.chat_file_upload_notifications.topic_arn
-        Condition = {
-          StringEquals = {
-            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
-          }
-          ArnLike = {
-            "aws:SourceArn" = module.chat_files_s3.bucket_arn
-          }
-        }
-      }
-    ]
-  })
-}
 
 # Historical Loader Lambda (Python 3.11) - UNCOMMENTED TO ADD P/E & DIVIDEND YIELD
 # Loads 5 years of historical stock data with P/E ratio and dividend yield
