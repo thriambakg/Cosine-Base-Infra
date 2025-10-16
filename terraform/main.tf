@@ -941,6 +941,41 @@ module "stock_data_historical_s3" {
   tags        = var.common_tags
 }
 
+# S3 Bucket for Chat File Uploads
+module "chat_files_s3" {
+  source = "./modules/s3"
+
+  # Required providers
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-chat-files-${var.environment}"
+  environment = var.environment
+  purpose     = "ChatFileUploads"
+
+  # Enable lifecycle transitions to IA and Glacier for cost optimization
+  enable_lifecycle_transitions = true
+  transition_to_ia_days        = 7  # Move to IA after 7 days
+  transition_to_glacier_days   = 30 # Move to Glacier after 30 days
+
+  # Enable expiration after 90 days (chat files TTL)
+  # Files automatically deleted after 90 days to handle message editing scenarios
+  # This prevents orphaned files when users edit/delete old messages
+  enable_expiration = true
+  expiration_days   = 90 # 90 days - files auto-delete after 3 months
+
+  # Abort incomplete multipart uploads after 1 day
+  abort_incomplete_multipart_upload_days = 1
+
+  # Noncurrent version expiration
+  noncurrent_version_expiration_days = 7
+
+  kms_key_arn = module.kms.main_key_arn
+  tags        = var.common_tags
+}
+
 # Historical Loader Lambda (Python 3.11) - UNCOMMENTED TO ADD P/E & DIVIDEND YIELD
 # Loads 5 years of historical stock data with P/E ratio and dividend yield
 module "stock_data_historical_loader" {

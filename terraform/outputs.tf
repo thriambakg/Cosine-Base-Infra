@@ -445,3 +445,19 @@ output "eod_aggregator_state_machine_arn" {
   description = "ARN of the EOD aggregator Step Functions state machine"
   value       = module.eod_aggregator_state_machine.state_machine_arn
 }
+
+# Chat Files S3 Bucket Outputs
+output "chat_files_bucket_name" {
+  description = "Name of the chat files S3 bucket"
+  value       = module.chat_files_s3.bucket_id
+}
+
+output "chat_files_bucket_arn" {
+  description = "ARN of the chat files S3 bucket"
+  value       = module.chat_files_s3.bucket_arn
+}
+
+output "chat_files_bucket_domain_name" {
+  description = "Domain name of the chat files S3 bucket"
+  value       = module.chat_files_s3.bucket_domain_name
+}
