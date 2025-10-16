@@ -54,7 +54,7 @@ resource "aws_sns_topic_policy" "this" {
         Action   = "SNS:Publish"
         Resource = aws_sns_topic.this.arn
         Condition = var.s3_bucket_arns != null ? {
-          ArnLike = {
+          ForAnyValueArnLike = {
             "aws:SourceArn" = var.s3_bucket_arns
           }
         } : {}
