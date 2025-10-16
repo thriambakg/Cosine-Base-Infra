@@ -1,6 +1,9 @@
 # SNS Module - Security Compliant by Default
 # modules/sns/main.tf
 
+# Data sources
+data "aws_caller_identity" "current" {}
+
 # SNS Topic
 resource "aws_sns_topic" "this" {
   name              = var.topic_name
@@ -54,8 +57,8 @@ resource "aws_sns_topic_policy" "this" {
         Action   = "SNS:Publish"
         Resource = aws_sns_topic.this.arn
         Condition = var.s3_bucket_arns != null ? {
-          ForAnyValueArnLike = {
-            "aws:SourceArn" = var.s3_bucket_arns
+          ArnLike = {
+            "aws:SourceArn" = var.s3_bucket_arns[0]
           }
         } : {}
       }] : [],
