@@ -178,16 +178,3 @@ variable "allow_cloudfront_oac" {
   type        = bool
   default     = false
 }
-
-# Notification configuration
-variable "notification_topic_arn" {
-  description = "ARN of the SNS topic for S3 bucket notifications"
-  type        = string
-  default     = ""
-}
-
-variable "notification_events" {
-  description = "List of S3 events to trigger notifications"
-  type        = list(string)
-  default     = ["s3:ObjectCreated:*"]
-}
