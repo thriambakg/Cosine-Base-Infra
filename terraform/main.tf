@@ -972,8 +972,30 @@ module "chat_files_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 7
 
+  # Enable S3 event notifications for file upload success
+  notification_topic_arn = module.chat_file_upload_notifications.topic_arn
+  notification_events    = ["s3:ObjectCreated:*"]
+
   kms_key_arn = module.kms.main_key_arn
   tags        = var.common_tags
+}
+
+# SNS Topic for Chat File Upload Notifications
+module "chat_file_upload_notifications" {
+  source = "./modules/sns"
+
+  topic_name   = "${var.project_name}-chat-file-upload-notifications-${var.environment}"
+  display_name = "Chat File Upload Notifications"
+  purpose      = "ChatFileUploadNotifications"
+  kms_key_arn  = module.kms.main_key_arn
+
+  # Allow S3 to publish to this topic
+  allow_s3_publish = true
+  s3_bucket_arns   = [module.chat_files_s3.bucket_arn]
+
+  tags = merge(var.common_tags, {
+    Environment = var.environment
+  })
 }
 
 # Historical Loader Lambda (Python 3.11) - UNCOMMENTED TO ADD P/E & DIVIDEND YIELD

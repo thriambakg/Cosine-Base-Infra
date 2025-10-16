@@ -461,3 +461,9 @@ output "chat_files_bucket_domain_name" {
   description = "Domain name of the chat files S3 bucket"
   value       = module.chat_files_s3.bucket_domain_name
 }
+
+# Chat File Upload Notifications
+output "chat_file_upload_notifications_topic_arn" {
+  description = "ARN of the SNS topic for chat file upload notifications"
+  value       = module.chat_file_upload_notifications.topic_arn
+}
