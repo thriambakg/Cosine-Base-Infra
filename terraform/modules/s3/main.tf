@@ -195,7 +195,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "replica" {
 
 # CKV_AWS_18: Access logging for replica bucket
 resource "aws_s3_bucket_logging" "replica" {
-  count    = var.enable_cross_region_replication && var.access_log_bucket != null ? 1 : 0
+  count    = var.enable_cross_region_replication && var.access_log_bucket != "" ? 1 : 0
   provider = aws.replica
   bucket   = aws_s3_bucket.replica[0].id
 
@@ -205,7 +205,7 @@ resource "aws_s3_bucket_logging" "replica" {
 
 # CKV2_AWS_62: Event notifications for replica bucket
 resource "aws_s3_bucket_notification" "replica" {
-  count    = var.enable_cross_region_replication && var.notification_topic_arn != null ? 1 : 0
+  count    = var.enable_cross_region_replication && var.notification_topic_arn != "" ? 1 : 0
   provider = aws.replica
   bucket   = aws_s3_bucket.replica[0].id
 
