@@ -972,9 +972,7 @@ module "chat_files_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 7
 
-  # Enable S3 event notifications for file upload success
-  notification_topic_arn = module.chat_file_upload_notifications.topic_arn
-  notification_events    = ["s3:ObjectCreated:*"]
+  # S3 notifications will be configured separately to avoid circular dependency
 
   kms_key_arn = module.kms.main_key_arn
   tags        = var.common_tags
@@ -989,12 +987,47 @@ module "chat_file_upload_notifications" {
   purpose      = "ChatFileUploadNotifications"
   kms_key_arn  = module.kms.main_key_arn
 
-  # Allow S3 to publish to this topic
-  allow_s3_publish = true
-  s3_bucket_arns   = [module.chat_files_s3.bucket_arn]
+  # S3 bucket policy will be configured separately to avoid circular dependency
 
   tags = merge(var.common_tags, {
     Environment = var.environment
+  })
+}
+
+# S3 Bucket Notification for Chat Files (separate resource to avoid circular dependency)
+resource "aws_s3_bucket_notification" "chat_files_notification" {
+  bucket = module.chat_files_s3.bucket_id
+
+  topic {
+    topic_arn = module.chat_file_upload_notifications.topic_arn
+    events    = ["s3:ObjectCreated:*"]
+  }
+}
+
+# SNS Topic Policy to allow S3 to publish to the topic
+resource "aws_sns_topic_policy" "chat_file_upload_policy" {
+  arn = module.chat_file_upload_notifications.topic_arn
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "s3.amazonaws.com"
+        }
+        Action   = "sns:Publish"
+        Resource = module.chat_file_upload_notifications.topic_arn
+        Condition = {
+          StringEquals = {
+            "aws:SourceAccount" = data.aws_caller_identity.current.account_id
+          }
+          ArnLike = {
+            "aws:SourceArn" = module.chat_files_s3.bucket_arn
+          }
+        }
+      }
+    ]
   })
 }
 
