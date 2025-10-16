@@ -140,5 +140,3 @@ resource "aws_sns_topic_subscription" "https" {
   endpoint  = each.value
 }
 
-# Data source for current AWS account
-data "aws_caller_identity" "current" {}
