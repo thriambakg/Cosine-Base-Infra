@@ -1016,7 +1016,8 @@ resource "aws_iam_policy" "lambda_s3_chat_files_policy" {
           "s3:GetObject",
           "s3:PutObject",
           "s3:DeleteObject",
-          "s3:ListBucket"
+          "s3:ListBucket",
+          "s3:GeneratePresignedUrl"
         ]
         Resource = [
           module.chat_files_s3.bucket_arn,
