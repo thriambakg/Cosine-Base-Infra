@@ -109,6 +109,12 @@ output "dynamodb_module_kms_key_id" {
   value       = module.kms.dynamodb_key_id
 }
 
+# KMS Access Policy
+output "kms_access_policy_arn" {
+  description = "ARN of the IAM policy for accessing KMS keys"
+  value       = module.kms.kms_access_policy_arn
+}
+
 # Security Events Table Outputs
 output "security_events_table_name" {
   description = "Name of the security events DynamoDB table"
