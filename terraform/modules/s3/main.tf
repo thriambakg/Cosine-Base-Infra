@@ -5,6 +5,11 @@
 data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
+# Local values
+locals {
+  agent_files_notification_enabled = var.agent_files_notification_topic_arn != "" && var.agent_files_notification_topic_arn != null
+}
+
 # Primary S3 bucket
 resource "aws_s3_bucket" "this" {
   bucket        = var.bucket_name
@@ -111,9 +116,8 @@ resource "aws_s3_bucket_notification" "this" {
   }
 }
 
-# Additional notification configuration for agent files - Optional
+# Additional notification configuration for agent files - Always present
 resource "aws_s3_bucket_notification" "agent_files" {
-  count  = var.agent_files_notification_topic_arn != "" ? 1 : 0
   bucket = aws_s3_bucket.this.id
 
   topic {
