@@ -474,6 +474,12 @@ output "chat_file_upload_notifications_topic_arn" {
   value       = module.chat_file_upload_notifications.topic_arn
 }
 
+# Agent File Upload Notifications
+output "agent_file_upload_notifications_topic_arn" {
+  description = "ARN of the SNS topic for agent file upload notifications"
+  value       = module.agent_file_upload_notifications.topic_arn
+}
+
 # Chat Files S3 Access Policy
 output "lambda_s3_chat_files_policy_arn" {
   description = "ARN of the IAM policy for Lambda access to chat files S3 bucket"

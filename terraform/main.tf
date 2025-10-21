@@ -2,6 +2,8 @@
 # Main Terraform configuration for shared resources
 
 # Data sources
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 terraform {
   required_version = ">= 1.0"
@@ -974,15 +976,21 @@ module "chat_files_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 7
 
-  # S3 notifications configuration
-  notification_topic_arn = module.chat_file_upload_notifications.topic_arn
-  notification_events    = ["s3:ObjectCreated:*"]
+  # S3 notifications configuration for user files (files/ folder only)
+  notification_topic_arn     = module.chat_file_upload_notifications.topic_arn
+  notification_events        = ["s3:ObjectCreated:*"]
+  notification_filter_prefix = "users/"
+
+  # S3 notifications configuration for agent files (agent-files/ folder only)
+  agent_files_notification_topic_arn     = module.agent_file_upload_notifications.topic_arn
+  agent_files_notification_events        = ["s3:ObjectCreated:*"]
+  agent_files_notification_filter_prefix = "users/"
 
   kms_key_arn = module.kms.main_key_arn
   tags        = var.common_tags
 }
 
-# SNS Topic for Chat File Upload Notifications
+# SNS Topic for Chat File Upload Notifications (User Files)
 module "chat_file_upload_notifications" {
   source = "./modules/sns"
 
@@ -998,6 +1006,31 @@ module "chat_file_upload_notifications" {
   tags = merge(var.common_tags, {
     Environment = var.environment
   })
+}
+
+# SNS Topic for Agent File Upload Notifications
+module "agent_file_upload_notifications" {
+  source = "./modules/sns"
+
+  topic_name   = "${var.project_name}-agent-file-upload-notifications-${var.environment}"
+  display_name = "Agent File Upload Notifications"
+  purpose      = "AgentFileUploadNotifications"
+  kms_key_arn  = module.kms.main_key_arn
+
+  # Allow S3 to publish to this topic (using wildcard to avoid circular dependency)
+  allow_s3_publish = true
+  s3_bucket_arns   = ["arn:aws:s3:::${var.project_name}-chat-files-${var.environment}"]
+
+  tags = merge(var.common_tags, {
+    Environment = var.environment
+  })
+}
+
+# SNS Subscription for Agent Files Processor Lambda
+resource "aws_sns_topic_subscription" "agent_files_processor" {
+  topic_arn = module.agent_file_upload_notifications.topic_arn
+  protocol  = "lambda"
+  endpoint  = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-agent-files-processor-${var.environment}"
 }
 
 # S3 Bucket Notification is now handled by the S3 module
