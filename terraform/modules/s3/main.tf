@@ -154,6 +154,7 @@ resource "aws_s3_bucket_versioning" "replica" {
   }
 }
 
+
 resource "aws_s3_bucket_server_side_encryption_configuration" "replica" {
   count    = var.enable_cross_region_replication ? 1 : 0
   provider = aws.replica
