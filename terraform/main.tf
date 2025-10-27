@@ -24,6 +24,10 @@ provider "aws" {
   }
 }
 
+# Data sources
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
 # Temporary provider for replica region to clean up cross-region replication resources
 provider "aws" {
   alias  = "replica"
