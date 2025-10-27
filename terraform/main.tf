@@ -24,8 +24,6 @@ provider "aws" {
   }
 }
 
-
-
 # Temporary provider for replica region to clean up cross-region replication resources
 provider "aws" {
   alias  = "replica"
@@ -992,6 +990,14 @@ resource "aws_s3_bucket_notification" "chat_files_combined" {
     events        = ["s3:ObjectCreated:*"]
     filter_prefix = "users/"
     filter_suffix = "/files/*"
+  }
+
+  # Notification for agent-generated files (agent-files/ folder)
+  topic {
+    topic_arn     = module.agent_file_upload_notifications.topic_arn
+    events        = ["s3:ObjectCreated:*"]
+    filter_prefix = "users/"
+    filter_suffix = "/agent-files/*"
   }
 }
 
