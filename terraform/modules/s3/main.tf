@@ -112,18 +112,6 @@ resource "aws_s3_bucket_notification" "this" {
   }
 }
 
-# Additional notification configuration for agent files - Conditional
-resource "aws_s3_bucket_notification" "agent_files" {
-  count  = var.agent_files_notification_topic_arn != "" ? 1 : 0
-  bucket = aws_s3_bucket.this.id
-
-  topic {
-    topic_arn     = var.agent_files_notification_topic_arn
-    events        = var.agent_files_notification_events
-    filter_prefix = var.agent_files_notification_filter_prefix
-  }
-}
-
 # Access logging - Optional but recommended
 resource "aws_s3_bucket_logging" "this" {
   count         = var.access_log_bucket != "" ? 1 : 0

@@ -106,25 +106,6 @@ variable "notification_filter_prefix" {
   default     = ""
 }
 
-# Agent files notification variables
-variable "agent_files_notification_topic_arn" {
-  description = "SNS topic ARN for agent files notifications"
-  type        = string
-  default     = ""
-}
-
-variable "agent_files_notification_events" {
-  description = "S3 events to send agent files notifications for"
-  type        = list(string)
-  default     = ["s3:ObjectCreated:*"]
-}
-
-variable "agent_files_notification_filter_prefix" {
-  description = "S3 object key prefix filter for agent files notifications"
-  type        = string
-  default     = ""
-}
-
 # Access logging variables
 variable "access_log_bucket" {
   description = "S3 bucket for access logs (CKV_AWS_18 compliance)"

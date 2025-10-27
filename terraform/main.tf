@@ -981,13 +981,21 @@ module "chat_files_s3" {
   notification_events        = ["s3:ObjectCreated:*"]
   notification_filter_prefix = "users/"
 
-  # S3 notifications configuration for agent files (agent-files/ folder only)
-  agent_files_notification_topic_arn     = module.agent_file_upload_notifications.topic_arn
-  agent_files_notification_events        = ["s3:ObjectCreated:*"]
-  agent_files_notification_filter_prefix = "users/"
-
   kms_key_arn = module.kms.main_key_arn
   tags        = var.common_tags
+}
+
+# Additional S3 Bucket Notification for Agent Files
+# This handles agent-generated files (charts, etc.) in the agent-files/ folder
+resource "aws_s3_bucket_notification" "agent_files" {
+  bucket = module.chat_files_s3.bucket_id
+
+  topic {
+    topic_arn     = module.agent_file_upload_notifications.topic_arn
+    events        = ["s3:ObjectCreated:*"]
+    filter_prefix = "users/"
+    filter_suffix = ""
+  }
 }
 
 # SNS Topic for Chat File Upload Notifications (User Files)
