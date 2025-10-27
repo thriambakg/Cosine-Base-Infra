@@ -992,12 +992,12 @@ resource "aws_s3_bucket_notification" "chat_files_combined" {
     filter_suffix = "/files/*"
   }
 
-  # Notification for agent-generated files (agent-files/ folder)
-  topic {
-    topic_arn     = module.agent_file_upload_notifications.topic_arn
-    events        = ["s3:ObjectCreated:*"]
-    filter_prefix = "users/"
-    filter_suffix = "/agent-files/*"
+  # Direct Lambda invocation for agent-generated files (agent-files/ folder)
+  lambda_function {
+    lambda_function_arn = "arn:aws:lambda:${var.aws_region}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-agent-files-processor-${var.environment}"
+    events              = ["s3:ObjectCreated:*"]
+    filter_prefix       = "users/"
+    filter_suffix       = "/agent-files/"
   }
 }
 
