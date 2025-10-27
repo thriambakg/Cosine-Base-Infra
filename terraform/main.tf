@@ -989,7 +989,7 @@ resource "aws_s3_bucket_notification" "chat_files_combined" {
     topic_arn     = module.chat_file_upload_notifications.topic_arn
     events        = ["s3:ObjectCreated:*"]
     filter_prefix = "users/"
-    filter_suffix = "/files/*"
+    filter_suffix = "/files/"
   }
 
   # Notification for agent-generated files (agent-files/ folder)
@@ -997,7 +997,7 @@ resource "aws_s3_bucket_notification" "chat_files_combined" {
     topic_arn     = module.agent_file_upload_notifications.topic_arn
     events        = ["s3:ObjectCreated:*"]
     filter_prefix = "users/"
-    filter_suffix = "/agent-files/*"
+    filter_suffix = "/agent-files/"
   }
 }
 
