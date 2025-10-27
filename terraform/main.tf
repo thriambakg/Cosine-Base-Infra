@@ -1,10 +1,6 @@
 # Cosine Base Infrastructure
 # Main Terraform configuration for shared resources
 
-# Data sources
-data "aws_caller_identity" "current" {}
-data "aws_region" "current" {}
-
 terraform {
   required_version = ">= 1.0"
 
