@@ -58,7 +58,7 @@ resource "aws_sns_topic_policy" "this" {
         Resource = aws_sns_topic.this.arn
         Condition = var.s3_bucket_arns != null ? {
           ArnLike = {
-            "aws:SourceArn" = var.s3_bucket_arns[0]
+            "aws:SourceArn" = "${var.s3_bucket_arns[0]}*"
           }
         } : {}
       }] : [],
