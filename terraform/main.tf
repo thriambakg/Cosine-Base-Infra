@@ -984,20 +984,13 @@ module "chat_files_s3" {
 resource "aws_s3_bucket_notification" "chat_files_combined" {
   bucket = module.chat_files_s3.bucket_id
 
-  # Notification for user-uploaded files (files/ folder)
+  # Single notification for all files in users/ prefix
+  # The Lambda functions will filter based on the file path
   topic {
     topic_arn     = module.chat_file_upload_notifications.topic_arn
     events        = ["s3:ObjectCreated:*"]
     filter_prefix = "users/"
-    filter_suffix = "/files/"
-  }
-
-  # Notification for agent-generated files (agent-files/ folder)
-  topic {
-    topic_arn     = module.agent_file_upload_notifications.topic_arn
-    events        = ["s3:ObjectCreated:*"]
-    filter_prefix = "users/"
-    filter_suffix = "/agent-files/"
+    filter_suffix = ""
   }
 }
 
