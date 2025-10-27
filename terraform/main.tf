@@ -25,8 +25,6 @@ provider "aws" {
 }
 
 
-# Data sources
-data "aws_caller_identity" "current" {}
 
 # Temporary provider for replica region to clean up cross-region replication resources
 provider "aws" {
