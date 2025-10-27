@@ -1034,13 +1034,6 @@ module "agent_file_upload_notifications" {
   })
 }
 
-# SNS Subscription for Agent Files Processor Lambda
-resource "aws_sns_topic_subscription" "agent_files_processor" {
-  topic_arn = module.agent_file_upload_notifications.topic_arn
-  protocol  = "lambda"
-  endpoint  = "arn:aws:lambda:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:function:${var.project_name}-agent-files-processor-${var.environment}"
-}
-
 # S3 Bucket Notification is now handled by the S3 module
 
 # IAM Policy for Lambda to access S3 chat files bucket
