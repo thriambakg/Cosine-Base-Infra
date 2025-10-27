@@ -24,8 +24,6 @@ provider "aws" {
   }
 }
 
-# Data sources
-data "aws_caller_identity" "current" {}
 
 # Data source to get the agent files processor Lambda function
 data "aws_lambda_function" "agent_files_processor" {
