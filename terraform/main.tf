@@ -979,18 +979,10 @@ module "chat_files_s3" {
   tags        = var.common_tags
 }
 
-# Combined S3 Bucket Notification for both User Files and Agent Files
-# This handles both user-uploaded files and agent-generated files
-resource "aws_s3_bucket_notification" "chat_files_combined" {
+# S3 Bucket Notification for Agent Files Only
+# User files are handled directly by the file upload lambda via WebSocket processor
+resource "aws_s3_bucket_notification" "agent_files_only" {
   bucket = module.chat_files_s3.bucket_id
-
-  # Notification for user-uploaded files (files/ folder)
-  topic {
-    topic_arn     = module.chat_file_upload_notifications.topic_arn
-    events        = ["s3:ObjectCreated:*"]
-    filter_prefix = "users/"
-    filter_suffix = "/files/"
-  }
 
   # Notification for agent-generated files (agent-files/ folder)
   topic {
@@ -999,24 +991,6 @@ resource "aws_s3_bucket_notification" "chat_files_combined" {
     filter_prefix = "users/"
     filter_suffix = "/agent-files/"
   }
-}
-
-# SNS Topic for Chat File Upload Notifications (User Files)
-module "chat_file_upload_notifications" {
-  source = "./modules/sns"
-
-  topic_name   = "${var.project_name}-chat-file-upload-notifications-${var.environment}"
-  display_name = "Chat File Upload Notifications"
-  purpose      = "ChatFileUploadNotifications"
-  kms_key_arn  = module.kms.main_key_arn
-
-  # Allow S3 to publish to this topic (using wildcard to avoid circular dependency)
-  allow_s3_publish = true
-  s3_bucket_arns   = ["arn:aws:s3:::${var.project_name}-chat-files-${var.environment}"]
-
-  tags = merge(var.common_tags, {
-    Environment = var.environment
-  })
 }
 
 # SNS Topic for Agent File Upload Notifications
