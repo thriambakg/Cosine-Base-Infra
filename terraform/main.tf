@@ -972,25 +972,32 @@ module "chat_files_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 7
 
-  # S3 notifications configuration for user files (files/ folder only)
-  notification_topic_arn     = module.chat_file_upload_notifications.topic_arn
-  notification_events        = ["s3:ObjectCreated:*"]
-  notification_filter_prefix = "users/"
+  # S3 notifications disabled - handled by separate notification resource below
+  notification_topic_arn = ""
 
   kms_key_arn = module.kms.main_key_arn
   tags        = var.common_tags
 }
 
-# Additional S3 Bucket Notification for Agent Files
-# This handles agent-generated files (charts, etc.) in the agent-files/ folder
-resource "aws_s3_bucket_notification" "agent_files" {
+# Combined S3 Bucket Notification for both User Files and Agent Files
+# This handles both user-uploaded files and agent-generated files
+resource "aws_s3_bucket_notification" "chat_files_combined" {
   bucket = module.chat_files_s3.bucket_id
 
+  # Notification for user-uploaded files (files/ folder)
+  topic {
+    topic_arn     = module.chat_file_upload_notifications.topic_arn
+    events        = ["s3:ObjectCreated:*"]
+    filter_prefix = "users/"
+    filter_suffix = "/files/"
+  }
+
+  # Notification for agent-generated files (agent-files/ folder)
   topic {
     topic_arn     = module.agent_file_upload_notifications.topic_arn
     events        = ["s3:ObjectCreated:*"]
     filter_prefix = "users/"
-    filter_suffix = ""
+    filter_suffix = "/agent-files/"
   }
 }
 
