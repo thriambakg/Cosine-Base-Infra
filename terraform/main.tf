@@ -25,10 +25,8 @@ provider "aws" {
 }
 
 
-# Data source to get the agent files processor Lambda function
-data "aws_lambda_function" "agent_files_processor" {
-  function_name = "${var.project_name}-agent-files-processor-${var.environment}"
-}
+# Data sources
+data "aws_caller_identity" "current" {}
 
 # Temporary provider for replica region to clean up cross-region replication resources
 provider "aws" {
@@ -996,14 +994,6 @@ resource "aws_s3_bucket_notification" "chat_files_combined" {
     events        = ["s3:ObjectCreated:*"]
     filter_prefix = "users/"
     filter_suffix = "/files/*"
-  }
-
-  # Direct Lambda invocation for agent-generated files (agent-files/ folder)
-  lambda_function {
-    lambda_function_arn = data.aws_lambda_function.agent_files_processor.arn
-    events              = ["s3:ObjectCreated:*"]
-    filter_prefix       = "users/"
-    filter_suffix       = "/agent-files/"
   }
 }
 
