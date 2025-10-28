@@ -75,7 +75,16 @@ chmod +x build-layer.sh
 # Build each layer
 for layer in "${LAYERS_TO_BUILD[@]}"; do
     print_status "Building layer: ${layer}"
-    ./build-layer.sh "${layer}"
+    
+    # Check if this is a code-based layer
+    if [[ "${layer}" == "shared-code" ]]; then
+        # For shared-code layer, provide source directory
+        ./build-layer.sh "${layer}" "../../Cosine2.0/backend_app/src/shared_layers"
+    else
+        # For dependency-based layers, use standard build
+        ./build-layer.sh "${layer}"
+    fi
+    
     print_success "Layer '${layer}' built successfully"
     echo ""
 done

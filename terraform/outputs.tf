@@ -395,6 +395,16 @@ output "crypto_layer_version" {
   value       = module.crypto_layer.layer_version
 }
 
+output "shared_code_layer_arn" {
+  description = "ARN of the shared code Lambda layer"
+  value       = module.shared_code_layer.layer_arn
+}
+
+output "shared_code_layer_version" {
+  description = "Version of the shared code Lambda layer"
+  value       = module.shared_code_layer.layer_version
+}
+
 # News Table Outputs
 output "news_table_name" {
   description = "Name of the news DynamoDB table"
@@ -469,11 +479,6 @@ output "chat_files_bucket_domain_name" {
 }
 
 # Agent File Upload Notifications
-output "agent_file_upload_notifications_topic_arn" {
-  description = "ARN of the SNS topic for agent file upload notifications"
-  value       = module.agent_file_upload_notifications.topic_arn
-}
-
 # Chat Files S3 Access Policy
 output "lambda_s3_chat_files_policy_arn" {
   description = "ARN of the IAM policy for Lambda access to chat files S3 bucket"

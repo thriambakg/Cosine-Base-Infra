@@ -37,6 +37,12 @@ variable "layer_name_suffix" {
   default     = "shared-deps"
 }
 
+variable "source_directory" {
+  description = "Path to source code directory to include in the layer (optional)"
+  type        = string
+  default     = ""
+}
+
 variable "source_files" {
   description = "List of additional source files to include in the layer (optional)"
   type        = list(string)

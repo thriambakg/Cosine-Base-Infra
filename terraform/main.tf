@@ -784,6 +784,23 @@ module "news_layer" {
   depends_on = [module.static_hosting_bucket]
 }
 
+# Shared Code Layer for Lambda functions
+module "shared_code_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "shared-code"
+  layer_description   = "Shared code modules (lambda_invocation, common utilities)"
+  requirements_file   = "shared-code-dependencies.txt"
+  source_directory    = "../../Cosine2.0/backend_app/src/shared_layers"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.static_hosting_bucket.bucket_id
+  python_command      = "python3.11"
+
+  depends_on = [module.static_hosting_bucket]
+}
+
 
 # SQS Queue for News Processing
 module "news_queue" {
@@ -977,38 +994,6 @@ module "chat_files_s3" {
 
   kms_key_arn = module.kms.main_key_arn
   tags        = var.common_tags
-}
-
-# S3 Bucket Notification for Agent Files Only
-# User files are handled directly by the file upload lambda via WebSocket processor
-resource "aws_s3_bucket_notification" "agent_files_only" {
-  bucket = module.chat_files_s3.bucket_id
-
-  # Notification for agent-generated files (agent-files/ folder)
-  topic {
-    topic_arn     = module.agent_file_upload_notifications.topic_arn
-    events        = ["s3:ObjectCreated:*"]
-    filter_prefix = "users/"
-    filter_suffix = "/agent-files/"
-  }
-}
-
-# SNS Topic for Agent File Upload Notifications
-module "agent_file_upload_notifications" {
-  source = "./modules/sns"
-
-  topic_name   = "${var.project_name}-agent-file-upload-notifications-${var.environment}"
-  display_name = "Agent File Upload Notifications"
-  purpose      = "AgentFileUploadNotifications"
-  kms_key_arn  = module.kms.main_key_arn
-
-  # Allow S3 to publish to this topic (using wildcard to avoid circular dependency)
-  allow_s3_publish = true
-  s3_bucket_arns   = ["arn:aws:s3:::${var.project_name}-chat-files-${var.environment}"]
-
-  tags = merge(var.common_tags, {
-    Environment = var.environment
-  })
 }
 
 # S3 Bucket Notification is now handled by the S3 module

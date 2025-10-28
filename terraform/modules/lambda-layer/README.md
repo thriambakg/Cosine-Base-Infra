@@ -1,23 +1,27 @@
 # Lambda Layer Module
 
-This module creates AWS Lambda layers for shared Python dependencies, organized into logical groups to stay under the 64MB per layer limit.
+This module creates AWS Lambda layers for shared Python dependencies and code, organized into logical groups to stay under the 64MB per layer limit.
 
 ## Architecture
 
-The module uses a **dynamic multi-layer approach** that automatically discovers layers based on requirements files:
+The module uses a **dynamic multi-layer approach** that automatically discovers layers based on requirements files and source code:
 
+### Dependency-Based Layers
 - **Core Layer** (`core-dependencies.txt`) - Essential packages (requests, boto3, etc.)
 - **Financial Layer** (`financial-dependencies.txt`) - Financial data processing (yfinance, numpy, pandas)
 - **AI Core Layer** (`ai-core-dependencies.txt`) - Essential AI packages (aiohttp, pyjwt, tenacity, etc.)
 - **Strands Layer** (`strands-dependencies.txt`) - Heavy AI agent framework (strands-agents, strands-agents-tools)
 - **Utility Layer** (`utility-dependencies.txt`) - Optional utilities (pillow, sympy, rich, etc.)
 
+### Code-Based Layers
+- **Shared Code Layer** (`shared-code-dependencies.txt`) - Shared Python code modules (lambda_invocation, etc.)
+
 **Dynamic Discovery**: The system automatically discovers all layers by scanning for `*-dependencies.txt` files in the `layer-definitions/` directory.
 
 ## Files
 
 ### Build Scripts
-- `build-layer.sh` - Main build script that can build any individual layer
+- `build-layer.sh` - Enhanced build script that handles both dependencies and source code
 - `build-all-layers.sh` - Wrapper script to build all layers or specific layers
 
 ### Requirements Files
@@ -25,6 +29,7 @@ The module uses a **dynamic multi-layer approach** that automatically discovers 
 - `layer-definitions/financial-dependencies.txt` - Financial dependencies  
 - `layer-definitions/ai-dependencies.txt` - AI dependencies
 - `layer-definitions/utility-dependencies.txt` - Utility dependencies
+- `layer-definitions/shared-code-dependencies.txt` - Shared code layer (no external deps)
 
 ### Terraform Files
 - `main.tf` - Module configuration
@@ -40,14 +45,18 @@ The module uses a **dynamic multi-layer approach** that automatically discovers 
 ./build-all-layers.sh
 
 # Build specific layers
-./build-all-layers.sh core financial
+./build-all-layers.sh core financial shared-code
 
-# Build individual layer
+# Build individual dependency-based layer
 ./build-layer.sh core
+
+# Build individual code-based layer with source directory
+./build-layer.sh shared-code ../../Cosine2.0/backend_app/src/shared_layers
 ```
 
 ### Using in Terraform
 
+#### Dependency-Based Layer
 ```hcl
 module "lambda_layer_core" {
   source = "./modules/lambda-layer"
@@ -57,6 +66,22 @@ module "lambda_layer_core" {
   requirements_file   = "core-dependencies.txt"
   layer_name_suffix   = "core-deps"
   layer_description   = "Core dependencies layer"
+  compatible_runtimes = ["python3.11"]
+  python_command      = "python3.11"
+}
+```
+
+#### Code-Based Layer
+```hcl
+module "lambda_layer_shared_code" {
+  source = "./modules/lambda-layer"
+  
+  project_name        = var.project_name
+  environment         = var.environment
+  requirements_file   = "shared-code-dependencies.txt"
+  layer_name_suffix   = "shared-code"
+  layer_description   = "Shared code modules layer"
+  source_directory    = "../../Cosine2.0/backend_app/src/shared_layers"
   compatible_runtimes = ["python3.11"]
   python_command      = "python3.11"
 }
