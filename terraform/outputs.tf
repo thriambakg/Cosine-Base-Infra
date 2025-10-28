@@ -395,16 +395,6 @@ output "crypto_layer_version" {
   value       = module.crypto_layer.layer_version
 }
 
-output "shared_code_layer_arn" {
-  description = "ARN of the shared code Lambda layer"
-  value       = module.shared_code_layer.layer_arn
-}
-
-output "shared_code_layer_version" {
-  description = "Version of the shared code Lambda layer"
-  value       = module.shared_code_layer.layer_version
-}
-
 # News Table Outputs
 output "news_table_name" {
   description = "Name of the news DynamoDB table"

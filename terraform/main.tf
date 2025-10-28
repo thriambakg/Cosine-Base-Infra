@@ -784,24 +784,6 @@ module "news_layer" {
   depends_on = [module.static_hosting_bucket]
 }
 
-# Shared Code Layer for Lambda functions
-module "shared_code_layer" {
-  source = "./modules/lambda-layer"
-
-  project_name        = var.project_name
-  environment         = var.environment
-  layer_name_suffix   = "shared-code"
-  layer_description   = "Shared code modules (lambda_invocation, common utilities)"
-  requirements_file   = "shared-code-dependencies.txt"
-  source_directory    = "./shared_layers"
-  compatible_runtimes = ["python3.11", "python3.12"]
-  s3_bucket_name      = module.static_hosting_bucket.bucket_id
-  python_command      = "python3.11"
-
-  depends_on = [module.static_hosting_bucket]
-}
-
-
 # SQS Queue for News Processing
 module "news_queue" {
   source = "./modules/sqs"

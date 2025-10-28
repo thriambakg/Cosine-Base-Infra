@@ -1,5 +1,0 @@
-# Shared Lambda Invocation Layer Dependencies
-# This layer contains shared code for Lambda invocation, no external dependencies needed
-# All dependencies are already available in the Lambda runtime
-
-# No additional dependencies required - uses only standard library and boto3
