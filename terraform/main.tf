@@ -793,7 +793,7 @@ module "shared_code_layer" {
   layer_name_suffix   = "shared-code"
   layer_description   = "Shared code modules (lambda_invocation, common utilities)"
   requirements_file   = "shared-code-dependencies.txt"
-  source_directory    = "../../Cosine2.0/backend_app/src/shared_layers"
+  source_directory    = "./shared_layers"
   compatible_runtimes = ["python3.11", "python3.12"]
   s3_bucket_name      = module.static_hosting_bucket.bucket_id
   python_command      = "python3.11"

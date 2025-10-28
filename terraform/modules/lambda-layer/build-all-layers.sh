@@ -79,7 +79,7 @@ for layer in "${LAYERS_TO_BUILD[@]}"; do
     # Check if this is a code-based layer
     if [[ "${layer}" == "shared-code" ]]; then
         # For shared-code layer, provide source directory
-        ./build-layer.sh "${layer}" "../../Cosine2.0/backend_app/src/shared_layers"
+        ./build-layer.sh "${layer}" "./shared_layers"
     else
         # For dependency-based layers, use standard build
         ./build-layer.sh "${layer}"
