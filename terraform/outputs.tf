@@ -468,6 +468,22 @@ output "chat_files_bucket_domain_name" {
   value       = module.chat_files_s3.bucket_domain_name
 }
 
+# Stock Historical Data S3 Bucket Outputs
+output "stock_historical_bucket_name" {
+  description = "Name of the stock historical data S3 bucket"
+  value       = module.stock_data_historical_s3.bucket_id
+}
+
+output "stock_historical_bucket_arn" {
+  description = "ARN of the stock historical data S3 bucket"
+  value       = module.stock_data_historical_s3.bucket_arn
+}
+
+output "stock_historical_bucket_domain_name" {
+  description = "Domain name of the stock historical data S3 bucket"
+  value       = module.stock_data_historical_s3.bucket_domain_name
+}
+
 # Agent File Upload Notifications
 # Chat Files S3 Access Policy
 output "lambda_s3_chat_files_policy_arn" {
