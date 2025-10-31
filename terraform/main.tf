@@ -1472,9 +1472,424 @@ resource "aws_iam_role_policy" "eventbridge_stepfunctions_policy" {
         ]
         Resource = [
           module.eod_aggregator_state_machine.state_machine_arn,
-          module.stock_data_historical_loader_state_machine.state_machine_arn
+          module.stock_data_historical_loader_state_machine.state_machine_arn,
+          module.politician_trades_state_machine.state_machine_arn
         ]
       }
     ]
   })
+}
+
+# ==============================================================================
+# POLITICIAN TRADES AGGREGATION SYSTEM
+# ==============================================================================
+# Daily batch job that fetches SEC forms (3, 4, 5) and Congressional PTRs,
+# matches trades to politicians, and stores in DynamoDB for dashboard querying
+
+# S3 Bucket for SEC Forms and Politician Data
+module "politician_trades_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-politician-trades-${var.environment}"
+  environment = var.environment
+  purpose     = "PoliticianTradesData"
+
+  # Enable lifecycle transitions to Glacier for cost optimization
+  enable_lifecycle_transitions = true
+  transition_to_ia_days        = 30
+  transition_to_glacier_days   = 90
+
+  # Enable expiration after 2 years (keep raw forms for compliance/audit)
+  enable_expiration = true
+  expiration_days   = 730 # 2 years
+
+  # Abort incomplete multipart uploads after 7 days
+  abort_incomplete_multipart_upload_days = 7
+
+  # Noncurrent version expiration
+  noncurrent_version_expiration_days = 30
+
+  kms_key_arn = module.kms.main_key_arn
+  tags        = var.common_tags
+}
+
+# IAM Policy for Lambda to access S3 politician trades bucket
+resource "aws_iam_policy" "lambda_politician_trades_s3_policy" {
+  name        = "${var.project_name}-lambda-politician-trades-s3-access-${var.environment}"
+  description = "Allows Lambda to read/write to politician trades S3 bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          module.politician_trades_s3.bucket_arn,
+          "${module.politician_trades_s3.bucket_arn}/*"
+        ]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# Politician Trades DynamoDB Table
+module "politician_trades_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "politician-trades"
+
+  hash_key  = "tradeId"
+  range_key = null
+
+  attributes = [
+    { name = "tradeId", type = "S" },
+    { name = "politicianName", type = "S" },
+    { name = "party", type = "S" },
+    { name = "position", type = "S" },
+    { name = "securitySymbol", type = "S" },
+    { name = "formType", type = "S" },
+    { name = "transactionType", type = "S" },
+    { name = "transactionDate", type = "N" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "PoliticianTradeDateIndex"
+      hash_key        = "politicianName"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PositionTradeDateIndex"
+      hash_key        = "position"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PartyTradeDateIndex"
+      hash_key        = "party"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "SecurityTradeDateIndex"
+      hash_key        = "securitySymbol"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FormTypeTradeDateIndex"
+      hash_key        = "formType"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "TransactionTypeTradeDateIndex"
+      hash_key        = "transactionType"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = var.dynamodb_ttl_enabled
+  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "TradeData"
+  table_purpose = "PoliticianTrades"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# Lambda 1: Fetch SEC Forms and Congressional PTRs
+module "politician_trades_fetcher" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-politician-trades-fetcher-${var.environment}"
+  description   = "Fetches SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) and stores in S3"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 900 # 15 minutes (max)
+  memory_size   = 1024
+
+  source_dir = "${path.module}/../backend_app/src/politician_trades_fetcher/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET = module.politician_trades_s3.bucket_id
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    aws_iam_policy.lambda_politician_trades_s3_policy.arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.politician_trades_s3]
+}
+
+# Lambda 2: Match Trades to Politicians
+module "politician_trades_matcher" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-politician-trades-matcher-${var.environment}"
+  description   = "Parses SEC forms and Congressional PTRs, matches trades to politicians using fuzzy name matching"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 900  # 15 minutes (max)
+  memory_size   = 2048 # Higher memory for PDF parsing and text processing
+
+  source_dir = "${path.module}/../backend_app/src/politician_trades_matcher/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET = module.politician_trades_s3.bucket_id
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    aws_iam_policy.lambda_politician_trades_s3_policy.arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.politician_trades_s3]
+}
+
+# Lambda 3: Save Trades to Database
+module "politician_trades_saver" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-politician-trades-saver-${var.environment}"
+  description   = "Batch writes matched politician trades to DynamoDB with idempotency"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 300 # 5 minutes
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/politician_trades_saver/app"
+
+  # Environment variables
+  environment_variables = {
+    DYNAMODB_TABLE_NAME = module.politician_trades_table.table_name
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    module.politician_trades_table.table_policy_arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.politician_trades_table]
+}
+
+# Step Functions State Machine for Politician Trades Aggregation
+module "politician_trades_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-politician-trades-${var.environment}"
+  environment        = var.environment
+
+  # Step Functions definition with 3 steps
+  definition = jsonencode({
+    Comment = "Daily politician trades aggregation - fetch forms, match trades, save to database"
+    StartAt = "FetchForms"
+    States = {
+      # Step 1: Fetch SEC Forms and Congressional PTRs
+      FetchForms = {
+        Type       = "Task"
+        Resource   = module.politician_trades_fetcher.function_arn
+        Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) and store in S3"
+        ResultPath = "$.fetchResults"
+        Next       = "MatchTrades"
+        Retry = [
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 30
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "FetchFormsFailed"
+          }
+        ]
+      }
+
+      FetchFormsFailed = {
+        Type  = "Fail"
+        Error = "FetchFormsFailed"
+        Cause = "Failed to fetch SEC forms or Congressional PTRs"
+      }
+
+      # Step 2: Match Trades to Politicians
+      MatchTrades = {
+        Type       = "Task"
+        Resource   = module.politician_trades_matcher.function_arn
+        Comment    = "Parse forms, extract trades, match to politicians using fuzzy name matching"
+        ResultPath = "$.matchResults"
+        Next       = "SaveTrades"
+        Retry = [
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 30
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "MatchTradesFailed"
+          }
+        ]
+      }
+
+      MatchTradesFailed = {
+        Type  = "Fail"
+        Error = "MatchTradesFailed"
+        Cause = "Failed to match trades to politicians"
+      }
+
+      # Step 3: Save Trades to Database
+      SaveTrades = {
+        Type       = "Task"
+        Resource   = module.politician_trades_saver.function_arn
+        Comment    = "Batch write matched trades to DynamoDB with idempotency"
+        ResultPath = "$.saveResults"
+        End        = true
+        Retry = [
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 30
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "SaveTradesFailed"
+          }
+        ]
+      }
+
+      SaveTradesFailed = {
+        Type  = "Fail"
+        Error = "SaveTradesFailed"
+        Cause = "Failed to save trades to database"
+      }
+    }
+  })
+
+  # Lambda ARNs for IAM permissions
+  lambda_function_arns = [
+    module.politician_trades_fetcher.function_arn,
+    module.politician_trades_matcher.function_arn,
+    module.politician_trades_saver.function_arn
+  ]
+
+  # Logging configuration
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.politician_trades_fetcher,
+    module.politician_trades_matcher,
+    module.politician_trades_saver
+  ]
+}
+
+# EventBridge Scheduler for Daily Politician Trades Aggregation (2:00 AM EST)
+module "politician_trades_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-politician-trades-${var.environment}"
+  rule_description    = "Trigger politician trades aggregation daily at 2:00 AM EST (after SEC filings are typically complete)"
+  schedule_expression = "cron(0 6 ? * * *)" # 2:00 AM EST = 6:00 AM UTC (DST) or 7:00 AM UTC (Standard)
+  enabled             = true
+
+  # Target is Step Functions state machine
+  target_arn = module.politician_trades_state_machine.state_machine_arn
+  target_id  = "PoliticianTradesScheduler"
+
+  # For Step Functions, we need to provide a role
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
+
+  target_input = jsonencode({
+    source    = "scheduler-daily"
+    timestamp = "{{.Timestamp}}"
+  })
+
+  purpose     = "PoliticianTradesAggregation"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [module.politician_trades_state_machine]
 }
