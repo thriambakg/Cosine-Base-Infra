@@ -31,18 +31,18 @@ NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
 
 def load_politician_list() -> List[Dict[str, Any]]:
     """
-    Load politician CSV from S3
+    Load congress-legislators CSV from S3
     
     Returns:
-        List of politician dicts with name, party, position, alternativeNames
+        List of politician dicts with name, party, position, url, and alternativeNames
     """
-    logger.info("📋 Loading politician list from S3")
+    logger.info("📋 Loading congress-legislators list from S3")
     
     try:
-        # Download politicians.csv from S3
+        # Download congress-legislators.csv from S3
         response = s3_client.get_object(
             Bucket=S3_BUCKET,
-            Key='politicians.csv'
+            Key='congress-legislators.csv'
         )
         
         csv_content = response['Body'].read().decode('utf-8')
@@ -50,23 +50,58 @@ def load_politician_list() -> List[Dict[str, Any]]:
         
         politicians = []
         for row in csv_reader:
-            # Parse alternative names (comma-separated)
+            # Construct full name from components
+            name_parts = []
+            if row.get('first_name'):
+                name_parts.append(row['first_name'])
+            if row.get('middle_name'):
+                name_parts.append(row['middle_name'])
+            if row.get('last_name'):
+                name_parts.append(row['last_name'])
+            if row.get('suffix'):
+                name_parts.append(row['suffix'])
+            
+            # Use constructed name or fall back to full_name
+            primary_name = ' '.join(name_parts) if name_parts else row.get('full_name', '').strip()
+            
+            # Build alternative names
             alt_names = []
-            if row.get('alternativeNames'):
-                alt_names = [name.strip() for name in row['alternativeNames'].split(',')]
+            if row.get('nickname'):
+                alt_names.append(row['nickname'])
+            if row.get('full_name') and row.get('full_name').strip() != primary_name:
+                alt_names.append(row['full_name'].strip())
+            
+            # Determine position from type
+            leg_type = row.get('type', '').lower().strip()
+            if leg_type == 'sen':
+                position = 'Senate'
+            elif leg_type == 'rep':
+                position = 'House'
+            else:
+                position = leg_type  # fallback
+            
+            # Get party
+            party = row.get('party', '').strip()
+            
+            # Get website URL
+            website_url = row.get('url', '').strip()
             
             politicians.append({
-                'name': row['name'].strip(),
-                'party': row['party'].strip(),
-                'position': row['position'].strip(),
-                'alternativeNames': alt_names
+                'name': primary_name,
+                'party': party,
+                'position': position,
+                'websiteUrl': website_url if website_url else None,
+                'alternativeNames': alt_names,
+                'bioguide_id': row.get('bioguide_id', '').strip() if row.get('bioguide_id') else None,
+                'state': row.get('state', '').strip() if row.get('state') else None,
+                'district': row.get('district', '').strip() if row.get('district') else None
             })
         
-        logger.info(f"✅ Loaded {len(politicians)} politicians from CSV")
+        logger.info(f"✅ Loaded {len(politicians)} legislators from CSV")
         return politicians
         
     except Exception as e:
-        logger.error(f"❌ Error loading politician list: {e}")
+        logger.error(f"❌ Error loading congress-legislators list: {e}")
         return []
 
 def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
@@ -282,16 +317,43 @@ def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
     
     return trades
 
+def list_s3_files_by_prefix(prefix: str) -> List[str]:
+    """
+    List all S3 object keys with the given prefix
+    
+    Args:
+        prefix: S3 key prefix (e.g., "trades/2024-01-15/sec/")
+        
+    Returns:
+        List of S3 keys
+    """
+    keys = []
+    paginator = s3_client.get_paginator('list_objects_v2')
+    
+    try:
+        for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    keys.append(obj['Key'])
+        
+        logger.info(f"📁 Found {len(keys)} files in S3 prefix: {prefix}")
+        return keys
+        
+    except Exception as e:
+        logger.error(f"❌ Error listing S3 files with prefix {prefix}: {e}")
+        return []
+
 def lambda_handler(event, context):
     """
     Lambda handler for matching trades to politicians
     
     Expected input from Step 1:
     {
-        "date": "2024-01-15",
-        "secForms": [...],
-        "housePTRs": [...],
-        "senatePTRs": [...]
+        "date": "2024-01-15"
+        // OR with arrays (backwards compatible):
+        // "secForms": [...],
+        // "housePTRs": [...],
+        // "senatePTRs": [...]
     }
     
     Returns:
@@ -307,19 +369,70 @@ def lambda_handler(event, context):
     if not S3_BUCKET:
         raise ValueError("S3_BUCKET environment variable not set")
     
-    # Get input from previous step
-    date = event.get('date') or event.get('fetchResults', {}).get('date')
-    sec_forms = event.get('secForms') or event.get('fetchResults', {}).get('secForms', [])
-    house_ptrs = event.get('housePTRs') or event.get('fetchResults', {}).get('housePTRs', [])
-    senate_ptrs = event.get('senatePTRs') or event.get('fetchResults', {}).get('senatePTRs', [])
+    # Get date from previous step
+    fetch_results = event.get('fetchResults', {})
+    date = event.get('date') or fetch_results.get('date')
+    
+    if not date:
+        raise ValueError("Date not provided in event")
     
     logger.info(f"📅 Processing date: {date}")
-    logger.info(f"📋 Processing {len(sec_forms)} SEC forms, {len(house_ptrs)} House PTRs, {len(senate_ptrs)} Senate PTRs")
     
-    # Load politician list
+    # Load politician list FIRST (before processing files)
+    logger.info("📋 Loading congress-legislators.csv from S3...")
     politicians = load_politician_list()
     if not politicians:
-        raise ValueError("Failed to load politician list from S3")
+        raise ValueError("Failed to load congress-legislators.csv from S3")
+    
+    logger.info(f"✅ Loaded {len(politicians)} legislators")
+    
+    # Get file lists - either from event (backwards compatible) or by listing S3 folders
+    sec_forms = event.get('secForms') or fetch_results.get('secForms', [])
+    house_ptrs = event.get('housePTRs') or fetch_results.get('housePTRs', [])
+    senate_ptrs = event.get('senatePTRs') or fetch_results.get('senatePTRs', [])
+    
+    # If arrays are empty, list files from S3 folder structure
+    if not sec_forms and not house_ptrs and not senate_ptrs:
+        logger.info("📁 No file lists provided - listing files from S3 folder structure")
+        
+        # List SEC forms
+        sec_prefix = f"trades/{date}/sec/"
+        sec_keys = list_s3_files_by_prefix(sec_prefix)
+        for key in sec_keys:
+            # Determine form type from filename
+            form_type = None
+            if 'form3' in key.lower() or 'form-3' in key.lower():
+                form_type = 'form3'
+            elif 'form4' in key.lower() or 'form-4' in key.lower():
+                form_type = 'form4'
+            elif 'form5' in key.lower() or 'form-5' in key.lower():
+                form_type = 'form5'
+            
+            sec_forms.append({
+                's3Key': key,
+                'formType': form_type or 'unknown',
+                'filingDate': date
+            })
+        
+        # List House PTRs
+        house_prefix = f"trades/{date}/house/"
+        house_keys = list_s3_files_by_prefix(house_prefix)
+        for key in house_keys:
+            house_ptrs.append({
+                's3Key': key,
+                'filingDate': date
+            })
+        
+        # List Senate PTRs
+        senate_prefix = f"trades/{date}/senate/"
+        senate_keys = list_s3_files_by_prefix(senate_prefix)
+        for key in senate_keys:
+            senate_ptrs.append({
+                's3Key': key,
+                'filingDate': date
+            })
+    
+    logger.info(f"📋 Processing {len(sec_forms)} SEC forms, {len(house_ptrs)} House PTRs, {len(senate_ptrs)} Senate PTRs")
     
     matched_trades = []
     unmatched_count = 0
@@ -358,6 +471,7 @@ def lambda_handler(event, context):
                         'politicianName': matched_politician['name'],
                         'party': matched_politician['party'],
                         'position': matched_politician['position'],
+                        'websiteUrl': matched_politician.get('websiteUrl'),
                         'formType': form_type,
                         'filingDate': form.get('filingDate', date),
                         'transactionDate': trade.get('transactionDate'),
@@ -397,6 +511,7 @@ def lambda_handler(event, context):
                             'politicianName': matched_politician['name'],
                             'party': matched_politician['party'],
                             'position': matched_politician['position'],
+                            'websiteUrl': matched_politician.get('websiteUrl'),
                             'formType': 'house_ptr',
                             'filingDate': date,
                             'transactionDate': trade.get('transactionDate'),
@@ -432,6 +547,7 @@ def lambda_handler(event, context):
                             'politicianName': matched_politician['name'],
                             'party': matched_politician['party'],
                             'position': matched_politician['position'],
+                            'websiteUrl': matched_politician.get('websiteUrl'),
                             'formType': 'senate_ptr',
                             'filingDate': date,
                             'transactionDate': trade.get('transactionDate'),

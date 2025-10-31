@@ -184,3 +184,14 @@ variable "allow_cloudfront_oac" {
   type        = bool
   default     = false
 }
+
+# Static file uploads
+variable "static_files" {
+  description = "List of static files to upload to the bucket. Each file object should have source_path (relative to Terraform root), s3_key (destination key), and optional content_type"
+  type = list(object({
+    source_path  = string
+    s3_key       = string
+    content_type = optional(string, null)
+  }))
+  default = []
+}

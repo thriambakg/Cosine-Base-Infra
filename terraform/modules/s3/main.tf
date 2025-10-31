@@ -307,3 +307,28 @@ resource "aws_s3_bucket_replication_configuration" "this" {
     aws_s3_bucket_versioning.replica
   ]
 }
+
+# Upload static files to the bucket
+resource "aws_s3_object" "static_files" {
+  for_each = {
+    for idx, file in var.static_files : file.s3_key => file
+  }
+
+  bucket       = aws_s3_bucket.this.id
+  key          = each.value.s3_key
+  source       = each.value.source_path
+  content_type = each.value.content_type != null ? each.value.content_type : null
+
+  # Use file hash to detect changes and trigger updates
+  etag = filemd5(each.value.source_path)
+
+  # Server-side encryption inherited from bucket configuration
+
+  tags = merge(var.tags, {
+    Name    = each.value.s3_key
+    Purpose = "StaticFile"
+    Source  = each.value.source_path
+  })
+
+  depends_on = [aws_s3_bucket.this]
+}

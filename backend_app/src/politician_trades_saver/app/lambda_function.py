@@ -28,10 +28,10 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
     Convert Python types to DynamoDB-compatible types
     
     Args:
-        item: Trade dict with Python types
+        item: Trade dict with Python types (includes websiteUrl as a string attribute, not GSI)
         
     Returns:
-        Dict with DynamoDB-compatible types (Decimal for numbers)
+        Dict with DynamoDB-compatible types (Decimal for numbers, strings preserved)
     """
     dynamodb_item = {}
     

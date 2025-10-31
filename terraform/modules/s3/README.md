@@ -1,75 +1,83 @@
-# S3 Module - Security Compliant by Default
+# S3 Module
 
-This S3 module creates secure S3 buckets that are compliant with security best practices out of the box.
+A security-compliant S3 bucket module with encryption, versioning, lifecycle management, and optional static file uploads.
 
-## Security Features
+## Features
 
-### Compliance Checks Addressed:
-- ✅ **CKV_AWS_300**: Lifecycle configuration with abort incomplete multipart uploads
-- ✅ **CKV2_AWS_61**: Lifecycle configuration enabled by default
-- ✅ **CKV_AWS_144**: Optional cross-region replication support
-- ✅ **CKV_AWS_21**: Versioning enabled by default
-- ✅ **CKV2_AWS_62**: Optional S3 event notifications
-- ✅ **CKV2_AWS_6**: Public access block enforced
-- ✅ **CKV_AWS_18**: Optional access logging
+- **Always Enabled:**
+  - Versioning (CKV_AWS_21)
+  - Server-side encryption with KMS (CKV_AWS_19)
+  - Access logging (CKV_AWS_18) - configurable
+  - Lifecycle configuration (CKV_AWS_300)
+  - Public access block (CKV_AWS_54)
 
-### Security Features:
-- **Encryption**: Server-side encryption with customer-managed KMS keys
-- **Versioning**: Always enabled for data protection
-- **Public Access**: Completely blocked by default
-- **Lifecycle Management**: Automated cleanup of incomplete uploads and old versions
-- **Access Logging**: Optional centralized access logging
-- **Cross-Region Replication**: Optional disaster recovery
-- **Event Notifications**: Optional SNS notifications for bucket events
+- **Optional:**
+  - Cross-region replication (CKV_AWS_144)
+  - Lifecycle transitions (IA, Glacier)
+  - Object expiration
+  - Static file uploads
+  - CloudFront OAC compatibility
 
-## Usage
+## Static Files Upload
+
+The module supports uploading static files during bucket creation via the `static_files` parameter:
 
 ```hcl
-module "secure_bucket" {
+module "my_bucket" {
   source = "./modules/s3"
-
-  bucket_name   = "my-secure-bucket"
-  environment   = "production"
-  purpose       = "application-data"
-  kms_key_arn   = module.kms.main_key_arn
-
-  # Optional: Enable advanced features
-  enable_cross_region_replication = true
-  notification_topic_arn         = aws_sns_topic.bucket_notifications.arn
-  access_log_bucket             = aws_s3_bucket.access_logs.id
-
-  tags = {
-    Project = "MyProject"
-    Owner   = "DevOps"
-  }
+  
+  bucket_name = "my-bucket"
+  environment = "production"
+  kms_key_arn = module.kms.main_key_arn
+  
+  # Upload multiple static files
+  static_files = [
+    {
+      source_path  = "${path.module}/../static-files/data/reference.csv"
+      s3_key       = "reference.csv"
+      content_type = "text/csv"
+    },
+    {
+      source_path  = "${path.module}/../static-files/config/settings.json"
+      s3_key       = "config/settings.json"
+      content_type = "application/json"
+    }
+  ]
 }
 ```
 
-## Variables
+### Static Files Parameters
 
-| Name | Description | Type | Default | Required |
-|------|-------------|------|---------|:--------:|
-| bucket_name | Name of the S3 bucket | `string` | n/a | yes |
-| environment | Environment name | `string` | n/a | yes |
-| kms_key_arn | ARN of KMS key for encryption | `string` | n/a | yes |
-| purpose | Purpose of the bucket | `string` | `"general"` | no |
-| force_destroy | Allow bucket destruction with objects | `bool` | `false` | no |
+- `source_path` (required): Path to the source file, relative to where Terraform is executed (typically the Terraform root directory)
+- `s3_key` (required): Destination S3 key/path where the file will be stored
+- `content_type` (optional): MIME type of the file. If not specified, Terraform will attempt to detect it
 
-## Outputs
+### Features
 
-| Name | Description |
-|------|-------------|
-| bucket_id | ID of the S3 bucket |
-| bucket_arn | ARN of the S3 bucket |
-| bucket_domain_name | Domain name of the S3 bucket |
-| replica_bucket_id | ID of replica bucket (if enabled) |
+- **Automatic Change Detection:** Uses file hash (`filemd5`) to detect changes and trigger updates
+- **Encryption:** Inherits bucket-level encryption settings
+- **Tagging:** Automatically tags files with source path and purpose
+- **Idempotent:** Safe to run multiple times - only updates if file content changes
 
-## Security Defaults
+## Usage Example
 
-- **Versioning**: Always enabled
-- **Encryption**: KMS encryption required
-- **Public Access**: Completely blocked
-- **Multipart Upload Cleanup**: 7 days
-- **Old Version Retention**: 30 days
-- **Replication**: Optional, disabled by default
-- **Lifecycle Transitions**: Optional, disabled by default
+See `main.tf` for the politician trades bucket example:
+
+```hcl
+module "politician_trades_s3" {
+  source = "./modules/s3"
+  
+  bucket_name = "${var.project_name}-politician-trades-${var.environment}"
+  environment = var.environment
+  purpose     = "PoliticianTradesData"
+  kms_key_arn = module.kms.main_key_arn
+  
+  static_files = [
+    {
+      source_path  = "${path.module}/../static-files/lists/politicians.csv"
+      s3_key       = "politicians.csv"
+      content_type = "text/csv"
+    }
+  ]
+}
+```

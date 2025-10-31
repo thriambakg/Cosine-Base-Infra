@@ -1515,7 +1515,18 @@ module "politician_trades_s3" {
   noncurrent_version_expiration_days = 30
 
   kms_key_arn = module.kms.main_key_arn
-  tags        = var.common_tags
+
+  # Upload static files (legislators CSV from cloned congress-legislators repo)
+  # Note: Keep this file updated by running: scripts/update-legislators-csv.ps1
+  static_files = [
+    {
+      source_path  = "${path.module}/../static-files/lists/congress-legislators.csv"
+      s3_key       = "congress-legislators.csv"
+      content_type = "text/csv"
+    }
+  ]
+
+  tags = var.common_tags
 }
 
 # IAM Policy for Lambda to access S3 politician trades bucket
