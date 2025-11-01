@@ -20,8 +20,9 @@ data "archive_file" "lambda_zip" {
 }
 
 # IAM Role for Lambda execution
+# Use name_prefix to avoid 64-character limit (adds random suffix)
 resource "aws_iam_role" "lambda_execution_role" {
-  name = "${var.function_name}-execution-role"
+  name_prefix = "${replace(var.function_name, "politician-trades", "pol-trades")}-role-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"

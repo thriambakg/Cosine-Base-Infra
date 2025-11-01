@@ -1721,7 +1721,7 @@ module "politician_trades_downloader" {
 module "politician_trades_single_matcher" {
   source = "./modules/lambda"
 
-  function_name = "${var.project_name}-politician-trades-single-matcher-${var.environment}"
+  function_name = "${var.project_name}-pol-trades-matcher-${var.environment}"
   description   = "Matches trades from a single file to politicians (invoked in parallel)"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
