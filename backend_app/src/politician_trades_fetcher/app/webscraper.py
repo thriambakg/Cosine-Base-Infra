@@ -73,21 +73,14 @@ class CongressionalPTRScraper:
                     logger.warning(f"⚠️ Could not access House PTR directory for {year}")
                     return ptrs
                 
-                # Parse HTML to find PDF links that match the target date
-                # Look for links to PDF files
-                # Date patterns in filenames: YYYYMMDD, YYYY-MM-DD, MM-DD-YYYY
-                date_formats_in_filename = [
-                    target_date.replace('-', ''),  # YYYYMMDD
-                    target_date,  # YYYY-MM-DD
-                    target_date[5:7] + '-' + target_date[8:10] + '-' + target_date[0:4],  # MM-DD-YYYY
-                ]
-                
-                # Find all PDF links
+                # Find all PDF links (no filename filtering - Textract will verify dates)
                 pdf_pattern = r'href=["\']([^"\']*\.pdf[^"\']*)["\']'
                 pdf_matches = re.findall(pdf_pattern, html_content, re.IGNORECASE)
                 
                 logger.info(f"📋 Found {len(pdf_matches)} PDF links in directory")
                 
+                # Download ALL PDFs - Textract will filter by actual filing date
+                # Don't filter by filename pattern anymore since we use Textract to verify dates
                 for pdf_link in pdf_matches:
                     # Convert relative URLs to absolute
                     if pdf_link.startswith('/'):
@@ -97,25 +90,21 @@ class CongressionalPTRScraper:
                     else:
                         pdf_url = urljoin(base_url, pdf_link)
                     
-                    # Check if filename contains target date
-                    filename_matches_date = any(date_format in pdf_link for date_format in date_formats_in_filename)
+                    # Extract filer name from filename if possible
+                    filename = pdf_link.split('/')[-1]
+                    filer_name = filename.replace('.pdf', '').replace('-', ' ').title()
                     
-                    if filename_matches_date:
-                        # Extract filer name from filename if possible
-                        filename = pdf_link.split('/')[-1]
-                        filer_name = filename.replace('.pdf', '').replace('-', ' ').title()
-                        
-                        ptr_data = {
-                            'filer_name': filer_name,
-                            'filing_date': target_date,
-                            'form_type': 'house_ptr',
-                            'url': pdf_url,
-                            's3_key': f"trades/{target_date}/house/{filename}"
-                        }
-                        ptrs.append(ptr_data)
-                        logger.info(f"✅ Found House PTR: {filename}")
+                    ptr_data = {
+                        'filer_name': filer_name,
+                        'filing_date': target_date,  # Will be verified/updated by Textract
+                        'form_type': 'house_ptr',
+                        'url': pdf_url,
+                        's3_key': f"trades/{target_date}/house/{filename}"
+                    }
+                    ptrs.append(ptr_data)
+                    logger.info(f"📄 Queueing House PTR for download and date verification: {filename}")
                 
-                logger.info(f"📊 Found {len(ptrs)} House PTRs for {target_date}")
+                logger.info(f"📊 Found {len(ptrs)} House PTR files to check (Textract will filter by actual filing date)")
                 
             except Exception as parse_error:
                 logger.error(f"❌ Error parsing House PTR directory: {parse_error}")
@@ -353,7 +342,7 @@ class CongressionalPTRScraper:
                 if not extracted_date:
                     logger.warning(f"⚠️ PTR from {url} does not match target date {target_date}, skipping")
                     return False
-                logger.info(f"✅ PTR filing date verified: {extracted_date}")
+                logger.info(f"✅ PTR filing date verified via Textract: {extracted_date} (target: {target_date})")
             
             # Upload to S3
             s3_client.put_object(
