@@ -236,14 +236,84 @@ def parse_sec_form_xml(s3_key: str) -> List[Dict[str, Any]]:
                 else:
                     raise parse_error
         
-        # Extract filer name
+        # Extract filer name - SEC XML uses various namespaces
+        # Try multiple strategies to find the owner/filer name
         filer_name = None
-        filer_name_elem = root.find('.//{http://www.sec.gov/edgar/document/edgardocument}rptOwnerName')
-        if filer_name_elem is not None:
-            filer_name = filer_name_elem.text.strip() if filer_name_elem.text else None
+        
+        # Strategy 1: Try common namespace variations
+        namespace_patterns = [
+            '{http://www.sec.gov/edgar/document/edgardocument}',
+            '{http://www.sec.gov/edgar/common}',
+            '{http://xbrl.sec.gov/edgar/document/edgardocument}',
+            '',  # No namespace
+        ]
+        
+        name_elements = [
+            'rptOwnerName',
+            'rptOwner',
+            'ownerName',
+            'filerName',
+            'filer',
+            'issuerName',
+            'reportingOwner',
+        ]
+        
+        for ns in namespace_patterns:
+            for elem_name in name_elements:
+                full_name = f'{ns}{elem_name}' if ns else elem_name
+                filer_name_elem = root.find(f'.//{full_name}')
+                if filer_name_elem is not None and filer_name_elem.text:
+                    filer_name = filer_name_elem.text.strip()
+                    logger.info(f"✅ Found filer name using {full_name}: {filer_name}")
+                    break
+            if filer_name:
+                break
+        
+        # Strategy 2: Search by tag name with wildcard namespace
+        if not filer_name:
+            for elem_name in name_elements:
+                # Search all elements with this tag name regardless of namespace
+                for elem in root.iter():
+                    # Remove namespace from tag for comparison
+                    tag_name = elem.tag.split('}')[-1] if '}' in elem.tag else elem.tag
+                    if tag_name == elem_name and elem.text:
+                        filer_name = elem.text.strip()
+                        logger.info(f"✅ Found filer name using wildcard search for {elem_name}: {filer_name}")
+                        break
+                if filer_name:
+                    break
+        
+        # Strategy 3: Look for reportingOwner element and find name inside it
+        if not filer_name:
+            owner_elems = root.findall('.//{http://www.sec.gov/edgar/document/edgardocument}reportingOwner')
+            if not owner_elems:
+                # Try without namespace
+                owner_elems = root.findall('.//reportingOwner')
+            if not owner_elems:
+                # Try with different namespace
+                owner_elems = root.findall('.//{http://xbrl.sec.gov/edgar/document/edgardocument}reportingOwner')
+            
+            for owner_elem in owner_elems:
+                # Look for name elements inside reportingOwner
+                for ns in namespace_patterns:
+                    for elem_name in ['rptOwnerName', 'ownerName', 'name']:
+                        full_name = f'{ns}{elem_name}' if ns else elem_name
+                        name_elem = owner_elem.find(f'./{full_name}')
+                        if name_elem is not None and name_elem.text:
+                            filer_name = name_elem.text.strip()
+                            logger.info(f"✅ Found filer name in reportingOwner using {full_name}: {filer_name}")
+                            break
+                    if filer_name:
+                        break
+                if filer_name:
+                    break
         
         if not filer_name:
-            logger.warning(f"⚠️ Could not extract filer name from {s3_key}")
+            logger.warning(f"⚠️ Could not extract filer name from {s3_key}. XML structure may be different.")
+            logger.debug(f"   Root tag: {root.tag}, Root attributes: {root.attrib}")
+            # Log some child elements for debugging
+            child_tags = [child.tag for child in root[:5]]  # First 5 children
+            logger.debug(f"   Sample child tags: {child_tags}")
             return trades
         
         # Extract transactions
