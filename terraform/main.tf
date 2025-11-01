@@ -1944,12 +1944,12 @@ module "politician_trades_state_machine" {
         ItemsPath      = "$.fetchResults.secForms"
         MaxConcurrency = 10 # Reduced to avoid Lambda rate limiting (429 errors)
         Iterator = {
-          StartAt = "MatchFile"
+          StartAt = "MatchFileSec"
           States = {
-            MatchFile = {
+            MatchFileSec = {
               Type     = "Task"
               Resource = module.politician_trades_single_matcher.function_arn
-              Comment  = "Match trades from a single file to politicians"
+              Comment  = "Match trades from a single SEC file to politicians"
               Retry = [
                 {
                   ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
@@ -1968,12 +1968,12 @@ module "politician_trades_state_machine" {
                 {
                   ErrorEquals = ["States.ALL"]
                   ResultPath  = "$.error"
-                  Next        = "MatchFailed"
+                  Next        = "MatchFailedSec"
                 }
               ]
               End = true
             }
-            MatchFailed = {
+            MatchFailedSec = {
               Type    = "Pass"
               Comment = "Continue even if matching fails (log error)"
               Result  = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
@@ -1992,11 +1992,12 @@ module "politician_trades_state_machine" {
         ItemsPath      = "$.fetchResults.housePTRs"
         MaxConcurrency = 10
         Iterator = {
-          StartAt = "MatchFile"
+          StartAt = "MatchFileHouse"
           States = {
-            MatchFile = {
+            MatchFileHouse = {
               Type     = "Task"
               Resource = module.politician_trades_single_matcher.function_arn
+              Comment  = "Match trades from a single House PTR to politicians"
               Retry = [
                 {
                   ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
@@ -2015,15 +2016,16 @@ module "politician_trades_state_machine" {
                 {
                   ErrorEquals = ["States.ALL"]
                   ResultPath  = "$.error"
-                  Next        = "MatchFailed"
+                  Next        = "MatchFailedHouse"
                 }
               ]
               End = true
             }
-            MatchFailed = {
-              Type   = "Pass"
-              Result = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
-              End    = true
+            MatchFailedHouse = {
+              Type    = "Pass"
+              Comment = "Continue even if matching fails (log error)"
+              Result  = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
+              End     = true
             }
           }
         }
@@ -2038,11 +2040,12 @@ module "politician_trades_state_machine" {
         ItemsPath      = "$.fetchResults.senatePTRs"
         MaxConcurrency = 10
         Iterator = {
-          StartAt = "MatchFile"
+          StartAt = "MatchFileSenate"
           States = {
-            MatchFile = {
+            MatchFileSenate = {
               Type     = "Task"
               Resource = module.politician_trades_single_matcher.function_arn
+              Comment  = "Match trades from a single Senate PTR to politicians"
               Retry = [
                 {
                   ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
@@ -2061,20 +2064,21 @@ module "politician_trades_state_machine" {
                 {
                   ErrorEquals = ["States.ALL"]
                   ResultPath  = "$.error"
-                  Next        = "MatchFailed"
+                  Next        = "MatchFailedSenate"
                 }
               ]
               End = true
             }
-            MatchFailed = {
-              Type   = "Pass"
-              Result = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
-              End    = true
+            MatchFailedSenate = {
+              Type    = "Pass"
+              Comment = "Continue even if matching fails (log error)"
+              Result  = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
+              End     = true
             }
           }
         }
         ResultPath = "$.senateMatchResults"
-        Next       = "CombineMatchResults"
+        Next       = "AggregateMatches"
       }
 
       # Aggregate match results
