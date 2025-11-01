@@ -427,22 +427,52 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
         
         logger.info(f"✅ Extracted filer name from HTML: {filer_name}")
         
-        # Detect form type
-        form_type_match = re.search(r'<title>SEC FORM\s+(\d+)</title>', html_content, re.IGNORECASE)
+        # Detect form type - try multiple patterns in order of reliability
         form_number = None
-        if form_type_match:
-            form_number = form_type_match.group(1)
-        else:
-            # Try alternative pattern
-            form_match = re.search(r'FORM\s+(\d+)', html_content, re.IGNORECASE)
+        
+        # Pattern 1 (Most Reliable): Look for "FORM 3", "FORM 4", "FORM 5" in FormName class
+        # This is the most reliable as it's in the actual form header
+        form_name_match = re.search(r'class="FormName"[^>]*>FORM\s*(\d+)', html_content, re.IGNORECASE | re.DOTALL)
+        if form_name_match:
+            form_number = form_name_match.group(1)
+            logger.debug(f"📋 Detected form number from FormName class: {form_number}")
+        
+        # Pattern 2: Check filename if it contains form number (very reliable)
+        if not form_number:
+            form_in_filename = re.search(r'form[_-]?(\d+)', s3_key, re.IGNORECASE)
+            if form_in_filename:
+                form_number = form_in_filename.group(1)
+                logger.info(f"📋 Detected form number from filename: {form_number}")
+        
+        # Pattern 3: <title>SEC FORM 3</title> or <title>SEC FORM\n            3</title>
+        if not form_number:
+            form_type_match = re.search(r'<title>SEC\s+FORM\s+(\d+)</title>', html_content, re.IGNORECASE | re.DOTALL)
+            if form_type_match:
+                form_number = form_type_match.group(1)
+                logger.debug(f"📋 Detected form number from title: {form_number}")
+        
+        # Pattern 4 (Least Reliable): FORM 3 or FORM3 in body text (can match wrong things)
+        # Only use if other patterns failed, and be more specific
+        if not form_number:
+            # Look for "FORM 3" or "FORM 4" or "FORM 5" followed by whitespace or HTML tag
+            form_match = re.search(r'\bFORM\s+([345])\b', html_content, re.IGNORECASE)
             if form_match:
                 form_number = form_match.group(1)
+                logger.debug(f"📋 Detected form number from body text: {form_number}")
         
         is_form3 = form_number == '3'
         is_form4 = form_number == '4'
         is_form5 = form_number == '5'
         
-        logger.info(f"📋 Detected Form {form_number} (Form 3={is_form3}, Form 4={is_form4}, Form 5={is_form5})")
+        if form_number:
+            logger.info(f"📋 Detected Form {form_number} (Form 3={is_form3}, Form 4={is_form4}, Form 5={is_form5})")
+        else:
+            logger.warning(f"⚠️ Could not detect form type from HTML content, defaulting to Form 4")
+            # Default to Form 4 if we can't detect (most common)
+            is_form4 = True
+            is_form3 = False
+            is_form5 = False
+            form_number = '4'
         
         # Extract issuer name and ticker
         issuer_match = re.search(r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE)
