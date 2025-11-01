@@ -1653,7 +1653,7 @@ module "politician_trades_table" {
 module "politician_trades_fetcher" {
   source = "./modules/lambda"
 
-  function_name = "${var.project_name}-politician-trades-fetcher-${var.environment}"
+  function_name = "${var.project_name}-pol-trades-fetcher-${var.environment}"
   description   = "Fetches SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) and stores in S3"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
@@ -1687,7 +1687,7 @@ module "politician_trades_fetcher" {
 module "politician_trades_downloader" {
   source = "./modules/lambda"
 
-  function_name = "${var.project_name}-politician-trades-downloader-${var.environment}"
+  function_name = "${var.project_name}-pol-trades-downloader-${var.environment}"
   description   = "Downloads a single SEC form and stores it in S3 (invoked in parallel)"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
@@ -1755,7 +1755,7 @@ module "politician_trades_single_matcher" {
 module "politician_trades_matcher" {
   source = "./modules/lambda"
 
-  function_name = "${var.project_name}-politician-trades-matcher-${var.environment}"
+  function_name = "${var.project_name}-pol-trades-aggregator-${var.environment}"
   description   = "Parses SEC forms and Congressional PTRs, matches trades to politicians using fuzzy name matching"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
@@ -1789,7 +1789,7 @@ module "politician_trades_matcher" {
 module "politician_trades_saver" {
   source = "./modules/lambda"
 
-  function_name = "${var.project_name}-politician-trades-saver-${var.environment}"
+  function_name = "${var.project_name}-pol-trades-saver-${var.environment}"
   description   = "Batch writes matched politician trades to DynamoDB with idempotency"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
@@ -2035,9 +2035,11 @@ module "politician_trades_state_machine" {
     }
   })
 
-  # Lambda ARNs for IAM permissions
+  # Lambda ARNs for IAM permissions (all Lambdas that Step Functions will invoke)
   lambda_function_arns = [
     module.politician_trades_fetcher.function_arn,
+    module.politician_trades_downloader.function_arn,
+    module.politician_trades_single_matcher.function_arn,
     module.politician_trades_matcher.function_arn,
     module.politician_trades_saver.function_arn
   ]
