@@ -1893,9 +1893,18 @@ module "politician_trades_state_machine" {
             }
             DownloadFailed = {
               Type    = "Pass"
-              Comment = "Continue even if download fails (log error)"
-              Result  = { "success" : false, "error" : "Download failed" }
-              End     = true
+              Comment = "Continue even if download fails (preserve error details)"
+              Parameters = {
+                "success" : false,
+                "error.$" : "$.error.Error",
+                "errorCause.$" : "$.error.Cause",
+                # Try to extract form data from error message if available
+                "formType" : null,
+                "cik" : null,
+                "accessionNumber" : null,
+                "filingDate" : null
+              }
+              End = true
             }
           }
         }

@@ -286,6 +286,17 @@ def lambda_handler(event, context):
         source = event.get('source', 'sec')  # sec, house, or senate
     cik = event.get('cik')
     
+    # Check if this is a failed download (from downloader Lambda error handling)
+    if event.get('success') is False:
+        logger.warning(f"⚠️ Skipping failed download: {event.get('error', 'Unknown error')}")
+        return {
+            "matchedTrades": [],
+            "unmatchedCount": 0,
+            "s3Key": None,
+            "formType": form_type,
+            "error": event.get('error', 'Download failed')
+        }
+    
     if not s3_key:
         logger.warning("⚠️ No s3Key provided in event")
         return {

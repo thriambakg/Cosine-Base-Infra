@@ -86,6 +86,8 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                     file_extensions.insert(0, (fe, ct))
                     break
         
+        failed_attempts = []  # Store failed attempts with status codes
+        
         for ext, ct in file_extensions:
             try:
                 if filename.endswith(ext):
@@ -93,8 +95,10 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                 else:
                     file_url = f"{base_url}/{accession_dashed}{ext}"
                 
-                logger.debug(f"📥 Attempting to download: {file_url}")
+                logger.info(f"📥 Attempting to download: {file_url}")
                 response = session.get(file_url, timeout=30)
+                
+                logger.info(f"📊 HTTP {response.status_code} for {file_url}")
                 
                 if response.status_code == 200:
                     file_content = response.content
@@ -106,13 +110,19 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                         file_ext = 'xml'
                         content_type = 'application/xml'
                     
-                    logger.info(f"✅ Successfully downloaded: {file_url}")
+                    logger.info(f"✅ Successfully downloaded: {file_url} ({len(file_content)} bytes)")
                     break
                 else:
-                    logger.debug(f"⚠️ HTTP {response.status_code} for {file_url}, trying next extension...")
+                    failed_attempts.append(f"{file_url} (HTTP {response.status_code})")
+                    logger.warning(f"⚠️ HTTP {response.status_code} for {file_url}, trying next extension...")
                     
+            except requests.exceptions.Timeout as e:
+                failed_attempts.append(f"{file_url} (Timeout)")
+                logger.warning(f"⚠️ Timeout downloading {file_url}: {e}")
+                continue
             except requests.exceptions.RequestException as e:
-                logger.debug(f"⚠️ Could not download {file_url}: {e}")
+                failed_attempts.append(f"{file_url} (Error: {str(e)})")
+                logger.warning(f"⚠️ Could not download {file_url}: {e}")
                 continue
         
         if not file_content:
@@ -123,9 +133,11 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                     attempted_urls.append(f"{base_url}/{filename}")
                 else:
                     attempted_urls.append(f"{base_url}/{accession_dashed}{ext}")
+            error_msg = f"Could not download form - all URLs failed: {failed_attempts}"
             logger.error(f"❌ Could not download form for CIK {cik}, accession {accession_dashed}")
             logger.error(f"   Attempted URLs: {attempted_urls}")
-            raise Exception(f"Could not download form - all URLs failed: {attempted_urls}")
+            logger.error(f"   Failed attempts: {failed_attempts}")
+            raise Exception(error_msg)
         
         # Generate S3 key
         s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{target_date}.{file_ext}"
@@ -196,12 +208,14 @@ def lambda_handler(event, context):
         
     except Exception as e:
         logger.error(f"❌ Error in downloader Lambda: {e}")
-        # Return None/empty to indicate failure (will be filtered out)
-        return {
-            "success": False,
+        # Raise exception so Step Functions Catch block handles it
+        # Include original event data in error message for context
+        error_with_context = {
             "error": str(e),
             "formType": event.get('formType') or event.get('form_type'),
             "cik": event.get('cik'),
+            "accessionNumber": event.get('accessionNumber') or event.get('accession_number'),
             "filingDate": event.get('filingDate') or event.get('date')
         }
+        raise Exception(json.dumps(error_with_context))
 
