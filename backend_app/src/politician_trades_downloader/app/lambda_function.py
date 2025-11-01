@@ -69,29 +69,42 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
         content_type = None
         
         # Build list of URLs to try
-        # SEC forms are typically available as:
-        # 1. {accession-number}.txt (structured XML content, most common)
-        # 2. {accession-number}.xml
-        # 3. index.htm (HTML page with links to documents)
+        # According to SEC EDGAR structure:
+        # - Forms are stored at: /Archives/edgar/data/{CIK}/{ACCESSION}/
+        # - index.htm contains links to all documents in the filing
+        # - The actual XML document may be:
+        #   1. {accession}-primary-document.xml
+        #   2. doc4.xml or doc{N}.xml (numbered documents)
+        #   3. {accession}.txt (but this often contains SGML header + XML)
+        # - We should parse index.htm first to find the correct document link
         
         urls_to_try = []
         
-        # Priority 1: Try direct .txt file first (most common, contains XML)
+        # Priority 1: Download index.htm to find actual document links
+        index_url = f"{base_url}/index.htm"
+        urls_to_try.append((index_url, "index.htm"))
+        
+        # Priority 2: Try known document file patterns (if index.htm fails)
+        doc_urls = [
+            f"{accession_dashed}-primary-document.xml",
+            f"{accession_dashed}-primarydoc.xml",
+            "primary-document.xml",
+            "doc4.xml",  # Common for Form 4
+            "doc1.xml",
+            f"{accession_dashed}.xml",
+        ]
+        for doc_name in doc_urls:
+            doc_url = f"{base_url}/{doc_name}"
+            urls_to_try.append((doc_url, doc_name))
+        
+        # Priority 3: Try .txt file (often contains SGML + XML, needs parsing)
         txt_url = f"{base_url}/{accession_dashed}.txt"
         urls_to_try.append((txt_url, f"{accession_dashed}.txt"))
         
-        # Priority 2: Try direct .xml file
-        xml_url = f"{base_url}/{accession_dashed}.xml"
-        urls_to_try.append((xml_url, f"{accession_dashed}.xml"))
-        
-        # Priority 3: If RSS feed provided a filename, try it (might be index.htm)
-        if filename and filename not in [f"{accession_dashed}.txt", f"{accession_dashed}.xml"]:
+        # Priority 4: If RSS feed provided a specific filename, try it
+        if filename and filename not in [doc for _, doc in urls_to_try]:
             file_url = f"{base_url}/{filename}"
             urls_to_try.append((file_url, filename))
-        
-        # Priority 4: Try PDF as last resort
-        pdf_url = f"{base_url}/{accession_dashed}.pdf"
-        urls_to_try.append((pdf_url, f"{accession_dashed}.pdf"))
         
         failed_attempts = []  # Store failed attempts with status codes
         
@@ -116,39 +129,46 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                         try:
                             html_text = file_content.decode('utf-8', errors='ignore')
                             
-                            # SEC HTML typically has a table with document links
-                            # Look for patterns like:
-                            # - href="/Archives/edgar/data/.../{accession}.txt"
-                            # - href="/Archives/edgar/data/.../{accession}.xml"
-                            # - Links to primary-document.xml or similar
-                            # - Document table rows with href attributes
+                            # SEC index.htm has a specific structure:
+                            # - Document table with rows containing links
+                            # - Links are relative to the filing directory
+                            # - XML documents are typically named: doc{N}.xml or {accession}-primary-document.xml
+                            # - Priority: Look for .xml files first, especially doc4.xml (common for Form 4)
                             
                             doc_links = []
                             
-                            # Pattern 1: Direct links to .txt files (most common)
-                            txt_pattern = rf'href="([^"]*{re.escape(accession_dashed)}\.txt[^"]*)"'
-                            txt_matches = re.findall(txt_pattern, html_text, re.IGNORECASE)
-                            doc_links.extend(txt_matches)
-                            
-                            # Pattern 2: Direct links to .xml files
-                            xml_pattern = rf'href="([^"]*{re.escape(accession_dashed)}\.xml[^"]*)"'
+                            # Strategy 1: Find all .xml file links (prioritize these over .txt)
+                            # Look for links ending in .xml in the same directory
+                            xml_pattern = r'href="([^"]*\.xml[^"]*)"'
                             xml_matches = re.findall(xml_pattern, html_text, re.IGNORECASE)
                             doc_links.extend(xml_matches)
                             
-                            # Pattern 3: Primary document patterns
+                            # Strategy 2: Look for primary document patterns (highest priority)
                             primary_patterns = [
                                 r'href="([^"]*primary[_-]?document[^"]*\.xml[^"]*)"',
                                 r'href="([^"]*primarydoc[^"]*\.xml[^"]*)"',
-                                r'href="([^"]*document\.xml[^"]*)"'
+                                r'href="([^"]*document[^"]*\.xml[^"]*)"',
+                                # Common SEC naming: doc4.xml for Form 4
+                                r'href="([^"]*doc\d+\.xml[^"]*)"',
                             ]
+                            primary_links = []
                             for pattern in primary_patterns:
                                 matches = re.findall(pattern, html_text, re.IGNORECASE)
-                                doc_links.extend(matches)
+                                primary_links.extend(matches)
+                            # Prepend primary links to prioritize them
+                            doc_links = primary_links + [link for link in doc_links if link not in primary_links]
                             
-                            # Pattern 4: Any .txt or .xml links in the directory
-                            generic_pattern = rf'href="([^"]*/{re.escape(accession_dashed.split("-")[0])}[^"]*\.(?:txt|xml)[^"]*)"'
-                            generic_matches = re.findall(generic_pattern, html_text, re.IGNORECASE)
-                            doc_links.extend(generic_matches)
+                            # Strategy 3: If no XML found, look for .txt files (last resort, contains SGML+XML)
+                            if not doc_links:
+                                txt_pattern = r'href="([^"]*\.txt[^"]*)"'
+                                txt_matches = re.findall(txt_pattern, html_text, re.IGNORECASE)
+                                doc_links.extend(txt_matches)
+                            
+                            # Strategy 4: Look for links with accession number
+                            if not doc_links:
+                                acc_pattern = rf'href="([^"]*{re.escape(accession_dashed)}[^"]*)"'
+                                acc_matches = re.findall(acc_pattern, html_text, re.IGNORECASE)
+                                doc_links.extend(acc_matches)
                             
                             # Remove duplicates while preserving order
                             seen = set()
@@ -158,8 +178,21 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                                     seen.add(link)
                                     unique_doc_links.append(link)
                             
-                            # Try each found link
-                            for doc_link in unique_doc_links[:5]:  # Limit to first 5 to avoid too many requests
+                            # Try each found link (prioritize XML files)
+                            # Sort: XML files first, then others
+                            def link_priority(link):
+                                if link.endswith('.xml'):
+                                    return 0  # Highest priority
+                                elif 'primary' in link.lower() or 'document' in link.lower():
+                                    return 1
+                                elif 'doc' in link.lower():
+                                    return 2
+                                else:
+                                    return 3
+                            
+                            sorted_links = sorted(unique_doc_links, key=link_priority)
+                            
+                            for doc_link in sorted_links[:10]:  # Try up to 10 links
                                 # Handle relative URLs
                                 if doc_link.startswith('/'):
                                     doc_link = f"https://www.sec.gov{doc_link}"
