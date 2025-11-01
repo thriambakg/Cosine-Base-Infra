@@ -1556,6 +1556,33 @@ resource "aws_iam_policy" "lambda_politician_trades_s3_policy" {
   tags = var.common_tags
 }
 
+resource "aws_iam_policy" "lambda_politician_trades_textract_policy" {
+  name        = "${var.project_name}-lambda-politician-trades-textract-access-${var.environment}"
+  description = "Allows Lambda to use Textract for parsing PTR PDFs"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "textract:DetectDocumentText",
+          "textract:AnalyzeDocument",
+          "textract:AnalyzeExpense",
+          "textract:AnalyzeID",
+          "textract:GetDocumentAnalysis",
+          "textract:GetExpenseAnalysis",
+          "textract:StartDocumentAnalysis",
+          "textract:StartExpenseAnalysis"
+        ]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
 # Politician Trades DynamoDB Table
 module "politician_trades_table" {
   source = "./modules/dynamodb-table"
@@ -1675,6 +1702,7 @@ module "politician_trades_fetcher" {
   # IAM policies
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
+    aws_iam_policy.lambda_politician_trades_textract_policy.arn,
     module.kms.kms_access_policy_arn
   ]
 
@@ -1743,6 +1771,7 @@ module "politician_trades_single_matcher" {
   # IAM policies
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
+    aws_iam_policy.lambda_politician_trades_textract_policy.arn,
     module.kms.kms_access_policy_arn
   ]
 

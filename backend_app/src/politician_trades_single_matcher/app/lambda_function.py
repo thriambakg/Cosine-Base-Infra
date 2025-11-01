@@ -350,42 +350,361 @@ def parse_sec_form_pdf(s3_key: str) -> List[Dict[str, Any]]:
     return trades
 
 
-def parse_house_ptr(s3_key: str) -> List[Dict[str, Any]]:
+def parse_ptr_with_textract(pdf_content: bytes, source: str = 'house') -> List[Dict[str, Any]]:
     """
-    Parse House PTR PDF and extract trade data
+    Parse PTR PDF using AWS Textract to extract trade data
+    
+    Args:
+        pdf_content: PDF file content as bytes
+        source: 'house' or 'senate' - determines parsing strategy
+        
+    Returns:
+        List of trade dicts with filerName, securitySymbol, shares, pricePerShare, transactionDate, etc.
     """
     trades = []
     
     try:
+        import boto3
+        textract_client = boto3.client('textract')
+        
+        logger.info(f"📄 Using Textract to parse {source.upper()} PTR PDF...")
+        
+        # Call Textract to extract text and forms/tables
+        # Use analyze_document with FORMS and TABLES for structured data
+        response = textract_client.analyze_document(
+            Document={'Bytes': pdf_content},
+            FeatureTypes=['FORMS', 'TABLES']
+        )
+        
+        # Extract text and structured data
+        text_lines = []
+        form_fields = {}  # Key-value pairs from forms
+        tables = []  # Table data
+        
+        for block in response.get('Blocks', []):
+            block_type = block.get('BlockType')
+            
+            if block_type == 'LINE':
+                text = block.get('Text', '').strip()
+                if text:
+                    text_lines.append(text)
+            
+            elif block_type == 'KEY_VALUE_SET':
+                # Extract form field key-value pairs
+                entity_type = block.get('EntityTypes', [])
+                if 'KEY' in entity_type:
+                    key_text = ''
+                    # Get the key text from child relationships
+                    for relationship in block.get('Relationships', []):
+                        if relationship.get('Type') == 'CHILD':
+                            for child_id in relationship.get('Ids', []):
+                                # Find the child block and get its text
+                                for child_block in response.get('Blocks', []):
+                                    if child_block.get('Id') == child_id and child_block.get('BlockType') == 'WORD':
+                                        key_text += child_block.get('Text', '') + ' '
+                    key_text = key_text.strip()
+                    
+                    # Find the corresponding value
+                    value_text = ''
+                    for relationship in block.get('Relationships', []):
+                        if relationship.get('Type') == 'VALUE':
+                            for value_id in relationship.get('Ids', []):
+                                for value_block in response.get('Blocks', []):
+                                    if value_block.get('Id') == value_id:
+                                        if value_block.get('BlockType') == 'WORD':
+                                            value_text += value_block.get('Text', '') + ' '
+                                        elif value_block.get('BlockType') == 'SELECTION_ELEMENT':
+                                            # Checkbox selected
+                                            if value_block.get('SelectionStatus') == 'SELECTED':
+                                                value_text = 'Yes'
+                    value_text = value_text.strip()
+                    
+                    if key_text and value_text:
+                        form_fields[key_text.lower()] = value_text
+        
+        # Extract tables
+        table_blocks = [b for b in response.get('Blocks', []) if b.get('BlockType') == 'TABLE']
+        for table_block in table_blocks:
+            table_data = extract_table_data(table_block, response.get('Blocks', []))
+            if table_data:
+                tables.append(table_data)
+        
+        full_text = ' '.join(text_lines)
+        
+        # Extract filer name
+        filer_name = None
+        filer_patterns = [
+            r'(?:Representative|Rep\.?|Name)[\s:]*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+            r'([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)',  # First M. Last
+        ]
+        for pattern in filer_patterns:
+            match = re.search(pattern, full_text)
+            if match:
+                filer_name = match.group(1).strip()
+                break
+        
+        # If not found in text, check form fields
+        if not filer_name:
+            for key, value in form_fields.items():
+                if 'name' in key or 'filer' in key:
+                    filer_name = value
+                    break
+        
+        if not filer_name:
+            logger.warning(f"⚠️ Could not extract filer name from {source} PTR")
+        
+        # Extract filing date
+        filing_date = None
+        date_patterns = [
+            r'(?:Date Filed|Filing Date|Report Date)[\s:]*(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+            r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+        ]
+        for pattern in date_patterns:
+            match = re.search(pattern, full_text)
+            if match:
+                date_str = match.group(1)
+                try:
+                    # Try to parse date
+                    for fmt in ['%m/%d/%Y', '%m-%d-%Y']:
+                        try:
+                            filing_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+                            break
+                        except ValueError:
+                            continue
+                    if filing_date:
+                        break
+                except:
+                    continue
+        
+        # Parse tables for trade data
+        # PTR tables typically have columns: Transaction Date, Asset Description, Transaction Type, Amount, etc.
+        for table in tables:
+            # Look for trade transactions in table rows
+            if len(table) < 2:  # Need at least header + data row
+                continue
+            
+            # Find header row (first row with column names)
+            header_row = table[0]
+            
+            # Map column indices
+            date_col = None
+            asset_col = None
+            symbol_col = None
+            type_col = None
+            amount_col = None
+            shares_col = None
+            
+            for idx, cell in enumerate(header_row):
+                cell_lower = cell.lower()
+                if 'date' in cell_lower and date_col is None:
+                    date_col = idx
+                elif 'asset' in cell_lower or 'security' in cell_lower or 'stock' in cell_lower:
+                    asset_col = idx
+                elif 'symbol' in cell_lower or 'ticker' in cell_lower:
+                    symbol_col = idx
+                elif 'type' in cell_lower or 'transaction' in cell_lower:
+                    type_col = idx
+                elif 'amount' in cell_lower or 'value' in cell_lower or 'price' in cell_lower:
+                    amount_col = idx
+                elif 'shares' in cell_lower or 'quantity' in cell_lower:
+                    shares_col = idx
+            
+            # Parse data rows
+            for row in table[1:]:
+                if len(row) < max(filter(None, [date_col, asset_col, type_col])) + 1:
+                    continue
+                
+                # Extract transaction date
+                transaction_date = None
+                if date_col is not None and date_col < len(row):
+                    date_str = row[date_col].strip()
+                    for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d']:
+                        try:
+                            transaction_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+                            break
+                        except ValueError:
+                            continue
+                
+                # Extract asset/symbol
+                security_name = None
+                security_symbol = None
+                
+                if asset_col is not None and asset_col < len(row):
+                    asset_text = row[asset_col].strip()
+                    # Try to extract ticker symbol (usually uppercase letters, 1-5 chars)
+                    symbol_match = re.search(r'\b([A-Z]{1,5})\b', asset_text)
+                    if symbol_match:
+                        security_symbol = symbol_match.group(1)
+                    security_name = asset_text
+                
+                if symbol_col is not None and symbol_col < len(row):
+                    security_symbol = row[symbol_col].strip()
+                
+                # Extract transaction type
+                transaction_type = None
+                if type_col is not None and type_col < len(row):
+                    trans_text = row[type_col].strip().upper()
+                    if 'PURCHASE' in trans_text or 'BUY' in trans_text:
+                        transaction_type = 'P'  # Purchase
+                    elif 'SALE' in trans_text or 'SELL' in trans_text:
+                        transaction_type = 'S'  # Sale
+                    else:
+                        transaction_type = trans_text[:1]  # First letter
+                
+                # Extract amount/shares
+                shares = None
+                price_per_share = None
+                total_amount = None
+                
+                if shares_col is not None and shares_col < len(row):
+                    shares_str = row[shares_col].strip()
+                    # Remove commas, parse number
+                    try:
+                        shares = int(re.sub(r'[^\d]', '', shares_str))
+                    except:
+                        pass
+                
+                if amount_col is not None and amount_col < len(row):
+                    amount_str = row[amount_col].strip()
+                    # Remove $, commas, parse number
+                    try:
+                        amount_value = float(re.sub(r'[^\d.]', '', amount_str))
+                        if shares and shares > 0:
+                            price_per_share = amount_value / shares
+                        total_amount = amount_value
+                    except:
+                        pass
+                
+                # Only create trade if we have minimum required data
+                if transaction_date or security_name or security_symbol:
+                    trade = {
+                        'filerName': filer_name,
+                        'securityName': security_name,
+                        'securitySymbol': security_symbol,
+                        'transactionDate': transaction_date or filing_date,
+                        'filingDate': filing_date,
+                        'transactionType': transaction_type or 'U',  # U = Unknown
+                        'shares': shares,
+                        'pricePerShare': price_per_share,
+                        'totalAmount': total_amount,
+                        'formType': f'{source}_ptr',
+                        'source': source
+                    }
+                    trades.append(trade)
+        
+        logger.info(f"✅ Extracted {len(trades)} trades from {source.upper()} PTR using Textract")
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing PTR with Textract: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    return trades
+
+
+def extract_table_data(table_block: Dict[str, Any], all_blocks: List[Dict[str, Any]]) -> Optional[List[List[str]]]:
+    """
+    Extract table data from Textract table block
+    
+    Args:
+        table_block: Textract table block
+        all_blocks: All blocks from Textract response
+        
+    Returns:
+        List of rows, each row is a list of cell values
+    """
+    try:
+        # Build block lookup
+        block_map = {block.get('Id'): block for block in all_blocks}
+        
+        # Get cells from table relationships
+        rows = {}
+        cols = {}
+        
+        for relationship in table_block.get('Relationships', []):
+            if relationship.get('Type') == 'CHILD':
+                for cell_id in relationship.get('Ids', []):
+                    cell_block = block_map.get(cell_id)
+                    if cell_block:
+                        row_index = cell_block.get('RowIndex', 0)
+                        col_index = cell_block.get('ColumnIndex', 0)
+                        
+                        # Get cell text from child words
+                        cell_text = ''
+                        for cell_rel in cell_block.get('Relationships', []):
+                            if cell_rel.get('Type') == 'CHILD':
+                                for word_id in cell_rel.get('Ids', []):
+                                    word_block = block_map.get(word_id)
+                                    if word_block and word_block.get('BlockType') == 'WORD':
+                                        cell_text += word_block.get('Text', '') + ' '
+                        cell_text = cell_text.strip()
+                        
+                        if row_index not in rows:
+                            rows[row_index] = {}
+                        rows[row_index][col_index] = cell_text
+        
+        # Convert to list of lists
+        if not rows:
+            return None
+        
+        table_data = []
+        for row_idx in sorted(rows.keys()):
+            row_data = []
+            for col_idx in sorted(rows[row_idx].keys()):
+                row_data.append(rows[row_idx][col_idx])
+            table_data.append(row_data)
+        
+        return table_data
+        
+    except Exception as e:
+        logger.error(f"❌ Error extracting table data: {e}")
+        return None
+
+
+def parse_house_ptr(s3_key: str) -> List[Dict[str, Any]]:
+    """
+    Parse House PTR PDF using Textract and extract trade data
+    """
+    trades = []
+    
+    try:
+        logger.info(f"📄 Parsing House PTR: {s3_key}")
+        
         # Download PDF from S3
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
         pdf_content = response['Body'].read()
         
-        # Note: Similar to SEC PDF parsing - requires Textract or pdf library
-        logger.warning("⚠️ House PTR PDF parsing not fully implemented")
+        # Use Textract to parse
+        trades = parse_ptr_with_textract(pdf_content, source='house')
         
     except Exception as e:
         logger.error(f"❌ Error parsing House PTR {s3_key}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
     
     return trades
 
 
 def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
     """
-    Parse Senate PTR PDF and extract trade data
+    Parse Senate PTR PDF using Textract and extract trade data
     """
     trades = []
     
     try:
+        logger.info(f"📄 Parsing Senate PTR: {s3_key}")
+        
         # Download PDF from S3
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
         pdf_content = response['Body'].read()
         
-        # Note: Similar to House PTR parsing
-        logger.warning("⚠️ Senate PTR PDF parsing not fully implemented")
+        # Use Textract to parse
+        trades = parse_ptr_with_textract(pdf_content, source='senate')
         
     except Exception as e:
         logger.error(f"❌ Error parsing Senate PTR {s3_key}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
     
     return trades
 

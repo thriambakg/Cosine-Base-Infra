@@ -10,6 +10,7 @@ from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 import re
 from urllib.parse import urljoin, urlparse
+import boto3
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -233,18 +234,109 @@ class CongressionalPTRScraper:
         
         return ptrs
     
-    def download_ptr_file(self, url: str, s3_key: str, s3_bucket: str, s3_client) -> bool:
+    def extract_filing_date_from_pdf(self, pdf_content: bytes, target_date: str) -> Optional[str]:
         """
-        Download a PTR file from URL and upload to S3
+        Use AWS Textract to extract filing date from PTR PDF
+        
+        Args:
+            pdf_content: PDF file content as bytes
+            target_date: Target date in YYYY-MM-DD format (for validation)
+            
+        Returns:
+            Extracted filing date in YYYY-MM-DD format, or None if not found
+        """
+        try:
+            textract_client = boto3.client('textract')
+            
+            logger.info(f"🔍 Using Textract to extract filing date from PTR PDF...")
+            
+            # Call Textract to extract text
+            response = textract_client.detect_document_text(
+                Document={'Bytes': pdf_content}
+            )
+            
+            # Extract all text from Textract response
+            text_lines = []
+            for block in response.get('Blocks', []):
+                if block.get('BlockType') == 'LINE':
+                    text = block.get('Text', '').strip()
+                    if text:
+                        text_lines.append(text)
+            
+            full_text = ' '.join(text_lines)
+            
+            # Look for date patterns in the extracted text
+            # PTRs typically have dates like "Date Filed: MM/DD/YYYY" or "Filing Date: MM/DD/YYYY"
+            date_patterns = [
+                r'(?:Date Filed|Filing Date|Date|Report Date)[\s:]*(\d{1,2})[/-](\d{1,2})[/-](\d{4})',
+                r'(\d{1,2})[/-](\d{1,2})[/-](\d{4})',  # Generic MM/DD/YYYY or MM-DD-YYYY
+                r'(\d{4})[/-](\d{1,2})[/-](\d{1,2})',  # Generic YYYY/MM/DD or YYYY-MM-DD
+            ]
+            
+            target_date_obj = datetime.strptime(target_date, '%Y-%m-%d')
+            
+            for pattern in date_patterns:
+                matches = re.finditer(pattern, full_text, re.IGNORECASE)
+                for match in matches:
+                    try:
+                        # Try to parse the date
+                        date_str = match.group(0)
+                        # Clean up the date string
+                        date_str = re.sub(r'[^\d/-]', '', date_str)
+                        
+                        # Try different date formats
+                        date_formats = [
+                            '%m/%d/%Y',
+                            '%m-%d-%Y',
+                            '%Y/%m/%d',
+                            '%Y-%m-%d',
+                            '%d/%m/%Y',
+                            '%d-%m-%Y',
+                        ]
+                        
+                        parsed_date = None
+                        for fmt in date_formats:
+                            try:
+                                parsed_date = datetime.strptime(date_str, fmt).date()
+                                break
+                            except ValueError:
+                                continue
+                        
+                        if parsed_date:
+                            # Check if this date matches the target date (or is within a few days)
+                            date_diff = abs((parsed_date - target_date_obj.date()).days)
+                            if date_diff <= 1:  # Allow 1 day tolerance
+                                filing_date_str = parsed_date.strftime('%Y-%m-%d')
+                                logger.info(f"✅ Extracted filing date: {filing_date_str} (target: {target_date})")
+                                return filing_date_str
+                            else:
+                                logger.debug(f"📅 Found date {parsed_date} but doesn't match target {target_date}")
+                    except Exception as date_parse_error:
+                        logger.debug(f"⚠️ Could not parse date from match: {match.group(0)}: {date_parse_error}")
+                        continue
+            
+            logger.warning(f"⚠️ Could not extract filing date from PTR PDF (target: {target_date})")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error extracting filing date with Textract: {e}")
+            import traceback
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return None
+    
+    def download_ptr_file(self, url: str, s3_key: str, s3_bucket: str, s3_client, target_date: str = None) -> bool:
+        """
+        Download a PTR file from URL, verify filing date with Textract, and upload to S3
         
         Args:
             url: Source URL of the PTR PDF
             s3_key: Destination S3 key
             s3_bucket: S3 bucket name
             s3_client: Boto3 S3 client
+            target_date: Target filing date (YYYY-MM-DD) - if provided, will filter by actual filing date
             
         Returns:
-            True if successful, False otherwise
+            True if successful and matches target date, False otherwise
         """
         try:
             logger.info(f"📥 Downloading PTR from {url}")
@@ -253,11 +345,21 @@ class CongressionalPTRScraper:
             response = self.session.get(url, timeout=30)
             response.raise_for_status()
             
+            pdf_content = response.content
+            
+            # If target_date is provided, extract and verify filing date using Textract
+            if target_date:
+                extracted_date = self.extract_filing_date_from_pdf(pdf_content, target_date)
+                if not extracted_date:
+                    logger.warning(f"⚠️ PTR from {url} does not match target date {target_date}, skipping")
+                    return False
+                logger.info(f"✅ PTR filing date verified: {extracted_date}")
+            
             # Upload to S3
             s3_client.put_object(
                 Bucket=s3_bucket,
                 Key=s3_key,
-                Body=response.content,
+                Body=pdf_content,
                 ContentType='application/pdf'
             )
             

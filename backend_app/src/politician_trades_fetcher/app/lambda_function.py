@@ -570,13 +570,14 @@ def lambda_handler(event, context):
         scraper = CongressionalPTRScraper()
         house_ptrs = scraper.fetch_house_ptrs(target_date)
         
-        # Download and store each House PTR
+        # Download and store each House PTR (Textract will filter by actual filing date)
         for ptr_data in house_ptrs:
             if scraper.download_ptr_file(
                 ptr_data.get('url'),
                 ptr_data.get('s3_key'),
                 S3_BUCKET,
-                s3_client
+                s3_client,
+                target_date  # Pass target_date to filter by actual filing date
             ):
                 results['housePTRs'].append(ptr_data)
                 results['housePTRsFetched'] += 1
@@ -587,13 +588,14 @@ def lambda_handler(event, context):
         logger.info("🏛️ Fetching Senate PTRs...")
         senate_ptrs = scraper.fetch_senate_ptrs(target_date)
         
-        # Download and store each Senate PTR
+        # Download and store each Senate PTR (Textract will filter by actual filing date)
         for ptr_data in senate_ptrs:
             if scraper.download_ptr_file(
                 ptr_data.get('url'),
                 ptr_data.get('s3_key'),
                 S3_BUCKET,
-                s3_client
+                s3_client,
+                target_date  # Pass target_date to filter by actual filing date
             ):
                 results['senatePTRs'].append(ptr_data)
                 results['senatePTRsFetched'] += 1
