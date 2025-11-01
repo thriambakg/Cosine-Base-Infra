@@ -208,23 +208,57 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                                     doc_response = session.get(doc_link, timeout=30)
                                     if doc_response.status_code == 200:
                                         doc_content = doc_response.content
-                                        # Prefer XML/structured content over HTML
-                                        if doc_content.startswith(b'<?xml') or doc_link.endswith('.xml'):
+                                        
+                                        # Detect content type based on actual content, not filename
+                                        content_start = doc_content[:1000].lower()
+                                        
+                                        # Check for HTML indicators
+                                        is_html = any(indicator in content_start for indicator in [
+                                            b'<!doctype html',
+                                            b'<html',
+                                            b'<head>',
+                                            b'<body>',
+                                            b'<style',
+                                            b'sec form 4',
+                                        ])
+                                        
+                                        # Check for XML indicators
+                                        is_xml = (doc_content.startswith(b'<?xml') or 
+                                                 b'<ownershipDocument' in doc_content or 
+                                                 b'<document>' in doc_content or 
+                                                 b'<edgarDocument' in doc_content)
+                                        
+                                        # Accept either HTML or XML - we can parse both
+                                        if is_xml and not is_html:
+                                            # Pure XML content
                                             file_content = doc_content
                                             file_ext = 'xml'
                                             content_type = 'application/xml'
-                                            logger.info(f"✅ Successfully extracted XML document from HTML link")
+                                            logger.info(f"✅ Found XML document: {doc_link}")
                                             break
-                                        elif doc_link.endswith('.txt') or doc_content.startswith(b'<'):
-                                            # Check if it's XML content
-                                            if doc_content.startswith(b'<?xml') or (b'<ownershipDocument' in doc_content or b'<document>' in doc_content):
-                                                file_content = doc_content
-                                                file_ext = 'xml'
-                                                content_type = 'application/xml'
-                                                logger.info(f"✅ Successfully extracted XML document from HTML link (.txt file)")
-                                                break
+                                        elif is_html:
+                                            # HTML rendering - accept it, matcher will parse it
+                                            file_content = doc_content
+                                            file_ext = 'html'
+                                            content_type = 'text/html'
+                                            logger.info(f"✅ Found HTML document (will parse): {doc_link}")
+                                            break
+                                        elif b'<sec-header' in content_start:
+                                            # SGML header - accept it, matcher can process it
+                                            file_content = doc_content
+                                            file_ext = 'txt'
+                                            content_type = 'text/plain'
+                                            logger.info(f"✅ Found SGML header: {doc_link} (will process)")
+                                            break
+                                        else:
+                                            # Unknown format - accept it anyway, let matcher figure it out
+                                            file_content = doc_content
+                                            file_ext = 'txt'
+                                            content_type = 'text/plain'
+                                            logger.info(f"✅ Found file (format unclear): {doc_link} (will process)")
+                                            break
                                 except Exception as doc_error:
-                                    logger.debug(f"⚠️ Could not download document link {doc_link}: {doc_error}")
+                                    logger.warning(f"⚠️ Could not download document link {doc_link}: {doc_error}")
                                     continue
                                     
                         except Exception as html_parse_error:
@@ -261,12 +295,31 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                                     doc_response = session.get(doc_url, timeout=30)
                                     if doc_response.status_code == 200:
                                         doc_content = doc_response.content
-                                        # Check if it's actual XML content
-                                        if doc_content.startswith(b'<?xml') or b'<ownershipDocument' in doc_content or b'<document>' in doc_content:
+                                        # Accept any content type - let matcher handle detection
+                                        content_sample = doc_content[:100].lower()
+                                        is_html = b'<html' in content_sample or b'<!doctype html' in content_sample
+                                        is_xml = doc_content.startswith(b'<?xml') or b'<ownershipDocument' in doc_content or b'<document>' in doc_content
+                                        
+                                        if is_xml:
                                             file_content = doc_content
                                             file_ext = 'xml'
                                             content_type = 'application/xml'
-                                            logger.info(f"✅ Found actual document file: {doc_url}")
+                                            logger.info(f"✅ Found XML document file: {doc_url}")
+                                            found_doc = True
+                                            break
+                                        elif is_html:
+                                            file_content = doc_content
+                                            file_ext = 'html'
+                                            content_type = 'text/html'
+                                            logger.info(f"✅ Found HTML document file: {doc_url}")
+                                            found_doc = True
+                                            break
+                                        else:
+                                            # Accept any content - matcher will handle it
+                                            file_content = doc_content
+                                            file_ext = 'txt'
+                                            content_type = 'text/plain'
+                                            logger.info(f"✅ Found document file (unknown format): {doc_url}")
                                             found_doc = True
                                             break
                                 except Exception as doc_error:
@@ -274,11 +327,11 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                                     continue
                             
                             if not found_doc:
-                                # If we can't find the document, don't store the SGML header
-                                # Continue to try next URL in urls_to_try (e.g., try .xml file)
-                                logger.warning(f"⚠️ Could not find actual document file for {accession_dashed}, will try next URL option")
-                                file_content = None  # Reset to None so we continue the loop
-                                continue  # Continue to next URL instead of storing SGML header
+                                # If we can't find a separate document file, accept the SGML header
+                                # Matcher can parse it or extract what it needs
+                                logger.info(f"📄 No separate document file found, accepting SGML header for processing")
+                                file_ext = 'txt'
+                                content_type = 'text/plain'
                         
                         elif file_content.startswith(b'<?xml'):
                             file_ext = 'xml'
@@ -297,11 +350,20 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                             file_ext = 'txt'
                             content_type = 'text/plain'
                     elif file_name.endswith('.xml'):
-                        file_ext = 'xml'
-                        content_type = 'application/xml'
-                        # Validate it's actually XML
-                        if not (file_content.startswith(b'<?xml') or b'<ownershipDocument' in file_content or b'<document>' in file_content):
-                            logger.warning(f"⚠️ .xml file doesn't appear to contain XML content")
+                        # Detect actual content type, not just extension
+                        content_sample = file_content[:100].lower()
+                        if b'<html' in content_sample or b'<!doctype html' in content_sample:
+                            file_ext = 'html'
+                            content_type = 'text/html'
+                            logger.info(f"📄 .xml file contains HTML content, treating as HTML")
+                        elif file_content.startswith(b'<?xml') or b'<ownershipDocument' in file_content or b'<document>' in file_content:
+                            file_ext = 'xml'
+                            content_type = 'application/xml'
+                        else:
+                            # Unknown format, store as-is
+                            file_ext = 'txt'
+                            content_type = 'text/plain'
+                            logger.info(f"📄 .xml file format unclear, storing as text")
                     elif file_name.endswith('.pdf'):
                         file_ext = 'pdf'
                         content_type = 'application/pdf'
@@ -313,28 +375,12 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                         elif b'<html' in file_content.lower():
                             file_ext = 'html'
                             content_type = 'text/html'
-                            logger.warning(f"⚠️ Downloaded file appears to be HTML, not structured data")
+                            logger.info(f"📄 Detected HTML content")
                         else:
                             file_ext = 'txt'
                             content_type = 'text/plain'
                     
-                    # Final validation: Check if we got actual document content
-                    # SEC forms should be XML with ownershipDocument or document tags
-                    if file_content and file_ext in ['xml', 'txt']:
-                        content_lower = file_content.lower()
-                        # Check if we have actual form content
-                        if (file_ext == 'xml' and not (
-                            file_content.startswith(b'<?xml') or 
-                            b'<ownershipDocument' in file_content or 
-                            b'<document' in file_content or
-                            b'<xbrl' in content_lower
-                        )):
-                            logger.warning(f"⚠️ XML file doesn't appear to contain form document structure")
-                        elif (file_ext == 'txt' and b'<sec-header' in content_lower):
-                            logger.warning(f"⚠️ Downloaded file is SGML header, actual document not found")
-                    
-                    # Only accept this as successful if we got actual content
-                    # Don't accept HTML/SGML headers as successful downloads of structured data
+                    # Accept whatever content we got - matcher will detect and parse appropriately
                     if file_content:
                         logger.info(f"✅ Successfully downloaded: {file_url} ({len(file_content)} bytes, type: {file_ext})")
                         break

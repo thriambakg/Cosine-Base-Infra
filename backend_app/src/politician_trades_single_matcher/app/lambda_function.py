@@ -13,6 +13,8 @@ from datetime import datetime
 import csv
 from io import StringIO
 import xml.etree.ElementTree as ET
+from html.parser import HTMLParser
+from html import unescape
 from difflib import SequenceMatcher
 
 # Configure logging
@@ -388,6 +390,209 @@ def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
     return trades
 
 
+def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
+    """
+    Parse SEC Form HTML rendering and extract trade data
+    HTML forms contain structured data in tables we can extract
+    """
+    trades = []
+    
+    try:
+        # Download HTML from S3
+        response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
+        html_content = response['Body'].read().decode('utf-8', errors='ignore')
+        
+        # Extract filer/owner name
+        # Pattern: <a href="/cgi-bin/browse-edgar?action=getcompany&CIK=...">Name</a>
+        name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
+        filer_name = None
+        if name_match:
+            filer_name = unescape(name_match.group(1)).strip()
+        
+        if not filer_name:
+            # Try alternative pattern: name might be in different format
+            name_patterns = [
+                r'Name and Address of Reporting Person[^<]*<[^>]*>([^<]+)</[^>]*>',
+                r'Reporting Person[^<]*<[^>]*>([^<]+)</[^>]*>',
+            ]
+            for pattern in name_patterns:
+                match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    filer_name = unescape(match.group(1)).strip()
+                    break
+        
+        if not filer_name:
+            logger.warning(f"⚠️ Could not extract filer name from HTML {s3_key}")
+            return trades
+        
+        logger.info(f"✅ Extracted filer name from HTML: {filer_name}")
+        
+        # Extract issuer name and ticker
+        issuer_match = re.search(r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE)
+        issuer_name = issuer_match.group(1).strip() if issuer_match else None
+        
+        ticker_match = re.search(r'\[ <span[^>]*>([A-Z0-9]+)</span> \]', html_content)
+        ticker = ticker_match.group(1) if ticker_match else None
+        
+        # Extract transaction date (earliest transaction date)
+        date_match = re.search(r'Date of Earliest Transaction[^<]*<span[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+        filing_date = None
+        if date_match:
+            try:
+                filing_date_obj = datetime.strptime(date_match.group(1), '%m/%d/%Y')
+                filing_date = filing_date_obj.strftime('%Y-%m-%d')
+            except:
+                pass
+        
+        # Parse Table I - Non-Derivative Securities
+        # Table structure: rows in tbody contain transaction data
+        table1_pattern = r'Table I[^<]*<tbody>(.*?)</tbody>'
+        table1_match = re.search(table1_pattern, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if table1_match:
+            tbody_content = table1_match.group(1)
+            # Extract table rows
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
+            
+            for row in rows:
+                # Extract data from table cells
+                cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
+                if len(cells) >= 8:
+                    # Clean HTML tags from cell content
+                    def clean_cell(cell):
+                        # Remove all HTML tags
+                        text = re.sub(r'<[^>]+>', '', cell)
+                        # Decode HTML entities
+                        text = unescape(text)
+                        # Clean whitespace
+                        return text.strip()
+                    
+                    security_name = clean_cell(cells[0]) if len(cells) > 0 else None
+                    trans_date = clean_cell(cells[1]) if len(cells) > 1 else None
+                    trans_code = clean_cell(cells[3]) if len(cells) > 3 else None  # Code column
+                    shares_str = clean_cell(cells[5]) if len(cells) > 5 else None  # Amount column
+                    trans_type = clean_cell(cells[6]) if len(cells) > 6 else None  # (A) or (D)
+                    price_str = clean_cell(cells[7]) if len(cells) > 7 else None  # Price column
+                    
+                    if security_name and trans_date and trans_code:
+                        # Parse shares (remove commas)
+                        shares = None
+                        if shares_str:
+                            try:
+                                shares = int(re.sub(r'[,\.]', '', shares_str))
+                            except:
+                                pass
+                        
+                        # Parse price (remove $ and commas)
+                        price = None
+                        if price_str:
+                            try:
+                                price_str_clean = re.sub(r'[\$,]', '', price_str)
+                                price = float(price_str_clean)
+                            except:
+                                pass
+                        
+                        # Parse date
+                        transaction_date = None
+                        try:
+                            trans_date_obj = datetime.strptime(trans_date, '%m/%d/%Y')
+                            transaction_date = trans_date_obj.strftime('%Y-%m-%d')
+                        except:
+                            transaction_date = filing_date
+                        
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': security_name,
+                            'transactionDate': transaction_date,
+                            'filingDate': filing_date,
+                            'transactionType': trans_code,
+                            'shares': shares,
+                            'pricePerShare': price,
+                            'transactionDirection': trans_type,  # A = Acquired, D = Disposed
+                            'formType': 'form4',
+                        }
+                        trades.append(trade)
+        
+        # Parse Table II - Derivative Securities (options, warrants, etc.)
+        table2_pattern = r'Table II[^<]*<tbody>(.*?)</tbody>'
+        table2_match = re.search(table2_pattern, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if table2_match:
+            tbody_content = table2_match.group(1)
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
+            
+            for row in rows:
+                cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
+                if len(cells) >= 10:
+                    def clean_cell(cell):
+                        text = re.sub(r'<[^>]+>', '', cell)
+                        text = unescape(text)
+                        return text.strip()
+                    
+                    derivative_name = clean_cell(cells[0]) if len(cells) > 0 else None
+                    trans_date = clean_cell(cells[2]) if len(cells) > 2 else None
+                    trans_code = clean_cell(cells[4]) if len(cells) > 4 else None
+                    shares_acquired = clean_cell(cells[6]) if len(cells) > 6 else None
+                    shares_disposed = clean_cell(cells[7]) if len(cells) > 7 else None
+                    underlying_title = clean_cell(cells[10]) if len(cells) > 10 else None
+                    underlying_shares = clean_cell(cells[11]) if len(cells) > 11 else None
+                    price_str = clean_cell(cells[12]) if len(cells) > 12 else None
+                    
+                    if derivative_name and trans_date and trans_code:
+                        shares = None
+                        if shares_acquired:
+                            try:
+                                shares = int(re.sub(r'[,\.]', '', shares_acquired))
+                            except:
+                                pass
+                        elif shares_disposed:
+                            try:
+                                shares = -int(re.sub(r'[,\.]', '', shares_disposed))  # Negative for disposed
+                            except:
+                                pass
+                        
+                        price = None
+                        if price_str:
+                            try:
+                                price_str_clean = re.sub(r'[\$,]', '', price_str)
+                                price = float(price_str_clean)
+                            except:
+                                pass
+                        
+                        transaction_date = None
+                        try:
+                            trans_date_obj = datetime.strptime(trans_date, '%m/%d/%Y')
+                            transaction_date = trans_date_obj.strftime('%Y-%m-%d')
+                        except:
+                            transaction_date = filing_date
+                        
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': f"{derivative_name} (underlying: {underlying_title})" if underlying_title else derivative_name,
+                            'transactionDate': transaction_date,
+                            'filingDate': filing_date,
+                            'transactionType': trans_code,
+                            'shares': shares,
+                            'pricePerShare': price,
+                            'formType': 'form4',
+                            'isDerivative': True,
+                        }
+                        trades.append(trade)
+        
+        logger.info(f"✅ Extracted {len(trades)} trades from HTML Form 4")
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing SEC form HTML {s3_key}: {e}")
+        import traceback
+        logger.error(f"   Traceback: {traceback.format_exc()}")
+    
+    return trades
+
+
 def lambda_handler(event, context):
     """
     Lambda handler for matching trades from a single file to politicians
@@ -457,14 +662,50 @@ def lambda_handler(event, context):
         logger.info(f"✅ Loaded {len(politicians)} legislators")
         
         # Parse the form/PTR file
+        # Detect content type based on actual file content, not just extension
         trades = []
         if source == 'sec':
-            if s3_key.endswith('.xml'):
-                trades = parse_sec_form_xml(s3_key)
-            elif s3_key.endswith('.pdf'):
-                trades = parse_sec_form_pdf(s3_key)
-            else:
-                logger.warning(f"⚠️ Unknown file type for {s3_key}")
+            # Download a sample to detect content type
+            try:
+                response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
+                content_sample = response['Body'].read(1000)  # Read first 1000 bytes
+                content_sample_lower = content_sample.lower()
+                
+                # Check content type
+                is_html = any(indicator in content_sample_lower for indicator in [
+                    b'<!doctype html',
+                    b'<html',
+                    b'<head>',
+                    b'<body>',
+                    b'<style',
+                ])
+                
+                is_xml = (content_sample.startswith(b'<?xml') or 
+                         b'<ownershipDocument' in content_sample or 
+                         b'<document>' in content_sample)
+                
+                # Route to appropriate parser based on content
+                if is_xml and not is_html:
+                    logger.info(f"📄 Detected XML content, parsing as XML")
+                    trades = parse_sec_form_xml(s3_key)
+                elif is_html:
+                    logger.info(f"📄 Detected HTML content, parsing as HTML")
+                    trades = parse_sec_form_html(s3_key)
+                elif s3_key.endswith('.pdf'):
+                    trades = parse_sec_form_pdf(s3_key)
+                else:
+                    # Try XML parser first, fallback to HTML
+                    logger.warning(f"⚠️ Content type unclear for {s3_key}, trying XML parser first")
+                    try:
+                        trades = parse_sec_form_xml(s3_key)
+                        if not trades:
+                            logger.info(f"📄 XML parser returned no trades, trying HTML parser")
+                            trades = parse_sec_form_html(s3_key)
+                    except:
+                        logger.info(f"📄 XML parser failed, trying HTML parser")
+                        trades = parse_sec_form_html(s3_key)
+            except Exception as e:
+                logger.error(f"❌ Error detecting/parsing file type for {s3_key}: {e}")
                 return {
                     "matchedTrades": [],
                     "unmatchedCount": 1,
