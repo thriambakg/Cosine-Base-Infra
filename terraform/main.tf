@@ -1918,12 +1918,11 @@ module "politician_trades_state_machine" {
         Next       = "TransformDownloadResults"
       }
 
-      # Transform download results to match matcher expectations
-      # Note: We pass downloadResults directly - matcher will filter successful downloads
-      # Matcher expects: fetchResults.secForms = [{ s3Key, formType, cik, filingDate }]
+      # Transform download results - prepare SEC forms and PTRs for matching
+      # SEC forms come from downloadResults, PTRs come from fetchResults (already downloaded)
       TransformDownloadResults = {
         Type    = "Pass"
-        Comment = "Restructure download results for matcher Lambda"
+        Comment = "Prepare all forms/PTRs for matching (normalize format)"
         Parameters = {
           "date.$" : "$.fetchResults.date",
           "fetchResults" : {
@@ -1937,9 +1936,11 @@ module "politician_trades_state_machine" {
       }
 
       # Step 3: Match Trades to Politicians (parallel)
+      # Match SEC forms first, then House PTRs, then Senate PTRs
+      # We'll create separate Map states for each source type to handle different formats
       MatchTrades = {
         Type           = "Map"
-        Comment        = "Match trades from each file to politicians in parallel"
+        Comment        = "Match trades from SEC forms to politicians in parallel"
         ItemsPath      = "$.fetchResults.secForms"
         MaxConcurrency = 10 # Reduced to avoid Lambda rate limiting (429 errors)
         Iterator = {
@@ -1980,16 +1981,111 @@ module "politician_trades_state_machine" {
             }
           }
         }
-        ResultPath = "$.matchResults"
-        Next       = "AggregateMatches"
+        ResultPath = "$.secMatchResults"
+        Next       = "MatchHousePTRs"
+      }
+
+      # Step 3b: Match House PTRs to Politicians (parallel)
+      MatchHousePTRs = {
+        Type           = "Map"
+        Comment        = "Match trades from House PTRs to politicians in parallel"
+        ItemsPath      = "$.fetchResults.housePTRs"
+        MaxConcurrency = 10
+        Iterator = {
+          StartAt = "MatchFile"
+          States = {
+            MatchFile = {
+              Type     = "Task"
+              Resource = module.politician_trades_single_matcher.function_arn
+              Retry = [
+                {
+                  ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                  IntervalSeconds = 60
+                  MaxAttempts     = 5
+                  BackoffRate     = 2.0
+                },
+                {
+                  ErrorEquals     = ["States.ALL"]
+                  IntervalSeconds = 10
+                  MaxAttempts     = 2
+                  BackoffRate     = 2.0
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  ResultPath  = "$.error"
+                  Next        = "MatchFailed"
+                }
+              ]
+              End = true
+            }
+            MatchFailed = {
+              Type   = "Pass"
+              Result = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
+              End    = true
+            }
+          }
+        }
+        ResultPath = "$.houseMatchResults"
+        Next       = "MatchSenatePTRs"
+      }
+
+      # Step 3c: Match Senate PTRs to Politicians (parallel)
+      MatchSenatePTRs = {
+        Type           = "Map"
+        Comment        = "Match trades from Senate PTRs to politicians in parallel"
+        ItemsPath      = "$.fetchResults.senatePTRs"
+        MaxConcurrency = 10
+        Iterator = {
+          StartAt = "MatchFile"
+          States = {
+            MatchFile = {
+              Type     = "Task"
+              Resource = module.politician_trades_single_matcher.function_arn
+              Retry = [
+                {
+                  ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                  IntervalSeconds = 60
+                  MaxAttempts     = 5
+                  BackoffRate     = 2.0
+                },
+                {
+                  ErrorEquals     = ["States.ALL"]
+                  IntervalSeconds = 10
+                  MaxAttempts     = 2
+                  BackoffRate     = 2.0
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  ResultPath  = "$.error"
+                  Next        = "MatchFailed"
+                }
+              ]
+              End = true
+            }
+            MatchFailed = {
+              Type   = "Pass"
+              Result = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
+              End    = true
+            }
+          }
+        }
+        ResultPath = "$.senateMatchResults"
+        Next       = "CombineMatchResults"
       }
 
       # Aggregate match results
+      # Pass all three arrays separately - aggregator will combine them
       AggregateMatches = {
         Type    = "Pass"
-        Comment = "Prepare data for aggregator Lambda"
+        Comment = "Prepare data for aggregator Lambda (combines SEC, House, Senate)"
         Parameters = {
-          "matchResults.$" : "$.matchResults",
+          "secMatchResults.$" : "$.secMatchResults",
+          "houseMatchResults.$" : "$.houseMatchResults",
+          "senateMatchResults.$" : "$.senateMatchResults",
           "date.$" : "$.fetchResults.date"
         }
         Next = "AggregateMatchesTask"

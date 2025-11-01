@@ -372,20 +372,37 @@ def lambda_handler(event, context):
     logger.info("🚀 Politician Trades Aggregator Lambda started")
     
     # Get match results from parallel processing
-    match_results = event.get('matchResults', [])
+    # Support both old format (single matchResults array) and new format (separate arrays)
+    sec_match_results = event.get('secMatchResults', [])
+    house_match_results = event.get('houseMatchResults', [])
+    senate_match_results = event.get('senateMatchResults', [])
+    
+    # Backward compatibility: if old format, use matchResults
+    if not sec_match_results and not house_match_results and not senate_match_results:
+        match_results = event.get('matchResults', [])
+        sec_match_results = match_results
+        logger.info("📋 Using legacy matchResults format (SEC forms only)")
+    
+    # Combine all match results
+    all_match_results = sec_match_results + house_match_results + senate_match_results
+    
     date = event.get('date') or event.get('fetchResults', {}).get('date')
     
     if not date:
         raise ValueError("Date not provided in event")
     
     logger.info(f"📅 Aggregating results for date: {date}")
-    logger.info(f"📋 Processing {len(match_results)} match results")
+    logger.info(f"📋 Processing {len(sec_match_results)} SEC, {len(house_match_results)} House, {len(senate_match_results)} Senate results")
+    logger.info(f"📊 Total: {len(all_match_results)} match results")
+    
+    # Filter out failed downloads (success: false)
+    valid_results = [r for r in all_match_results if r.get('success') is not False]
     
     # Aggregate all matched trades and count unmatched
     all_matched_trades = []
     total_unmatched = 0
     
-    for result in match_results:
+    for result in valid_results:
         matched_trades = result.get('matchedTrades', [])
         unmatched_count = result.get('unmatchedCount', 0)
         

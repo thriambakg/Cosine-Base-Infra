@@ -757,7 +757,15 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
                         trades.append(trade)
         
         form_name = f"Form {form_number}" if form_number else "Form 4"
-        logger.info(f"✅ Extracted {len(trades)} trades/ownership records from HTML {form_name}")
+        if len(trades) == 0:
+            logger.warning(f"⚠️ No trades/ownership records extracted from HTML {form_name} in {s3_key}")
+            logger.debug(f"   Filer name extracted: {filer_name}")
+            logger.debug(f"   Issuer: {issuer_name}, Ticker: {ticker}, Filing Date: {filing_date}")
+        else:
+            logger.info(f"✅ Extracted {len(trades)} trades/ownership records from HTML {form_name}")
+            # Log first trade as example
+            if trades:
+                logger.debug(f"   Example trade: {trades[0]}")
         
     except Exception as e:
         logger.error(f"❌ Error parsing SEC form HTML {s3_key}: {e}")
@@ -794,16 +802,24 @@ def lambda_handler(event, context):
         raise ValueError("S3_BUCKET environment variable not set")
     
     # Extract file info from event
-    s3_key = event.get('s3Key')
+    # Support both SEC form format and PTR format
+    s3_key = event.get('s3Key') or event.get('s3_key')
     form_type = event.get('formType') or event.get('form_type')
-    filing_date = event.get('filingDate') or event.get('date', '')
+    filing_date = event.get('filingDate') or event.get('filing_date') or event.get('date', '')
+    
     # Determine source from form type or explicit source field
+    # PTRs come with form_type='house_ptr' or 'senate_ptr'
     if form_type and ('house' in form_type.lower() or 'house_ptr' in form_type.lower()):
         source = 'house'
     elif form_type and ('senate' in form_type.lower() or 'senate_ptr' in form_type.lower()):
         source = 'senate'
     else:
         source = event.get('source', 'sec')  # sec, house, or senate
+    
+    # For PTRs, s3_key might be directly in the event (from fetcher)
+    if not s3_key and source in ['house', 'senate']:
+        s3_key = event.get('s3_key')
+    
     cik = event.get('cik')
     
     # Check if this is a failed download (from downloader Lambda error handling)
@@ -903,6 +919,10 @@ def lambda_handler(event, context):
         matched_trades = []
         unmatched_count = 0
         
+        logger.info(f"📊 Processing {len(trades)} extracted trades/ownership records")
+        if len(trades) == 0:
+            logger.warning(f"⚠️ No trades/ownership records extracted from {s3_key}. File may contain no transactions or parsing failed.")
+        
         for trade in trades:
             if source == 'sec':
                 filer_name = trade.get('filerName')
@@ -910,6 +930,11 @@ def lambda_handler(event, context):
                     continue
                 
                 matched_politician = find_matching_politician(filer_name, politicians)
+                
+                if matched_politician:
+                    logger.info(f"✅ Matched filer '{filer_name}' to politician: {matched_politician['name']}")
+                else:
+                    logger.debug(f"❌ No politician match found for filer: {filer_name}")
                 
                 if matched_politician:
                     matched_trade = {
