@@ -172,30 +172,59 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
                 items_before_date_filter = len(items)
                 items_matching_date = 0
                 
-                for item in items:
+                for item_index, item in enumerate(items):
                     try:
-                        # Extract filing date
+                        # Extract filing date - SEC uses Atom format with 'updated' field
                         pub_date_elem = None
-                        for tag_name in ['pubDate', 'date', '{http://purl.org/dc/elements/1.1/}date']:
+                        for tag_name in [
+                            '{http://www.w3.org/2005/Atom}updated',  # Atom format (SEC uses this)
+                            'pubDate',  # RSS format
+                            'date',  # Generic
+                            '{http://purl.org/dc/elements/1.1/}date'  # Dublin Core
+                        ]:
                             pub_date_elem = item.find(tag_name)
                             if pub_date_elem is not None:
                                 break
                         
+                        # Log item structure for first few items to debug
+                        if item_index < 3:
+                            # Get all child element tags
+                            child_tags = [child.tag for child in item]
+                            logger.info(f"🔍 RSS item #{item_index} child tags: {child_tags}")
+                            if pub_date_elem is not None:
+                                logger.info(f"✅ Found date element: tag='{pub_date_elem.tag}', text='{pub_date_elem.text}'")
+                            else:
+                                logger.warning(f"⚠️ No date element found in item #{item_index}")
+                        
                         if pub_date_elem is None or not pub_date_elem.text:
+                            if item_index < 3:
+                                logger.debug(f"⏭️ Skipping item #{item_index}: no date element or empty text")
                             continue
                         
                         # Parse date (format: "Wed, 30 Oct 2025 16:30:00 EST")
                         try:
                             # Common RSS date formats
                             date_formats = [
-                                '%a, %d %b %Y %H:%M:%S %Z',
+                                '%Y-%m-%dT%H:%M:%S%z',  # Atom format: 2025-10-31T12:00:00-04:00
+                                '%Y-%m-%dT%H:%M:%SZ',  # Atom format: 2025-10-31T12:00:00Z
+                                '%Y-%m-%dT%H:%M:%S',  # Atom format: 2025-10-31T12:00:00
+                                '%a, %d %b %Y %H:%M:%S %Z',  # RSS format
                                 '%a, %d %b %Y %H:%M:%S %z',
+                                '%a, %d %b %Y %H:%M:%S',
                                 '%Y-%m-%d',
-                                '%Y-%m-%d %H:%M:%S'
+                                '%Y-%m-%d %H:%M:%S',
+                                '%d %b %Y',
+                                '%b %d, %Y',
+                                '%m/%d/%Y',
+                                '%Y/%m/%d'
                             ]
                             
                             filing_date_str = pub_date_elem.text.strip()
                             filing_date = None
+                            
+                            # Log first few date strings we encounter for debugging (before parsing)
+                            if item_index < 3:
+                                logger.info(f"🔍 Raw date string from RSS item #{item_index}: '{filing_date_str}'")
                             
                             for fmt in date_formats:
                                 try:
@@ -205,13 +234,22 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
                                     continue
                             
                             if not filing_date:
-                                # Try parsing with dateutil (if available) or skip
+                                # Log failed date parsing for first few items
+                                if item_index < 3:
+                                    logger.warning(f"⚠️ Could not parse date: '{filing_date_str}' with any standard format")
                                 continue
+                            
+                            # Log parsed date for first few items
+                            if item_index < 3:
+                                logger.info(f"📅 Parsed date: {filing_date} (target: {target_date})")
                             
                             # Compare dates (YYYY-MM-DD format)
                             target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
                             
                             if filing_date != target_date_obj:
+                                # Log why we're skipping for first few items
+                                if item_index < 3:
+                                    logger.debug(f"⏭️ Skipping: filing_date={filing_date}, target={target_date_obj}")
                                 continue  # Skip if not matching target date
                             
                             items_matching_date += 1
@@ -221,16 +259,26 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
                             continue
                         
                         # Extract link/guid to get CIK and accession number
+                        # Atom format uses <link href="..."/> with href attribute, RSS uses text content
                         link_elem = None
-                        for tag_name in ['link', 'guid', '{http://www.w3.org/2005/Atom}link']:
+                        filing_url = None
+                        
+                        for tag_name in ['{http://www.w3.org/2005/Atom}link', 'link', 'guid']:
                             link_elem = item.find(tag_name)
                             if link_elem is not None:
                                 break
                         
-                        if link_elem is None or not link_elem.text:
-                            continue
+                        if link_elem is not None:
+                            # Atom links use href attribute, RSS links use text content
+                            if link_elem.get('href'):
+                                filing_url = link_elem.get('href').strip()
+                            elif link_elem.text:
+                                filing_url = link_elem.text.strip()
                         
-                        filing_url = link_elem.text.strip()
+                        if not filing_url:
+                            if item_index < 3:
+                                logger.debug(f"⚠️ Could not extract link URL from item #{item_index}")
+                            continue
                         
                         # Extract CIK and accession number from URL
                         # Format: https://www.sec.gov/cgi-bin/viewer?action=view&cik={CIK}&accession_number={ACCESSION}&xbrl_type=v
@@ -414,13 +462,23 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                     
                     logger.info(f"✅ Successfully downloaded: {file_url}")
                     break
+                else:
+                    logger.debug(f"⚠️ HTTP {response.status_code} for {file_url}, trying next extension...")
                     
             except requests.exceptions.RequestException as e:
                 logger.debug(f"⚠️ Could not download {file_url}: {e}")
                 continue
         
         if not file_content:
+            # Log more details about what we tried
+            attempted_urls = []
+            for ext, ct in file_extensions:
+                if filename.endswith(ext):
+                    attempted_urls.append(f"{base_url}/{filename}")
+                else:
+                    attempted_urls.append(f"{base_url}/{accession_dashed}{ext}")
             logger.error(f"❌ Could not download form for CIK {cik}, accession {accession_dashed}")
+            logger.error(f"   Attempted URLs: {attempted_urls}")
             return None
         
         # Generate S3 key
@@ -490,23 +548,22 @@ def lambda_handler(event, context):
     }
     
     try:
-        # Step 1: Fetch SEC Forms (3, 4, 5)
+        # Step 1: Fetch SEC Forms (3, 4, 5) - only metadata, no downloads
         logger.info("📋 Fetching SEC Forms 3, 4, 5...")
         sec_forms = fetch_sec_forms(target_date)
         
-        # Download and store each form
+        # Return metadata for parallel downloading (done by separate Lambda)
         for form_data in sec_forms:
-            s3_key = download_and_store_sec_form(form_data, target_date)
-            if s3_key:
-                results['secForms'].append({
-                    'formType': form_data.get('form_type'),
-                    'cik': form_data.get('cik'),
-                    'filingDate': target_date,
-                    's3Key': s3_key
-                })
-                results['secFormsFetched'] += 1
+            results['secForms'].append({
+                'formType': form_data.get('form_type'),
+                'cik': form_data.get('cik'),
+                'accessionNumber': form_data.get('accession_number'),
+                'filename': form_data.get('filename'),
+                'filingDate': target_date
+            })
+            results['secFormsFetched'] += 1
         
-        logger.info(f"✅ Fetched {results['secFormsFetched']} SEC forms")
+        logger.info(f"✅ Found {results['secFormsFetched']} SEC forms for download")
         
         # Step 2: Fetch House PTRs
         logger.info("🏛️ Fetching House PTRs...")

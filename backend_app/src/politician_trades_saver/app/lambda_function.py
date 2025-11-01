@@ -153,7 +153,8 @@ def lambda_handler(event, context):
     table = dynamodb.Table(DYNAMODB_TABLE_NAME)
     
     # Get input from previous step
-    match_results = event.get('matchResults') or event
+    # Support both old format (matchResults) and new format (aggregateResults)
+    match_results = event.get('aggregateResults') or event.get('matchResults') or event
     matched_trades = match_results.get('matchedTrades', [])
     date = match_results.get('date')
     

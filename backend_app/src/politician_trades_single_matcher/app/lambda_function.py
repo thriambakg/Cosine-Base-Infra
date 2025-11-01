@@ -1,8 +1,6 @@
 """
-Politician Trades Matcher Lambda
-Parses SEC forms and Congressional PTRs, extracts trades, and matches to politicians
-
-This is Step 2 of the 3-step politician trades aggregation workflow.
+Lambda function to match trades from a single SEC form or PTR file to politicians.
+This function is invoked in parallel via Step Functions Map state.
 """
 
 import json
@@ -29,6 +27,7 @@ S3_BUCKET = os.environ.get('S3_BUCKET')
 # Name matching threshold (0.0 to 1.0)
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
 
+
 def load_politician_list() -> List[Dict[str, Any]]:
     """
     Load congress-legislators CSV from S3
@@ -36,8 +35,6 @@ def load_politician_list() -> List[Dict[str, Any]]:
     Returns:
         List of politician dicts with name, party, position, url, and alternativeNames
     """
-    logger.info("📋 Loading congress-legislators list from S3")
-    
     try:
         # Download congress-legislators.csv from S3
         response = s3_client.get_object(
@@ -97,23 +94,16 @@ def load_politician_list() -> List[Dict[str, Any]]:
                 'district': row.get('district', '').strip() if row.get('district') else None
             })
         
-        logger.info(f"✅ Loaded {len(politicians)} legislators from CSV")
         return politicians
         
     except Exception as e:
         logger.error(f"❌ Error loading congress-legislators list: {e}")
         return []
 
+
 def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     """
     Fuzzy match a filer name to a politician using Levenshtein distance
-    
-    Args:
-        filer_name: Name from SEC form or PTR
-        politician: Politician dict with name and alternativeNames
-        
-    Returns:
-        Similarity score (0.0 to 1.0)
     """
     # Normalize names (lowercase, strip)
     filer_normalized = filer_name.lower().strip()
@@ -137,16 +127,10 @@ def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     
     return similarity
 
+
 def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """
     Find best matching politician for a filer name
-    
-    Args:
-        filer_name: Name from form
-        politicians: List of politician dicts
-        
-    Returns:
-        Best matching politician dict or None
     """
     best_match = None
     best_score = 0.0
@@ -166,18 +150,11 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]])
     
     return None
 
+
 def parse_sec_form_xml(s3_key: str) -> List[Dict[str, Any]]:
     """
     Parse SEC Form XML and extract trade data
-    
-    Args:
-        s3_key: S3 key of the form XML
-        
-    Returns:
-        List of trade dicts extracted from form
     """
-    logger.info(f"📄 Parsing SEC form XML: {s3_key}")
-    
     trades = []
     
     try:
@@ -187,20 +164,6 @@ def parse_sec_form_xml(s3_key: str) -> List[Dict[str, Any]]:
         
         # Parse XML
         root = ET.fromstring(xml_content)
-        
-        # SEC forms have complex XML structure
-        # Form 4 structure example:
-        # <ownershipDocument>
-        #   <reportingOwner>
-        #     <reportingOwnerId>
-        #       <rptOwnerName>
-        #   <nonDerivativeTable>
-        #     <nonDerivativeTransaction>
-        #       <transactionDate>
-        #       <transactionCode>
-        #       <securityTitle>
-        #       <transactionShares>
-        #       <transactionPricePerShare>
         
         # Extract filer name
         filer_name = None
@@ -215,9 +178,7 @@ def parse_sec_form_xml(s3_key: str) -> List[Dict[str, Any]]:
         # Extract transactions
         # Note: SEC XML is complex with namespaces - this is simplified
         # Full implementation would need to handle all transaction types
-        # (Purchases, Sales, Grants, Exercises, Conversions, etc.)
         
-        # For now, return placeholder structure
         logger.info(f"✅ Extracted filer name: {filer_name}")
         
     except Exception as e:
@@ -225,18 +186,11 @@ def parse_sec_form_xml(s3_key: str) -> List[Dict[str, Any]]:
     
     return trades
 
+
 def parse_sec_form_pdf(s3_key: str) -> List[Dict[str, Any]]:
     """
     Parse SEC Form PDF and extract trade data
-    
-    Args:
-        s3_key: S3 key of the form PDF
-        
-    Returns:
-        List of trade dicts extracted from form
     """
-    logger.info(f"📄 Parsing SEC form PDF: {s3_key}")
-    
     trades = []
     
     try:
@@ -245,12 +199,6 @@ def parse_sec_form_pdf(s3_key: str) -> List[Dict[str, Any]]:
         pdf_content = response['Body'].read()
         
         # Note: PDF parsing requires AWS Textract or pdf parsing library
-        # For now, this is a placeholder
-        # Full implementation would:
-        # 1. Use AWS Textract to extract text
-        # 2. Parse structured data from text
-        # 3. Extract filer name, transaction details, etc.
-        
         logger.warning("⚠️ PDF parsing not fully implemented - requires Textract or pdf library")
         
     except Exception as e:
@@ -258,18 +206,11 @@ def parse_sec_form_pdf(s3_key: str) -> List[Dict[str, Any]]:
     
     return trades
 
+
 def parse_house_ptr(s3_key: str) -> List[Dict[str, Any]]:
     """
     Parse House PTR PDF and extract trade data
-    
-    Args:
-        s3_key: S3 key of the House PTR PDF
-        
-    Returns:
-        List of trade dicts extracted from PTR
     """
-    logger.info(f"📄 Parsing House PTR: {s3_key}")
-    
     trades = []
     
     try:
@@ -278,9 +219,6 @@ def parse_house_ptr(s3_key: str) -> List[Dict[str, Any]]:
         pdf_content = response['Body'].read()
         
         # Note: Similar to SEC PDF parsing - requires Textract or pdf library
-        # House PTRs have different format than SEC forms
-        # Would need to extract: representative name, transaction date, security, amount
-        
         logger.warning("⚠️ House PTR PDF parsing not fully implemented")
         
     except Exception as e:
@@ -288,18 +226,11 @@ def parse_house_ptr(s3_key: str) -> List[Dict[str, Any]]:
     
     return trades
 
+
 def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
     """
     Parse Senate PTR PDF and extract trade data
-    
-    Args:
-        s3_key: S3 key of the Senate PTR PDF
-        
-    Returns:
-        List of trade dicts extracted from PTR
     """
-    logger.info(f"📄 Parsing Senate PTR: {s3_key}")
-    
     trades = []
     
     try:
@@ -308,8 +239,6 @@ def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
         pdf_content = response['Body'].read()
         
         # Note: Similar to House PTR parsing
-        # Senate PTRs have different format
-        
         logger.warning("⚠️ Senate PTR PDF parsing not fully implemented")
         
     except Exception as e:
@@ -317,92 +246,175 @@ def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
     
     return trades
 
-def list_s3_files_by_prefix(prefix: str) -> List[str]:
-    """
-    List all S3 object keys with the given prefix
-    
-    Args:
-        prefix: S3 key prefix (e.g., "trades/2024-01-15/sec/")
-        
-    Returns:
-        List of S3 keys
-    """
-    keys = []
-    paginator = s3_client.get_paginator('list_objects_v2')
-    
-    try:
-        for page in paginator.paginate(Bucket=S3_BUCKET, Prefix=prefix):
-            if 'Contents' in page:
-                for obj in page['Contents']:
-                    keys.append(obj['Key'])
-        
-        logger.info(f"📁 Found {len(keys)} files in S3 prefix: {prefix}")
-        return keys
-        
-    except Exception as e:
-        logger.error(f"❌ Error listing S3 files with prefix {prefix}: {e}")
-        return []
 
 def lambda_handler(event, context):
     """
-    Lambda handler for aggregating matched trades from parallel processing
+    Lambda handler for matching trades from a single file to politicians
     
-    Expected input from Step Functions (after Map state):
+    Expected input (from Step Functions Map state):
     {
-        "matchResults": [
-            {
-                "matchedTrades": [...],
-                "unmatchedCount": 0,
-                "s3Key": "...",
-                "formType": "..."
-            },
-            ...
-        ],
-        "date": "2024-01-15"
+        "s3Key": "trades/2024-01-15/sec/form4-1234567-2024-01-15.xml",
+        "formType": "form4",
+        "cik": "1234567",
+        "filingDate": "2024-01-15",
+        "source": "sec"  // or "house" or "senate"
     }
     
     Returns:
     {
-        "date": "2024-01-15",
         "matchedTrades": [...],
-        "totalMatched": 45,
-        "unmatchedForms": 3
+        "unmatchedCount": 0,
+        "s3Key": "...",
+        "formType": "..."
     }
     """
-    logger.info("🚀 Politician Trades Aggregator Lambda started")
+    logger.info(f"🚀 Politician Trades Single Matcher Lambda started: {json.dumps(event)}")
     
-    # Get match results from parallel processing
-    match_results = event.get('matchResults', [])
-    date = event.get('date') or event.get('fetchResults', {}).get('date')
+    if not S3_BUCKET:
+        raise ValueError("S3_BUCKET environment variable not set")
     
-    if not date:
-        raise ValueError("Date not provided in event")
+    # Extract file info from event
+    s3_key = event.get('s3Key')
+    form_type = event.get('formType') or event.get('form_type')
+    filing_date = event.get('filingDate') or event.get('date', '')
+    # Determine source from form type or explicit source field
+    if form_type and ('house' in form_type.lower() or 'house_ptr' in form_type.lower()):
+        source = 'house'
+    elif form_type and ('senate' in form_type.lower() or 'senate_ptr' in form_type.lower()):
+        source = 'senate'
+    else:
+        source = event.get('source', 'sec')  # sec, house, or senate
+    cik = event.get('cik')
     
-    logger.info(f"📅 Aggregating results for date: {date}")
-    logger.info(f"📋 Processing {len(match_results)} match results")
-    
-    # Aggregate all matched trades and count unmatched
-    all_matched_trades = []
-    total_unmatched = 0
-    
-    for result in match_results:
-        matched_trades = result.get('matchedTrades', [])
-        unmatched_count = result.get('unmatchedCount', 0)
-        
-        all_matched_trades.extend(matched_trades)
-        total_unmatched += unmatched_count
-    
-    logger.info(f"✅ Aggregated {len(all_matched_trades)} matched trades")
-    logger.info(f"⚠️ {total_unmatched} files/trades could not be matched")
+    if not s3_key:
+        logger.warning("⚠️ No s3Key provided in event")
+        return {
+            "matchedTrades": [],
+            "unmatchedCount": 0,
+            "s3Key": None,
+            "formType": form_type
+        }
     
     try:
+        # Load politician list
+        logger.info("📋 Loading congress-legislators list from S3")
+        politicians = load_politician_list()
+        if not politicians:
+            raise ValueError("Failed to load congress-legislators.csv from S3")
+        
+        logger.info(f"✅ Loaded {len(politicians)} legislators")
+        
+        # Parse the form/PTR file
+        trades = []
+        if source == 'sec':
+            if s3_key.endswith('.xml'):
+                trades = parse_sec_form_xml(s3_key)
+            elif s3_key.endswith('.pdf'):
+                trades = parse_sec_form_pdf(s3_key)
+            else:
+                logger.warning(f"⚠️ Unknown file type for {s3_key}")
+                return {
+                    "matchedTrades": [],
+                    "unmatchedCount": 1,
+                    "s3Key": s3_key,
+                    "formType": form_type
+                }
+        elif source == 'house':
+            trades = parse_house_ptr(s3_key)
+        elif source == 'senate':
+            trades = parse_senate_ptr(s3_key)
+        else:
+            logger.warning(f"⚠️ Unknown source type: {source}")
+            return {
+                "matchedTrades": [],
+                "unmatchedCount": 1,
+                "s3Key": s3_key,
+                "formType": form_type
+            }
+        
+        # Match trades to politicians
+        matched_trades = []
+        unmatched_count = 0
+        
+        for trade in trades:
+            if source == 'sec':
+                filer_name = trade.get('filerName')
+                if not filer_name:
+                    continue
+                
+                matched_politician = find_matching_politician(filer_name, politicians)
+                
+                if matched_politician:
+                    matched_trade = {
+                        'tradeId': f"trade_{filing_date}_{cik or 'unknown'}_{len(matched_trades)}",
+                        'politicianName': matched_politician['name'],
+                        'party': matched_politician['party'],
+                        'position': matched_politician['position'],
+                        'websiteUrl': matched_politician.get('websiteUrl'),
+                        'formType': form_type,
+                        'filingDate': filing_date,
+                        'transactionDate': trade.get('transactionDate'),
+                        'transactionTime': trade.get('transactionTime'),
+                        'securitySymbol': trade.get('securitySymbol'),
+                        'securityName': trade.get('securityName'),
+                        'transactionType': trade.get('transactionType'),
+                        'shares': trade.get('shares'),
+                        'pricePerShare': trade.get('pricePerShare'),
+                        'totalAmount': trade.get('totalAmount'),
+                        'formCIK': cik,
+                        'formS3Key': s3_key,
+                        'matchConfidence': matched_politician.get('matchScore', 1.0),
+                        'source': 'sec'
+                    }
+                    matched_trades.append(matched_trade)
+                else:
+                    unmatched_count += 1
+            else:  # house or senate
+                politician_name = trade.get('politicianName')
+                if politician_name:
+                    matched_politician = find_matching_politician(politician_name, politicians)
+                    if matched_politician:
+                        matched_trade = {
+                            'tradeId': f"trade_{filing_date}_{source}_{len(matched_trades)}",
+                            'politicianName': matched_politician['name'],
+                            'party': matched_politician['party'],
+                            'position': matched_politician['position'],
+                            'websiteUrl': matched_politician.get('websiteUrl'),
+                            'formType': form_type or f'{source}_ptr',
+                            'filingDate': filing_date,
+                            'transactionDate': trade.get('transactionDate'),
+                            'transactionTime': trade.get('transactionTime'),
+                            'securitySymbol': trade.get('securitySymbol'),
+                            'securityName': trade.get('securityName'),
+                            'transactionType': trade.get('transactionType'),
+                            'shares': trade.get('shares'),
+                            'pricePerShare': trade.get('pricePerShare'),
+                            'totalAmount': trade.get('totalAmount'),
+                            'formS3Key': s3_key,
+                            'matchConfidence': 1.0,
+                            'source': source
+                        }
+                        matched_trades.append(matched_trade)
+                    else:
+                        unmatched_count += 1
+        
+        logger.info(f"✅ Matched {len(matched_trades)} trades from {s3_key}")
+        
         return {
-            "date": date,
-            "matchedTrades": all_matched_trades,
-            "totalMatched": len(all_matched_trades),
-            "unmatchedForms": total_unmatched
+            "matchedTrades": matched_trades,
+            "unmatchedCount": unmatched_count,
+            "s3Key": s3_key,
+            "formType": form_type,
+            "source": source
         }
+        
     except Exception as e:
-        logger.error(f"❌ Fatal error in aggregator Lambda: {e}")
-        raise
+        logger.error(f"❌ Error in single matcher Lambda: {e}")
+        return {
+            "matchedTrades": [],
+            "unmatchedCount": 1,
+            "s3Key": s3_key,
+            "formType": form_type,
+            "error": str(e)
+        }
 

@@ -1683,7 +1683,75 @@ module "politician_trades_fetcher" {
   depends_on = [module.politician_trades_s3]
 }
 
-# Lambda 2: Match Trades to Politicians
+# Lambda 2: Download SEC Forms (parallel processing)
+module "politician_trades_downloader" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-politician-trades-downloader-${var.environment}"
+  description   = "Downloads a single SEC form and stores it in S3 (invoked in parallel)"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 60 # 1 minute per form
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/politician_trades_downloader/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET = module.politician_trades_s3.bucket_id
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    aws_iam_policy.lambda_politician_trades_s3_policy.arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.politician_trades_s3]
+}
+
+# Lambda 3: Match Trades to Politicians (single file, parallel processing)
+module "politician_trades_single_matcher" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-politician-trades-single-matcher-${var.environment}"
+  description   = "Matches trades from a single file to politicians (invoked in parallel)"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 300  # 5 minutes per file (for PDF parsing)
+  memory_size   = 2048 # Higher memory for PDF parsing and text processing
+
+  source_dir = "${path.module}/../backend_app/src/politician_trades_single_matcher/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET = module.politician_trades_s3.bucket_id
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    aws_iam_policy.lambda_politician_trades_s3_policy.arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.politician_trades_s3]
+}
+
+# Lambda 4: Aggregate Matched Trades
 module "politician_trades_matcher" {
   source = "./modules/lambda"
 
@@ -1717,7 +1785,7 @@ module "politician_trades_matcher" {
   depends_on = [module.politician_trades_s3]
 }
 
-# Lambda 3: Save Trades to Database
+# Lambda 5: Save Trades to Database
 module "politician_trades_saver" {
   source = "./modules/lambda"
 
@@ -1758,18 +1826,18 @@ module "politician_trades_state_machine" {
   state_machine_name = "${var.project_name}-politician-trades-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition with 3 steps
+  # Step Functions definition with 4 steps (parallel downloads)
   definition = jsonencode({
-    Comment = "Daily politician trades aggregation - fetch forms, match trades, save to database"
-    StartAt = "FetchForms"
+    Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database"
+    StartAt = "FetchFormMetadata"
     States = {
-      # Step 1: Fetch SEC Forms and Congressional PTRs
-      FetchForms = {
+      # Step 1: Fetch SEC Forms and Congressional PTRs metadata (no downloads)
+      FetchFormMetadata = {
         Type       = "Task"
         Resource   = module.politician_trades_fetcher.function_arn
-        Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) and store in S3"
+        Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) metadata"
         ResultPath = "$.fetchResults"
-        Next       = "MatchTrades"
+        Next       = "DownloadForms"
         Retry = [
           {
             ErrorEquals     = ["States.ALL"]
@@ -1790,15 +1858,127 @@ module "politician_trades_state_machine" {
       FetchFormsFailed = {
         Type  = "Fail"
         Error = "FetchFormsFailed"
-        Cause = "Failed to fetch SEC forms or Congressional PTRs"
+        Cause = "Failed to fetch SEC forms or Congressional PTRs metadata"
       }
 
-      # Step 2: Match Trades to Politicians
+      # Step 2: Download SEC forms in parallel
+      DownloadForms = {
+        Type           = "Map"
+        Comment        = "Download SEC forms in parallel using Map state"
+        ItemsPath      = "$.fetchResults.secForms"
+        MaxConcurrency = 50
+        Iterator = {
+          StartAt = "DownloadForm"
+          States = {
+            DownloadForm = {
+              Type     = "Task"
+              Resource = module.politician_trades_downloader.function_arn
+              Comment  = "Download a single SEC form"
+              Retry = [
+                {
+                  ErrorEquals     = ["States.ALL"]
+                  IntervalSeconds = 5
+                  MaxAttempts     = 2
+                  BackoffRate     = 2.0
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  ResultPath  = "$.error"
+                  Next        = "DownloadFailed"
+                }
+              ]
+              End = true
+            }
+            DownloadFailed = {
+              Type    = "Pass"
+              Comment = "Continue even if download fails (log error)"
+              Result  = { "success" : false, "error" : "Download failed" }
+              End     = true
+            }
+          }
+        }
+        ResultPath = "$.downloadResults"
+        Next       = "TransformDownloadResults"
+      }
+
+      # Transform download results to match matcher expectations
+      # Note: We pass downloadResults directly - matcher will filter successful downloads
+      # Matcher expects: fetchResults.secForms = [{ s3Key, formType, cik, filingDate }]
+      TransformDownloadResults = {
+        Type    = "Pass"
+        Comment = "Restructure download results for matcher Lambda"
+        Parameters = {
+          "date.$" : "$.fetchResults.date",
+          "fetchResults" : {
+            "date.$" : "$.fetchResults.date",
+            "secForms.$" : "$.downloadResults",
+            "housePTRs.$" : "$.fetchResults.housePTRs",
+            "senatePTRs.$" : "$.fetchResults.senatePTRs"
+          }
+        }
+        Next = "MatchTrades"
+      }
+
+      # Step 3: Match Trades to Politicians (parallel)
       MatchTrades = {
+        Type           = "Map"
+        Comment        = "Match trades from each file to politicians in parallel"
+        ItemsPath      = "$.fetchResults.secForms"
+        MaxConcurrency = 50
+        Iterator = {
+          StartAt = "MatchFile"
+          States = {
+            MatchFile = {
+              Type     = "Task"
+              Resource = module.politician_trades_single_matcher.function_arn
+              Comment  = "Match trades from a single file to politicians"
+              Retry = [
+                {
+                  ErrorEquals     = ["States.ALL"]
+                  IntervalSeconds = 10
+                  MaxAttempts     = 2
+                  BackoffRate     = 2.0
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  ResultPath  = "$.error"
+                  Next        = "MatchFailed"
+                }
+              ]
+              End = true
+            }
+            MatchFailed = {
+              Type    = "Pass"
+              Comment = "Continue even if matching fails (log error)"
+              Result  = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
+              End     = true
+            }
+          }
+        }
+        ResultPath = "$.matchResults"
+        Next       = "AggregateMatches"
+      }
+
+      # Aggregate match results
+      AggregateMatches = {
+        Type    = "Pass"
+        Comment = "Prepare data for aggregator Lambda"
+        Parameters = {
+          "matchResults.$" : "$.matchResults",
+          "date.$" : "$.fetchResults.date"
+        }
+        Next = "AggregateMatchesTask"
+      }
+
+      AggregateMatchesTask = {
         Type       = "Task"
         Resource   = module.politician_trades_matcher.function_arn
-        Comment    = "Parse forms, extract trades, match to politicians using fuzzy name matching"
-        ResultPath = "$.matchResults"
+        Comment    = "Aggregate matched trades from all files"
+        ResultPath = "$.aggregateResults"
         Next       = "SaveTrades"
         Retry = [
           {
@@ -1823,7 +2003,7 @@ module "politician_trades_state_machine" {
         Cause = "Failed to match trades to politicians"
       }
 
-      # Step 3: Save Trades to Database
+      # Step 4: Save Trades to Database
       SaveTrades = {
         Type       = "Task"
         Resource   = module.politician_trades_saver.function_arn
