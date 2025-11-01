@@ -6,6 +6,7 @@ This function is invoked in parallel via Step Functions Map state.
 import json
 import os
 import logging
+import re
 import boto3
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -151,6 +152,52 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]])
     return None
 
 
+def sanitize_xml_content(content: bytes) -> bytes:
+    """
+    Clean up XML content to handle SGML headers and malformed XML
+    """
+    try:
+        # Try to decode as UTF-8
+        text = content.decode('utf-8', errors='ignore')
+    except:
+        # Fallback to latin-1 or other encoding
+        text = content.decode('latin-1', errors='ignore')
+    
+    # Remove SGML header if present (everything before <?xml or <ownershipDocument)
+    # SGML headers typically look like: <SEC-HEADER>...</SEC-HEADER>
+    if '<SEC-HEADER>' in text.upper() or '<ACCEPTANCE-DATETIME>' in text.upper():
+        # Find the start of the actual XML document
+        xml_start_patterns = [
+            r'<\?xml',
+            r'<ownershipDocument',
+            r'<document',
+            r'<edgarDocument',
+        ]
+        
+        for pattern in xml_start_patterns:
+            match = re.search(pattern, text, re.IGNORECASE)
+            if match:
+                text = text[match.start():]
+                logger.info(f"🔧 Removed SGML header, found XML at position {match.start()}")
+                break
+    
+    # Fix common XML encoding issues
+    # Replace smart quotes and other problematic characters
+    text = text.replace('\x92', "'")  # Smart apostrophe
+    text = text.replace('\x93', '"')  # Smart quote left
+    text = text.replace('\x94', '"')  # Smart quote right
+    text = text.replace('\x96', '-')  # En dash
+    text = text.replace('\x97', '--')  # Em dash
+    
+    # Remove control characters that can break XML parsing (except newlines, tabs, carriage returns)
+    text = ''.join(char for char in text if ord(char) >= 32 or char in '\n\r\t')
+    
+    # Try to fix mismatched tags (basic fix - if a tag is self-closing, ensure it ends with />)
+    # This is a basic fix - full XML repair would require a proper XML repair library
+    
+    return text.encode('utf-8')
+
+
 def parse_sec_form_xml(s3_key: str) -> List[Dict[str, Any]]:
     """
     Parse SEC Form XML and extract trade data
@@ -160,10 +207,34 @@ def parse_sec_form_xml(s3_key: str) -> List[Dict[str, Any]]:
     try:
         # Download XML from S3
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
-        xml_content = response['Body'].read()
+        xml_content_raw = response['Body'].read()
         
-        # Parse XML
-        root = ET.fromstring(xml_content)
+        # Sanitize XML content to handle SGML headers and malformed XML
+        xml_content = sanitize_xml_content(xml_content_raw)
+        
+        # Parse XML - use iterparse for large files, but for now use fromstring
+        try:
+            root = ET.fromstring(xml_content)
+        except ET.ParseError as parse_error:
+            # If parsing fails, try to extract just the XML document part
+            logger.warning(f"⚠️ XML parse error for {s3_key}: {parse_error}. Attempting recovery...")
+            
+            # Try to find and extract the ownershipDocument section
+            text = xml_content.decode('utf-8', errors='ignore')
+            ownership_match = re.search(r'<ownershipDocument.*?</ownershipDocument>', text, re.DOTALL | re.IGNORECASE)
+            if ownership_match:
+                xml_content = ownership_match.group(0).encode('utf-8')
+                root = ET.fromstring(xml_content)
+                logger.info(f"✅ Recovered XML by extracting ownershipDocument section")
+            else:
+                # Try to find any document section
+                doc_match = re.search(r'<document[^>]*>.*?</document>', text, re.DOTALL | re.IGNORECASE)
+                if doc_match:
+                    xml_content = doc_match.group(0).encode('utf-8')
+                    root = ET.fromstring(xml_content)
+                    logger.info(f"✅ Recovered XML by extracting document section")
+                else:
+                    raise parse_error
         
         # Extract filer name
         filer_name = None

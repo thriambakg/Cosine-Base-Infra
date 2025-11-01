@@ -6,6 +6,7 @@ This function is invoked in parallel via Step Functions Map state.
 import json
 import logging
 import os
+import re
 from typing import Dict, Any, Optional
 
 import boto3
@@ -56,45 +57,46 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
         else:
             accession_dashed = accession
         
-        # Determine filename and file type
-        # Try .txt first (most common), then .xml if not found
-        if not filename:
-            filename = f'{accession_dashed}.txt'
-        
         # Build base URL
         base_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_dashed}"
         
         session = requests.Session()
         session.headers.update({'User-Agent': SEC_USER_AGENT})
         
-        # Try to download the file - try .txt first, then .xml
+        # Try to download the file
         file_content = None
         file_ext = None
         content_type = None
         
-        file_extensions = [
-            ('.txt', 'application/xml'),  # .txt files are usually XML content
-            ('.xml', 'application/xml'),
-            ('.pdf', 'application/pdf')
-        ]
+        # Build list of URLs to try
+        # SEC forms are typically available as:
+        # 1. {accession-number}.txt (structured XML content, most common)
+        # 2. {accession-number}.xml
+        # 3. index.htm (HTML page with links to documents)
         
-        # If filename already has extension, try that first
-        if filename.endswith(('.txt', '.xml', '.pdf')):
-            ext = filename[filename.rfind('.'):]
-            for fe, ct in file_extensions:
-                if ext == fe:
-                    file_extensions.insert(0, (fe, ct))
-                    break
+        urls_to_try = []
+        
+        # Priority 1: Try direct .txt file first (most common, contains XML)
+        txt_url = f"{base_url}/{accession_dashed}.txt"
+        urls_to_try.append((txt_url, f"{accession_dashed}.txt"))
+        
+        # Priority 2: Try direct .xml file
+        xml_url = f"{base_url}/{accession_dashed}.xml"
+        urls_to_try.append((xml_url, f"{accession_dashed}.xml"))
+        
+        # Priority 3: If RSS feed provided a filename, try it (might be index.htm)
+        if filename and filename not in [f"{accession_dashed}.txt", f"{accession_dashed}.xml"]:
+            file_url = f"{base_url}/{filename}"
+            urls_to_try.append((file_url, filename))
+        
+        # Priority 4: Try PDF as last resort
+        pdf_url = f"{base_url}/{accession_dashed}.pdf"
+        urls_to_try.append((pdf_url, f"{accession_dashed}.pdf"))
         
         failed_attempts = []  # Store failed attempts with status codes
         
-        for ext, ct in file_extensions:
+        for file_url, file_name in urls_to_try:
             try:
-                if filename.endswith(ext):
-                    file_url = f"{base_url}/{filename}"
-                else:
-                    file_url = f"{base_url}/{accession_dashed}{ext}"
-                
                 logger.info(f"📥 Attempting to download: {file_url}")
                 response = session.get(file_url, timeout=30)
                 
@@ -102,19 +104,210 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
                 
                 if response.status_code == 200:
                     file_content = response.content
-                    file_ext = ext[1:]  # Remove the dot
-                    content_type = ct
                     
-                    # For .txt files, check if it's actually XML (common for SEC forms)
-                    if ext == '.txt' and file_content.startswith(b'<?xml'):
+                    # Determine file extension and content type
+                    if file_name.endswith('.htm') or file_name.endswith('.html'):
+                        # For HTML files, try to find the primary document link
+                        # SEC index.htm files contain links to the actual form documents
+                        file_ext = 'html'
+                        content_type = 'text/html'
+                        
+                        # Check if HTML contains document links we should follow
+                        try:
+                            html_text = file_content.decode('utf-8', errors='ignore')
+                            
+                            # SEC HTML typically has a table with document links
+                            # Look for patterns like:
+                            # - href="/Archives/edgar/data/.../{accession}.txt"
+                            # - href="/Archives/edgar/data/.../{accession}.xml"
+                            # - Links to primary-document.xml or similar
+                            # - Document table rows with href attributes
+                            
+                            doc_links = []
+                            
+                            # Pattern 1: Direct links to .txt files (most common)
+                            txt_pattern = rf'href="([^"]*{re.escape(accession_dashed)}\.txt[^"]*)"'
+                            txt_matches = re.findall(txt_pattern, html_text, re.IGNORECASE)
+                            doc_links.extend(txt_matches)
+                            
+                            # Pattern 2: Direct links to .xml files
+                            xml_pattern = rf'href="([^"]*{re.escape(accession_dashed)}\.xml[^"]*)"'
+                            xml_matches = re.findall(xml_pattern, html_text, re.IGNORECASE)
+                            doc_links.extend(xml_matches)
+                            
+                            # Pattern 3: Primary document patterns
+                            primary_patterns = [
+                                r'href="([^"]*primary[_-]?document[^"]*\.xml[^"]*)"',
+                                r'href="([^"]*primarydoc[^"]*\.xml[^"]*)"',
+                                r'href="([^"]*document\.xml[^"]*)"'
+                            ]
+                            for pattern in primary_patterns:
+                                matches = re.findall(pattern, html_text, re.IGNORECASE)
+                                doc_links.extend(matches)
+                            
+                            # Pattern 4: Any .txt or .xml links in the directory
+                            generic_pattern = rf'href="([^"]*/{re.escape(accession_dashed.split("-")[0])}[^"]*\.(?:txt|xml)[^"]*)"'
+                            generic_matches = re.findall(generic_pattern, html_text, re.IGNORECASE)
+                            doc_links.extend(generic_matches)
+                            
+                            # Remove duplicates while preserving order
+                            seen = set()
+                            unique_doc_links = []
+                            for link in doc_links:
+                                if link not in seen:
+                                    seen.add(link)
+                                    unique_doc_links.append(link)
+                            
+                            # Try each found link
+                            for doc_link in unique_doc_links[:5]:  # Limit to first 5 to avoid too many requests
+                                # Handle relative URLs
+                                if doc_link.startswith('/'):
+                                    doc_link = f"https://www.sec.gov{doc_link}"
+                                elif not doc_link.startswith('http'):
+                                    doc_link = f"{base_url}/{doc_link}"
+                                
+                                # Skip if it's the same URL we just tried
+                                if doc_link == file_url:
+                                    continue
+                                
+                                logger.info(f"🔗 Found document link in HTML, trying: {doc_link}")
+                                try:
+                                    doc_response = session.get(doc_link, timeout=30)
+                                    if doc_response.status_code == 200:
+                                        doc_content = doc_response.content
+                                        # Prefer XML/structured content over HTML
+                                        if doc_content.startswith(b'<?xml') or doc_link.endswith('.xml'):
+                                            file_content = doc_content
+                                            file_ext = 'xml'
+                                            content_type = 'application/xml'
+                                            logger.info(f"✅ Successfully extracted XML document from HTML link")
+                                            break
+                                        elif doc_link.endswith('.txt') or doc_content.startswith(b'<'):
+                                            # Check if it's XML content
+                                            if doc_content.startswith(b'<?xml') or (b'<ownershipDocument' in doc_content or b'<document>' in doc_content):
+                                                file_content = doc_content
+                                                file_ext = 'xml'
+                                                content_type = 'application/xml'
+                                                logger.info(f"✅ Successfully extracted XML document from HTML link (.txt file)")
+                                                break
+                                except Exception as doc_error:
+                                    logger.debug(f"⚠️ Could not download document link {doc_link}: {doc_error}")
+                                    continue
+                                    
+                        except Exception as html_parse_error:
+                            logger.warning(f"⚠️ Could not parse HTML for document links: {html_parse_error}")
+                            # If HTML parsing fails, we'll store the HTML (not ideal, but better than nothing)
+                        
+                    elif file_name.endswith('.txt'):
+                        # SEC .txt files are typically XML-structured documents
+                        # But sometimes they're SGML headers or HTML
+                        content_lower = file_content.lower()
+                        
+                        # Check if it's an SGML header file (starts with header tags)
+                        if b'<sec-header' in content_lower or b'<acceptance-datetime' in content_lower or b'.hdr.sgml' in file_content:
+                            # This is an SGML header, not the actual document
+                            logger.warning(f"⚠️ Downloaded file is an SGML header, not the document. Looking for actual document file...")
+                            
+                            # Try to find the actual document file
+                            doc_candidates = [
+                                f"{accession_dashed}-primary-document.xml",
+                                f"{accession_dashed}-primarydoc.xml",
+                                "primary-document.xml",
+                                "doc4.xml",  # Common document file
+                                "doc1.xml",
+                                "doc2.xml",
+                                "doc3.xml",
+                                f"{accession_dashed}.xml",
+                            ]
+                            
+                            found_doc = False
+                            for doc_candidate in doc_candidates:
+                                doc_url = f"{base_url}/{doc_candidate}"
+                                try:
+                                    logger.info(f"🔍 Trying document candidate: {doc_url}")
+                                    doc_response = session.get(doc_url, timeout=30)
+                                    if doc_response.status_code == 200:
+                                        doc_content = doc_response.content
+                                        # Check if it's actual XML content
+                                        if doc_content.startswith(b'<?xml') or b'<ownershipDocument' in doc_content or b'<document>' in doc_content:
+                                            file_content = doc_content
+                                            file_ext = 'xml'
+                                            content_type = 'application/xml'
+                                            logger.info(f"✅ Found actual document file: {doc_url}")
+                                            found_doc = True
+                                            break
+                                except Exception as doc_error:
+                                    logger.debug(f"⚠️ Could not download candidate {doc_url}: {doc_error}")
+                                    continue
+                            
+                            if not found_doc:
+                                # If we can't find the document, don't store the SGML header
+                                # Continue to try next URL in urls_to_try (e.g., try .xml file)
+                                logger.warning(f"⚠️ Could not find actual document file for {accession_dashed}, will try next URL option")
+                                file_content = None  # Reset to None so we continue the loop
+                                continue  # Continue to next URL instead of storing SGML header
+                        
+                        elif file_content.startswith(b'<?xml'):
+                            file_ext = 'xml'
+                            content_type = 'application/xml'
+                        elif b'<ownershipDocument' in file_content or b'<document>' in file_content or b'<XBRL>' in file_content:
+                            # XML content without XML declaration
+                            file_ext = 'xml'
+                            content_type = 'application/xml'
+                        elif b'<html' in content_lower or b'<!doctype html' in content_lower:
+                            # This is HTML, not XML - try to extract XML link
+                            logger.warning(f"⚠️ .txt file contains HTML, not XML. File might be misnamed.")
+                            file_ext = 'txt'  # Store as-is, matcher will need to handle HTML
+                            content_type = 'text/html'
+                        else:
+                            # Plain text or unknown format
+                            file_ext = 'txt'
+                            content_type = 'text/plain'
+                    elif file_name.endswith('.xml'):
                         file_ext = 'xml'
                         content_type = 'application/xml'
+                        # Validate it's actually XML
+                        if not (file_content.startswith(b'<?xml') or b'<ownershipDocument' in file_content or b'<document>' in file_content):
+                            logger.warning(f"⚠️ .xml file doesn't appear to contain XML content")
+                    elif file_name.endswith('.pdf'):
+                        file_ext = 'pdf'
+                        content_type = 'application/pdf'
+                    else:
+                        # Try to determine from content
+                        if file_content.startswith(b'<?xml') or b'<ownershipDocument' in file_content or b'<document>' in file_content:
+                            file_ext = 'xml'
+                            content_type = 'application/xml'
+                        elif b'<html' in file_content.lower():
+                            file_ext = 'html'
+                            content_type = 'text/html'
+                            logger.warning(f"⚠️ Downloaded file appears to be HTML, not structured data")
+                        else:
+                            file_ext = 'txt'
+                            content_type = 'text/plain'
                     
-                    logger.info(f"✅ Successfully downloaded: {file_url} ({len(file_content)} bytes)")
-                    break
+                    # Final validation: Check if we got actual document content
+                    # SEC forms should be XML with ownershipDocument or document tags
+                    if file_content and file_ext in ['xml', 'txt']:
+                        content_lower = file_content.lower()
+                        # Check if we have actual form content
+                        if (file_ext == 'xml' and not (
+                            file_content.startswith(b'<?xml') or 
+                            b'<ownershipDocument' in file_content or 
+                            b'<document' in file_content or
+                            b'<xbrl' in content_lower
+                        )):
+                            logger.warning(f"⚠️ XML file doesn't appear to contain form document structure")
+                        elif (file_ext == 'txt' and b'<sec-header' in content_lower):
+                            logger.warning(f"⚠️ Downloaded file is SGML header, actual document not found")
+                    
+                    # Only accept this as successful if we got actual content
+                    # Don't accept HTML/SGML headers as successful downloads of structured data
+                    if file_content:
+                        logger.info(f"✅ Successfully downloaded: {file_url} ({len(file_content)} bytes, type: {file_ext})")
+                        break
                 else:
                     failed_attempts.append(f"{file_url} (HTTP {response.status_code})")
-                    logger.warning(f"⚠️ HTTP {response.status_code} for {file_url}, trying next extension...")
+                    logger.warning(f"⚠️ HTTP {response.status_code} for {file_url}, trying next option...")
                     
             except requests.exceptions.Timeout as e:
                 failed_attempts.append(f"{file_url} (Timeout)")
@@ -127,12 +320,7 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
         
         if not file_content:
             # Log more details about what we tried
-            attempted_urls = []
-            for ext, ct in file_extensions:
-                if filename.endswith(ext):
-                    attempted_urls.append(f"{base_url}/{filename}")
-                else:
-                    attempted_urls.append(f"{base_url}/{accession_dashed}{ext}")
+            attempted_urls = [url for url, _ in urls_to_try]
             error_msg = f"Could not download form - all URLs failed: {failed_attempts}"
             logger.error(f"❌ Could not download form for CIK {cik}, accession {accession_dashed}")
             logger.error(f"   Attempted URLs: {attempted_urls}")
