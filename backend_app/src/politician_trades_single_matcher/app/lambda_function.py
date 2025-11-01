@@ -427,6 +427,23 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
         
         logger.info(f"✅ Extracted filer name from HTML: {filer_name}")
         
+        # Detect form type
+        form_type_match = re.search(r'<title>SEC FORM\s+(\d+)</title>', html_content, re.IGNORECASE)
+        form_number = None
+        if form_type_match:
+            form_number = form_type_match.group(1)
+        else:
+            # Try alternative pattern
+            form_match = re.search(r'FORM\s+(\d+)', html_content, re.IGNORECASE)
+            if form_match:
+                form_number = form_match.group(1)
+        
+        is_form3 = form_number == '3'
+        is_form4 = form_number == '4'
+        is_form5 = form_number == '5'
+        
+        logger.info(f"📋 Detected Form {form_number} (Form 3={is_form3}, Form 4={is_form4}, Form 5={is_form5})")
+        
         # Extract issuer name and ticker
         issuer_match = re.search(r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE)
         issuer_name = issuer_match.group(1).strip() if issuer_match else None
@@ -434,18 +451,33 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
         ticker_match = re.search(r'\[ <span[^>]*>([A-Z0-9]+)</span> \]', html_content)
         ticker = ticker_match.group(1) if ticker_match else None
         
-        # Extract transaction date (earliest transaction date)
-        date_match = re.search(r'Date of Earliest Transaction[^<]*<span[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+        # Extract filing date
         filing_date = None
-        if date_match:
-            try:
-                filing_date_obj = datetime.strptime(date_match.group(1), '%m/%d/%Y')
-                filing_date = filing_date_obj.strftime('%Y-%m-%d')
-            except:
-                pass
         
-        # Parse Table I - Non-Derivative Securities
-        # Table structure: rows in tbody contain transaction data
+        # Form 4 has "Date of Earliest Transaction"
+        if is_form4:
+            date_match = re.search(r'Date of Earliest Transaction[^<]*<span[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+            if date_match:
+                try:
+                    filing_date_obj = datetime.strptime(date_match.group(1), '%m/%d/%Y')
+                    filing_date = filing_date_obj.strftime('%Y-%m-%d')
+                except:
+                    pass
+        
+        # Form 3 has "Date of Event Requiring Statement"
+        if is_form3:
+            date_match = re.search(r'Date of Event Requiring Statement[^<]*<span[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+            if date_match:
+                try:
+                    filing_date_obj = datetime.strptime(date_match.group(1), '%m/%d/%Y')
+                    filing_date = filing_date_obj.strftime('%Y-%m-%d')
+                except:
+                    pass
+        
+        # Parse Table I based on form type
+        # Form 4: "Table I - Non-Derivative Securities Acquired, Disposed of, or Beneficially Owned" (transactions)
+        # Form 3: "Table I - Non-Derivative Securities Beneficially Owned" (ownership snapshot, not transactions)
+        
         table1_pattern = r'Table I[^<]*<tbody>(.*?)</tbody>'
         table1_match = re.search(table1_pattern, html_content, re.IGNORECASE | re.DOTALL)
         
@@ -457,7 +489,10 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
             for row in rows:
                 # Extract data from table cells
                 cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
-                if len(cells) >= 8:
+                
+                # Form 4 has 8+ columns with transaction data
+                # Form 3 has 4 columns with ownership data (no transactions)
+                if is_form4 and len(cells) >= 8:
                     # Clean HTML tags from cell content
                     def clean_cell(cell):
                         # Remove all HTML tags
@@ -474,7 +509,13 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
                     trans_type = clean_cell(cells[6]) if len(cells) > 6 else None  # (A) or (D)
                     price_str = clean_cell(cells[7]) if len(cells) > 7 else None  # Price column
                     
-                    if security_name and trans_date and trans_code:
+                    # Only extract rows that have actual transaction data
+                    # Skip rows that only show ownership (no transaction date/code)
+                    has_transaction = (trans_date and trans_date.strip() and 
+                                     trans_code and trans_code.strip() and
+                                     shares_str and shares_str.strip())
+                    
+                    if security_name and has_transaction:
                         # Parse shares (remove commas)
                         shares = None
                         if shares_str:
@@ -511,11 +552,53 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
                             'shares': shares,
                             'pricePerShare': price,
                             'transactionDirection': trans_type,  # A = Acquired, D = Disposed
-                            'formType': 'form4',
+                            'formType': f'form{form_number}' if form_number else 'form4',
+                        }
+                        trades.append(trade)
+                elif is_form3 and len(cells) >= 4:
+                    # Form 3: Table I shows ownership, not transactions
+                    # Columns: Title, Amount Owned, Ownership Form (D/I), Nature of Indirect Ownership
+                    def clean_cell(cell):
+                        text = re.sub(r'<[^>]+>', '', cell)
+                        text = unescape(text)
+                        return text.strip()
+                    
+                    security_name = clean_cell(cells[0]) if len(cells) > 0 else None
+                    shares_owned_str = clean_cell(cells[1]) if len(cells) > 1 else None
+                    ownership_form = clean_cell(cells[2]) if len(cells) > 2 else None  # D or I
+                    indirect_nature = clean_cell(cells[3]) if len(cells) > 3 else None
+                    
+                    if security_name and shares_owned_str:
+                        # Parse shares owned
+                        shares = None
+                        try:
+                            shares = int(re.sub(r'[,\.]', '', shares_owned_str))
+                        except:
+                            pass
+                        
+                        # Form 3 represents initial ownership at filing date
+                        # Not a transaction, but we can treat it as an "initial acquisition" for tracking
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': security_name,
+                            'transactionDate': filing_date,  # Use filing date as reference
+                            'filingDate': filing_date,
+                            'transactionType': 'I',  # I = Initial Statement
+                            'shares': shares,
+                            'pricePerShare': None,  # Form 3 doesn't have price info
+                            'transactionDirection': 'A',  # Treat as acquisition for initial ownership
+                            'formType': 'form3',
+                            'ownershipForm': ownership_form,
+                            'indirectNature': indirect_nature,
+                            'isInitialOwnership': True,  # Flag to indicate this is ownership, not a transaction
                         }
                         trades.append(trade)
         
-        # Parse Table II - Derivative Securities (options, warrants, etc.)
+        # Parse Table II - Derivative Securities
+        # Form 4: "Table II - Derivative Securities Acquired, Disposed of, or Beneficially Owned" (transactions)
+        # Form 3: "Table II - Derivative Securities Beneficially Owned" (ownership)
         table2_pattern = r'Table II[^<]*<tbody>(.*?)</tbody>'
         table2_match = re.search(table2_pattern, html_content, re.IGNORECASE | re.DOTALL)
         
@@ -525,38 +608,61 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
             
             for row in rows:
                 cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
-                if len(cells) >= 10:
+                
+                # Form 4 has 10+ columns with transaction data
+                # Form 3 has fewer columns (ownership data)
+                if is_form4 and len(cells) >= 10:
                     def clean_cell(cell):
                         text = re.sub(r'<[^>]+>', '', cell)
                         text = unescape(text)
                         return text.strip()
                     
                     derivative_name = clean_cell(cells[0]) if len(cells) > 0 else None
+                    exercise_price_str = clean_cell(cells[1]) if len(cells) > 1 else None  # Conversion/Exercise Price
                     trans_date = clean_cell(cells[2]) if len(cells) > 2 else None
-                    trans_code = clean_cell(cells[4]) if len(cells) > 4 else None
+                    trans_code = clean_cell(cells[4]) if len(cells) > 4 else None  # Transaction Code
                     shares_acquired = clean_cell(cells[6]) if len(cells) > 6 else None
                     shares_disposed = clean_cell(cells[7]) if len(cells) > 7 else None
                     underlying_title = clean_cell(cells[10]) if len(cells) > 10 else None
                     underlying_shares = clean_cell(cells[11]) if len(cells) > 11 else None
-                    price_str = clean_cell(cells[12]) if len(cells) > 12 else None
+                    price_str = clean_cell(cells[12]) if len(cells) > 12 else None  # Price of Derivative Security
                     
-                    if derivative_name and trans_date and trans_code:
+                    # Only extract rows that have actual transaction data
+                    # Skip rows that only show ownership positions (no transaction date/code)
+                    has_transaction = (trans_date and trans_date.strip() and 
+                                     trans_code and trans_code.strip() and
+                                     (shares_acquired and shares_acquired.strip() or 
+                                      shares_disposed and shares_disposed.strip()))
+                    
+                    if derivative_name and has_transaction:
                         shares = None
-                        if shares_acquired:
+                        if shares_acquired and shares_acquired.strip():
                             try:
                                 shares = int(re.sub(r'[,\.]', '', shares_acquired))
                             except:
                                 pass
-                        elif shares_disposed:
+                        elif shares_disposed and shares_disposed.strip():
                             try:
                                 shares = -int(re.sub(r'[,\.]', '', shares_disposed))  # Negative for disposed
                             except:
                                 pass
                         
+                        # If no shares acquired or disposed, skip this row (it's just ownership)
+                        if shares is None:
+                            continue
+                        
+                        # Parse price - use exercise price if available, otherwise use derivative price
                         price = None
-                        if price_str:
+                        if price_str and price_str.strip():
                             try:
                                 price_str_clean = re.sub(r'[\$,]', '', price_str)
+                                price = float(price_str_clean)
+                            except:
+                                pass
+                        elif exercise_price_str and exercise_price_str.strip():
+                            # Use exercise price as the reference price
+                            try:
+                                price_str_clean = re.sub(r'[\$,]', '', exercise_price_str)
                                 price = float(price_str_clean)
                             except:
                                 pass
@@ -568,6 +674,14 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
                         except:
                             transaction_date = filing_date
                         
+                        # Parse exercise price
+                        exercise_price = None
+                        if exercise_price_str and exercise_price_str.strip():
+                            try:
+                                exercise_price = float(re.sub(r'[\$,]', '', exercise_price_str))
+                            except:
+                                pass
+                        
                         trade = {
                             'filerName': filer_name,
                             'issuerName': issuer_name,
@@ -578,12 +692,42 @@ def parse_sec_form_html(s3_key: str) -> List[Dict[str, Any]]:
                             'transactionType': trans_code,
                             'shares': shares,
                             'pricePerShare': price,
-                            'formType': 'form4',
+                            'exercisePrice': exercise_price,
+                            'formType': f'form{form_number}' if form_number else 'form4',
                             'isDerivative': True,
                         }
                         trades.append(trade)
+                elif is_form3 and len(cells) >= 6:
+                    # Form 3 Table II: Derivative ownership (similar structure but for ownership)
+                    def clean_cell(cell):
+                        text = re.sub(r'<[^>]+>', '', cell)
+                        text = unescape(text)
+                        return text.strip()
+                    
+                    derivative_name = clean_cell(cells[0]) if len(cells) > 0 else None
+                    underlying_title = clean_cell(cells[3]) if len(cells) > 3 else None
+                    underlying_shares = clean_cell(cells[4]) if len(cells) > 4 else None
+                    
+                    if derivative_name:
+                        # Form 3 derivatives represent ownership, not transactions
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': f"{derivative_name} (underlying: {underlying_title})" if underlying_title else derivative_name,
+                            'transactionDate': filing_date,
+                            'filingDate': filing_date,
+                            'transactionType': 'I',  # I = Initial Statement
+                            'shares': None,  # Form 3 doesn't always show share amounts in same format
+                            'pricePerShare': None,
+                            'formType': 'form3',
+                            'isDerivative': True,
+                            'isInitialOwnership': True,
+                        }
+                        trades.append(trade)
         
-        logger.info(f"✅ Extracted {len(trades)} trades from HTML Form 4")
+        form_name = f"Form {form_number}" if form_number else "Form 4"
+        logger.info(f"✅ Extracted {len(trades)} trades/ownership records from HTML {form_name}")
         
     except Exception as e:
         logger.error(f"❌ Error parsing SEC form HTML {s3_key}: {e}")

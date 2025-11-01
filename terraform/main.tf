@@ -1866,7 +1866,7 @@ module "politician_trades_state_machine" {
         Type           = "Map"
         Comment        = "Download SEC forms in parallel using Map state"
         ItemsPath      = "$.fetchResults.secForms"
-        MaxConcurrency = 50
+        MaxConcurrency = 10 # Reduced to avoid Lambda rate limiting (429 errors)
         Iterator = {
           StartAt = "DownloadForm"
           States = {
@@ -1876,8 +1876,14 @@ module "politician_trades_state_machine" {
               Comment  = "Download a single SEC form"
               Retry = [
                 {
+                  ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                  IntervalSeconds = 60
+                  MaxAttempts     = 5
+                  BackoffRate     = 2.0
+                },
+                {
                   ErrorEquals     = ["States.ALL"]
-                  IntervalSeconds = 5
+                  IntervalSeconds = 10
                   MaxAttempts     = 2
                   BackoffRate     = 2.0
                 }
@@ -1935,7 +1941,7 @@ module "politician_trades_state_machine" {
         Type           = "Map"
         Comment        = "Match trades from each file to politicians in parallel"
         ItemsPath      = "$.fetchResults.secForms"
-        MaxConcurrency = 50
+        MaxConcurrency = 10 # Reduced to avoid Lambda rate limiting (429 errors)
         Iterator = {
           StartAt = "MatchFile"
           States = {
@@ -1944,6 +1950,12 @@ module "politician_trades_state_machine" {
               Resource = module.politician_trades_single_matcher.function_arn
               Comment  = "Match trades from a single file to politicians"
               Retry = [
+                {
+                  ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                  IntervalSeconds = 60
+                  MaxAttempts     = 5
+                  BackoffRate     = 2.0
+                },
                 {
                   ErrorEquals     = ["States.ALL"]
                   IntervalSeconds = 10
