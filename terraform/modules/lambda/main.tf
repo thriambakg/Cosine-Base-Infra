@@ -21,8 +21,17 @@ data "archive_file" "lambda_zip" {
 
 # IAM Role for Lambda execution
 # Use name_prefix to avoid 64-character limit (adds random suffix)
+# Truncate to 38 chars max (AWS limit for name_prefix)
+locals {
+  # Shorten function name and truncate to fit within 38-char limit for name_prefix
+  # AWS appends ~26 chars, so we need prefix <= 38 chars
+  role_name_base = replace(var.function_name, "politician-trades", "pol-trades")
+  # Truncate base to 32 chars max, then add "-role-" (6 chars) = max 38 chars
+  role_name_prefix = "${substr(local.role_name_base, 0, min(32, length(local.role_name_base)))}-role-"
+}
+
 resource "aws_iam_role" "lambda_execution_role" {
-  name_prefix = "${replace(var.function_name, "politician-trades", "pol-trades")}-role-"
+  name_prefix = local.role_name_prefix
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
