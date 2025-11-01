@@ -1919,15 +1919,19 @@ module "politician_trades_state_machine" {
       }
 
       # Transform download results - prepare SEC forms and PTRs for matching
-      # SEC forms come from downloadResults, PTRs come from fetchResults (already downloaded)
+      # SEC forms come from downloadResults (with s3Key), PTRs come from fetchResults (already downloaded with s3_key)
+      # The matcher Lambda handles both s3Key and s3_key formats, so we pass them as-is
       TransformDownloadResults = {
         Type    = "Pass"
-        Comment = "Prepare all forms/PTRs for matching (normalize format)"
+        Comment = "Prepare all forms/PTRs for matching (PTRs already downloaded, SEC forms from downloadResults)"
         Parameters = {
           "date.$" : "$.fetchResults.date",
           "fetchResults" : {
             "date.$" : "$.fetchResults.date",
+            "datedFolder.$" : "States.Format('trades/{}', $.fetchResults.date)",
             "secForms.$" : "$.downloadResults",
+            # PTRs are already downloaded in fetcher with s3_key format
+            # Matcher handles both s3Key and s3_key
             "housePTRs.$" : "$.fetchResults.housePTRs",
             "senatePTRs.$" : "$.fetchResults.senatePTRs"
           }

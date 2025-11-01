@@ -182,27 +182,44 @@ class CongressionalPTRScraper:
                 
                 logger.info(f"📋 Found {len(pdf_matches)} PDF links on Senate search page")
                 
-                # Alternative: Try to construct common PTR URL patterns
-                # Senate may publish at a known structure
-                year = target_date[:4]
-                
-                # Common Senate PTR URL patterns (may vary)
-                common_patterns = [
-                    f"https://efdsearch.senate.gov/search/view/{year}/ptr/",
-                    f"https://efdsearch.senate.gov/public/view/{year}/ptr/",
+                # Check if PDFs match the target date
+                date_formats_in_filename = [
+                    target_date.replace('-', ''),  # YYYYMMDD
+                    target_date,  # YYYY-MM-DD
+                    target_date[5:7] + '-' + target_date[8:10] + '-' + target_date[0:4],  # MM-DD-YYYY
                 ]
                 
-                for pattern_url in common_patterns:
-                    try:
-                        logger.debug(f"🔍 Trying Senate PTR pattern: {pattern_url}")
-                        # This would need directory listing or API access
-                    except:
-                        continue
+                for pdf_link in pdf_matches:
+                    # Convert relative URLs to absolute
+                    if pdf_link.startswith('/'):
+                        pdf_url = f"https://efdsearch.senate.gov{pdf_link}"
+                    elif pdf_link.startswith('http'):
+                        pdf_url = pdf_link
+                    else:
+                        pdf_url = urljoin(search_url, pdf_link)
+                    
+                    # Check if filename contains target date
+                    filename_matches_date = any(date_format in pdf_link for date_format in date_formats_in_filename)
+                    
+                    if filename_matches_date:
+                        filename = pdf_link.split('/')[-1]
+                        filer_name = filename.replace('.pdf', '').replace('-', ' ').title()
+                        
+                        ptr_data = {
+                            'filer_name': filer_name,
+                            'filing_date': target_date,
+                            'form_type': 'senate_ptr',
+                            'url': pdf_url,
+                            's3_key': f"trades/{target_date}/senate/{filename}"
+                        }
+                        ptrs.append(ptr_data)
+                        logger.info(f"✅ Found Senate PTR: {filename}")
                 
                 # If we can't find PDFs directly, we might need to use the search form
                 # This requires more complex form submission
-                logger.warning("⚠️ Senate PTR scraping requires search form submission - basic implementation may not find all PTRs")
-                logger.info("💡 Consider using Senate PTR API or official data feed if available")
+                if len(ptrs) == 0:
+                    logger.warning("⚠️ Senate PTR scraping requires search form submission - basic implementation may not find all PTRs")
+                    logger.info("💡 Consider using Senate PTR API or official data feed if available")
                 
             except Exception as search_error:
                 logger.error(f"❌ Error accessing Senate PTR search: {search_error}")
