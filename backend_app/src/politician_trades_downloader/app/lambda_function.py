@@ -425,11 +425,98 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
         raise
 
 
+def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Optional[str]:
+    """
+    Download PTR file from URL and store in S3
+    
+    Args:
+        ptr_data: PTR metadata with url, source (house/senate), s3_key
+        target_date: Date string for S3 key structure
+        
+    Returns:
+        S3 key if successful, None otherwise
+    """
+    try:
+        url = ptr_data.get('url')
+        s3_key = ptr_data.get('s3_key') or ptr_data.get('s3Key')
+        source = ptr_data.get('source')  # 'house' or 'senate'
+        form_type = ptr_data.get('formType') or ptr_data.get('form_type', 'house_ptr' if source == 'house' else 'senate_ptr')
+        
+        if not url:
+            logger.error(f"❌ Missing URL for PTR download: {ptr_data}")
+            return None
+        
+        # If s3_key not provided, construct it from source and filename
+        if not s3_key:
+            filename = url.split('/')[-1]
+            if source == 'house':
+                s3_key = f"trades/{target_date}/house/{filename}"
+            elif source == 'senate':
+                s3_key = f"trades/{target_date}/senate/{filename}"
+            else:
+                # Default to house if source unclear
+                s3_key = f"trades/{target_date}/house/{filename}"
+                logger.warning(f"⚠️ Source unclear, defaulting to house: {ptr_data}")
+        
+        logger.info(f"📥 Downloading PTR from {url}")
+        logger.info(f"📦 Will store to S3: {s3_key}")
+        
+        # Download the PTR file
+        session = requests.Session()
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        response = session.get(url, timeout=30)
+        response.raise_for_status()
+        
+        file_content = response.content
+        content_type = response.headers.get('Content-Type', 'application/pdf')
+        
+        # Determine file extension from URL or content type
+        if s3_key.endswith('.pdf'):
+            file_ext = 'pdf'
+        elif url.endswith('.pdf'):
+            file_ext = 'pdf'
+        elif 'pdf' in content_type.lower():
+            file_ext = 'pdf'
+        else:
+            # Try to extract from URL
+            if '.' in url.split('/')[-1]:
+                file_ext = url.split('/')[-1].split('.')[-1]
+            else:
+                file_ext = 'pdf'  # Default for PTRs
+        
+        # Update s3_key with correct extension if needed
+        if not s3_key.endswith(f'.{file_ext}'):
+            base_key = s3_key.rsplit('.', 1)[0] if '.' in s3_key else s3_key
+            s3_key = f"{base_key}.{file_ext}"
+        
+        logger.info(f"✅ Downloaded PTR file ({len(file_content)} bytes, type: {file_ext})")
+        
+        # Upload to S3
+        s3_client.put_object(
+            Bucket=S3_BUCKET,
+            Key=s3_key,
+            Body=file_content,
+            ContentType=content_type
+        )
+        
+        logger.info(f"✅ Stored PTR to S3: {s3_key}")
+        return s3_key
+        
+    except Exception as e:
+        logger.error(f"❌ Error downloading/storing PTR: {e}")
+        raise
+
+
 def lambda_handler(event, context):
     """
-    Lambda handler for downloading a single SEC form
+    Lambda handler for downloading SEC forms or PTR files
     
     Expected input (from Step Functions Map state):
+    
+    SEC Form:
     {
         "formType": "form4",
         "cik": "1234567",
@@ -438,12 +525,21 @@ def lambda_handler(event, context):
         "filingDate": "2024-01-15"
     }
     
+    PTR File:
+    {
+        "url": "https://clerk.house.gov/public_disc/ptr-pdfs/2025/example.pdf",
+        "s3_key": "trades/2025-10-31/house/example.pdf",
+        "source": "house",
+        "formType": "house_ptr",
+        "filingDate": "2025-10-31"
+    }
+    
     Returns:
     {
         "success": true,
         "s3Key": "trades/2024-01-15/sec/form4-1234567-2024-01-15.xml",
         "formType": "form4",
-        "cik": "1234567"
+        "source": "sec" (or "house"/"senate")
     }
     """
     logger.info(f"🚀 Politician Trades Downloader Lambda started: {json.dumps(event)}")
@@ -453,25 +549,52 @@ def lambda_handler(event, context):
     
     try:
         # Extract target date from event
-        target_date = event.get('filingDate') or event.get('date')
+        target_date = event.get('filingDate') or event.get('filing_date') or event.get('date')
         if not target_date:
-            raise ValueError("filingDate or date must be provided in event")
+            raise ValueError("filingDate, filing_date, or date must be provided in event")
         
-        # Download and store the form
-        s3_key = download_and_store_sec_form(event, target_date)
+        # Determine if this is a PTR download (has URL) or SEC form (has CIK/accession)
+        url = event.get('url')
+        source = event.get('source')
+        is_ptr = bool(url) or source in ['house', 'senate']
         
-        if not s3_key:
-            raise Exception("Failed to download form - download_and_store_sec_form returned None")
-        
-        # Return format that matches matcher Lambda expectations
-        return {
-            "s3Key": s3_key,
-            "formType": event.get('formType') or event.get('form_type'),
-            "cik": event.get('cik'),
-            "filingDate": target_date,
-            "accessionNumber": event.get('accessionNumber') or event.get('accession_number'),
-            "success": True
-        }
+        if is_ptr:
+            # Download PTR file
+            logger.info(f"📋 Detected PTR download request (source: {source})")
+            s3_key = download_and_store_ptr(event, target_date)
+            
+            if not s3_key:
+                raise Exception("Failed to download PTR - download_and_store_ptr returned None")
+            
+            # Return format that matches matcher Lambda expectations
+            return {
+                "s3Key": s3_key,
+                "s3_key": s3_key,  # Support both formats
+                "formType": event.get('formType') or event.get('form_type'),
+                "form_type": event.get('formType') or event.get('form_type'),
+                "source": source or ('house' if 'house' in str(event.get('formType', '')).lower() else 'senate'),
+                "filingDate": target_date,
+                "filing_date": target_date,
+                "success": True
+            }
+        else:
+            # Download SEC form
+            logger.info(f"📋 Detected SEC form download request")
+            s3_key = download_and_store_sec_form(event, target_date)
+            
+            if not s3_key:
+                raise Exception("Failed to download form - download_and_store_sec_form returned None")
+            
+            # Return format that matches matcher Lambda expectations
+            return {
+                "s3Key": s3_key,
+                "formType": event.get('formType') or event.get('form_type'),
+                "cik": event.get('cik'),
+                "filingDate": target_date,
+                "accessionNumber": event.get('accessionNumber') or event.get('accession_number'),
+                "source": "sec",
+                "success": True
+            }
         
     except Exception as e:
         logger.error(f"❌ Error in downloader Lambda: {e}")
@@ -480,9 +603,11 @@ def lambda_handler(event, context):
         error_with_context = {
             "error": str(e),
             "formType": event.get('formType') or event.get('form_type'),
+            "source": event.get('source'),
+            "url": event.get('url'),
             "cik": event.get('cik'),
             "accessionNumber": event.get('accessionNumber') or event.get('accession_number'),
-            "filingDate": event.get('filingDate') or event.get('date')
+            "filingDate": event.get('filingDate') or event.get('filing_date') or event.get('date')
         }
         raise Exception(json.dumps(error_with_context))
 

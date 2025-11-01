@@ -1,0 +1,9 @@
+{
+  "comment": "Test event for House PTR download - replace with actual URL from clerk.house.gov",
+  "source": "house",
+  "url": "https://clerk.house.gov/public_disc/ptr-pdfs/2025/actual-filename.pdf",
+  "s3_key": "trades/2025-10-31/house/actual-filename.pdf",
+  "formType": "house_ptr",
+  "filingDate": "2025-10-31"
+}
+

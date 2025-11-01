@@ -1,0 +1,5 @@
+{
+  "comment": "Test event for fetcher Lambda to download House/Senate PTRs. The fetcher downloads PTRs directly to S3.",
+  "date": "2025-10-31"
+}
+
