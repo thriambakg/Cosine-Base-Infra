@@ -760,21 +760,198 @@ def parse_house_ptr(s3_key: str) -> List[Dict[str, Any]]:
     return trades
 
 
+def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
+    """
+    Parse Senate PTR HTML page with transaction table
+    Extracts transaction data directly from HTML table (no Textract needed)
+    """
+    trades = []
+    
+    try:
+        # Find the transactions table
+        # Table structure: <table class="table table-striped"> with transaction rows
+        
+        # Extract filer name from the page
+        filer_name = None
+        name_patterns = [
+            r'<h[1-6][^>]*>([^<]+(?:Senator|Representative)[^<]*)</h[1-6]>',
+            r'class=["\']filer[^"\']*["\'][^>]*>([^<]+)</',
+            r'<td[^>]*>([^<]+\([^)]+\)[^<]*)</td>',  # "Name (Last, First)" format
+        ]
+        for pattern in name_patterns:
+            match = re.search(pattern, html_content, re.IGNORECASE)
+            if match:
+                filer_name = match.group(1).strip()
+                break
+        
+        # Find the transactions table
+        # Look for table with headers: #, Transaction Date, Owner, Ticker, Asset Name, Asset Type, Type, Amount, Comment
+        table_match = re.search(
+            r'<table[^>]*class=["\']table[^"\']*["\'][^>]*>.*?<tbody>(.*?)</tbody>',
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
+        
+        if not table_match:
+            logger.warning("⚠️ Could not find transactions table in HTML")
+            return trades
+        
+        tbody_content = table_match.group(1)
+        
+        # Extract all table rows (<tr>...</tr>)
+        row_pattern = r'<tr[^>]*>(.*?)</tr>'
+        rows = re.finditer(row_pattern, tbody_content, re.IGNORECASE | re.DOTALL)
+        
+        for row_num, row_match in enumerate(rows, start=1):
+            row_html = row_match.group(1)
+            
+            # Extract cells from row
+            cell_pattern = r'<td[^>]*>(.*?)</td>'
+            cells = re.findall(cell_pattern, row_html, re.IGNORECASE | re.DOTALL)
+            
+            if len(cells) < 8:  # Need at least 8 columns
+                continue
+            
+            # Column mapping:
+            # 0: # (row number)
+            # 1: Transaction Date
+            # 2: Owner
+            # 3: Ticker
+            # 4: Asset Name
+            # 5: Asset Type
+            # 6: Type
+            # 7: Amount
+            # 8: Comment
+            
+            # Clean HTML from cells
+            def clean_html(text):
+                # Remove HTML tags
+                text = re.sub(r'<[^>]+>', '', text)
+                # Decode HTML entities
+                text = unescape(text)
+                # Strip whitespace
+                text = text.strip()
+                # Remove extra whitespace
+                text = re.sub(r'\s+', ' ', text)
+                return text
+            
+            try:
+                transaction_date_str = clean_html(cells[1]) if len(cells) > 1 else ''
+                owner = clean_html(cells[2]) if len(cells) > 2 else ''
+                ticker = clean_html(cells[3]) if len(cells) > 3 else ''
+                asset_name = clean_html(cells[4]) if len(cells) > 4 else ''
+                asset_type = clean_html(cells[5]) if len(cells) > 5 else ''
+                transaction_type = clean_html(cells[6]) if len(cells) > 6 else ''
+                amount_str = clean_html(cells[7]) if len(cells) > 7 else ''
+                
+                # Parse transaction date
+                transaction_date = None
+                if transaction_date_str:
+                    try:
+                        transaction_date = datetime.strptime(transaction_date_str, '%m/%d/%Y').date()
+                    except:
+                        pass
+                
+                # Parse amount (handles ranges like "$100,001 - $250,000")
+                amount_min = None
+                amount_max = None
+                total_amount = None
+                
+                if amount_str and amount_str not in ['--', '']:
+                    # Remove $ and commas
+                    amount_clean = amount_str.replace('$', '').replace(',', '').strip()
+                    
+                    # Check for range (e.g., "100001 - 250000")
+                    if ' - ' in amount_clean or '-' in amount_clean:
+                        parts = re.split(r'\s*-\s*', amount_clean)
+                        if len(parts) == 2:
+                            try:
+                                amount_min = float(parts[0].strip())
+                                amount_max = float(parts[1].strip())
+                                total_amount = (amount_min + amount_max) / 2
+                            except:
+                                pass
+                    else:
+                        # Single amount
+                        try:
+                            total_amount = float(amount_clean)
+                            amount_min = total_amount
+                            amount_max = total_amount
+                        except:
+                            pass
+                
+                # Map transaction type
+                transaction_code = None
+                if transaction_type.lower() in ['purchase', 'buy', 'acquired']:
+                    transaction_code = 'P'
+                elif transaction_type.lower() in ['sale', 'sell', 'disposed']:
+                    transaction_code = 'S'
+                else:
+                    transaction_code = transaction_type[:1].upper() if transaction_type else 'P'
+                
+                # Skip if ticker is missing or "--"
+                if not ticker or ticker.strip() in ['--', '']:
+                    ticker = None
+                else:
+                    ticker = ticker.strip()
+                
+                trade = {
+                    'transactionDate': transaction_date.strftime('%Y-%m-%d') if transaction_date else '',
+                    'transaction_code': transaction_code,
+                    'owner': owner,
+                    'securitySymbol': ticker,
+                    'securityName': asset_name,
+                    'assetType': asset_type,
+                    'transactionType': transaction_type,
+                    'amount': total_amount,
+                    'amountMin': amount_min,
+                    'amountMax': amount_max,
+                    'shares': None,  # Not provided in Senate PTR HTML
+                    'comment': clean_html(cells[8]) if len(cells) > 8 else ''
+                }
+                
+                trades.append(trade)
+                logger.info(f"✅ Extracted trade: {transaction_type} {asset_name} ({ticker or 'N/A'}) on {transaction_date_str}")
+                
+            except Exception as e:
+                logger.warning(f"⚠️ Error parsing row {row_num}: {e}")
+                continue
+        
+        logger.info(f"✅ Parsed {len(trades)} trades from Senate PTR HTML")
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing Senate PTR HTML: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    return trades
+
+
 def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
     """
-    Parse Senate PTR PDF using Textract and extract trade data
+    Parse Senate PTR - handles both PDF and HTML formats
     """
     trades = []
     
     try:
         logger.info(f"📄 Parsing Senate PTR: {s3_key}")
         
-        # Download PDF from S3
+        # Download file from S3
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
-        pdf_content = response['Body'].read()
+        file_content = response['Body'].read()
         
-        # Use Textract to parse
-        trades = parse_ptr_with_textract(pdf_content, source='senate')
+        # Check if it's HTML or PDF
+        content_start = file_content[:100].lower()
+        
+        if b'<html' in content_start or b'<!doctype' in content_start:
+            # It's HTML - parse the transaction table directly
+            logger.info(f"📄 Senate PTR is HTML format - parsing table directly")
+            html_content = file_content.decode('utf-8', errors='ignore')
+            trades = parse_senate_ptr_html(html_content)
+        else:
+            # It's PDF - use Textract
+            logger.info(f"📄 Senate PTR is PDF format - using Textract")
+            trades = parse_ptr_with_textract(file_content, source='senate')
         
     except Exception as e:
         logger.error(f"❌ Error parsing Senate PTR {s3_key}: {e}")
@@ -1299,7 +1476,14 @@ def lambda_handler(event, context):
         elif source == 'house':
             trades = parse_house_ptr(s3_key)
         elif source == 'senate':
-            trades = parse_senate_ptr(s3_key)
+            # Check if transactions are already extracted at fetcher level
+            if event.get('transactions'):
+                logger.info(f"✅ Using {len(event.get('transactions', []))} pre-extracted transactions from fetcher")
+                trades = event.get('transactions', [])
+            else:
+                # Fallback: parse from S3 file
+                logger.info(f"📄 No pre-extracted transactions found, parsing from S3 file")
+                trades = parse_senate_ptr(s3_key)
         else:
             logger.warning(f"⚠️ Unknown source type: {source}")
             return {
@@ -1356,33 +1540,49 @@ def lambda_handler(event, context):
                 else:
                     unmatched_count += 1
             else:  # house or senate
-                politician_name = trade.get('politicianName')
-                if politician_name:
-                    matched_politician = find_matching_politician(politician_name, politicians)
-                    if matched_politician:
-                        matched_trade = {
-                            'tradeId': f"trade_{filing_date}_{source}_{len(matched_trades)}",
-                            'politicianName': matched_politician['name'],
-                            'party': matched_politician['party'],
-                            'position': matched_politician['position'],
-                            'websiteUrl': matched_politician.get('websiteUrl'),
-                            'formType': form_type or f'{source}_ptr',
-                            'filingDate': filing_date,
-                            'transactionDate': trade.get('transactionDate'),
-                            'transactionTime': trade.get('transactionTime'),
-                            'securitySymbol': trade.get('securitySymbol'),
-                            'securityName': trade.get('securityName'),
-                            'transactionType': trade.get('transactionType'),
-                            'shares': trade.get('shares'),
-                            'pricePerShare': trade.get('pricePerShare'),
-                            'totalAmount': trade.get('totalAmount'),
-                            'formS3Key': s3_key,
-                            'matchConfidence': 1.0,
-                            'source': source
-                        }
-                        matched_trades.append(matched_trade)
-                    else:
-                        unmatched_count += 1
+                # For Senate PTRs, use filerName from trade (pre-extracted)
+                # For House PTRs, may have politicianName or filerName
+                filer_name = trade.get('filerName') or trade.get('politicianName')
+                if not filer_name:
+                    unmatched_count += 1
+                    continue
+                
+                matched_politician = find_matching_politician(filer_name, politicians)
+                if matched_politician:
+                    # Map Senate PTR transaction fields to standard format
+                    # Senate PTRs use: securityName, assetType, order, amount
+                    # Standard format uses: securityName, transactionType, totalAmount
+                    transaction_type = trade.get('order') or trade.get('transactionType')
+                    
+                    matched_trade = {
+                        'tradeId': f"trade_{filing_date}_{source}_{len(matched_trades)}",
+                        'politicianName': matched_politician['name'],
+                        'party': matched_politician['party'],
+                        'position': matched_politician['position'],
+                        'websiteUrl': matched_politician.get('websiteUrl'),
+                        'formType': form_type or f'{source}_ptr',
+                        'filingDate': filing_date,
+                        'transactionDate': trade.get('transactionDate'),
+                        'transactionTime': trade.get('transactionTime'),
+                        'securitySymbol': trade.get('ticker') or trade.get('securitySymbol'),
+                        'securityName': trade.get('securityName'),
+                        'assetType': trade.get('assetType'),  # Include assetType for Senate PTRs
+                        'transactionType': transaction_type,  # "Purchase", "Sale", etc.
+                        'order': trade.get('order'),  # Keep original "order" field
+                        'shares': trade.get('shares'),
+                        'pricePerShare': trade.get('pricePerShare'),
+                        'totalAmount': trade.get('amount') or trade.get('totalAmount'),
+                        'amountMin': trade.get('amountMin'),
+                        'amountMax': trade.get('amountMax'),
+                        'owner': trade.get('owner'),
+                        'comment': trade.get('comment'),
+                        'formS3Key': s3_key,
+                        'matchConfidence': matched_politician.get('matchScore', 1.0),
+                        'source': source
+                    }
+                    matched_trades.append(matched_trade)
+                else:
+                    unmatched_count += 1
         
         logger.info(f"✅ Matched {len(matched_trades)} trades from {s3_key}")
         

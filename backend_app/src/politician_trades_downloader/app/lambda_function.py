@@ -458,6 +458,31 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
                 s3_key = f"trades/{target_date}/house/{filename}"
                 logger.warning(f"⚠️ Source unclear, defaulting to house: {ptr_data}")
         
+        # For Senate PTRs, use the print page which has the transaction table in HTML
+        # The print page has the same data as the PDF but is easier/cheaper to parse
+        # View URL: /search/view/ptr/{uuid}/
+        # Print URL: /search/view/ptr/{uuid}/print/ (returns HTML with transaction table)
+        if source == 'senate' and '/view/ptr/' in url and not url.endswith('/print/'):
+            # Extract UUID from URL
+            import re
+            uuid_match = re.search(r'/ptr/([a-f0-9-]+)', url, re.IGNORECASE)
+            if uuid_match:
+                uuid = uuid_match.group(1)
+                # Convert to print page URL (HTML with transaction table)
+                if url.startswith('/'):
+                    # Relative URL
+                    print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
+                elif 'efdsearch.senate.gov' in url:
+                    # Absolute URL, replace the path
+                    print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
+                else:
+                    # Fallback: append /print/
+                    print_url = url.rstrip('/') + '/print/'
+                
+                logger.info(f"🔄 Converting Senate PTR view URL to print page (HTML): {url} -> {print_url}")
+                logger.info(f"💡 Using HTML page with transaction table (cheaper/faster than PDF + Textract)")
+                url = print_url
+        
         logger.info(f"📥 Downloading PTR from {url}")
         logger.info(f"📦 Will store to S3: {s3_key}")
         
@@ -470,22 +495,41 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
         response = session.get(url, timeout=30)
         response.raise_for_status()
         
-        file_content = response.content
-        content_type = response.headers.get('Content-Type', 'application/pdf')
+        # Check if response is actually a PDF
+        content_type = response.headers.get('Content-Type', '').lower()
+        content_sample = response.content[:100]
         
-        # Determine file extension from URL or content type
-        if s3_key.endswith('.pdf'):
+        if 'application/pdf' in content_type or content_sample.startswith(b'%PDF'):
+            logger.info(f"✅ Downloaded PDF file ({len(response.content)} bytes)")
+            file_content = response.content
             file_ext = 'pdf'
-        elif url.endswith('.pdf'):
-            file_ext = 'pdf'
-        elif 'pdf' in content_type.lower():
-            file_ext = 'pdf'
+        elif source == 'senate' and ('text/html' in content_type or content_sample.startswith(b'<html') or content_sample.startswith(b'<!DOCTYPE')):
+            # Senate PTR print page returns HTML with transaction table
+            # We prefer HTML over PDF because:
+            # 1. It's free (no Textract costs)
+            # 2. It's faster (direct parsing vs Textract processing)
+            # 3. It's more reliable (structured HTML vs OCR extraction)
+            # The HTML contains the same transaction data in a structured table
+            logger.info(f"📄 Senate PTR is HTML format - storing HTML page with transaction table")
+            logger.info(f"💡 Matcher will parse HTML table directly (cheaper/faster than PDF + Textract)")
+            file_content = response.content
+            file_ext = 'html'
         else:
-            # Try to extract from URL
-            if '.' in url.split('/')[-1]:
-                file_ext = url.split('/')[-1].split('.')[-1]
+            # Determine file extension from URL or content type
+            if s3_key.endswith('.pdf'):
+                file_ext = 'pdf'
+            elif url.endswith('.pdf'):
+                file_ext = 'pdf'
+            elif 'pdf' in content_type.lower():
+                file_ext = 'pdf'
             else:
-                file_ext = 'pdf'  # Default for PTRs
+                # Try to extract from URL
+                if '.' in url.split('/')[-1]:
+                    file_ext = url.split('/')[-1].split('.')[-1]
+                else:
+                    file_ext = 'pdf'  # Default for PTRs
+            
+            file_content = response.content
         
         # Update s3_key with correct extension if needed
         if not s3_key.endswith(f'.{file_ext}'):
@@ -561,22 +605,48 @@ def lambda_handler(event, context):
         if is_ptr:
             # Download PTR file
             logger.info(f"📋 Detected PTR download request (source: {source})")
-            s3_key = download_and_store_ptr(event, target_date)
             
-            if not s3_key:
-                raise Exception("Failed to download PTR - download_and_store_ptr returned None")
-            
-            # Return format that matches matcher Lambda expectations
-            return {
-                "s3Key": s3_key,
-                "s3_key": s3_key,  # Support both formats
-                "formType": event.get('formType') or event.get('form_type'),
-                "form_type": event.get('formType') or event.get('form_type'),
-                "source": source or ('house' if 'house' in str(event.get('formType', '')).lower() else 'senate'),
-                "filingDate": target_date,
-                "filing_date": target_date,
-                "success": True
-            }
+            # For Senate PTRs, transactions are already extracted at fetcher level
+            # Just pass through the transactions if they exist
+            if source == 'senate' and event.get('transactions'):
+                logger.info(f"✅ Senate PTR has {len(event.get('transactions', []))} pre-extracted transactions - passing through")
+                # Still download and store HTML for reference, but use pre-extracted transactions
+                s3_key = download_and_store_ptr(event, target_date)
+                
+                if not s3_key:
+                    raise Exception("Failed to download PTR - download_and_store_ptr returned None")
+                
+                # Return format that includes pre-extracted transactions
+                return {
+                    "s3Key": s3_key,
+                    "s3_key": s3_key,
+                    "formType": event.get('formType') or event.get('form_type'),
+                    "form_type": event.get('formType') or event.get('form_type'),
+                    "source": source,
+                    "filingDate": target_date,
+                    "filing_date": target_date,
+                    "filer_name": event.get('filer_name'),
+                    "transactions": event.get('transactions', []),  # Pass through pre-extracted transactions
+                    "success": True
+                }
+            else:
+                # House PTRs or Senate PTRs without pre-extracted transactions - download and parse
+                s3_key = download_and_store_ptr(event, target_date)
+                
+                if not s3_key:
+                    raise Exception("Failed to download PTR - download_and_store_ptr returned None")
+                
+                # Return format that matches matcher Lambda expectations
+                return {
+                    "s3Key": s3_key,
+                    "s3_key": s3_key,  # Support both formats
+                    "formType": event.get('formType') or event.get('form_type'),
+                    "form_type": event.get('formType') or event.get('form_type'),
+                    "source": source or ('house' if 'house' in str(event.get('formType', '')).lower() else 'senate'),
+                    "filingDate": target_date,
+                    "filing_date": target_date,
+                    "success": True
+                }
         else:
             # Download SEC form
             logger.info(f"📋 Detected SEC form download request")

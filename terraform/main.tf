@@ -2001,7 +2001,7 @@ module "politician_trades_state_machine" {
       # House PTRs are skipped for now
       TransformDownloadResults = {
         Type    = "Pass"
-        Comment = "Prepare all forms/PTRs for matching"
+        Comment = "Prepare all forms/PTRs for matching - maps downloaded results back to original structure"
         Parameters = {
           "date.$" : "$.fetchResults.date",
           "fetchResults" : {
@@ -2009,7 +2009,7 @@ module "politician_trades_state_machine" {
             "datedFolder.$" : "States.Format('trades/{}', $.fetchResults.date)",
             "secForms.$" : "$.downloadResults",
             "housePTRs.$" : "$.fetchResults.housePTRs",
-            "senatePTRs.$" : "$.senatePTRDownloadResults"
+            "senatePTRs.$" : "$.senatePTRDownloadResults" # Downloaded PTRs with s3Key from downloader
           }
         }
         Next = "MatchTrades"
@@ -2114,9 +2114,10 @@ module "politician_trades_state_machine" {
       }
 
       # Step 3c: Match Senate PTRs to Politicians (parallel)
+      # Use the downloaded results which have s3Key (from senatePTRDownloadResults)
       MatchSenatePTRs = {
         Type           = "Map"
-        Comment        = "Match trades from Senate PTRs to politicians in parallel"
+        Comment        = "Match trades from Senate PTRs to politicians in parallel - processes all downloaded PTRs"
         ItemsPath      = "$.fetchResults.senatePTRs"
         MaxConcurrency = 10
         Iterator = {
