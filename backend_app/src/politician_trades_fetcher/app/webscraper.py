@@ -926,15 +926,56 @@ class CongressionalPTRScraper:
                                 logger.warning(f"⚠️ HTML content too short ({len(html_content)} bytes), might be an error page")
                                 raise Exception(f"HTML content too short: {len(html_content)} bytes")
                             
+                            # Check if we got the agreement page instead of the actual PTR
+                            # If so, accept the agreement and retry
+                            if 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content:
+                                logger.info(f"📋 Got agreement form for PTR URL - accepting terms and retrying...")
+                                
+                                # Extract CSRF token from agreement form
+                                agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
+                                agreement_csrf_match = re.search(agreement_csrf_pattern, html_content, re.IGNORECASE)
+                                
+                                if agreement_csrf_match:
+                                    agreement_csrf = agreement_csrf_match.group(1)
+                                    
+                                    # Submit agreement form
+                                    agreement_data = {
+                                        'prohibition_agreement': '1',
+                                        'csrfmiddlewaretoken': agreement_csrf
+                                    }
+                                    
+                                    logger.info(f"📋 Submitting agreement form for PTR access...")
+                                    agreement_response = self.session.post(
+                                        search_url,
+                                        data=agreement_data,
+                                        headers={
+                                            'Content-Type': 'application/x-www-form-urlencoded',
+                                            'Referer': view_url,
+                                            'Origin': 'https://efdsearch.senate.gov',
+                                            'User-Agent': self.session.headers.get('User-Agent'),
+                                            'X-CSRFToken': agreement_csrf
+                                        }
+                                    )
+                                    agreement_response.raise_for_status()
+                                    logger.info("✅ Agreement accepted for PTR access")
+                                    
+                                    # Now retry accessing the PTR URL
+                                    logger.info(f"🔄 Retrying PTR URL after accepting agreement: {view_url}")
+                                    html_response = self.session.get(view_url, timeout=30, allow_redirects=True, headers={
+                                        'Referer': search_url,
+                                        'User-Agent': self.session.headers.get('User-Agent')
+                                    })
+                                    html_response.raise_for_status()
+                                    html_content = html_response.text
+                                    logger.info(f"✅ Downloaded HTML page after agreement ({len(html_content)} bytes)")
+                                else:
+                                    logger.error(f"❌ Could not extract CSRF token from agreement form")
+                                    raise Exception(f"Could not accept agreement - CSRF token not found")
+                            
                             # Check for error indicators
                             if '404' in html_content or 'not found' in html_content.lower() or 'page not found' in html_content.lower():
                                 logger.error(f"❌ Got 404/not found in response for {view_url}")
                                 raise Exception(f"404 Not Found for view URL: {view_url}")
-                            
-                            # Check if we got the agreement page instead of the actual PTR
-                            if 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content:
-                                logger.error(f"❌ Got agreement form instead of PTR page - session may have expired")
-                                raise Exception(f"Session expired - got agreement form instead of PTR")
                             
                             # Verify we have the transactions table
                             if 'Transactions' not in html_content or 'table-striped' not in html_content:
@@ -950,7 +991,8 @@ class CongressionalPTRScraper:
                             transactions = []  # Empty transactions if download fails
                         except Exception as e:
                             logger.error(f"❌ Error downloading/parsing PTR {view_url}: {e}")
-                            logger.error(f"Traceback: {traceback.format_exc()}")
+                            import traceback as tb
+                            logger.error(f"Traceback: {tb.format_exc()}")
                             transactions = []  # Empty transactions if parsing fails
                         
                         # Generate S3 key (use date_str which is the formatted date string)
