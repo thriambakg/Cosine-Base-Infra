@@ -500,6 +500,31 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             search_response = session.get(search_url, timeout=30)
             search_response.raise_for_status()
             
+            # Check for session cookie from initial GET - Django might set it on first request
+            initial_set_cookie = search_response.headers.get('Set-Cookie', '')
+            if initial_set_cookie:
+                logger.info(f"📋 Set-Cookie from initial GET: {initial_set_cookie[:200]}...")
+                if 'sessionid=' in initial_set_cookie:
+                    import re
+                    from http.cookies import SimpleCookie
+                    try:
+                        cookie = SimpleCookie()
+                        cookie.load(initial_set_cookie)
+                        for key, morsel in cookie.items():
+                            domain = '.senate.gov'
+                            if 'Domain=' in initial_set_cookie:
+                                domain_match = re.search(r'Domain=([^;]+)', initial_set_cookie)
+                                if domain_match:
+                                    domain = domain_match.group(1).strip()
+                            session.cookies.set(key, morsel.value, domain=domain)
+                        logger.info(f"✅ Set session cookie from initial GET")
+                    except Exception as e:
+                        logger.warning(f"⚠️ Could not parse Set-Cookie from initial GET: {e}")
+            
+            # Log all cookies after initial GET
+            initial_cookies = list(session.cookies.keys())
+            logger.info(f"📋 Cookies after initial GET: {initial_cookies}")
+            
             # Check if agreement form is present
             search_html = search_response.text
             if 'id="agreement_form"' in search_html or 'prohibition_agreement' in search_html:
@@ -555,13 +580,38 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
                             except Exception as e:
                                 logger.warning(f"⚠️ Could not parse Set-Cookie: {e}")
                     
-                    # Verify session cookie
+                    # Verify session cookie - Django might use a different name or create it later
                     sessionid_cookie = session.cookies.get('sessionid')
+                    
+                    # Check all cookies - sometimes Django uses different session cookie names
+                    all_cookies = list(session.cookies.keys())
+                    logger.info(f"📋 All cookies after agreement: {all_cookies}")
+                    
+                    # Look for any cookie that might be a session cookie (long alphanumeric strings)
+                    # Django sometimes uses different cookie names or the sessionid might be in a different format
+                    potential_session_cookies = []
+                    for cookie_name in all_cookies:
+                        if cookie_name not in ['csrftoken', 'csrfmiddlewaretoken', 'messages']:
+                            cookie_value = session.cookies.get(cookie_name)
+                            if cookie_value:
+                                if len(cookie_value) > 20:  # Session cookies are usually long
+                                    potential_session_cookies.append((cookie_name, cookie_value))
+                                    logger.info(f"📋 Found potential session cookie '{cookie_name}': {cookie_value[:50]}...")
+                                # Also check if the cookie name itself looks like a session ID
+                                elif len(cookie_name) > 20 and cookie_name.replace('-', '').replace('_', '').isalnum():
+                                    potential_session_cookies.append((cookie_name, cookie_value))
+                                    logger.info(f"📋 Cookie name '{cookie_name}' might be session ID itself: {cookie_value[:50]}...")
+                    
+                    # If we found a potential session cookie but no 'sessionid', treat it as the session
+                    if not sessionid_cookie and potential_session_cookies:
+                        logger.info(f"💡 No 'sessionid' cookie, but found {len(potential_session_cookies)} potential session cookies")
+                        logger.info(f"💡 Django may be using a different session cookie name - proceeding with available cookies")
+                    
                     if sessionid_cookie:
                         logger.info(f"✅ Session ID cookie present after agreement: {sessionid_cookie[:50]}...")
                     else:
-                        logger.warning(f"⚠️ No sessionid cookie after agreement acceptance!")
-                        logger.info(f"📋 All cookies: {list(session.cookies.keys())}")
+                        logger.warning(f"⚠️ No sessionid cookie after agreement acceptance - Django may create it on first access")
+                        logger.info(f"💡 Will attempt to access PTR URL - Django may set session cookie on first request")
                     
                     logger.info("✅ Agreement accepted")
                 else:
@@ -575,59 +625,166 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             # For Senate PTRs, the view URL is what we want (it contains the transaction table)
             # No need to access a separate print URL
         
-        # Verify session cookie before downloading PTR
+        # Before downloading PTR, check if we need to accept agreement on the PTR page itself
+        # Some PTR pages require accepting agreement directly on that page
         if source == 'senate':
-            sessionid_cookie = session.cookies.get('sessionid')
-            if not sessionid_cookie:
-                logger.warning(f"⚠️ No sessionid cookie before downloading PTR - may get redirected to TOS")
+            logger.info(f"📋 Attempting to access PTR URL: {url}")
+            
+            # Log cookies before attempting access
+            pre_access_cookies = list(session.cookies.keys())
+            logger.info(f"📋 Cookies before PTR access: {pre_access_cookies}")
+            
+            # First attempt - with current session cookies
+            # Use allow_redirects=False first to see if we get redirected
+            response = session.get(url, timeout=30, allow_redirects=False, headers={
+                'Referer': search_url if source == 'senate' else url,
+                'User-Agent': session.headers.get('User-Agent'),
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1'
+            })
+            
+            # Check if we got redirected
+            if response.status_code in [301, 302, 303, 307, 308]:
+                redirect_location = response.headers.get('Location', '')
+                logger.info(f"📋 PTR URL returned {response.status_code} redirect to: {redirect_location}")
+                # Follow redirect manually to see where we end up
+                if redirect_location.startswith('/'):
+                    redirect_location = f"https://efdsearch.senate.gov{redirect_location}"
+                elif not redirect_location.startswith('http'):
+                    redirect_location = f"https://efdsearch.senate.gov/{redirect_location}"
+                logger.info(f"📋 Following redirect to: {redirect_location}")
+                response = session.get(redirect_location, timeout=30, allow_redirects=True, headers={
+                    'Referer': url,
+                    'User-Agent': session.headers.get('User-Agent')
+                })
             else:
-                logger.info(f"✅ Session cookie present: {sessionid_cookie[:50]}...")
-        
-        # Now download the actual PTR file/HTML
-        response = session.get(url, timeout=30, allow_redirects=True, headers={
-            'Referer': search_url if source == 'senate' else url,
-            'User-Agent': session.headers.get('User-Agent'),
-            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-            'Accept-Language': 'en-US,en;q=0.9',
-            'Connection': 'keep-alive',
-            'Upgrade-Insecure-Requests': '1'
-        })
-        response.raise_for_status()
-        
-        # Check if we got redirected to home page (agreement issue)
-        if source == 'senate' and ('/search/home/' in response.url or 'eFD: Home' in response.text[:500]):
-            logger.warning(f"⚠️ Got redirected to home page when accessing PTR - agreement not in session")
-            logger.warning(f"⚠️ Final URL: {response.url}")
-            logger.warning(f"⚠️ This means the session cookie with agreement is missing")
-            # Try to re-accept agreement and retry
-            logger.info(f"📋 Re-attempting agreement acceptance...")
-            search_response = session.get(search_url, timeout=30)
-            search_html = search_response.text
-            if 'id="agreement_form"' in search_html:
+                response.raise_for_status()
+            
+            # Check if we got redirected to home page OR got agreement form on PTR page
+            is_home_redirect = '/search/home/' in response.url or 'eFD: Home' in response.text[:500] or response.text.find('<title>eFD: Home</title>') != -1
+            has_agreement_form = 'id="agreement_form"' in response.text or 'prohibition_agreement' in response.text or 'Get Access' in response.text
+            
+            if is_home_redirect:
+                logger.warning(f"⚠️ Got redirected to home page - trying to accept agreement on PTR page directly")
+                # Try accessing the PTR URL and accepting agreement there
+                # Sometimes the agreement needs to be accepted on the specific page
+                logger.info(f"📋 Re-fetching PTR URL to get agreement form...")
+                ptr_page_response = session.get(url, timeout=30, allow_redirects=False, headers={
+                    'Referer': search_url,
+                    'User-Agent': session.headers.get('User-Agent')
+                })
+                
+                # Check response - might be 302 redirect or 200 with agreement form
+                if ptr_page_response.status_code == 302:
+                    logger.info(f"📋 PTR URL redirects to: {ptr_page_response.headers.get('Location', 'unknown')}")
+                    # Follow redirect manually
+                    redirect_url = ptr_page_response.headers.get('Location', '')
+                    if redirect_url.startswith('/'):
+                        redirect_url = f"https://efdsearch.senate.gov{redirect_url}"
+                    logger.info(f"📋 Following redirect to: {redirect_url}")
+                    ptr_page_response = session.get(redirect_url, timeout=30, allow_redirects=True)
+                
+                ptr_html = ptr_page_response.text
+                if 'id="agreement_form"' in ptr_html or 'prohibition_agreement' in ptr_html:
+                    logger.info(f"📋 Found agreement form on PTR page - accepting...")
+                    import re
+                    agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
+                    agreement_csrf_match = re.search(agreement_csrf_pattern, ptr_html, re.IGNORECASE)
+                    
+                    if agreement_csrf_match:
+                        ptr_csrf = agreement_csrf_match.group(1)
+                        # POST agreement to the PTR URL itself
+                        agreement_post_response = session.post(
+                            url,
+                            data={'prohibition_agreement': '1', 'csrfmiddlewaretoken': ptr_csrf},
+                            headers={
+                                'Content-Type': 'application/x-www-form-urlencoded',
+                                'Referer': url,
+                                'Origin': 'https://efdsearch.senate.gov',
+                                'X-CSRFToken': ptr_csrf
+                            },
+                            allow_redirects=True
+                        )
+                        agreement_post_response.raise_for_status()
+                        
+                        # Check Set-Cookie from agreement POST
+                        post_set_cookie = agreement_post_response.headers.get('Set-Cookie', '')
+                        if post_set_cookie:
+                            logger.info(f"📋 Set-Cookie from PTR agreement POST: {post_set_cookie[:200]}...")
+                            # Parse sessionid if present
+                            if 'sessionid=' in post_set_cookie:
+                                from http.cookies import SimpleCookie
+                                try:
+                                    cookie = SimpleCookie()
+                                    cookie.load(post_set_cookie)
+                                    for key, morsel in cookie.items():
+                                        domain = '.senate.gov'
+                                        if 'Domain=' in post_set_cookie:
+                                            domain_match = re.search(r'Domain=([^;]+)', post_set_cookie)
+                                            if domain_match:
+                                                domain = domain_match.group(1).strip()
+                                        session.cookies.set(key, morsel.value, domain=domain)
+                                    logger.info(f"✅ Set session cookie from PTR agreement POST")
+                                except Exception as e:
+                                    logger.warning(f"⚠️ Could not parse Set-Cookie: {e}")
+                        
+                        # Now try accessing the PTR page again
+                        logger.info(f"📋 Re-accessing PTR URL after accepting agreement on page...")
+                        response = session.get(url, timeout=30, allow_redirects=True, headers={
+                            'Referer': url,
+                            'User-Agent': session.headers.get('User-Agent')
+                        })
+                        response.raise_for_status()
+                        
+                        # Verify we got the PTR page, not home page
+                        if '/search/home/' in response.url or 'eFD: Home' in response.text[:500]:
+                            raise Exception(f"Still redirected to home page after accepting agreement on PTR page")
+                        logger.info(f"✅ Successfully accessed PTR page after accepting agreement")
+                    else:
+                        raise Exception(f"Could not extract CSRF token from PTR agreement form")
+                else:
+                    raise Exception(f"PTR page does not contain agreement form but still redirects")
+            elif has_agreement_form:
+                # We got the agreement form on the PTR page - accept it
+                logger.info(f"📋 Found agreement form on PTR page - accepting...")
                 import re
                 agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
-                agreement_csrf_match = re.search(agreement_csrf_pattern, search_html, re.IGNORECASE)
+                agreement_csrf_match = re.search(agreement_csrf_pattern, response.text, re.IGNORECASE)
+                
                 if agreement_csrf_match:
-                    agreement_csrf = agreement_csrf_match.group(1)
-                    agreement_response = session.post(
-                        search_url,
-                        data={'prohibition_agreement': '1', 'csrfmiddlewaretoken': agreement_csrf},
+                    ptr_csrf = agreement_csrf_match.group(1)
+                    agreement_post_response = session.post(
+                        url,
+                        data={'prohibition_agreement': '1', 'csrfmiddlewaretoken': ptr_csrf},
                         headers={
                             'Content-Type': 'application/x-www-form-urlencoded',
-                            'Referer': search_url,
+                            'Referer': url,
                             'Origin': 'https://efdsearch.senate.gov',
-                            'X-CSRFToken': agreement_csrf
+                            'X-CSRFToken': ptr_csrf
                         },
                         allow_redirects=True
                     )
-                    logger.info(f"✅ Re-accepted agreement, retrying PTR URL...")
-                    response = session.get(url, timeout=30, allow_redirects=True, headers={
-                        'Referer': search_url,
-                        'User-Agent': session.headers.get('User-Agent')
-                    })
-                    response.raise_for_status()
-                    if '/search/home/' in response.url:
-                        raise Exception(f"Could not access PTR after accepting agreement - redirected to home page")
+                    agreement_post_response.raise_for_status()
+                    
+                    # If POST response contains the PTR content, use it
+                    if 'Transactions' in agreement_post_response.text or 'table-striped' in agreement_post_response.text:
+                        logger.info(f"✅ Agreement POST response contains PTR content - using it")
+                        response = agreement_post_response
+                    else:
+                        # Retry GET request
+                        logger.info(f"📋 Re-accessing PTR URL after agreement acceptance...")
+                        response = session.get(url, timeout=30, allow_redirects=True, headers={
+                            'Referer': url,
+                            'User-Agent': session.headers.get('User-Agent')
+                        })
+                        response.raise_for_status()
+                else:
+                    raise Exception(f"Could not extract CSRF token from PTR agreement form")
+            else:
+                # We got the actual PTR page - success!
+                logger.info(f"✅ Successfully accessed PTR page")
         
         # Check if response is actually a PDF
         content_type = response.headers.get('Content-Type', '').lower()
