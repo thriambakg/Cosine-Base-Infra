@@ -167,52 +167,83 @@ class CongressionalPTRScraper:
             
             html_content = response.text
             
-            # Extract any hidden form fields or CSRF tokens
-            # Look for common form field names
-            csrf_token = None
-            view_state = None
+            # Log first part of HTML to debug form structure
+            logger.info(f"📄 HTML content preview (first 3000 chars): {html_content[:3000]}")
             
-            # Try to find hidden form fields
-            csrf_pattern = r'name=["\']csrf["\']|name=["\']_token["\']|name=["\']authenticity_token["\']|name=["\']csrf_token["\']|csrf["\']:\s*["\']([^"\']+)["\']'
+            # Extract form action URL
+            form_action = None
+            form_match = re.search(r'<form[^>]*action=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+            if form_match:
+                form_action = form_match.group(1)
+                if form_action.startswith('/'):
+                    form_action = urljoin(search_url, form_action)
+                elif not form_action.startswith('http'):
+                    form_action = urljoin(search_url, form_action)
+                logger.info(f"✅ Found form action: {form_action}")
+            
+            # Extract form method (GET or POST)
+            form_method = 'POST'
+            method_match = re.search(r'<form[^>]*method=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+            if method_match:
+                form_method = method_match.group(1).upper()
+                logger.info(f"✅ Found form method: {form_method}")
+            
+            # Extract form field names from the actual HTML
+            # Based on the actual form structure:
+            # - Report type: name="report_type", value="11" for Periodic Transactions
+            # - Date fields: name="submitted_start_date" and name="submitted_end_date"
+            # - CSRF token: name="csrfmiddlewaretoken"
+            
+            # Extract CSRF token (required for Django forms)
+            csrf_token = None
+            csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
             csrf_match = re.search(csrf_pattern, html_content, re.IGNORECASE)
             if csrf_match:
-                if len(csrf_match.groups()) > 0:
-                    csrf_token = csrf_match.group(1)
-                else:
-                    # Try to find value in next input tag
-                    value_pattern = r'value=["\']([^"\']+)["\']'
-                    value_match = re.search(value_pattern, html_content[csrf_match.end():csrf_match.end()+200])
-                    if value_match:
-                        csrf_token = value_match.group(1)
+                csrf_token = csrf_match.group(1)
+                logger.info(f"✅ Found CSRF token")
+            else:
+                logger.warning("⚠️ Could not find CSRF token - form submission may fail")
             
-            # Look for viewstate (ASP.NET) or other hidden fields
-            viewstate_pattern = r'name=["\']__VIEWSTATE["\'][^>]*value=["\']([^"\']+)["\']'
-            viewstate_match = re.search(viewstate_pattern, html_content, re.IGNORECASE)
-            if viewstate_match:
-                view_state = viewstate_match.group(1)
+            # Extract report type field name and value for Periodic Transactions
+            report_type_field = 'report_type'
+            report_type_value = None
+            # Look for checkbox with value="11" and Periodic Transactions label
+            ptr_checkbox_pattern = r'<input[^>]*name=["\']report_type["\'][^>]*value=["\'](\d+)["\'][^>]*>.*?Periodic.*?Transaction'
+            ptr_match = re.search(ptr_checkbox_pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if ptr_match:
+                report_type_value = ptr_match.group(1)
+                logger.info(f"✅ Found Periodic Transactions checkbox value: {report_type_value}")
+            else:
+                # Fallback: look for checkbox with value that comes before "Periodic Transactions"
+                # The HTML shows value="11" for Periodic Transactions
+                report_type_value = '11'
+                logger.info(f"💡 Using default Periodic Transactions value: {report_type_value}")
+            
+            # Date field names (from actual HTML)
+            date_from_field = 'submitted_start_date'
+            date_to_field = 'submitted_end_date'
+            logger.info(f"✅ Using date fields: {date_from_field} and {date_to_field}")
             
             # Prepare form data for POST request
-            # Based on the search form: Periodic Transactions checkbox checked, date range
-            # The form likely uses checkbox names like "report_types[]" or similar
-            form_data = {
-                'report_types[]': 'PT',  # Periodic Transactions (may need array format)
-                'report_types': 'PT',  # Try both formats
-                'filed_date_from': date_str,
-                'filed_date_to': date_str,
-            }
+            # Based on actual form structure from HTML
+            form_data = {}
             
-            # Add CSRF token if found
+            # Report type checkbox: name="report_type", value="11" for Periodic Transactions
+            if report_type_value:
+                form_data[report_type_field] = report_type_value
+            else:
+                form_data['report_type'] = '11'  # Periodic Transactions value
+            
+            # Date fields: name="submitted_start_date" and name="submitted_end_date"
+            form_data[date_from_field] = date_str
+            form_data[date_to_field] = date_str
+            
+            # CSRF token: name="csrfmiddlewaretoken" (required for Django)
             if csrf_token:
-                # Determine the field name from the pattern
-                if 'csrf' in csrf_pattern.lower():
-                    form_data['csrf'] = csrf_token
-                elif '_token' in csrf_pattern.lower():
-                    form_data['_token'] = csrf_token
-                else:
-                    form_data['csrf_token'] = csrf_token
-            
-            if view_state:
-                form_data['__VIEWSTATE'] = view_state
+                form_data['csrfmiddlewaretoken'] = csrf_token
+            else:
+                logger.error("❌ CSRF token is required but not found - form submission will fail")
+                return ptrs
             
             # Set headers for form submission
             headers = {
@@ -227,13 +258,16 @@ class CongressionalPTRScraper:
             logger.info(f"📋 Form data: {form_data}")
             
             # Try POST to search endpoint
-            # The form might submit to /search/ or /search/results/ or similar
-            search_endpoints = [
+            # Use form action if found, otherwise try common endpoints
+            search_endpoints = []
+            if form_action:
+                search_endpoints.append(form_action)
+            search_endpoints.extend([
                 search_url,
                 f"{search_url}results/",
                 f"{search_url}search/",
                 "https://efdsearch.senate.gov/search/results/",
-            ]
+            ])
             
             search_results_html = None
             
@@ -250,33 +284,60 @@ class CongressionalPTRScraper:
                     
                     if response.status_code == 200:
                         search_results_html = response.text
-                        logger.info(f"✅ Successfully submitted search form")
+                        logger.info(f"✅ Successfully submitted search form to {endpoint}")
+                        # Log a sample of the response to see what we got
+                        logger.debug(f"📄 Response preview (first 1000 chars): {search_results_html[:1000]}")
                         break
+                    elif response.status_code == 302 or response.status_code == 301:
+                        # Redirect - follow it
+                        redirect_url = response.headers.get('Location')
+                        if redirect_url:
+                            if redirect_url.startswith('/'):
+                                redirect_url = urljoin(endpoint, redirect_url)
+                            logger.info(f"🔄 Following redirect to: {redirect_url}")
+                            redirect_response = self.session.get(redirect_url, timeout=30)
+                            if redirect_response.status_code == 200:
+                                search_results_html = redirect_response.text
+                                logger.info(f"✅ Got results after redirect")
+                                break
                     else:
                         logger.debug(f"⚠️ POST to {endpoint} returned status {response.status_code}")
+                        logger.debug(f"📄 Response preview: {response.text[:500]}")
                 except Exception as e:
                     logger.debug(f"⚠️ Error POSTing to {endpoint}: {e}")
                     continue
             
-            if not search_results_html:
-                # If POST doesn't work, try GET with query parameters
-                logger.info("💡 Trying GET request with query parameters as fallback")
-                params = {
-                    'report_types': 'PT',
-                    'filed_date_from': date_str,
-                    'filed_date_to': date_str,
-                }
-                
-                try:
-                    response = self.session.get(search_url, params=params, timeout=30)
-                    if response.status_code == 200:
-                        search_results_html = response.text
-                except Exception as e:
-                    logger.warning(f"⚠️ GET request also failed: {e}")
+            # Note: Django forms typically require POST, so we don't try GET as fallback
             
             if not search_results_html:
                 logger.warning("⚠️ Could not retrieve search results page")
+                logger.warning("💡 The form submission may have failed. Check form field names and submission method.")
+                # Log the HTML form structure for debugging
+                if html_content:
+                    form_match = re.search(r'<form[^>]*>.*?</form>', html_content, re.IGNORECASE | re.DOTALL)
+                    if form_match:
+                        logger.debug(f"📋 Form HTML structure: {form_match.group(0)[:1000]}")
                 return ptrs
+            
+            # Log search results page structure for debugging
+            logger.info(f"📄 Search results page preview (first 3000 chars): {search_results_html[:3000]}")
+            
+            # Check if we got the search form back (which means submission failed)
+            if '<form' in search_results_html and 'Search' in search_results_html:
+                logger.warning("⚠️ Got search form back - form submission may have failed or been rejected")
+                logger.warning("💡 Response suggests form was not submitted correctly")
+            
+            # Check if we got an error message or empty results
+            if 'no results' in search_results_html.lower() or 'no matches' in search_results_html.lower():
+                logger.info("📋 Search returned no results (this might be correct if no PTRs were filed on this date)")
+            elif 'error' in search_results_html.lower() and ('form' in search_results_html.lower() or 'invalid' in search_results_html.lower()):
+                logger.warning("⚠️ Search may have returned an error - form submission might be incorrect")
+            
+            # Look for table with results
+            if '<table' in search_results_html or '<tbody' in search_results_html:
+                logger.info("✅ Found table structure in results - likely contains search results")
+            else:
+                logger.warning("⚠️ No table structure found in results - may not be the results page")
             
             # Parse search results HTML to find PTR links
             # The results are in a table with columns: FName, LName, Office, Report type, Date received/filed
