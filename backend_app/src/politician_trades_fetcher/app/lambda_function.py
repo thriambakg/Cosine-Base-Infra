@@ -577,28 +577,26 @@ def lambda_handler(event, context):
         results['housePTRsFetched'] = 0
         results['housePTRs'] = []
         
-        # Step 3: Fetch Senate PTRs
+        # Step 3: Fetch Senate PTRs (metadata only - downloader will download them)
         logger.info("🏛️ Fetching Senate PTRs...")
         scraper = CongressionalPTRScraper()
         senate_ptrs = scraper.fetch_senate_ptrs(target_date)
         
-        # Download and store each Senate PTR (Textract will filter by actual filing date)
-        # NOTE: Senate PTR fetching is not yet implemented (requires form submission)
-        # For testing, you can manually upload Senate PTR PDFs to S3 at:
-        # trades/{date}/senate/{filename}.pdf
-        if senate_ptrs:
-            for ptr_data in senate_ptrs:
-                if scraper.download_ptr_file(
-                    ptr_data.get('url'),
-                    ptr_data.get('s3_key'),
-                    S3_BUCKET,
-                    s3_client,
-                    target_date  # Pass target_date to filter by actual filing date
-                ):
-                    results['senatePTRs'].append(ptr_data)
-                    results['senatePTRsFetched'] += 1
+        # Return metadata for downloader Lambda (similar to SEC forms)
+        # The downloader will download them and use Textract to filter by actual filing date
+        for ptr_data in senate_ptrs:
+            # Add source field if not present
+            if 'source' not in ptr_data:
+                ptr_data['source'] = 'senate'
+            # Ensure formType is set
+            if 'formType' not in ptr_data and 'form_type' not in ptr_data:
+                ptr_data['formType'] = 'senate_ptr'
+                ptr_data['form_type'] = 'senate_ptr'
+            
+            results['senatePTRs'].append(ptr_data)
+            results['senatePTRsFetched'] += 1
         
-        logger.info(f"✅ Fetched {results['senatePTRsFetched']} Senate PTRs")
+        logger.info(f"✅ Found {results['senatePTRsFetched']} Senate PTRs for download")
         
         # Summary
         total_fetched = (

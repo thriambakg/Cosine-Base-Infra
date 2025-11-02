@@ -140,14 +140,6 @@ class CongressionalPTRScraper:
         Senate PTRs are published at: https://efdsearch.senate.gov/search/
         This site uses a search interface that requires form submission
         
-        NOTE: Senate PTRs are accessed through a search interface that requires:
-        1. Authenticated session (may need to handle cookies/CSRF)
-        2. Form submission with date range
-        3. Parsing search results
-        
-        For now, this returns an empty list. Senate PTRs should be downloaded
-        manually or accessed through their API if available.
-        
         Args:
             target_date: Date in YYYY-MM-DD format
             
@@ -158,68 +150,329 @@ class CongressionalPTRScraper:
         
         ptrs = []
         
-        # TODO: Implement Senate PTR fetching
-        # Senate eFD search requires:
-        # 1. Form submission with date range
-        # 2. Authentication/session management
-        # 3. Result parsing
-        
-        logger.warning("⚠️ Senate PTR fetching not yet implemented - requires form submission and session handling")
-        logger.info("💡 Senate PTRs can be accessed at: https://efdsearch.senate.gov/search/")
-        logger.info("💡 PTRs filed on a specific date can be searched by date range")
-        
-        # Placeholder implementation
         try:
-                
-                # For now, try to find links to PDFs with date in URL/filename
-                pdf_pattern = r'href=["\']([^"\']*\.pdf[^"\']*)["\']'
-                pdf_matches = re.findall(pdf_pattern, html_content, re.IGNORECASE)
-                
-                logger.info(f"📋 Found {len(pdf_matches)} PDF links on Senate search page")
-                
-                # Check if PDFs match the target date
-                date_formats_in_filename = [
-                    target_date.replace('-', ''),  # YYYYMMDD
-                    target_date,  # YYYY-MM-DD
-                    target_date[5:7] + '-' + target_date[8:10] + '-' + target_date[0:4],  # MM-DD-YYYY
-                ]
-                
-                for pdf_link in pdf_matches:
-                    # Convert relative URLs to absolute
-                    if pdf_link.startswith('/'):
-                        pdf_url = f"https://efdsearch.senate.gov{pdf_link}"
-                    elif pdf_link.startswith('http'):
-                        pdf_url = pdf_link
+            # Parse target date for form submission
+            target_date_obj = datetime.strptime(target_date, '%Y-%m-%d')
+            
+            # Format date for form (MM/DD/YYYY)
+            date_str = target_date_obj.strftime('%m/%d/%Y')
+            
+            # Senate eFD search URL
+            search_url = "https://efdsearch.senate.gov/search/"
+            
+            # First, GET the search page to get session cookies and any CSRF tokens
+            logger.info(f"🔍 Accessing Senate PTR search page: {search_url}")
+            response = self.session.get(search_url, timeout=30)
+            response.raise_for_status()
+            
+            html_content = response.text
+            
+            # Extract any hidden form fields or CSRF tokens
+            # Look for common form field names
+            csrf_token = None
+            view_state = None
+            
+            # Try to find hidden form fields
+            csrf_pattern = r'name=["\']csrf["\']|name=["\']_token["\']|name=["\']authenticity_token["\']|name=["\']csrf_token["\']|csrf["\']:\s*["\']([^"\']+)["\']'
+            csrf_match = re.search(csrf_pattern, html_content, re.IGNORECASE)
+            if csrf_match:
+                if len(csrf_match.groups()) > 0:
+                    csrf_token = csrf_match.group(1)
+                else:
+                    # Try to find value in next input tag
+                    value_pattern = r'value=["\']([^"\']+)["\']'
+                    value_match = re.search(value_pattern, html_content[csrf_match.end():csrf_match.end()+200])
+                    if value_match:
+                        csrf_token = value_match.group(1)
+            
+            # Look for viewstate (ASP.NET) or other hidden fields
+            viewstate_pattern = r'name=["\']__VIEWSTATE["\'][^>]*value=["\']([^"\']+)["\']'
+            viewstate_match = re.search(viewstate_pattern, html_content, re.IGNORECASE)
+            if viewstate_match:
+                view_state = viewstate_match.group(1)
+            
+            # Prepare form data for POST request
+            # Based on the search form: Periodic Transactions checkbox checked, date range
+            # The form likely uses checkbox names like "report_types[]" or similar
+            form_data = {
+                'report_types[]': 'PT',  # Periodic Transactions (may need array format)
+                'report_types': 'PT',  # Try both formats
+                'filed_date_from': date_str,
+                'filed_date_to': date_str,
+            }
+            
+            # Add CSRF token if found
+            if csrf_token:
+                # Determine the field name from the pattern
+                if 'csrf' in csrf_pattern.lower():
+                    form_data['csrf'] = csrf_token
+                elif '_token' in csrf_pattern.lower():
+                    form_data['_token'] = csrf_token
+                else:
+                    form_data['csrf_token'] = csrf_token
+            
+            if view_state:
+                form_data['__VIEWSTATE'] = view_state
+            
+            # Set headers for form submission
+            headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'Referer': search_url,
+                'Origin': 'https://efdsearch.senate.gov',
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+            }
+            
+            # Submit search form
+            logger.info(f"🔍 Submitting search form for date range: {date_str} to {date_str}")
+            logger.info(f"📋 Form data: {form_data}")
+            
+            # Try POST to search endpoint
+            # The form might submit to /search/ or /search/results/ or similar
+            search_endpoints = [
+                search_url,
+                f"{search_url}results/",
+                f"{search_url}search/",
+                "https://efdsearch.senate.gov/search/results/",
+            ]
+            
+            search_results_html = None
+            
+            for endpoint in search_endpoints:
+                try:
+                    logger.info(f"🔍 Trying POST to: {endpoint}")
+                    response = self.session.post(
+                        endpoint,
+                        data=form_data,
+                        headers=headers,
+                        timeout=30,
+                        allow_redirects=True
+                    )
+                    
+                    if response.status_code == 200:
+                        search_results_html = response.text
+                        logger.info(f"✅ Successfully submitted search form")
+                        break
                     else:
-                        pdf_url = urljoin(search_url, pdf_link)
+                        logger.debug(f"⚠️ POST to {endpoint} returned status {response.status_code}")
+                except Exception as e:
+                    logger.debug(f"⚠️ Error POSTing to {endpoint}: {e}")
+                    continue
+            
+            if not search_results_html:
+                # If POST doesn't work, try GET with query parameters
+                logger.info("💡 Trying GET request with query parameters as fallback")
+                params = {
+                    'report_types': 'PT',
+                    'filed_date_from': date_str,
+                    'filed_date_to': date_str,
+                }
+                
+                try:
+                    response = self.session.get(search_url, params=params, timeout=30)
+                    if response.status_code == 200:
+                        search_results_html = response.text
+                except Exception as e:
+                    logger.warning(f"⚠️ GET request also failed: {e}")
+            
+            if not search_results_html:
+                logger.warning("⚠️ Could not retrieve search results page")
+                return ptrs
+            
+            # Parse search results HTML to find PTR links
+            # The results are in a table with columns: FName, LName, Office, Report type, Date received/filed
+            # Links are typically in the "Report type" column or filer name columns
+            ptr_link_patterns = [
+                r'href=["\']([^"\']*view/ptr/[^"\']+)["\']',  # Direct PTR view links
+                r'href=["\']([^"\']*ptr/[^"\']+)["\']',  # PTR links
+                r'https://efdsearch\.senate\.gov/search/view/ptr/([a-f0-9-]+)',  # UUID-based links
+                r'/search/view/ptr/([a-f0-9-]+)/',  # UUID in path
+            ]
+            
+            ptr_urls = set()  # Use set to avoid duplicates
+            ptr_data_map = {}  # Map URL to metadata (filer name, etc.)
+            
+            # First, try to find links using patterns
+            for pattern in ptr_link_patterns:
+                matches = re.finditer(pattern, search_results_html, re.IGNORECASE)
+                for match in matches:
+                    if match.groups():
+                        # Pattern with capture group (UUID)
+                        uuid = match.group(1)
+                        full_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/"
+                    else:
+                        # Full URL pattern
+                        link = match.group(0)
+                        if link.startswith('/'):
+                            full_url = f"https://efdsearch.senate.gov{link}"
+                        elif link.startswith('http'):
+                            full_url = link
+                        else:
+                            full_url = urljoin(search_url, link)
                     
-                    # Check if filename contains target date
-                    filename_matches_date = any(date_format in pdf_link for date_format in date_formats_in_filename)
+                    ptr_urls.add(full_url)
+            
+            # Also try to parse the results table directly
+            # Look for table rows with PTR data
+            # The table might have structure like: <tr><td>Rick</td><td>Scott</td><td>...</td></tr>
+            table_row_pattern = r'<tr[^>]*>.*?Periodic Transaction Report.*?</tr>'
+            table_rows = re.finditer(table_row_pattern, search_results_html, re.IGNORECASE | re.DOTALL)
+            
+            for row_match in table_rows:
+                row_html = row_match.group(0)
+                
+                # Extract UUID from any links in the row
+                uuid_match = re.search(r'/ptr/([a-f0-9-]+)', row_html, re.IGNORECASE)
+                if uuid_match:
+                    uuid = uuid_match.group(1)
+                    full_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/"
+                    ptr_urls.add(full_url)
                     
-                    if filename_matches_date:
-                        filename = pdf_link.split('/')[-1]
-                        filer_name = filename.replace('.pdf', '').replace('-', ' ').title()
+                    # Try to extract filer name from table cells
+                    # Look for name pattern in <td> tags
+                    name_cells = re.finditer(r'<td[^>]*>([^<]+)</td>', row_html, re.IGNORECASE)
+                    names = []
+                    for cell_match in name_cells:
+                        cell_text = cell_match.group(1).strip()
+                        if cell_text and len(cell_text) > 2 and not cell_text.isdigit():
+                            names.append(cell_text)
+                    
+                    if names and len(names) >= 2:
+                        # First two non-empty cells are likely first and last name
+                        filer_name = f"{names[0]} {names[1]}"
+                        ptr_data_map[full_url] = {'filer_name': filer_name}
+            
+            logger.info(f"📋 Found {len(ptr_urls)} Senate PTR links in search results")
+            
+            # For each PTR URL, extract metadata and find the PDF download link
+            for ptr_url in ptr_urls:
+                try:
+                    logger.info(f"🔍 Processing Senate PTR: {ptr_url}")
+                    
+                    # Access the PTR view page to get the download link
+                    response = self.session.get(ptr_url, timeout=30)
+                    response.raise_for_status()
+                    
+                    ptr_page_html = response.text
+                    
+                    # Look for PDF download link on the PTR page
+                    # Common patterns: "Print", "Download PDF", "View PDF", etc.
+                    pdf_link_patterns = [
+                        r'href=["\']([^"\']*\.pdf[^"\']*)["\']',  # Direct PDF links
+                        r'href=["\']([^"\']*print[^"\']*)["\']',  # Print links that generate PDFs
+                        r'href=["\']([^"\']*download[^"\']*)["\']',  # Download links
+                        r'data-pdf-url=["\']([^"\']+)["\']',  # Data attributes
+                    ]
+                    
+                    pdf_url = None
+                    
+                    for pattern in pdf_link_patterns:
+                        match = re.search(pattern, ptr_page_html, re.IGNORECASE)
+                        if match:
+                            link = match.group(1)
+                            
+                            # Convert relative URLs to absolute
+                            if link.startswith('/'):
+                                pdf_url = f"https://efdsearch.senate.gov{link}"
+                            elif link.startswith('http'):
+                                pdf_url = link
+                            else:
+                                pdf_url = urljoin(ptr_url, link)
+                            
+                            # Check if it's actually a PDF link
+                            if '.pdf' in pdf_url.lower() or 'print' in pdf_url.lower():
+                                break
+                    
+                    # If no direct PDF link found, the PTR page might have a print endpoint
+                    # Try common print endpoints
+                    if not pdf_url:
+                        # Extract UUID from URL if present
+                        uuid_match = re.search(r'/ptr/([a-f0-9-]+)', ptr_url, re.IGNORECASE)
+                        if uuid_match:
+                            uuid = uuid_match.group(1)
+                            # Try common print endpoints
+                            print_endpoints = [
+                                f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/",
+                                f"https://efdsearch.senate.gov/search/ptr/{uuid}/print/",
+                                f"https://efdsearch.senate.gov/search/print/ptr/{uuid}/",
+                            ]
+                            
+                            for endpoint in print_endpoints:
+                                # Test if endpoint exists (HEAD request)
+                                try:
+                                    test_response = self.session.head(endpoint, timeout=10, allow_redirects=True)
+                                    if test_response.status_code == 200 or test_response.status_code == 302:
+                                        pdf_url = endpoint
+                                        break
+                                except:
+                                    continue
+                    
+                    # Extract filer name from the PTR page or use cached value from search results
+                    filer_name = None
+                    
+                    # Check if we already have the filer name from search results
+                    if ptr_url in ptr_data_map and 'filer_name' in ptr_data_map[ptr_url]:
+                        filer_name = ptr_data_map[ptr_url]['filer_name']
+                    else:
+                        # Try to extract from PTR page
+                        name_patterns = [
+                            r'<h[1-6][^>]*>([^<]*The Honorable[^<]+)</h[1-6]>',  # Header with "The Honorable"
+                            r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',  # "The Honorable First Last"
+                            r'<td[^>]*>([A-Z][a-z]+\s+[A-Z][a-z]+)</td>',  # Table cell with name
+                            r'<title>([^<]*The Honorable[^<]+)</title>',  # Title tag
+                        ]
+                        
+                        for pattern in name_patterns:
+                            match = re.search(pattern, ptr_page_html)
+                            if match:
+                                filer_name = match.group(1).strip()
+                                # Clean up HTML tags and extra whitespace
+                                filer_name = re.sub(r'<[^>]+>', '', filer_name)
+                                filer_name = re.sub(r'\s+', ' ', filer_name).strip()
+                                # Remove "The Honorable" title
+                                filer_name = re.sub(r'\bThe Honorable\b', '', filer_name, flags=re.IGNORECASE).strip()
+                                if filer_name:
+                                    break
+                    
+                    # If no PDF URL found, try to construct it from the UUID
+                    if not pdf_url and uuid_match:
+                        uuid = uuid_match.group(1)
+                        # Try direct PDF endpoint
+                        pdf_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
+                    
+                    if pdf_url:
+                        # Generate filename from URL or use UUID
+                        if uuid_match:
+                            filename = f"senate-ptr-{uuid_match.group(1)}.pdf"
+                        else:
+                            filename = f"senate-ptr-{target_date}.pdf"
+                        
+                        # Extract last name from filer name if available
+                        if filer_name:
+                            name_parts = filer_name.split()
+                            if len(name_parts) >= 2:
+                                last_name = name_parts[-1]
+                                filename = f"senate-ptr-{last_name.lower()}-{target_date}.pdf"
                         
                         ptr_data = {
-                            'filer_name': filer_name,
+                            'filer_name': filer_name or 'Unknown',
                             'filing_date': target_date,
                             'form_type': 'senate_ptr',
                             'url': pdf_url,
                             's3_key': f"trades/{target_date}/senate/{filename}"
                         }
+                        
                         ptrs.append(ptr_data)
-                        logger.info(f"✅ Found Senate PTR: {filename}")
-                
-                # If we can't find PDFs directly, we might need to use the search form
-                # This requires more complex form submission
-                if len(ptrs) == 0:
-                    logger.warning("⚠️ Senate PTR scraping requires search form submission - basic implementation may not find all PTRs")
-                    logger.info("💡 Consider using Senate PTR API or official data feed if available")
-                
-            except Exception as search_error:
-                logger.error(f"❌ Error accessing Senate PTR search: {search_error}")
-                import traceback
-                logger.error(f"Traceback: {traceback.format_exc()}")
+                        logger.info(f"✅ Found Senate PTR: {filer_name or 'Unknown'} - {filename}")
+                    else:
+                        logger.warning(f"⚠️ Could not find PDF download URL for Senate PTR: {ptr_url}")
+                        
+                except Exception as ptr_error:
+                    logger.error(f"❌ Error processing Senate PTR {ptr_url}: {ptr_error}")
+                    import traceback
+                    logger.debug(f"Traceback: {traceback.format_exc()}")
+                    continue
+            
+            logger.info(f"📊 Found {len(ptrs)} Senate PTRs for {target_date}")
             
         except Exception as e:
             logger.error(f"❌ Error fetching Senate PTRs: {e}")

@@ -1945,25 +1945,71 @@ module "politician_trades_state_machine" {
           }
         }
         ResultPath = "$.downloadResults"
+        Next       = "DownloadSenatePTRs"
+      }
+
+      # Step 2b: Download Senate PTRs in parallel
+      DownloadSenatePTRs = {
+        Type           = "Map"
+        Comment        = "Download Senate PTRs in parallel using Map state"
+        ItemsPath      = "$.fetchResults.senatePTRs"
+        MaxConcurrency = 10
+        Iterator = {
+          StartAt = "DownloadSenatePTR"
+          States = {
+            DownloadSenatePTR = {
+              Type     = "Task"
+              Resource = module.politician_trades_downloader.function_arn
+              Comment  = "Download a single Senate PTR"
+              Retry = [
+                {
+                  ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                  IntervalSeconds = 60
+                  MaxAttempts     = 5
+                  BackoffRate     = 2.0
+                },
+                {
+                  ErrorEquals     = ["States.ALL"]
+                  IntervalSeconds = 10
+                  MaxAttempts     = 2
+                  BackoffRate     = 2.0
+                }
+              ]
+              Catch = [
+                {
+                  ErrorEquals = ["States.ALL"]
+                  ResultPath  = "$.error"
+                  Next        = "DownloadSenatePTRFailed"
+                }
+              ]
+              End = true
+            }
+            DownloadSenatePTRFailed = {
+              Type    = "Pass"
+              Comment = "Continue even if download fails (log error)"
+              Result  = { "success" : false, "error" : "Download failed" }
+              End     = true
+            }
+          }
+        }
+        ResultPath = "$.senatePTRDownloadResults"
         Next       = "TransformDownloadResults"
       }
 
       # Transform download results - prepare SEC forms and PTRs for matching
-      # SEC forms come from downloadResults (with s3Key), PTRs come from fetchResults (already downloaded with s3_key)
-      # The matcher Lambda handles both s3Key and s3_key formats, so we pass them as-is
+      # SEC forms come from downloadResults (with s3Key), Senate PTRs come from senatePTRDownloadResults
+      # House PTRs are skipped for now
       TransformDownloadResults = {
         Type    = "Pass"
-        Comment = "Prepare all forms/PTRs for matching (PTRs already downloaded, SEC forms from downloadResults)"
+        Comment = "Prepare all forms/PTRs for matching"
         Parameters = {
           "date.$" : "$.fetchResults.date",
           "fetchResults" : {
             "date.$" : "$.fetchResults.date",
             "datedFolder.$" : "States.Format('trades/{}', $.fetchResults.date)",
             "secForms.$" : "$.downloadResults",
-            # PTRs are already downloaded in fetcher with s3_key format
-            # Matcher handles both s3Key and s3_key
             "housePTRs.$" : "$.fetchResults.housePTRs",
-            "senatePTRs.$" : "$.fetchResults.senatePTRs"
+            "senatePTRs.$" : "$.senatePTRDownloadResults"
           }
         }
         Next = "MatchTrades"
