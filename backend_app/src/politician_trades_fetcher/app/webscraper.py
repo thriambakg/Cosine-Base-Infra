@@ -34,14 +34,33 @@ class CongressionalPTRScraper:
         
         try:
             # Find the transactions table
-            table_match = re.search(
-                r'<table[^>]*class=["\']table[^"\']*["\'][^>]*>.*?<tbody>(.*?)</tbody>',
-                html_content,
-                re.IGNORECASE | re.DOTALL
-            )
+            # Try multiple patterns to match different HTML structures
+            table_patterns = [
+                # Pattern 1: Standard table with class="table table-striped"
+                r'<table[^>]*class=["\'][^"\']*table[^"\']*table-striped[^"\']*["\'][^>]*>.*?<tbody>(.*?)</tbody>',
+                # Pattern 2: Table with class containing "table" and "striped" (may be in different order)
+                r'<table[^>]*class=["\'][^"\']*table[^"\']*["\'][^>]*>.*?<tbody>(.*?)</tbody>',
+                # Pattern 3: Any table with tbody (fallback)
+                r'<table[^>]*>.*?<tbody>(.*?)</tbody>',
+            ]
+            
+            table_match = None
+            for i, pattern in enumerate(table_patterns, 1):
+                table_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                if table_match:
+                    logger.debug(f"✅ Matched table pattern {i}")
+                    break
             
             if not table_match:
                 logger.warning("⚠️ Could not find transactions table in HTML")
+                # Debug: Look for any table tags
+                all_tables = re.findall(r'<table[^>]*>', html_content, re.IGNORECASE)
+                logger.debug(f"   Found {len(all_tables)} <table> tags in HTML")
+                if all_tables:
+                    logger.debug(f"   First table: {all_tables[0][:200]}")
+                # Also check for tbody tags
+                tbody_tags = re.findall(r'<tbody[^>]*>', html_content, re.IGNORECASE)
+                logger.debug(f"   Found {len(tbody_tags)} <tbody> tags in HTML")
                 return transactions
             
             tbody_content = table_match.group(1)
@@ -977,13 +996,45 @@ class CongressionalPTRScraper:
                                 logger.error(f"❌ Got 404/not found in response for {view_url}")
                                 raise Exception(f"404 Not Found for view URL: {view_url}")
                             
-                            # Verify we have the transactions table
-                            if 'Transactions' not in html_content or 'table-striped' not in html_content:
-                                logger.warning(f"⚠️ May not have transactions table in HTML (checking content...)")
+                            # Log HTML content summary for debugging
+                            has_transactions_keyword = 'Transactions' in html_content or 'transactions' in html_content.lower()
+                            has_table_striped = 'table-striped' in html_content
+                            has_table_tag = '<table' in html_content
+                            has_tbody_tag = '<tbody' in html_content
+                            
+                            logger.info(f"🔍 HTML content analysis:")
+                            logger.info(f"   - Contains 'Transactions': {has_transactions_keyword}")
+                            logger.info(f"   - Contains 'table-striped': {has_table_striped}")
+                            logger.info(f"   - Contains '<table': {has_table_tag}")
+                            logger.info(f"   - Contains '<tbody': {has_tbody_tag}")
+                            logger.info(f"   - Content length: {len(html_content)} bytes")
+                            
+                            # Extract a sample of HTML around "Transactions" to see structure
+                            if has_transactions_keyword:
+                                transactions_idx = html_content.lower().find('transactions')
+                                if transactions_idx != -1:
+                                    sample_start = max(0, transactions_idx - 200)
+                                    sample_end = min(len(html_content), transactions_idx + 1000)
+                                    sample = html_content[sample_start:sample_end]
+                                    logger.debug(f"📄 Sample HTML around 'Transactions': {sample[:500]}")
                             
                             # Extract transactions from HTML table
                             transactions = self._extract_senate_ptr_transactions(html_content, filer_name, filing_date_str)
                             logger.info(f"✅ Extracted {len(transactions)} transactions from {filer_name}'s PTR")
+                            
+                            if len(transactions) == 0:
+                                # Log detailed debug info if no transactions found
+                                logger.warning(f"⚠️ Extracted 0 transactions - debugging...")
+                                if has_table_tag:
+                                    # Find all tables and log their structure
+                                    table_matches = re.findall(r'<table[^>]*>.*?</table>', html_content, re.IGNORECASE | re.DOTALL)
+                                    logger.debug(f"   Found {len(table_matches)} complete table tags")
+                                    for i, table_html in enumerate(table_matches[:2]):  # Show first 2
+                                        logger.debug(f"   Table {i+1} preview: {table_html[:500]}")
+                                else:
+                                    logger.warning(f"   No <table> tags found in HTML at all!")
+                                    # Log a sample of the HTML to see what we got
+                                    logger.debug(f"   HTML sample (first 2000 chars): {html_content[:2000]}")
                             
                         except requests.exceptions.HTTPError as e:
                             logger.error(f"❌ HTTP error downloading PTR {view_url}: {e}")
