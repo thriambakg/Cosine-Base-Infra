@@ -507,45 +507,102 @@ def lambda_handler(event, context):
     """
     Lambda handler for fetching SEC forms and Congressional PTRs
     
-    Expected input:
+    Supports three input modes:
+    
+    1. Single date (backwards compatible):
     {
-        "date": "2024-01-15"  // Optional, defaults to yesterday
+        "date": "2025-10-30"
     }
+    
+    2. Date range (for backfilling historical data):
+    {
+        "startDate": "2025-01-01",
+        "endDate": "2025-12-31"
+    }
+    
+    3. Default (from EventBridge daily scheduler):
+    {
+        "source": "scheduler-daily",
+        "timestamp": "2025-10-31T00:00:00Z"
+    }
+    # Defaults to yesterday's date
     
     Returns:
     {
-        "date": "2024-01-15",
-        "secFormsFetched": 1250,
-        "housePTRsFetched": 15,
+        "date": "2025-10-30",  # First date (for backwards compatibility)
+        "dateRange": {  # Present only if date range was provided
+            "startDate": "2025-01-01",
+            "endDate": "2025-12-31",
+            "totalDays": 365
+        },
+        "secFormsFetched": 52,
+        "housePTRsFetched": 0,
         "senatePTRsFetched": 8,
-        "secForms": [...],
+        "secForms": [...],  # All forms across all dates in range
         "housePTRs": [...],
         "senatePTRs": [...]
     }
+    
+    Note: For large date ranges, consider breaking into smaller chunks to avoid Lambda timeout.
+    Recommended: Process 30-90 days at a time for optimal performance.
     """
     logger.info("🚀 Politician Trades Fetcher Lambda started")
-    
-    # Get target date from event
-    # Step Functions from EventBridge passes: {"source": "scheduler-daily", "timestamp": "..."}
-    # For daily runs, we default to yesterday's date (previous trading day)
-    # Direct invocations can pass explicit date: {"date": "2025-10-30"}
-    if isinstance(event, dict) and event.get('date'):
-        target_date = event.get('date')
-        logger.info(f"📅 Using provided date: {target_date}")
-    else:
-        # Default to yesterday for scheduled runs (previous trading day)
-        # For manual testing, you can pass {"date": "YYYY-MM-DD"} in Step Functions input
-        target_date = get_yesterday_date()
-        logger.info(f"📅 Using default date (yesterday): {target_date}")
-    
-    logger.info(f"📅 Processing date: {target_date}")
     
     if not S3_BUCKET:
         raise ValueError("S3_BUCKET environment variable not set")
     
-    # Initialize results
-    results = {
-        'date': target_date,
+    # Parse date input - support both single date and date range
+    # Options:
+    # 1. Single date: {"date": "2025-10-30"}
+    # 2. Date range: {"startDate": "2025-01-01", "endDate": "2025-12-31"}
+    # 3. Default: yesterday's date (for scheduled runs)
+    target_dates = []
+    
+    if isinstance(event, dict):
+        if event.get('startDate') and event.get('endDate'):
+            # Date range mode - backfill historical data
+            start_date_str = event.get('startDate')
+            end_date_str = event.get('endDate')
+            
+            try:
+                start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+                end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+                
+                if start_date > end_date:
+                    raise ValueError("startDate must be <= endDate")
+                
+                # Generate list of dates from start to end (inclusive)
+                current_date = start_date
+                while current_date <= end_date:
+                    target_dates.append(current_date.strftime('%Y-%m-%d'))
+                    current_date += timedelta(days=1)
+                
+                logger.info(f"📅 Date range mode: {start_date_str} to {end_date_str} ({len(target_dates)} days)")
+            except ValueError as e:
+                logger.error(f"❌ Invalid date format or range: {e}")
+                raise ValueError(f"Invalid date range: startDate='{start_date_str}', endDate='{end_date_str}'. Expected YYYY-MM-DD format.")
+        elif event.get('date'):
+            # Single date mode (backwards compatible)
+            target_dates = [event.get('date')]
+            logger.info(f"📅 Single date mode: {target_dates[0]}")
+        else:
+            # Default: yesterday for scheduled runs
+            target_dates = [get_yesterday_date()]
+            logger.info(f"📅 Default date mode (yesterday): {target_dates[0]}")
+    else:
+        # Default: yesterday for scheduled runs
+        target_dates = [get_yesterday_date()]
+        logger.info(f"📅 Default date mode (yesterday): {target_dates[0]}")
+    
+    logger.info(f"📅 Processing {len(target_dates)} date(s): {target_dates[0] if len(target_dates) == 1 else f'{target_dates[0]} to {target_dates[-1]}'}")
+    
+    # Initialize aggregate results
+    aggregate_results = {
+        'dateRange': {
+            'startDate': target_dates[0],
+            'endDate': target_dates[-1],
+            'totalDays': len(target_dates)
+        } if len(target_dates) > 1 else {'singleDate': target_dates[0]},
         'secFormsFetched': 0,
         'housePTRsFetched': 0,
         'senatePTRsFetched': 0,
@@ -555,68 +612,82 @@ def lambda_handler(event, context):
     }
     
     try:
-        # Step 1: Fetch SEC Forms (3, 4, 5) - only metadata, no downloads
-        logger.info("📋 Fetching SEC Forms 3, 4, 5...")
-        sec_forms = fetch_sec_forms(target_date)
-        
-        # Return metadata for parallel downloading (done by separate Lambda)
-        for form_data in sec_forms:
-            results['secForms'].append({
-                'formType': form_data.get('form_type'),
-                'cik': form_data.get('cik'),
-                'accessionNumber': form_data.get('accession_number'),
-                'filename': form_data.get('filename'),
-                'filingDate': target_date
-            })
-            results['secFormsFetched'] += 1
-        
-        logger.info(f"✅ Found {results['secFormsFetched']} SEC forms for download")
-        
-        # Step 2: Fetch House PTRs
-        # NOTE: House PTRs are in XML format (annual filings), not individual PTR PDFs
-        # Skipping House PTRs for now - focus on Senate PTRs which have better filing system
-        logger.info("🏛️ Fetching House PTRs...")
-        logger.warning("⚠️ House PTRs are in XML format (annual filings) - skipping for now")
-        logger.info("💡 House PTRs would require XML parsing of annual disclosure files")
-        results['housePTRsFetched'] = 0
-        results['housePTRs'] = []
-        
-        # Step 3: Fetch Senate PTRs (metadata only - downloader will download them)
-        logger.info("🏛️ Fetching Senate PTRs...")
-        scraper = CongressionalPTRScraper()
-        senate_ptrs = scraper.fetch_senate_ptrs(target_date)
-        
-        # Return metadata for downloader Lambda (similar to SEC forms)
-        # The downloader will download them and use Textract to filter by actual filing date
-        for ptr_data in senate_ptrs:
-            # Add source field if not present
-            if 'source' not in ptr_data:
-                ptr_data['source'] = 'senate'
-            # Ensure formType is set
-            if 'formType' not in ptr_data and 'form_type' not in ptr_data:
-                ptr_data['formType'] = 'senate_ptr'
-                ptr_data['form_type'] = 'senate_ptr'
+        # Process each date in the range
+        for date_index, target_date in enumerate(target_dates, 1):
+            logger.info(f"📅 Processing date {date_index}/{len(target_dates)}: {target_date}")
             
-            results['senatePTRs'].append(ptr_data)
-            results['senatePTRsFetched'] += 1
-        
-        logger.info(f"✅ Found {results['senatePTRsFetched']} Senate PTRs for download")
+            # Step 1: Fetch SEC Forms (3, 4, 5) - only metadata, no downloads
+            logger.info(f"📋 Fetching SEC Forms 3, 4, 5 for {target_date}...")
+            sec_forms = fetch_sec_forms(target_date)
+            
+            # Return metadata for parallel downloading (done by separate Lambda)
+            for form_data in sec_forms:
+                aggregate_results['secForms'].append({
+                    'formType': form_data.get('form_type'),
+                    'cik': form_data.get('cik'),
+                    'accessionNumber': form_data.get('accession_number'),
+                    'filename': form_data.get('filename'),
+                    'filingDate': target_date
+                })
+                aggregate_results['secFormsFetched'] += 1
+            
+            logger.info(f"✅ Found {len(sec_forms)} SEC forms for {target_date} (total so far: {aggregate_results['secFormsFetched']})")
+            
+            # Step 2: Fetch House PTRs
+            # NOTE: House PTRs are in XML format (annual filings), not individual PTR PDFs
+            # Skipping House PTRs for now - focus on Senate PTRs which have better filing system
+            logger.info("🏛️ Fetching House PTRs...")
+            logger.warning("⚠️ House PTRs are in XML format (annual filings) - skipping for now")
+            logger.info("💡 House PTRs would require XML parsing of annual disclosure files")
+            # House PTRs remain empty for all dates
+            
+            # Step 3: Fetch Senate PTRs (metadata only - downloader will download them)
+            logger.info(f"🏛️ Fetching Senate PTRs for {target_date}...")
+            scraper = CongressionalPTRScraper()
+            senate_ptrs = scraper.fetch_senate_ptrs(target_date)
+            
+            # Return metadata for downloader Lambda (similar to SEC forms)
+            # The downloader will download them and use Textract to filter by actual filing date
+            for ptr_data in senate_ptrs:
+                # Add source field if not present
+                if 'source' not in ptr_data:
+                    ptr_data['source'] = 'senate'
+                # Ensure formType is set
+                if 'formType' not in ptr_data and 'form_type' not in ptr_data:
+                    ptr_data['formType'] = 'senate_ptr'
+                    ptr_data['form_type'] = 'senate_ptr'
+                
+                aggregate_results['senatePTRs'].append(ptr_data)
+                aggregate_results['senatePTRsFetched'] += 1
+            
+            logger.info(f"✅ Found {len(senate_ptrs)} Senate PTRs for {target_date} (total so far: {aggregate_results['senatePTRsFetched']})")
+            
+            # Add a small delay between dates to avoid rate limiting (for date ranges)
+            if len(target_dates) > 1 and date_index < len(target_dates):
+                time.sleep(1)  # 1 second delay between dates
         
         # Summary
         total_fetched = (
-            results['secFormsFetched'] + 
-            results['housePTRsFetched'] + 
-            results['senatePTRsFetched']
+            aggregate_results['secFormsFetched'] + 
+            aggregate_results['housePTRsFetched'] + 
+            aggregate_results['senatePTRsFetched']
         )
         
-        logger.info(f"✅ Total forms fetched: {total_fetched}")
+        logger.info(f"✅ Total forms fetched across {len(target_dates)} date(s): {total_fetched}")
+        logger.info(f"   - SEC Forms: {aggregate_results['secFormsFetched']}")
+        logger.info(f"   - House PTRs: {aggregate_results['housePTRsFetched']}")
+        logger.info(f"   - Senate PTRs: {aggregate_results['senatePTRsFetched']}")
+        
+        # For backwards compatibility with Step Functions, also include 'date' field
+        # Use the first date if range, or the single date
+        aggregate_results['date'] = target_dates[0]
         
         # Log the return value for debugging
-        logger.info(f"📤 Returning results: {json.dumps(results, default=str)}")
+        logger.info(f"📤 Returning results: {json.dumps({k: v if k != 'secForms' and k != 'senatePTRs' else f'[{len(v)} items]' for k, v in aggregate_results.items()}, default=str)}")
         
         # Return dict directly for Step Functions (not wrapped in statusCode/body)
         # Step Functions expects a JSON-serializable dict
-        return results
+        return aggregate_results
         
     except Exception as e:
         logger.error(f"❌ Fatal error in fetcher Lambda: {e}")
