@@ -458,38 +458,30 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
                 s3_key = f"trades/{target_date}/house/{filename}"
                 logger.warning(f"⚠️ Source unclear, defaulting to house: {ptr_data}")
         
-        # For Senate PTRs, use the print page which has the transaction table in HTML
-        # The print page has the same data as the PDF but is easier/cheaper to parse
-        # View URL: /search/view/ptr/{uuid}/
-        # Print URL: /search/view/ptr/{uuid}/print/ (returns HTML with transaction table)
+        # For Senate PTRs, the view URL already contains the transaction table in HTML
+        # View URL: /search/view/ptr/{uuid}/ (contains transaction table directly)
         # Note: If transactions are already extracted in fetcher, we still need to download HTML for storage
         if source == 'senate':
-            # Check if print_url is already provided (from fetcher)
-            print_url = ptr_data.get('print_url')
+            # Check if view_url is already provided (from fetcher)
+            view_url = ptr_data.get('view_url')
             
-            if print_url:
-                logger.info(f"✅ Using provided print URL from fetcher: {print_url}")
-                url = print_url
-            elif '/view/ptr/' in url and not url.endswith('/print/'):
-                # Extract UUID from URL
+            if view_url:
+                logger.info(f"✅ Using provided view URL from fetcher: {view_url}")
+                url = view_url
+            elif '/view/ptr/' in url:
+                # URL is already the view URL - no conversion needed
+                # The view URL already has the transaction table
+                logger.info(f"✅ Using view URL directly (contains transaction table): {url}")
+            else:
+                # Extract UUID and construct view URL if needed
                 import re
                 uuid_match = re.search(r'/ptr/([a-f0-9-]+)', url, re.IGNORECASE)
                 if uuid_match:
                     uuid = uuid_match.group(1)
-                    # Convert to print page URL (HTML with transaction table)
-                    if url.startswith('/'):
-                        # Relative URL
-                        print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
-                    elif 'efdsearch.senate.gov' in url:
-                        # Absolute URL, replace the path
-                        print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
-                    else:
-                        # Fallback: append /print/
-                        print_url = url.rstrip('/') + '/print/'
-                    
-                    logger.info(f"🔄 Converting Senate PTR view URL to print page (HTML): {url} -> {print_url}")
-                    logger.info(f"💡 Using HTML page with transaction table (cheaper/faster than PDF + Textract)")
-                    url = print_url
+                    view_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/"
+                    logger.info(f"🔄 Constructing view URL: {view_url}")
+                    logger.info(f"💡 View URL contains transaction table directly (cheaper/faster than PDF + Textract)")
+                    url = view_url
         
         logger.info(f"📥 Downloading PTR from {url}")
         logger.info(f"📦 Will store to S3: {s3_key}")
@@ -548,22 +540,12 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             if csrf_cookie:
                 logger.debug(f"✅ Have CSRF cookie: {csrf_cookie[:20]}...")
             
-            # If accessing print URL, first try accessing the view URL to maintain session
-            if '/print/' in url:
-                view_url = url.replace('/print/', '/')
-                logger.debug(f"🔍 Accessing view URL first to maintain session: {view_url}")
-                try:
-                    view_response = session.get(view_url, timeout=30, allow_redirects=True)
-                    if view_response.status_code == 200:
-                        logger.debug("✅ View URL accessed successfully")
-                    else:
-                        logger.warning(f"⚠️ View URL returned status {view_response.status_code}")
-                except Exception as e:
-                    logger.warning(f"⚠️ Could not access view URL: {e}")
+            # For Senate PTRs, the view URL is what we want (it contains the transaction table)
+            # No need to access a separate print URL
         
         # Now download the actual PTR file/HTML
         response = session.get(url, timeout=30, allow_redirects=True, headers={
-            'Referer': url if source != 'senate' else (view_url if '/print/' in url else url),
+            'Referer': search_url if source == 'senate' else url,
             'User-Agent': session.headers.get('User-Agent')
         })
         response.raise_for_status()
