@@ -51,6 +51,7 @@ def load_politician_list() -> List[Dict[str, Any]]:
         politicians = []
         for row in csv_reader:
             # Construct full name from components
+            # CSV format: last_name,first_name,middle_name,suffix,nickname,full_name,...
             name_parts = []
             if row.get('first_name'):
                 name_parts.append(row['first_name'])
@@ -62,7 +63,11 @@ def load_politician_list() -> List[Dict[str, Any]]:
                 name_parts.append(row['suffix'])
             
             # Use constructed name or fall back to full_name
-            primary_name = ' '.join(name_parts) if name_parts else row.get('full_name', '').strip()
+            # Prefer full_name if available as it's more reliable
+            if row.get('full_name') and row.get('full_name').strip():
+                primary_name = row.get('full_name').strip()
+            else:
+                primary_name = ' '.join(name_parts) if name_parts else ''
             
             # Build alternative names
             alt_names = []
