@@ -523,13 +523,16 @@ def lambda_handler(event, context):
     
     # Get target date from event
     # Step Functions from EventBridge passes: {"source": "scheduler-daily", "timestamp": "..."}
-    # For daily runs, we always want yesterday's date (previous trading day)
-    # Direct invocations can pass explicit date
+    # For daily runs, we default to yesterday's date (previous trading day)
+    # Direct invocations can pass explicit date: {"date": "2025-10-30"}
     if isinstance(event, dict) and event.get('date'):
         target_date = event.get('date')
+        logger.info(f"📅 Using provided date: {target_date}")
     else:
         # Default to yesterday for scheduled runs (previous trading day)
+        # For manual testing, you can pass {"date": "YYYY-MM-DD"} in Step Functions input
         target_date = get_yesterday_date()
+        logger.info(f"📅 Using default date (yesterday): {target_date}")
     
     logger.info(f"📅 Processing date: {target_date}")
     
@@ -566,39 +569,34 @@ def lambda_handler(event, context):
         logger.info(f"✅ Found {results['secFormsFetched']} SEC forms for download")
         
         # Step 2: Fetch House PTRs
+        # NOTE: House PTRs are in XML format (annual filings), not individual PTR PDFs
+        # Skipping House PTRs for now - focus on Senate PTRs which have better filing system
         logger.info("🏛️ Fetching House PTRs...")
-        scraper = CongressionalPTRScraper()
-        house_ptrs = scraper.fetch_house_ptrs(target_date)
-        
-        # Download and store each House PTR (Textract will filter by actual filing date)
-        for ptr_data in house_ptrs:
-            if scraper.download_ptr_file(
-                ptr_data.get('url'),
-                ptr_data.get('s3_key'),
-                S3_BUCKET,
-                s3_client,
-                target_date  # Pass target_date to filter by actual filing date
-            ):
-                results['housePTRs'].append(ptr_data)
-                results['housePTRsFetched'] += 1
-        
-        logger.info(f"✅ Fetched {results['housePTRsFetched']} House PTRs")
+        logger.warning("⚠️ House PTRs are in XML format (annual filings) - skipping for now")
+        logger.info("💡 House PTRs would require XML parsing of annual disclosure files")
+        results['housePTRsFetched'] = 0
+        results['housePTRs'] = []
         
         # Step 3: Fetch Senate PTRs
         logger.info("🏛️ Fetching Senate PTRs...")
+        scraper = CongressionalPTRScraper()
         senate_ptrs = scraper.fetch_senate_ptrs(target_date)
         
         # Download and store each Senate PTR (Textract will filter by actual filing date)
-        for ptr_data in senate_ptrs:
-            if scraper.download_ptr_file(
-                ptr_data.get('url'),
-                ptr_data.get('s3_key'),
-                S3_BUCKET,
-                s3_client,
-                target_date  # Pass target_date to filter by actual filing date
-            ):
-                results['senatePTRs'].append(ptr_data)
-                results['senatePTRsFetched'] += 1
+        # NOTE: Senate PTR fetching is not yet implemented (requires form submission)
+        # For testing, you can manually upload Senate PTR PDFs to S3 at:
+        # trades/{date}/senate/{filename}.pdf
+        if senate_ptrs:
+            for ptr_data in senate_ptrs:
+                if scraper.download_ptr_file(
+                    ptr_data.get('url'),
+                    ptr_data.get('s3_key'),
+                    S3_BUCKET,
+                    s3_client,
+                    target_date  # Pass target_date to filter by actual filing date
+                ):
+                    results['senatePTRs'].append(ptr_data)
+                    results['senatePTRsFetched'] += 1
         
         logger.info(f"✅ Fetched {results['senatePTRsFetched']} Senate PTRs")
         

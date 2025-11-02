@@ -73,14 +73,21 @@ class CongressionalPTRScraper:
                     logger.warning(f"⚠️ Could not access House PTR directory for {year}")
                     return ptrs
                 
-                # Find all PDF links (no filename filtering - Textract will verify dates)
+                # Find all PDF links
                 pdf_pattern = r'href=["\']([^"\']*\.pdf[^"\']*)["\']'
                 pdf_matches = re.findall(pdf_pattern, html_content, re.IGNORECASE)
                 
                 logger.info(f"📋 Found {len(pdf_matches)} PDF links in directory")
                 
-                # Download ALL PDFs - Textract will filter by actual filing date
-                # Don't filter by filename pattern anymore since we use Textract to verify dates
+                # Filter out clearly non-PTR documents
+                # Non-PTR indicators: generic filenames like "statistics", "terms", "guide", etc.
+                non_ptr_indicators = [
+                    'statistics', 'terms_of_service', 'terms', 'guide', 'user', 'manual',
+                    'index', 'readme', 'help', 'faq', 'about', 'contact', 'privacy',
+                    'duplicate', 'olm', 'ttd', 'oal', 'scsoal', 'artificial-intelligence'
+                ]
+                
+                # Download candidate PTRs - Textract will verify dates and PTR content
                 for pdf_link in pdf_matches:
                     # Convert relative URLs to absolute
                     if pdf_link.startswith('/'):
@@ -90,8 +97,16 @@ class CongressionalPTRScraper:
                     else:
                         pdf_url = urljoin(base_url, pdf_link)
                     
+                    # Extract filename
+                    filename = pdf_link.split('/')[-1].lower()
+                    
+                    # Skip obviously non-PTR files
+                    is_likely_non_ptr = any(indicator in filename for indicator in non_ptr_indicators)
+                    if is_likely_non_ptr:
+                        logger.debug(f"⏭️ Skipping likely non-PTR file: {filename}")
+                        continue
+                    
                     # Extract filer name from filename if possible
-                    filename = pdf_link.split('/')[-1]
                     filer_name = filename.replace('.pdf', '').replace('-', ' ').title()
                     
                     ptr_data = {
@@ -102,9 +117,9 @@ class CongressionalPTRScraper:
                         's3_key': f"trades/{target_date}/house/{filename}"
                     }
                     ptrs.append(ptr_data)
-                    logger.info(f"📄 Queueing House PTR for download and date verification: {filename}")
+                    logger.info(f"📄 Queueing House PTR candidate for download and verification: {filename}")
                 
-                logger.info(f"📊 Found {len(ptrs)} House PTR files to check (Textract will filter by actual filing date)")
+                logger.info(f"📊 Found {len(ptrs)} House PTR candidates to check (Textract will verify filing date and PTR content)")
                 
             except Exception as parse_error:
                 logger.error(f"❌ Error parsing House PTR directory: {parse_error}")
@@ -125,6 +140,14 @@ class CongressionalPTRScraper:
         Senate PTRs are published at: https://efdsearch.senate.gov/search/
         This site uses a search interface that requires form submission
         
+        NOTE: Senate PTRs are accessed through a search interface that requires:
+        1. Authenticated session (may need to handle cookies/CSRF)
+        2. Form submission with date range
+        3. Parsing search results
+        
+        For now, this returns an empty list. Senate PTRs should be downloaded
+        manually or accessed through their API if available.
+        
         Args:
             target_date: Date in YYYY-MM-DD format
             
@@ -134,37 +157,19 @@ class CongressionalPTRScraper:
         logger.info(f"🏛️ Fetching Senate PTRs for date: {target_date}")
         
         ptrs = []
+        
+        # TODO: Implement Senate PTR fetching
+        # Senate eFD search requires:
+        # 1. Form submission with date range
+        # 2. Authentication/session management
+        # 3. Result parsing
+        
+        logger.warning("⚠️ Senate PTR fetching not yet implemented - requires form submission and session handling")
+        logger.info("💡 Senate PTRs can be accessed at: https://efdsearch.senate.gov/search/")
+        logger.info("💡 PTRs filed on a specific date can be searched by date range")
+        
+        # Placeholder implementation
         try:
-            # Senate Ethics Financial Disclosure search
-            # URL: https://efdsearch.senate.gov/search/
-            search_url = "https://efdsearch.senate.gov/search/"
-            
-            # Parse target date
-            target_date_obj = datetime.strptime(target_date, '%Y-%m-%d')
-            
-            # Senate search requires form submission with date range
-            # For a specific date, we'll search that date plus/minus 1 day to catch filings
-            # that might be dated slightly differently
-            date_start = (target_date_obj - timedelta(days=1)).strftime('%m/%d/%Y')
-            date_end = (target_date_obj + timedelta(days=1)).strftime('%m/%d/%Y')
-            
-            try:
-                # First, GET the search page to get any CSRF tokens or session cookies
-                logger.info(f"🔍 Accessing Senate PTR search page: {search_url}")
-                response = self.session.get(search_url, timeout=30)
-                response.raise_for_status()
-                
-                # Parse the search form to extract necessary fields
-                html_content = response.text
-                
-                # Look for form action and any hidden fields
-                # Senate site may require specific form submission
-                
-                # Try to find PTR links in the page or submit search
-                # This is a simplified approach - actual implementation may need:
-                # 1. Form submission with proper POST data
-                # 2. Handling pagination
-                # 3. Parsing search results
                 
                 # For now, try to find links to PDFs with date in URL/filename
                 pdf_pattern = r'href=["\']([^"\']*\.pdf[^"\']*)["\']'
@@ -254,6 +259,26 @@ class CongressionalPTRScraper:
             
             full_text = ' '.join(text_lines)
             
+            # First, verify this is actually a PTR document
+            # Look for PTR-specific keywords
+            ptr_keywords = [
+                'periodic transaction report',
+                'ptr',
+                'stock act',
+                'financial disclosure',
+                'transaction report',
+                'clerk of the house',
+                'representative',
+                'member of congress'
+            ]
+            
+            text_lower = full_text.lower()
+            has_ptr_content = any(keyword in text_lower for keyword in ptr_keywords)
+            
+            if not has_ptr_content:
+                logger.warning(f"⚠️ Document does not appear to be a PTR (missing PTR-specific content)")
+                return None
+            
             # Look for date patterns in the extracted text
             # PTRs typically have dates like "Date Filed: MM/DD/YYYY" or "Filing Date: MM/DD/YYYY"
             date_patterns = [
@@ -308,6 +333,11 @@ class CongressionalPTRScraper:
             return None
             
         except Exception as e:
+            error_msg = str(e)
+            # Handle unsupported document format (e.g., corrupted PDFs, non-PDF files)
+            if 'UnsupportedDocumentException' in error_msg or 'UnsupportedDocumentFormat' in error_msg:
+                logger.warning(f"⚠️ Document format not supported by Textract (likely not a valid PDF): {error_msg}")
+                return None
             logger.error(f"❌ Error extracting filing date with Textract: {e}")
             import traceback
             logger.error(f"Traceback: {traceback.format_exc()}")

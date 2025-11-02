@@ -433,15 +433,31 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'house') -> List[D
         
         # Extract filer name
         filer_name = None
-        filer_patterns = [
-            r'(?:Representative|Rep\.?|Name)[\s:]*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
-            r'([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)',  # First M. Last
-        ]
-        for pattern in filer_patterns:
-            match = re.search(pattern, full_text)
-            if match:
-                filer_name = match.group(1).strip()
-                break
+        
+        if source == 'senate':
+            # Senate format: "The Honorable Rick Scott (Scott, Rick)"
+            senate_patterns = [
+                r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)\s+\([^)]+\)',  # "The Honorable First Last (Last, First)"
+                r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',  # "The Honorable First Last" (fallback)
+            ]
+            for pattern in senate_patterns:
+                match = re.search(pattern, full_text)
+                if match:
+                    filer_name = match.group(1).strip()
+                    # Clean up common titles
+                    filer_name = re.sub(r'\b(Honorable|Hon\.?|Senator|Sen\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
+                    break
+        else:
+            # House format (for future implementation)
+            house_patterns = [
+                r'(?:Representative|Rep\.?|Name)[\s:]*([A-Z][a-z]+(?:\s+[A-Z][a-z]+)+)',
+                r'([A-Z][a-z]+\s+[A-Z]\.?\s+[A-Z][a-z]+)',  # First M. Last
+            ]
+            for pattern in house_patterns:
+                match = re.search(pattern, full_text)
+                if match:
+                    filer_name = match.group(1).strip()
+                    break
         
         # If not found in text, check form fields
         if not filer_name:
@@ -455,26 +471,44 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'house') -> List[D
         
         # Extract filing date
         filing_date = None
-        date_patterns = [
-            r'(?:Date Filed|Filing Date|Report Date)[\s:]*(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
-            r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
-        ]
-        for pattern in date_patterns:
-            match = re.search(pattern, full_text)
-            if match:
-                date_str = match.group(1)
-                try:
-                    # Try to parse date
-                    for fmt in ['%m/%d/%Y', '%m-%d-%Y']:
-                        try:
-                            filing_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
-                            break
-                        except ValueError:
-                            continue
-                    if filing_date:
+        
+        if source == 'senate':
+            # Senate format: "Filed 10/30/2025 @ 5 PM" or "Periodic Transaction Report for 10/30/2025"
+            senate_date_patterns = [
+                r'Filed\s+(\d{1,2}/\d{1,2}/\d{4})',
+                r'Periodic Transaction Report for\s+(\d{1,2}/\d{1,2}/\d{4})',
+            ]
+            for pattern in senate_date_patterns:
+                match = re.search(pattern, full_text)
+                if match:
+                    date_str = match.group(1)
+                    try:
+                        filing_date = datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
                         break
-                except:
-                    continue
+                    except ValueError:
+                        continue
+        else:
+            # House format (for future implementation)
+            date_patterns = [
+                r'(?:Date Filed|Filing Date|Report Date)[\s:]*(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+                r'(\d{1,2}[/-]\d{1,2}[/-]\d{4})',
+            ]
+            for pattern in date_patterns:
+                match = re.search(pattern, full_text)
+                if match:
+                    date_str = match.group(1)
+                    try:
+                        # Try to parse date
+                        for fmt in ['%m/%d/%Y', '%m-%d-%Y']:
+                            try:
+                                filing_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+                                break
+                            except ValueError:
+                                continue
+                        if filing_date:
+                            break
+                    except:
+                        continue
         
         # Parse tables for trade data
         # PTR tables typically have columns: Transaction Date, Asset Description, Transaction Type, Amount, etc.
@@ -486,59 +520,81 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'house') -> List[D
             # Find header row (first row with column names)
             header_row = table[0]
             
-            # Map column indices
+            # Map column indices based on Senate PTR structure
+            # Senate PTR columns: #, Transaction Date, Owner, Ticker, Asset Name, Asset Type, Type, Amount, Comment
             date_col = None
+            owner_col = None  # Self, Joint, Spouse, Dependent Child
             asset_col = None
+            asset_type_col = None  # Stock, Bond, Municipal Security, etc.
             symbol_col = None
-            type_col = None
+            type_col = None  # Purchase, Sale, etc.
             amount_col = None
             shares_col = None
             
             for idx, cell in enumerate(header_row):
-                cell_lower = cell.lower()
-                if 'date' in cell_lower and date_col is None:
+                cell_lower = cell.lower().strip()
+                if 'transaction date' in cell_lower or ('date' in cell_lower and 'transaction' in cell_lower):
                     date_col = idx
-                elif 'asset' in cell_lower or 'security' in cell_lower or 'stock' in cell_lower:
+                elif 'owner' in cell_lower:
+                    owner_col = idx
+                elif 'asset name' in cell_lower or ('asset' in cell_lower and 'name' in cell_lower):
                     asset_col = idx
-                elif 'symbol' in cell_lower or 'ticker' in cell_lower:
+                elif 'asset type' in cell_lower or ('asset' in cell_lower and 'type' in cell_lower):
+                    asset_type_col = idx
+                elif 'ticker' in cell_lower or 'symbol' in cell_lower:
                     symbol_col = idx
-                elif 'type' in cell_lower or 'transaction' in cell_lower:
+                elif ('type' in cell_lower and 'asset' not in cell_lower) or 'transaction type' in cell_lower:
                     type_col = idx
-                elif 'amount' in cell_lower or 'value' in cell_lower or 'price' in cell_lower:
+                elif 'amount' in cell_lower or 'value' in cell_lower:
                     amount_col = idx
                 elif 'shares' in cell_lower or 'quantity' in cell_lower:
                     shares_col = idx
             
             # Parse data rows
             for row in table[1:]:
-                if len(row) < max(filter(None, [date_col, asset_col, type_col])) + 1:
+                # Check if we have minimum required columns
+                min_cols = max(filter(None, [date_col, asset_col, type_col, amount_col]))
+                if min_cols is None or len(row) < min_cols + 1:
                     continue
                 
                 # Extract transaction date
                 transaction_date = None
                 if date_col is not None and date_col < len(row):
                     date_str = row[date_col].strip()
-                    for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d']:
+                    # Senate format: MM/DD/YYYY
+                    for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d', '%m/%d/%y']:
                         try:
                             transaction_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
                             break
                         except ValueError:
                             continue
                 
-                # Extract asset/symbol
+                # Extract owner (Self, Joint, Spouse, Dependent Child)
+                owner = None
+                if owner_col is not None and owner_col < len(row):
+                    owner = row[owner_col].strip()
+                
+                # Extract asset name and symbol
                 security_name = None
                 security_symbol = None
                 
                 if asset_col is not None and asset_col < len(row):
                     asset_text = row[asset_col].strip()
-                    # Try to extract ticker symbol (usually uppercase letters, 1-5 chars)
+                    security_name = asset_text
+                    # Try to extract ticker symbol if present (usually uppercase letters, 1-5 chars)
                     symbol_match = re.search(r'\b([A-Z]{1,5})\b', asset_text)
                     if symbol_match:
                         security_symbol = symbol_match.group(1)
-                    security_name = asset_text
                 
                 if symbol_col is not None and symbol_col < len(row):
-                    security_symbol = row[symbol_col].strip()
+                    symbol_text = row[symbol_col].strip()
+                    if symbol_text and symbol_text != '--':
+                        security_symbol = symbol_text
+                
+                # Extract asset type (Stock, Bond, Municipal Security, etc.)
+                asset_type = None
+                if asset_type_col is not None and asset_type_col < len(row):
+                    asset_type = row[asset_type_col].strip()
                 
                 # Extract transaction type
                 transaction_type = None
@@ -549,12 +605,14 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'house') -> List[D
                     elif 'SALE' in trans_text or 'SELL' in trans_text:
                         transaction_type = 'S'  # Sale
                     else:
-                        transaction_type = trans_text[:1]  # First letter
+                        transaction_type = trans_text[:1] if trans_text else 'U'  # First letter or Unknown
                 
-                # Extract amount/shares
+                # Extract amount (could be range like "$100,001 - $250,000")
                 shares = None
                 price_per_share = None
                 total_amount = None
+                amount_min = None
+                amount_max = None
                 
                 if shares_col is not None and shares_col < len(row):
                     shares_str = row[shares_col].strip()
@@ -566,27 +624,44 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'house') -> List[D
                 
                 if amount_col is not None and amount_col < len(row):
                     amount_str = row[amount_col].strip()
-                    # Remove $, commas, parse number
-                    try:
-                        amount_value = float(re.sub(r'[^\d.]', '', amount_str))
-                        if shares and shares > 0:
-                            price_per_share = amount_value / shares
-                        total_amount = amount_value
-                    except:
-                        pass
+                    
+                    # Handle range format: "$100,001 - $250,000" or "$1,000 - $15,000"
+                    range_match = re.search(r'\$([\d,]+)\s*-\s*\$([\d,]+)', amount_str)
+                    if range_match:
+                        try:
+                            amount_min = float(re.sub(r'[^\d.]', '', range_match.group(1)))
+                            amount_max = float(re.sub(r'[^\d.]', '', range_match.group(2)))
+                            # Use midpoint of range as estimate
+                            total_amount = (amount_min + amount_max) / 2
+                        except:
+                            pass
+                    else:
+                        # Single amount format
+                        try:
+                            total_amount = float(re.sub(r'[^\d.]', '', amount_str))
+                        except:
+                            pass
+                    
+                    # Calculate price per share if we have shares and total amount
+                    if shares and shares > 0 and total_amount:
+                        price_per_share = total_amount / shares
                 
                 # Only create trade if we have minimum required data
-                if transaction_date or security_name or security_symbol:
+                if transaction_date or security_name or security_symbol or total_amount:
                     trade = {
                         'filerName': filer_name,
                         'securityName': security_name,
                         'securitySymbol': security_symbol,
+                        'assetType': asset_type,  # Stock, Bond, Municipal Security, etc.
+                        'owner': owner,  # Self, Joint, Spouse, Dependent Child
                         'transactionDate': transaction_date or filing_date,
                         'filingDate': filing_date,
                         'transactionType': transaction_type or 'U',  # U = Unknown
                         'shares': shares,
                         'pricePerShare': price_per_share,
                         'totalAmount': total_amount,
+                        'amountMin': amount_min,  # For range amounts
+                        'amountMax': amount_max,  # For range amounts
                         'formType': f'{source}_ptr',
                         'source': source
                     }

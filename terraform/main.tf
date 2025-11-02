@@ -1857,14 +1857,15 @@ module "politician_trades_state_machine" {
 
   # Step Functions definition with 4 steps (parallel downloads)
   definition = jsonencode({
-    Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database"
+    Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
     StartAt = "FetchFormMetadata"
     States = {
       # Step 1: Fetch SEC Forms and Congressional PTRs metadata (no downloads)
       FetchFormMetadata = {
         Type       = "Task"
         Resource   = module.politician_trades_fetcher.function_arn
-        Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) metadata"
+        Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) metadata. Lambda defaults to yesterday if date not provided."
+        InputPath  = "$" # Pass through entire input - Lambda will extract 'date' or default
         ResultPath = "$.fetchResults"
         Next       = "DownloadForms"
         Retry = [
