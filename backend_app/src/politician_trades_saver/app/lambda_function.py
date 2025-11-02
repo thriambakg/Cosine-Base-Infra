@@ -27,6 +27,18 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
     """
     Convert Python types to DynamoDB-compatible types
     
+    GSIs:
+    - PoliticianTradeDateIndex: hash_key=politicianName, range_key=transactionDate
+    - PositionTradeDateIndex: hash_key=position, range_key=transactionDate
+    - PartyTradeDateIndex: hash_key=party, range_key=transactionDate
+    - SecurityTradeDateIndex: hash_key=securitySymbol, range_key=transactionDate
+    - FormTypeTradeDateIndex: hash_key=formType, range_key=transactionDate
+    - TransactionTypeTradeDateIndex: hash_key=transactionType, range_key=transactionDate
+    - AmountRangeTradeDateIndex: hash_key=amountMin, range_key=transactionDate
+    
+    Note: GSI hash keys cannot be null. If securitySymbol or amountMin is null, we exclude it
+    so the item won't appear in those GSIs.
+    
     Args:
         item: Trade dict with Python types (includes websiteUrl as a string attribute, not GSI)
         
@@ -35,17 +47,45 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
     """
     dynamodb_item = {}
     
+    # GSI hash keys that cannot be null
+    # Note: amountMin is numeric, others are strings
+    gsi_hash_keys_string = ['politicianName', 'party', 'position', 'securitySymbol', 'formType', 'transactionType']
+    gsi_hash_keys_numeric = ['amountMin']
+    
+    # Extract amountMin from amountRange if present
+    # amountRange is a list [min, max], we need amountMin as a number for the GSI
+    if 'amountRange' in item and isinstance(item.get('amountRange'), list) and len(item.get('amountRange', [])) > 0:
+        amount_range = item.get('amountRange')
+        if amount_range[0] is not None:
+            # Ensure amountMin is set from amountRange if not already present
+            if 'amountMin' not in item or item.get('amountMin') is None:
+                item['amountMin'] = amount_range[0]
+    
     for key, value in item.items():
         if value is None:
+            # For GSI hash keys, skip null values (item won't appear in that GSI)
+            # For other fields, just skip them
+            if key in gsi_hash_keys_string or key in gsi_hash_keys_numeric:
+                logger.debug(f"⚠️ Skipping null GSI hash key '{key}' - item won't appear in {key} GSI")
             continue
         elif isinstance(value, (int, float)):
             dynamodb_item[key] = Decimal(str(value))
         elif isinstance(value, bool):
             dynamodb_item[key] = value
         elif isinstance(value, (str, list, dict)):
+            # Ensure GSI hash keys are non-empty strings
+            if key in gsi_hash_keys_string and isinstance(value, str) and not value.strip():
+                logger.debug(f"⚠️ Skipping empty GSI hash key '{key}' - item won't appear in {key} GSI")
+                continue
             dynamodb_item[key] = value
         else:
             dynamodb_item[key] = str(value)
+    
+    # Validate required GSI fields are present (securitySymbol and amountMin are optional)
+    required_gsi_fields = ['politicianName', 'party', 'position', 'formType', 'transactionType', 'transactionDate']
+    missing_fields = [field for field in required_gsi_fields if field not in dynamodb_item]
+    if missing_fields:
+        logger.warning(f"⚠️ Missing required GSI fields: {missing_fields}")
     
     return dynamodb_item
 
