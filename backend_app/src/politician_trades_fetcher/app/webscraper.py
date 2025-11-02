@@ -45,29 +45,44 @@ class CongressionalPTRScraper:
             ]
             
             table_match = None
+            matched_pattern = None
             for i, pattern in enumerate(table_patterns, 1):
                 table_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
                 if table_match:
-                    logger.debug(f"✅ Matched table pattern {i}")
+                    matched_pattern = i
+                    logger.info(f"✅ Matched table pattern {i} - found transactions table")
                     break
             
             if not table_match:
                 logger.warning("⚠️ Could not find transactions table in HTML")
                 # Debug: Look for any table tags
                 all_tables = re.findall(r'<table[^>]*>', html_content, re.IGNORECASE)
-                logger.debug(f"   Found {len(all_tables)} <table> tags in HTML")
+                logger.info(f"   Found {len(all_tables)} <table> tags in HTML")
                 if all_tables:
-                    logger.debug(f"   First table: {all_tables[0][:200]}")
+                    for i, table_tag in enumerate(all_tables[:3], 1):
+                        logger.info(f"   Table {i}: {table_tag[:300]}")
+                
                 # Also check for tbody tags
                 tbody_tags = re.findall(r'<tbody[^>]*>', html_content, re.IGNORECASE)
-                logger.debug(f"   Found {len(tbody_tags)} <tbody> tags in HTML")
+                logger.info(f"   Found {len(tbody_tags)} <tbody> tags in HTML")
+                
+                # Look specifically for "Transactions" heading and nearby table
+                if 'Transactions' in html_content:
+                    transactions_idx = html_content.find('Transactions')
+                    sample = html_content[max(0, transactions_idx-100):min(len(html_content), transactions_idx+500)]
+                    logger.info(f"   Sample HTML around 'Transactions': {sample}")
+                
                 return transactions
             
+            logger.info(f"✅ Successfully matched table pattern {matched_pattern}")
+            
             tbody_content = table_match.group(1)
+            logger.debug(f"✅ Extracted tbody content ({len(tbody_content)} chars)")
             
             # Extract all table rows
             row_pattern = r'<tr[^>]*>(.*?)</tr>'
-            rows = re.finditer(row_pattern, tbody_content, re.IGNORECASE | re.DOTALL)
+            rows = list(re.finditer(row_pattern, tbody_content, re.IGNORECASE | re.DOTALL))
+            logger.info(f"✅ Found {len(rows)} table rows in tbody")
             
             for row_num, row_match in enumerate(rows, start=1):
                 row_html = row_match.group(1)
@@ -89,10 +104,26 @@ class CongressionalPTRScraper:
                     return text
                 
                 try:
+                    # Column mapping from the HTML table:
+                    # 0: # (row number)
+                    # 1: Transaction Date
+                    # 2: Owner
+                    # 3: Ticker
+                    # 4: Asset Name (may have nested div with Rate/Coupon, Matures info)
+                    # 5: Asset Type
+                    # 6: Type (Purchase/Sale)
+                    # 7: Amount
+                    # 8: Comment
                     transaction_date_str = clean_html(cells[1]) if len(cells) > 1 else ''
                     owner = clean_html(cells[2]) if len(cells) > 2 else ''
                     ticker = clean_html(cells[3]) if len(cells) > 3 else ''
+                    
+                    # Asset name may have nested HTML (e.g., <div class="text-muted"> with Rate/Coupon info)
+                    # clean_html will remove all HTML tags, so we'll get just the text
                     asset_name = clean_html(cells[4]) if len(cells) > 4 else ''
+                    # Remove extra whitespace that might result from nested content
+                    asset_name = ' '.join(asset_name.split())
+                    
                     asset_type = clean_html(cells[5]) if len(cells) > 5 else ''
                     transaction_type = clean_html(cells[6]) if len(cells) > 6 else ''
                     amount_str = clean_html(cells[7]) if len(cells) > 7 else ''
@@ -139,9 +170,11 @@ class CongressionalPTRScraper:
                     }
                     
                     transactions.append(transaction)
+                    logger.debug(f"   ✅ Parsed row {row_num}: {transaction_type} - {asset_name} ({asset_type}) - {amount_str}")
                     
                 except Exception as e:
                     logger.warning(f"⚠️ Error parsing row {row_num}: {e}")
+                    logger.debug(f"   Row HTML: {row_html[:300]}")
                     continue
             
         except Exception as e:
@@ -947,7 +980,7 @@ class CongressionalPTRScraper:
                             
                             # Check if we got the agreement page instead of the actual PTR
                             # If so, accept the agreement and retry
-                            if 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content:
+                            if 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content or 'Get Access' in html_content:
                                 logger.info(f"📋 Got agreement form for PTR URL - accepting terms and retrying...")
                                 
                                 # Extract CSRF token from agreement form
@@ -957,15 +990,18 @@ class CongressionalPTRScraper:
                                 if agreement_csrf_match:
                                     agreement_csrf = agreement_csrf_match.group(1)
                                     
-                                    # Submit agreement form
+                                    # Submit agreement form - POST to the view URL itself (not search_url)
+                                    # The agreement form on the view page likely POSTs to the same URL or /search/
+                                    # Try posting to the view URL first, then fallback to /search/
                                     agreement_data = {
                                         'prohibition_agreement': '1',
                                         'csrfmiddlewaretoken': agreement_csrf
                                     }
                                     
                                     logger.info(f"📋 Submitting agreement form for PTR access...")
+                                    # First try POSTing to the view URL itself
                                     agreement_response = self.session.post(
-                                        search_url,
+                                        view_url,
                                         data=agreement_data,
                                         headers={
                                             'Content-Type': 'application/x-www-form-urlencoded',
@@ -973,7 +1009,8 @@ class CongressionalPTRScraper:
                                             'Origin': 'https://efdsearch.senate.gov',
                                             'User-Agent': self.session.headers.get('User-Agent'),
                                             'X-CSRFToken': agreement_csrf
-                                        }
+                                        },
+                                        allow_redirects=True
                                     )
                                     agreement_response.raise_for_status()
                                     logger.info("✅ Agreement accepted for PTR access")
@@ -981,15 +1018,101 @@ class CongressionalPTRScraper:
                                     # Now retry accessing the PTR URL
                                     logger.info(f"🔄 Retrying PTR URL after accepting agreement: {view_url}")
                                     html_response = self.session.get(view_url, timeout=30, allow_redirects=True, headers={
-                                        'Referer': search_url,
+                                        'Referer': view_url,
                                         'User-Agent': self.session.headers.get('User-Agent')
                                     })
                                     html_response.raise_for_status()
                                     html_content = html_response.text
                                     logger.info(f"✅ Downloaded HTML page after agreement ({len(html_content)} bytes)")
+                                    
+                                    # Check if we still got the agreement form or search page
+                                    if 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content or 'Search Options' in html_content:
+                                        logger.warning(f"⚠️ Still got agreement form or search page after accepting - may need different approach")
+                                        # Check if we're on the search page - if so, we need to navigate to the view URL again
+                                        if 'Search Options' in html_content or 'Find Reports' in html_content:
+                                            logger.info(f"🔄 We're on the search page - directly accessing view URL with session...")
+                                            # The agreement was accepted, so now access the view URL directly
+                                            html_response = self.session.get(view_url, timeout=30, allow_redirects=True, headers={
+                                                'Referer': search_url,
+                                                'User-Agent': self.session.headers.get('User-Agent')
+                                            })
+                                            html_response.raise_for_status()
+                                            html_content = html_response.text
+                                            logger.info(f"✅ Re-downloaded HTML page ({len(html_content)} bytes)")
                                 else:
                                     logger.error(f"❌ Could not extract CSRF token from agreement form")
                                     raise Exception(f"Could not accept agreement - CSRF token not found")
+                            
+                            # Check if we got redirected to the search page instead of the PTR view
+                            if 'Search Options' in html_content or ('Find Reports' in html_content and 'Transactions' not in html_content):
+                                logger.warning(f"⚠️ Got search page instead of PTR view page - need to click through the link")
+                                
+                                # The search results page has a link to the PTR view page
+                                # Extract the link from the search results table
+                                # Link format: <a href="/search/view/ptr/{uuid}/" target="_blank">Periodic Transaction Report for 10/30/2025</a>
+                                ptr_link_pattern = rf'<a[^>]*href=["\'](/search/view/ptr/{uuid}/)["\']'
+                                link_match = re.search(ptr_link_pattern, html_content, re.IGNORECASE)
+                                
+                                if link_match:
+                                    ptr_path = link_match.group(1)
+                                    # Make it absolute URL
+                                    if ptr_path.startswith('/'):
+                                        absolute_view_url = f"https://efdsearch.senate.gov{ptr_path}"
+                                    else:
+                                        absolute_view_url = view_url
+                                    
+                                    logger.info(f"🔄 Found PTR link in search results - accessing: {absolute_view_url}")
+                                    html_response = self.session.get(absolute_view_url, timeout=30, allow_redirects=True, headers={
+                                        'Referer': search_url,
+                                        'User-Agent': self.session.headers.get('User-Agent')
+                                    })
+                                    html_response.raise_for_status()
+                                    html_content = html_response.text
+                                    logger.info(f"✅ Accessed PTR view page ({len(html_content)} bytes)")
+                                    
+                                    # Check if we got agreement form on the view page
+                                    if 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content or 'Get Access' in html_content:
+                                        logger.info(f"📋 View page also requires agreement - accepting...")
+                                        # Extract CSRF from view page
+                                        agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
+                                        agreement_csrf_match = re.search(agreement_csrf_pattern, html_content, re.IGNORECASE)
+                                        
+                                        if agreement_csrf_match:
+                                            agreement_csrf = agreement_csrf_match.group(1)
+                                            agreement_data = {
+                                                'prohibition_agreement': '1',
+                                                'csrfmiddlewaretoken': agreement_csrf
+                                            }
+                                            
+                                            # POST to the view URL itself
+                                            logger.info(f"📋 Submitting agreement on view page...")
+                                            agreement_response = self.session.post(
+                                                absolute_view_url,
+                                                data=agreement_data,
+                                                headers={
+                                                    'Content-Type': 'application/x-www-form-urlencoded',
+                                                    'Referer': absolute_view_url,
+                                                    'Origin': 'https://efdsearch.senate.gov',
+                                                    'User-Agent': self.session.headers.get('User-Agent'),
+                                                    'X-CSRFToken': agreement_csrf
+                                                },
+                                                allow_redirects=True
+                                            )
+                                            agreement_response.raise_for_status()
+                                            logger.info("✅ Agreement accepted on view page")
+                                            
+                                            # Now get the actual view page content
+                                            html_response = self.session.get(absolute_view_url, timeout=30, allow_redirects=True, headers={
+                                                'Referer': absolute_view_url,
+                                                'User-Agent': self.session.headers.get('User-Agent')
+                                            })
+                                            html_response.raise_for_status()
+                                            html_content = html_response.text
+                                            logger.info(f"✅ Got PTR view page after agreement ({len(html_content)} bytes)")
+                                        else:
+                                            logger.warning(f"⚠️ Could not extract CSRF from view page agreement form")
+                                else:
+                                    logger.warning(f"⚠️ Could not find PTR link in search results HTML")
                             
                             # Check for error indicators
                             if '404' in html_content or 'not found' in html_content.lower() or 'page not found' in html_content.lower():
@@ -1001,13 +1124,19 @@ class CongressionalPTRScraper:
                             has_table_striped = 'table-striped' in html_content
                             has_table_tag = '<table' in html_content
                             has_tbody_tag = '<tbody' in html_content
+                            has_periodic_report = 'Periodic Transaction Report' in html_content
                             
                             logger.info(f"🔍 HTML content analysis:")
+                            logger.info(f"   - Contains 'Periodic Transaction Report': {has_periodic_report}")
                             logger.info(f"   - Contains 'Transactions': {has_transactions_keyword}")
                             logger.info(f"   - Contains 'table-striped': {has_table_striped}")
                             logger.info(f"   - Contains '<table': {has_table_tag}")
                             logger.info(f"   - Contains '<tbody': {has_tbody_tag}")
                             logger.info(f"   - Content length: {len(html_content)} bytes")
+                            
+                            # If we have the PTR page but no transactions keyword, something's wrong
+                            if has_periodic_report and not has_transactions_keyword:
+                                logger.warning(f"⚠️ Found PTR page but no 'Transactions' keyword - page structure may be different")
                             
                             # Extract a sample of HTML around "Transactions" to see structure
                             if has_transactions_keyword:
