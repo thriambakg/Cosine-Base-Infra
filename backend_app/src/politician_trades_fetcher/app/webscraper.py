@@ -709,70 +709,77 @@ class CongressionalPTRScraper:
             search_results_html = None
             ajax_worked = False
             
-            # Prepare DataTables AJAX payload format
-            # This is what the browser actually sends to /search/report/data/
-            datatables_payload = {
-                'draw': '1',
-                'columns[0][data]': '0',
-                'columns[0][name]': '',
-                'columns[0][searchable]': 'true',
-                'columns[0][orderable]': 'true',
-                'columns[0][search][value]': '',
-                'columns[0][search][regex]': 'false',
-                'columns[1][data]': '1',
-                'columns[1][name]': '',
-                'columns[1][searchable]': 'true',
-                'columns[1][orderable]': 'true',
-                'columns[1][search][value]': '',
-                'columns[1][search][regex]': 'false',
-                'columns[2][data]': '2',
-                'columns[2][name]': '',
-                'columns[2][searchable]': 'true',
-                'columns[2][orderable]': 'true',
-                'columns[2][search][value]': '',
-                'columns[2][search][regex]': 'false',
-                'columns[3][data]': '3',
-                'columns[3][name]': '',
-                'columns[3][searchable]': 'true',
-                'columns[3][orderable]': 'true',
-                'columns[3][search][value]': '',
-                'columns[3][search][regex]': 'false',
-                'columns[4][data]': '4',
-                'columns[4][name]': '',
-                'columns[4][searchable]': 'true',
-                'columns[4][orderable]': 'true',
-                'columns[4][search][value]': '',
-                'columns[4][search][regex]': 'false',
-                'order[0][column]': '1',
-                'order[0][dir]': 'asc',
-                'order[1][column]': '0',
-                'order[1][dir]': 'asc',
-                'start': '0',
-                'length': '25',
-                'search[value]': '',
-                'search[regex]': 'false',
-                'report_types': '[11]',  # Array as string: Periodic Transactions
-                'filer_types': '[]',  # Empty array
-                'submitted_start_date': ajax_date_start,  # "10/30/2025 00:00:00"
-                'submitted_end_date': ajax_date_end,  # "10/30/2025 23:59:59"
-                'candidate_state': '',
-                'senator_state': '',
-                'office_id': '',
-                'first_name': '',
-                'last_name': '',
-                'csrfmiddlewaretoken': csrf_token if csrf_token else csrf_cookie
-            }
+            def build_datatables_payload(draw_num: int, start: int = 0, length: int = 25) -> dict:
+                """Build DataTables AJAX payload with pagination parameters"""
+                return {
+                    'draw': str(draw_num),
+                    'columns[0][data]': '0',
+                    'columns[0][name]': '',
+                    'columns[0][searchable]': 'true',
+                    'columns[0][orderable]': 'true',
+                    'columns[0][search][value]': '',
+                    'columns[0][search][regex]': 'false',
+                    'columns[1][data]': '1',
+                    'columns[1][name]': '',
+                    'columns[1][searchable]': 'true',
+                    'columns[1][orderable]': 'true',
+                    'columns[1][search][value]': '',
+                    'columns[1][search][regex]': 'false',
+                    'columns[2][data]': '2',
+                    'columns[2][name]': '',
+                    'columns[2][searchable]': 'true',
+                    'columns[2][orderable]': 'true',
+                    'columns[2][search][value]': '',
+                    'columns[2][search][regex]': 'false',
+                    'columns[3][data]': '3',
+                    'columns[3][name]': '',
+                    'columns[3][searchable]': 'true',
+                    'columns[3][orderable]': 'true',
+                    'columns[3][search][value]': '',
+                    'columns[3][search][regex]': 'false',
+                    'columns[4][data]': '4',
+                    'columns[4][name]': '',
+                    'columns[4][searchable]': 'true',
+                    'columns[4][orderable]': 'true',
+                    'columns[4][search][value]': '',
+                    'columns[4][search][regex]': 'false',
+                    'order[0][column]': '1',
+                    'order[0][dir]': 'asc',
+                    'order[1][column]': '0',
+                    'order[1][dir]': 'asc',
+                    'start': str(start),
+                    'length': str(length),
+                    'search[value]': '',
+                    'search[regex]': 'false',
+                    'report_types': '[11]',  # Array as string: Periodic Transactions
+                    'filer_types': '[]',  # Empty array
+                    'submitted_start_date': ajax_date_start,  # "10/30/2025 00:00:00"
+                    'submitted_end_date': ajax_date_end,  # "10/30/2025 23:59:59"
+                    'candidate_state': '',
+                    'senator_state': '',
+                    'office_id': '',
+                    'first_name': '',
+                    'last_name': '',
+                    'csrfmiddlewaretoken': csrf_token if csrf_token else csrf_cookie
+                }
             
+            # Collect all PTRs across all pages
+            all_ptr_data_map = {}  # Map of view_url -> metadata (filer_name, filing_date, uuid, etc.)
+            working_ajax_endpoint = None
+            
+            # First, find a working AJAX endpoint
             for ajax_endpoint in ajax_endpoints:
                 try:
                     logger.info(f"📡 POSTing to AJAX endpoint: {ajax_endpoint}")
                     logger.info(f"📋 Using DataTables payload format")
-                    logger.info(f"📋 Key params: report_types={datatables_payload['report_types']}, dates={ajax_date_start} to {ajax_date_end}")
+                    logger.info(f"📋 Key params: report_types=[11], dates={ajax_date_start} to {ajax_date_end}")
                     logger.info(f"📋 Headers: X-Requested-With={ajax_headers.get('X-Requested-With')}, X-CSRFToken={ajax_headers.get('X-CSRFToken', '')[:20]}...")
                     
+                    # Test with first page to find working endpoint
+                    test_payload = build_datatables_payload(draw_num=1, start=0, length=25)
                     ajax_response = self.session.post(
                         ajax_endpoint,
-                        data=datatables_payload,  # DataTables format payload
+                        data=test_payload,
                         headers=ajax_headers,
                         timeout=30
                     )
@@ -849,6 +856,7 @@ class CongressionalPTRScraper:
                     if search_results_html and ajax_response.status_code == 200 and 'Site Under Maintenance' not in (search_results_html or ''):
                         logger.info(f"✅ AJAX endpoint {ajax_endpoint} returned valid results!")
                         ajax_worked = True
+                        working_ajax_endpoint = ajax_endpoint
                         break
                     elif search_results_html is None:
                         # This endpoint failed, try next one
@@ -863,9 +871,231 @@ class CongressionalPTRScraper:
                 logger.error("❌ All AJAX endpoints failed")
                 search_results_html = None
             
-            # If AJAX endpoint worked, skip the fallback
-            if search_results_html:
-                logger.info("✅ Using results from AJAX endpoint")
+            # If AJAX endpoint worked, fetch all pages with pagination
+            if working_ajax_endpoint and ajax_worked:
+                logger.info(f"✅ Using AJAX endpoint {working_ajax_endpoint} for pagination")
+                
+                # Fetch all pages by incrementing draw until no more results
+                draw_num = 1
+                page_size = 25
+                start = 0
+                total_records = None
+                
+                while True:
+                    # Build payload for this page
+                    page_payload = build_datatables_payload(draw_num=draw_num, start=start, length=page_size)
+                    
+                    logger.info(f"📄 Fetching page {draw_num} (start={start}, length={page_size})")
+                    
+                    try:
+                        page_response = self.session.post(
+                            working_ajax_endpoint,
+                            data=page_payload,
+                            headers=ajax_headers,
+                            timeout=30
+                        )
+                        
+                        if page_response.status_code != 200:
+                            logger.warning(f"⚠️ Page {draw_num} returned status {page_response.status_code}, stopping pagination")
+                            break
+                        
+                        try:
+                            page_data = json.loads(page_response.text)
+                            
+                            if 'result' not in page_data or page_data.get('result') != 'ok':
+                                logger.warning(f"⚠️ Page {draw_num} result != 'ok': {page_data.get('result')}, stopping pagination")
+                                break
+                            
+                            data_array = page_data.get('data', [])
+                            
+                            if not data_array:
+                                logger.info(f"✅ Page {draw_num} returned 0 records - end of pagination")
+                                break
+                            
+                            # Update total records if available
+                            if 'recordsTotal' in page_data:
+                                total_records = page_data.get('recordsTotal')
+                                logger.info(f"📊 Total records available: {total_records}")
+                            
+                            logger.info(f"✅ Page {draw_num}: Found {len(data_array)} PTR records")
+                            
+                            # Extract PTR metadata from this page
+                            for row in data_array:
+                                if len(row) >= 4:
+                                    full_name = row[2] if len(row) > 2 else ''
+                                    link_html = row[3] if len(row) > 3 else ''
+                                    filing_date_str = row[4] if len(row) > 4 else ''
+                                    
+                                    # Extract UUID from link HTML
+                                    uuid_match = re.search(r'/ptr/([a-f0-9-]+)', link_html, re.IGNORECASE)
+                                    if uuid_match:
+                                        uuid = uuid_match.group(1)
+                                        base_url = "https://efdsearch.senate.gov"
+                                        
+                                        # Extract href path
+                                        href_match = re.search(r'href=["\']([^"\']+)["\']', link_html, re.IGNORECASE)
+                                        if href_match:
+                                            href_path = href_match.group(1)
+                                            if href_path.startswith('/'):
+                                                view_url = f"{base_url}{href_path}"
+                                            else:
+                                                view_url = f"{base_url}/search/view/ptr/{uuid}/"
+                                        else:
+                                            view_url = f"{base_url}/search/view/ptr/{uuid}/"
+                                        
+                                        # Store metadata (avoid duplicates)
+                                        if view_url not in all_ptr_data_map:
+                                            all_ptr_data_map[view_url] = {
+                                                'filer_name': full_name,
+                                                'filing_date': filing_date_str,
+                                                'uuid': uuid,
+                                                'link_html': link_html
+                                            }
+                            
+                            # Check if we've fetched all records
+                            if total_records is not None and start + len(data_array) >= total_records:
+                                logger.info(f"✅ Fetched all {total_records} records across {draw_num} pages")
+                                break
+                            
+                            # Move to next page
+                            draw_num += 1
+                            start += page_size
+                            
+                            # Safety limit: stop after 100 pages (2500 records)
+                            if draw_num > 100:
+                                logger.warning(f"⚠️ Reached pagination limit (100 pages), stopping")
+                                break
+                            
+                        except json.JSONDecodeError as e:
+                            logger.warning(f"⚠️ Page {draw_num} JSON decode error: {e}, stopping pagination")
+                            break
+                            
+                    except Exception as e:
+                        logger.warning(f"⚠️ Error fetching page {draw_num}: {e}, stopping pagination")
+                        break
+                
+                logger.info(f"✅ Collected {len(all_ptr_data_map)} unique PTR filings across all pages")
+                
+                # Now download HTML for each PTR and extract all transactions
+                for view_url, metadata in all_ptr_data_map.items():
+                    filer_name = metadata.get('filer_name', 'Unknown')
+                    filing_date_str = metadata.get('filing_date', '')
+                    uuid = metadata.get('uuid', '')
+                    
+                    # Parse filing date
+                    filing_date = None
+                    if filing_date_str:
+                        try:
+                            filing_date = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
+                        except Exception as e:
+                            logger.debug(f"⚠️ Could not parse filing date '{filing_date_str}': {e}")
+                            continue
+                    
+                    # Only process if filing date matches target date
+                    if filing_date and filing_date != target_date_obj.date():
+                        logger.debug(f"⏭️ Skipping PTR from {filing_date} (not {target_date_obj.date()})")
+                        continue
+                    
+                    logger.info(f"📥 Downloading PTR HTML: {filer_name} - {view_url}")
+                    
+                    try:
+                        # Download the PTR HTML page with session cookies
+                        ptr_response = self.session.get(
+                            view_url,
+                            headers={
+                                'Referer': search_url,
+                                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                                'Accept-Language': 'en-US,en;q=0.5',
+                                'Accept-Encoding': 'gzip, deflate, br',
+                                'Connection': 'keep-alive',
+                                'Upgrade-Insecure-Requests': '1'
+                            },
+                            timeout=30,
+                            allow_redirects=True
+                        )
+                        
+                        if ptr_response.status_code != 200:
+                            logger.warning(f"⚠️ Failed to download PTR HTML: {view_url} (status: {ptr_response.status_code})")
+                            continue
+                        
+                        ptr_html = ptr_response.text
+                        
+                        # Check if we got redirected to agreement or home page
+                        if 'agreement_form' in ptr_html or '/search/home/' in ptr_response.url or 'Search Options' in ptr_html:
+                            logger.warning(f"⚠️ PTR URL redirected to agreement/home page: {view_url}")
+                            # Try accepting agreement again
+                            if 'agreement_form' in ptr_html:
+                                logger.info(f"🔄 Attempting to accept agreement for PTR: {view_url}")
+                                # Extract CSRF token from agreement form
+                                csrf_match = re.search(r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']', ptr_html, re.IGNORECASE)
+                                if csrf_match:
+                                    agreement_csrf = csrf_match.group(1)
+                                    # POST agreement acceptance
+                                    agreement_response = self.session.post(
+                                        view_url,
+                                        data={'prohibition_agreement': '1', 'csrfmiddlewaretoken': agreement_csrf},
+                                        headers={'X-CSRFToken': agreement_csrf, 'Referer': view_url},
+                                        timeout=30,
+                                        allow_redirects=True
+                                    )
+                                    if agreement_response.status_code == 200:
+                                        ptr_html = agreement_response.text
+                                        if 'agreement_form' in ptr_html:
+                                            logger.warning(f"⚠️ Agreement acceptance failed for PTR: {view_url}")
+                                            continue
+                                else:
+                                    logger.warning(f"⚠️ Could not find CSRF token in agreement form for: {view_url}")
+                                    continue
+                            else:
+                                continue
+                        
+                        # Extract all transactions from this PTR HTML
+                        transactions = self._extract_senate_ptr_transactions(ptr_html, filer_name, filing_date_str)
+                        
+                        logger.info(f"✅ Extracted {len(transactions)} transactions from {filer_name}'s PTR")
+                        
+                        # Create one entry per transaction, all sharing the same politician info
+                        for transaction in transactions:
+                            ptr_info = {
+                                'url': view_url,  # Keep original URL for reference
+                                'view_url': view_url,
+                                'formType': 'senate_ptr',
+                                'form_type': 'senate_ptr',
+                                'source': 'senate',
+                                'filingDate': filing_date_str if filing_date_str else date_str,
+                                'filing_date': filing_date_str if filing_date_str else date_str,
+                                'filer_name': filer_name,
+                                'uuid': uuid,
+                                # Transaction-specific fields (from extracted transaction)
+                                'transactionDate': transaction.get('transactionDate'),
+                                'owner': transaction.get('owner'),
+                                'securitySymbol': transaction.get('ticker'),
+                                'securityName': transaction.get('securityName'),
+                                'assetType': transaction.get('assetType'),
+                                'transactionType': transaction.get('order'),  # "Purchase", "Sale", etc.
+                                'amount': transaction.get('amount'),
+                                'amountMin': transaction.get('amountMin'),
+                                'amountMax': transaction.get('amountMax'),
+                                'comment': transaction.get('comment'),
+                                # Store transactions array (single transaction per entry)
+                                'transactions': [transaction]  # Single transaction per entry
+                            }
+                            
+                            ptrs.append(ptr_info)
+                            logger.debug(f"   ✅ Added transaction: {transaction.get('order')} - {transaction.get('securityName')} ({transaction.get('assetType')})")
+                        
+                        if not transactions:
+                            logger.warning(f"⚠️ No transactions extracted from PTR: {view_url}")
+                    
+                    except Exception as e:
+                        logger.error(f"❌ Error downloading/extracting from PTR {view_url}: {e}")
+                        import traceback as tb
+                        logger.error(f"Traceback: {tb.format_exc()}")
+                        continue
+                
+                logger.info(f"✅ Successfully extracted {len(ptrs)} transactions from {len(all_ptr_data_map)} Senate PTR filings")
+                return ptrs
+            
             elif search_results_html is None:
                 # Explicitly None means error/maintenance - don't try fallback
                 logger.error("❌ AJAX endpoint failed - cannot fetch Senate PTRs")
@@ -1112,12 +1342,12 @@ class CongressionalPTRScraper:
                         
                         # No exception handling needed - just return empty transactions
                         
-                        s3_key = f"trades/{date_str.replace('/', '-')}/senate/senate-ptr-{uuid}.html"
-                        
+                        # Fetcher should NOT create s3_key - downloader will handle that
+                        # Just return the metadata needed for downloading
                         ptr_info = {
                             'url': ptr_url,
                             'view_url': view_url,  # Store view_url (not print_url)
-                            's3_key': s3_key,
+                            # NO s3_key - downloader will create it in YYYY-MM-DD format
                             'formType': 'senate_ptr',
                             'form_type': 'senate_ptr',
                             'source': 'senate',

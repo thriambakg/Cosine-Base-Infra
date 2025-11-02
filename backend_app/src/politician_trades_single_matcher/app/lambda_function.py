@@ -772,8 +772,11 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
         # Table structure: <table class="table table-striped"> with transaction rows
         
         # Extract filer name from the page
+        # Look for <h2 class="filedReport">The Honorable Rick Scott (Scott, Rick)</h2>
         filer_name = None
         name_patterns = [
+            r'<h2[^>]*class=["\']filedReport["\'][^>]*>(?:The\s+Honorable\s+)?([^<(]+)(?:\s*\([^)]+\))?</h2>',  # "The Honorable Rick Scott (Scott, Rick)"
+            r'<h2[^>]*class=["\']filedReport["\'][^>]*>([^<]+)</h2>',  # Fallback for h2 with filedReport class
             r'<h[1-6][^>]*>([^<]+(?:Senator|Representative)[^<]*)</h[1-6]>',
             r'class=["\']filer[^"\']*["\'][^>]*>([^<]+)</',
             r'<td[^>]*>([^<]+\([^)]+\)[^<]*)</td>',  # "Name (Last, First)" format
@@ -781,8 +784,28 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
         for pattern in name_patterns:
             match = re.search(pattern, html_content, re.IGNORECASE)
             if match:
-                filer_name = match.group(1).strip()
-                break
+                name_text = match.group(1).strip()
+                # Clean up "The Honorable" prefix and extract just the name
+                name_text = re.sub(r'^The\s+Honorable\s+', '', name_text, flags=re.IGNORECASE).strip()
+                # If we have parentheses, prefer the format inside (e.g., "Scott, Rick")
+                # Otherwise use the full name
+                paren_match = re.search(r'\(([^)]+)\)', name_text)
+                if paren_match:
+                    # Extract name from parentheses and convert "Last, First" to "First Last"
+                    paren_name = paren_match.group(1).strip()
+                    if ',' in paren_name:
+                        parts = [p.strip() for p in paren_name.split(',', 1)]
+                        if len(parts) == 2:
+                            filer_name = f"{parts[1]} {parts[0]}".strip()  # "First Last"
+                        else:
+                            filer_name = paren_name
+                    else:
+                        filer_name = paren_name
+                else:
+                    filer_name = name_text
+                if filer_name:
+                    logger.info(f"✅ Extracted filer name: {filer_name}")
+                    break
         
         # Find the transactions table
         # Look for table with headers: #, Transaction Date, Owner, Ticker, Asset Name, Asset Type, Type, Amount, Comment
@@ -802,14 +825,28 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
         row_pattern = r'<tr[^>]*>(.*?)</tr>'
         rows = re.finditer(row_pattern, tbody_content, re.IGNORECASE | re.DOTALL)
         
+        # Clean HTML helper function (defined once before loop)
+        def clean_html(text):
+            # Remove HTML tags
+            text = re.sub(r'<[^>]+>', '', text)
+            # Decode HTML entities
+            text = unescape(text)
+            # Strip whitespace
+            text = text.strip()
+            # Remove extra whitespace
+            text = re.sub(r'\s+', ' ', text)
+            return text
+        
         for row_num, row_match in enumerate(rows, start=1):
             row_html = row_match.group(1)
             
-            # Extract cells from row
+            # Extract cells from row - handle malformed HTML with duplicate/nested cells
+            # Use a more robust pattern that handles closing tags properly
             cell_pattern = r'<td[^>]*>(.*?)</td>'
             cells = re.findall(cell_pattern, row_html, re.IGNORECASE | re.DOTALL)
             
-            if len(cells) < 8:  # Need at least 8 columns
+            if len(cells) < 7:  # Need at least 7 data columns
+                logger.debug(f"⚠️ Row {row_num} has only {len(cells)} cells, skipping")
                 continue
             
             # Column mapping:
@@ -817,32 +854,52 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
             # 1: Transaction Date
             # 2: Owner
             # 3: Ticker
-            # 4: Asset Name
+            # 4: Asset Name (may have nested div with Rate/Coupon, Matures info)
             # 5: Asset Type
-            # 6: Type
+            # 6: Type (Purchase/Sale)
             # 7: Amount
-            # 8: Comment
-            
-            # Clean HTML from cells
-            def clean_html(text):
-                # Remove HTML tags
-                text = re.sub(r'<[^>]+>', '', text)
-                # Decode HTML entities
-                text = unescape(text)
-                # Strip whitespace
-                text = text.strip()
-                # Remove extra whitespace
-                text = re.sub(r'\s+', ' ', text)
-                return text
+            # 8: Comment (optional)
             
             try:
-                transaction_date_str = clean_html(cells[1]) if len(cells) > 1 else ''
-                owner = clean_html(cells[2]) if len(cells) > 2 else ''
-                ticker = clean_html(cells[3]) if len(cells) > 3 else ''
-                asset_name = clean_html(cells[4]) if len(cells) > 4 else ''
-                asset_type = clean_html(cells[5]) if len(cells) > 5 else ''
-                transaction_type = clean_html(cells[6]) if len(cells) > 6 else ''
-                amount_str = clean_html(cells[7]) if len(cells) > 7 else ''
+                # Try to find Amount column by looking for "$" - helps with malformed HTML
+                amount_index = None
+                for i, cell in enumerate(cells):
+                    cleaned = clean_html(cell)
+                    if '$' in cleaned and ('-' in cleaned or re.search(r'\d', cleaned)):
+                        amount_index = i
+                        break
+                
+                # Extract columns - use smart mapping if we found amount, otherwise sequential
+                if amount_index is not None and amount_index >= 6:
+                    # Smart mapping: work backwards from Amount column
+                    transaction_date_str = clean_html(cells[amount_index - 6]) if amount_index >= 6 else ''
+                    owner = clean_html(cells[amount_index - 5]) if amount_index >= 5 else ''
+                    ticker = clean_html(cells[amount_index - 4]) if amount_index >= 4 else ''
+                    asset_name = clean_html(cells[amount_index - 3]) if amount_index >= 3 else ''
+                    asset_type = clean_html(cells[amount_index - 2]) if amount_index >= 2 else ''
+                    transaction_type = clean_html(cells[amount_index - 1]) if amount_index >= 1 else ''
+                    amount_str = clean_html(cells[amount_index])
+                    comment = clean_html(cells[amount_index + 1]) if amount_index + 1 < len(cells) else ''
+                else:
+                    # Sequential mapping (standard case)
+                    # Skip first cell if it's just a row number
+                    start_idx = 1 if (len(cells) > 0 and re.match(r'^\s*\d+\s*$', clean_html(cells[0]))) else 0
+                    transaction_date_str = clean_html(cells[start_idx + 0]) if len(cells) > start_idx + 0 else ''
+                    owner = clean_html(cells[start_idx + 1]) if len(cells) > start_idx + 1 else ''
+                    ticker = clean_html(cells[start_idx + 2]) if len(cells) > start_idx + 2 else ''
+                    asset_name = clean_html(cells[start_idx + 3]) if len(cells) > start_idx + 3 else ''
+                    asset_type = clean_html(cells[start_idx + 4]) if len(cells) > start_idx + 4 else ''
+                    transaction_type = clean_html(cells[start_idx + 5]) if len(cells) > start_idx + 5 else ''
+                    amount_str = clean_html(cells[start_idx + 6]) if len(cells) > start_idx + 6 else ''
+                    comment = clean_html(cells[start_idx + 7]) if len(cells) > start_idx + 7 else ''
+                
+                # Clean asset name - remove extra whitespace from nested HTML
+                asset_name = ' '.join(asset_name.split()) if asset_name else ''
+                
+                # Validate that we got essential fields
+                if not transaction_type or not amount_str or amount_str in ['--', '']:
+                    logger.warning(f"⚠️ Row {row_num} missing essential fields (type: {transaction_type}, amount: {amount_str}), skipping")
+                    continue
                 
                 # Parse transaction date
                 transaction_date = None
@@ -853,9 +910,52 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                         pass
                 
                 # Parse amount (handles ranges like "$100,001 - $250,000")
+                # Senate PTR uses fixed standard ranges for reporting
+                # Standard Senate PTR ranges (fixed):
+                # $1 - $1,000
+                # $1,001 - $15,000
+                # $15,001 - $50,000
+                # $50,001 - $100,000
+                # $100,001 - $250,000
+                # $250,001 - $500,000
+                # $500,001 - $1,000,000
+                # $1,000,001 - $5,000,000
+                # $5,000,001 - $25,000,000
+                # $25,000,001 - $50,000,000
+                # Over $50,000,000
+                
+                # Define standard Senate PTR ranges (as tuples of (min, max))
+                SENATE_PTR_RANGES = [
+                    (1, 1000),
+                    (1001, 15000),
+                    (15001, 50000),
+                    (50001, 100000),
+                    (100001, 250000),
+                    (250001, 500000),
+                    (500001, 1000000),
+                    (1000001, 5000000),
+                    (5000001, 25000000),
+                    (25000001, 50000000),
+                    (50000001, None)  # Over $50,000,000 - max is None/unbounded
+                ]
+                
+                def find_standard_range(amount_value: float) -> tuple:
+                    """Find the standard Senate PTR range that contains the given amount"""
+                    for range_min, range_max in SENATE_PTR_RANGES:
+                        if range_max is None:
+                            if amount_value >= range_min:
+                                return (range_min, None)
+                        else:
+                            if range_min <= amount_value <= range_max:
+                                return (range_min, range_max)
+                    # Fallback: if amount is less than minimum, use first range
+                    return SENATE_PTR_RANGES[0]
+                
                 amount_min = None
                 amount_max = None
                 total_amount = None
+                exact_amount = None  # For exact amounts (not a GSI)
+                amount_range = None  # List of two integers [min, max] for the standard range
                 
                 if amount_str and amount_str not in ['--', '']:
                     # Remove $ and commas
@@ -866,17 +966,38 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                         parts = re.split(r'\s*-\s*', amount_clean)
                         if len(parts) == 2:
                             try:
-                                amount_min = float(parts[0].strip())
-                                amount_max = float(parts[1].strip())
-                                total_amount = (amount_min + amount_max) / 2
+                                raw_min = float(parts[0].strip())
+                                raw_max = float(parts[1].strip())
+                                
+                                # Most trades are in ranges - use the provided range as-is
+                                # amount_range is a list of two integers from the fixed Senate PTR ranges
+                                amount_min = int(raw_min)
+                                amount_max = int(raw_max)
+                                amount_range = [amount_min, amount_max]  # Use provided range
+                                
+                                total_amount = (raw_min + raw_max) / 2
                             except:
                                 pass
                     else:
-                        # Single amount
+                        # Single exact amount - map to standard range AND store exact amount
                         try:
-                            total_amount = float(amount_clean)
-                            amount_min = total_amount
-                            amount_max = total_amount
+                            exact_value = float(amount_clean)
+                            exact_amount = int(exact_value)  # Store exact amount (not a GSI)
+                            
+                            # Find the standard range this exact amount falls into
+                            standard_range = find_standard_range(exact_value)
+                            
+                            # Set amount_range to the standard range [min, max]
+                            # For unbounded ranges, use a large number for max
+                            if standard_range[1] is None:
+                                amount_range = [standard_range[0], 999999999]  # Use large number instead of None
+                            else:
+                                amount_range = [standard_range[0], standard_range[1]]
+                            
+                            # Also set amountMin/amountMax to the exact value for backwards compatibility
+                            amount_min = int(exact_value)
+                            amount_max = int(exact_value)
+                            total_amount = exact_value
                         except:
                             pass
                 
@@ -906,8 +1027,11 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                     'amount': total_amount,
                     'amountMin': amount_min,
                     'amountMax': amount_max,
+                    'amountRange': amount_range,  # List of two integers [min, max] for standard Senate PTR range
+                    'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI)
                     'shares': None,  # Not provided in Senate PTR HTML
-                    'comment': clean_html(cells[8]) if len(cells) > 8 else ''
+                    'comment': clean_html(cells[8]) if len(cells) > 8 else '',
+                    'filerName': filer_name  # Include filer name from HTML for matching
                 }
                 
                 trades.append(trade)
@@ -1515,19 +1639,49 @@ def lambda_handler(event, context):
                     logger.debug(f"❌ No politician match found for filer: {filer_name}")
                 
                 if matched_politician:
+                    # Convert transactionDate to numeric format for GSI range key
+                    transaction_date_str = trade.get('transactionDate') or ''
+                    transaction_date_num = None
+                    if transaction_date_str:
+                        try:
+                            # If it's already in YYYY-MM-DD format, convert to YYYYMMDD integer
+                            if len(transaction_date_str) == 10 and '-' in transaction_date_str:
+                                transaction_date_num = int(transaction_date_str.replace('-', ''))
+                            # If it's already numeric, use it
+                            elif transaction_date_str.isdigit():
+                                transaction_date_num = int(transaction_date_str)
+                            # Otherwise try to parse and convert
+                            else:
+                                parsed_date = datetime.strptime(transaction_date_str, '%Y-%m-%d').date()
+                                transaction_date_num = int(parsed_date.strftime('%Y%m%d'))
+                        except:
+                            # Fallback: use filing date as transaction date
+                            try:
+                                filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
+                                transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
+                            except:
+                                pass
+                    else:
+                        # Use filing date if transaction date is missing
+                        try:
+                            filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
+                            transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
+                        except:
+                            pass
+                    
                     matched_trade = {
                         'tradeId': f"trade_{filing_date}_{cik or 'unknown'}_{len(matched_trades)}",
-                        'politicianName': matched_politician['name'],
-                        'party': matched_politician['party'],
-                        'position': matched_politician['position'],
-                        'websiteUrl': matched_politician.get('websiteUrl'),
-                        'formType': form_type,
+                        'politicianName': matched_politician['name'],  # GSI: PoliticianTradeDateIndex
+                        'party': matched_politician['party'],  # GSI: PartyTradeDateIndex
+                        'position': matched_politician['position'],  # GSI: PositionTradeDateIndex
+                        'websiteUrl': matched_politician.get('websiteUrl'),  # Regular attribute (not GSI)
+                        'formType': form_type,  # GSI: FormTypeTradeDateIndex
                         'filingDate': filing_date,
-                        'transactionDate': trade.get('transactionDate'),
+                        'transactionDate': transaction_date_num,  # GSI range key (numeric: YYYYMMDD format)
                         'transactionTime': trade.get('transactionTime'),
-                        'securitySymbol': trade.get('securitySymbol'),
+                        'securitySymbol': trade.get('securitySymbol'),  # GSI: SecurityTradeDateIndex
                         'securityName': trade.get('securityName'),
-                        'transactionType': trade.get('transactionType'),
+                        'transactionType': trade.get('transactionType'),  # GSI: TransactionTypeTradeDateIndex
                         'shares': trade.get('shares'),
                         'pricePerShare': trade.get('pricePerShare'),
                         'totalAmount': trade.get('totalAmount'),
@@ -1540,7 +1694,7 @@ def lambda_handler(event, context):
                 else:
                     unmatched_count += 1
             else:  # house or senate
-                # For Senate PTRs, use filerName from trade (pre-extracted)
+                # For Senate PTRs, use filerName from trade (pre-extracted from HTML)
                 # For House PTRs, may have politicianName or filerName
                 filer_name = trade.get('filerName') or trade.get('politicianName')
                 if not filer_name:
@@ -1554,26 +1708,67 @@ def lambda_handler(event, context):
                     # Standard format uses: securityName, transactionType, totalAmount
                     transaction_type = trade.get('order') or trade.get('transactionType')
                     
+                    # Get amountRange (list of two integers) and exactAmount
+                    amount_range = trade.get('amountRange')  # [min, max] or [min, None]
+                    exact_amount = trade.get('exactAmount')  # Exact dollar amount if provided
+                    
+                    # Convert transactionDate to numeric format for GSI range key
+                    # transactionDate should be stored as YYYYMMDD integer (e.g., 20251002 for 2025-10-02)
+                    transaction_date_str = trade.get('transactionDate') or ''
+                    transaction_date_num = None
+                    if transaction_date_str:
+                        try:
+                            # If it's already in YYYY-MM-DD format, convert to YYYYMMDD integer
+                            if len(transaction_date_str) == 10 and '-' in transaction_date_str:
+                                transaction_date_num = int(transaction_date_str.replace('-', ''))
+                            # If it's in MM/DD/YYYY format (from Senate PTR HTML), parse and convert
+                            elif len(transaction_date_str) == 10 and '/' in transaction_date_str:
+                                parsed_date = datetime.strptime(transaction_date_str, '%m/%d/%Y').date()
+                                transaction_date_num = int(parsed_date.strftime('%Y%m%d'))
+                            # If it's already numeric, use it
+                            elif transaction_date_str.isdigit():
+                                transaction_date_num = int(transaction_date_str)
+                            # Otherwise try to parse as YYYY-MM-DD
+                            else:
+                                parsed_date = datetime.strptime(transaction_date_str, '%Y-%m-%d').date()
+                                transaction_date_num = int(parsed_date.strftime('%Y%m%d'))
+                        except:
+                            # Fallback: use filing date as transaction date
+                            try:
+                                filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
+                                transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
+                            except:
+                                pass
+                    else:
+                        # Use filing date if transaction date is missing
+                        try:
+                            filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
+                            transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
+                        except:
+                            pass
+                    
                     matched_trade = {
                         'tradeId': f"trade_{filing_date}_{source}_{len(matched_trades)}",
-                        'politicianName': matched_politician['name'],
-                        'party': matched_politician['party'],
-                        'position': matched_politician['position'],
-                        'websiteUrl': matched_politician.get('websiteUrl'),
-                        'formType': form_type or f'{source}_ptr',
+                        'politicianName': matched_politician['name'],  # GSI: PoliticianTradeDateIndex
+                        'party': matched_politician['party'],  # GSI: PartyTradeDateIndex
+                        'position': matched_politician['position'],  # GSI: PositionTradeDateIndex
+                        'websiteUrl': matched_politician.get('websiteUrl'),  # Regular attribute (not GSI)
+                        'formType': form_type or f'{source}_ptr',  # GSI: FormTypeTradeDateIndex
                         'filingDate': filing_date,
-                        'transactionDate': trade.get('transactionDate'),
+                        'transactionDate': transaction_date_num,  # GSI range key (numeric: YYYYMMDD format)
                         'transactionTime': trade.get('transactionTime'),
-                        'securitySymbol': trade.get('ticker') or trade.get('securitySymbol'),
+                        'securitySymbol': trade.get('ticker') or trade.get('securitySymbol'),  # GSI: SecurityTradeDateIndex
                         'securityName': trade.get('securityName'),
                         'assetType': trade.get('assetType'),  # Include assetType for Senate PTRs
-                        'transactionType': transaction_type,  # "Purchase", "Sale", etc.
+                        'transactionType': transaction_type,  # GSI: TransactionTypeTradeDateIndex ("Purchase", "Sale", etc.)
                         'order': trade.get('order'),  # Keep original "order" field
                         'shares': trade.get('shares'),
                         'pricePerShare': trade.get('pricePerShare'),
                         'totalAmount': trade.get('amount') or trade.get('totalAmount'),
-                        'amountMin': trade.get('amountMin'),
-                        'amountMax': trade.get('amountMax'),
+                        'amountMin': trade.get('amountMin'),  # For backwards compatibility
+                        'amountMax': trade.get('amountMax'),  # For backwards compatibility
+                        'amountRange': amount_range,  # List of two integers [min, max] for standard Senate PTR range
+                        'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI)
                         'owner': trade.get('owner'),
                         'comment': trade.get('comment'),
                         'formS3Key': s3_key,

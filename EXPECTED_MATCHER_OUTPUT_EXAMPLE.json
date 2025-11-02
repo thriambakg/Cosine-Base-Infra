@@ -1,0 +1,36 @@
+{
+  "matchedTrades": [
+    {
+      "tradeId": "trade_2025-10-30_senate_0",
+      "politicianName": "Rick Scott",
+      "party": "Republican",
+      "position": "Senate",
+      "websiteUrl": "https://www.rickscott.senate.gov",
+      "formType": "senate_ptr",
+      "filingDate": "2025-10-30",
+      "transactionDate": 20251002,
+      "transactionTime": null,
+      "securitySymbol": null,
+      "securityName": "North Texas Tollway Auth Revenue Bond",
+      "assetType": "Municipal Security",
+      "transactionType": "Purchase",
+      "order": "Purchase",
+      "shares": null,
+      "pricePerShare": null,
+      "totalAmount": 175000.5,
+      "amountMin": 100001,
+      "amountMax": 250000,
+      "amountRange": [100001, 250000],
+      "exactAmount": null,
+      "owner": "Spouse",
+      "comment": "--",
+      "formS3Key": "trades/2025-10-30/senate/senate-ptr-c6456d94-2e65-4740-87e8-15f307c7e596.html",
+      "matchConfidence": 1.0,
+      "source": "senate"
+    }
+  ],
+  "unmatchedCount": 0,
+  "s3Key": "trades/2025-10-30/senate/senate-ptr-c6456d94-2e65-4740-87e8-15f307c7e596.html",
+  "formType": "senate_ptr"
+}
+

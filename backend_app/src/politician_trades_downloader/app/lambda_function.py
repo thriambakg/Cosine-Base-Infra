@@ -446,17 +446,29 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             logger.error(f"❌ Missing URL for PTR download: {ptr_data}")
             return None
         
-        # If s3_key not provided, construct it from source and filename
+        # Construct S3 key - always use YYYY-MM-DD format for target_date
+        # target_date is already normalized to YYYY-MM-DD format in lambda_handler
         if not s3_key:
-            filename = url.split('/')[-1]
-            if source == 'house':
-                s3_key = f"trades/{target_date}/house/{filename}"
-            elif source == 'senate':
+            # Generate filename from UUID or URL
+            if source == 'senate':
+                uuid = ptr_data.get('uuid', '')
+                if uuid:
+                    filename = f"senate-ptr-{uuid}.html"
+                else:
+                    # Fallback: extract from URL
+                    filename = url.split('/')[-1].rstrip('/') or 'senate-ptr.html'
                 s3_key = f"trades/{target_date}/senate/{filename}"
-            else:
-                # Default to house if source unclear
+            elif source == 'house':
+                filename = url.split('/')[-1] or 'house-ptr.pdf'
                 s3_key = f"trades/{target_date}/house/{filename}"
-                logger.warning(f"⚠️ Source unclear, defaulting to house: {ptr_data}")
+            else:
+                # Default to senate if source unclear
+                uuid = ptr_data.get('uuid', '')
+                filename = f"ptr-{uuid}.html" if uuid else 'ptr.html'
+                s3_key = f"trades/{target_date}/senate/{filename}"
+                logger.warning(f"⚠️ Source unclear, defaulting to senate: {ptr_data}")
+        
+        logger.info(f"📦 Will store PTR to S3: {s3_key}")
         
         # For Senate PTRs, the view URL already contains the transaction table in HTML
         # View URL: /search/view/ptr/{uuid}/ (contains transaction table directly)
@@ -525,28 +537,213 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             initial_cookies = list(session.cookies.keys())
             logger.info(f"📋 Cookies after initial GET: {initial_cookies}")
             
-            # Check if agreement form is present
-            search_html = search_response.text
-            if 'id="agreement_form"' in search_html or 'prohibition_agreement' in search_html:
-                logger.info("📋 Found agreement form - accepting terms...")
+            # CRITICAL: Perform search FIRST to establish session cookie
+            # THEN accept agreement so it's stored in that session
+            # This mimics how a browser would work - search creates session, then agreement is stored in it
+            logger.info(f"📋 Performing search operation FIRST to establish session cookie...")
+            
+            # Get CSRF token before performing search
+            csrf_cookie = session.cookies.get('csrftoken') or session.cookies.get('csrfmiddlewaretoken')
+            if not csrf_cookie:
+                # Try to extract from HTML if not in cookies
+                import re
+                csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
+                csrf_match = re.search(csrf_pattern, search_response.text, re.IGNORECASE)
+                if csrf_match:
+                    csrf_cookie = csrf_match.group(1)
+                    logger.info(f"📋 Extracted CSRF token from HTML: {csrf_cookie[:20]}...")
+            
+            # Perform search to establish session (use today's date if filing date not available)
+            filing_date = ptr_data.get('filingDate') or ptr_data.get('filing_date', '')
+            if filing_date:
+                try:
+                    from datetime import datetime
+                    if '/' in filing_date:
+                        date_obj = datetime.strptime(filing_date, '%m/%d/%Y')
+                    else:
+                        date_obj = datetime.strptime(filing_date, '%Y-%m-%d')
+                    search_start_date = date_obj.strftime('%m/%d/%Y')
+                    search_end_date = search_start_date
+                except:
+                    from datetime import datetime
+                    today = datetime.now()
+                    search_start_date = today.strftime('%m/%d/%Y')
+                    search_end_date = search_start_date
+            else:
+                from datetime import datetime
+                today = datetime.now()
+                search_start_date = today.strftime('%m/%d/%Y')
+                search_end_date = search_start_date
+            
+            # Perform AJAX search to create session cookie
+            ajax_url = "https://efdsearch.senate.gov/search/report/data/"
+            ajax_date_start = f"{search_start_date} 00:00:00"
+            ajax_date_end = f"{search_end_date} 23:59:59"
+            
+            datatables_payload = {
+                'draw': '1',
+                'columns[0][data]': '0', 'columns[0][name]': '', 'columns[0][searchable]': 'true', 'columns[0][orderable]': 'true', 'columns[0][search][value]': '', 'columns[0][search][regex]': 'false',
+                'columns[1][data]': '1', 'columns[1][name]': '', 'columns[1][searchable]': 'true', 'columns[1][orderable]': 'true', 'columns[1][search][value]': '', 'columns[1][search][regex]': 'false',
+                'columns[4][data]': '4', 'columns[4][name]': '', 'columns[4][searchable]': 'true', 'columns[4][orderable]': 'true', 'columns[4][search][value]': '', 'columns[4][search][regex]': 'false',
+                'order[0][column]': '1', 'order[0][dir]': 'asc',
+                'order[1][column]': '0', 'order[1][dir]': 'asc',
+                'start': '0', 'length': '25',
+                'search[value]': '', 'search[regex]': 'false',
+                'report_types': '[11]', 'filer_types': '[]',
+                'submitted_start_date': ajax_date_start,
+                'submitted_end_date': ajax_date_end,
+                'candidate_state': '', 'senator_state': '', 'office_id': '',
+                'first_name': '', 'last_name': '',
+                'csrfmiddlewaretoken': csrf_cookie if csrf_cookie else ''
+            }
+            
+            ajax_headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': csrf_cookie if csrf_cookie else '',
+                'Referer': search_url,
+                'Origin': 'https://efdsearch.senate.gov'
+            }
+            
+            logger.info(f"📋 Performing search to establish session...")
+            search_ajax_response = session.post(
+                ajax_url,
+                data=datatables_payload,
+                headers=ajax_headers,
+                timeout=30
+            )
+            
+            # Parse session cookie from search response
+            search_set_cookie = search_ajax_response.headers.get('Set-Cookie', '')
+            if search_set_cookie:
+                logger.info(f"📋 Set-Cookie from search (establishing session): {search_set_cookie[:200]}...")
+                from http.cookies import SimpleCookie
+                try:
+                    cookie_jar = SimpleCookie()
+                    cookie_jar.load(search_set_cookie)
+                    for cookie_name, morsel in cookie_jar.items():
+                        cookie_value = morsel.value
+                        domain = morsel.get('domain', '') or 'efdsearch.senate.gov'
+                        path = morsel.get('path', '/')
+                        if domain.startswith('.'):
+                            domain = domain[1:]
+                        from http.cookiejar import Cookie
+                        cookie_obj = Cookie(
+                            version=0, name=cookie_name, value=cookie_value,
+                            port=None, port_specified=False,
+                            domain=domain if domain else None, domain_specified=bool(domain),
+                            domain_initial_dot=False,
+                            path=path, path_specified=bool(path),
+                            secure=morsel.get('secure', False) or 'Secure' in str(morsel),
+                            expires=None, discard=False, comment=None, comment_url=None, rest={}
+                        )
+                        session.cookies.set_cookie(cookie_obj)
+                        logger.info(f"✅ Set session cookie '{cookie_name}' from search")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not parse Set-Cookie from search: {e}")
+            
+            cookies_after_search = list(session.cookies.keys())
+            logger.info(f"📋 Cookies after search (session established): {cookies_after_search}")
+            
+            # NOW accept agreement so it's stored in the session created by the search
+            # Loop until agreement form is gone (accepting redirects back to search page)
+            max_agreement_attempts = 5
+            agreement_accepted = False
+            
+            for attempt in range(max_agreement_attempts):
+                # Get current page (search page after agreement redirect, or initial search page)
+                logger.info(f"📋 GETting search page (attempt {attempt + 1}/{max_agreement_attempts})...")
+                current_page_response = session.get(search_url, timeout=30)
+                current_page_response.raise_for_status()
+                current_page_html = current_page_response.text
                 
-                # Extract CSRF token from agreement form
+                # Log what we received
+                logger.info(f"📋 Search page response status: {current_page_response.status_code}")
+                logger.info(f"📋 Search page response URL: {current_page_response.url}")
+                logger.info(f"📋 Search page content length: {len(current_page_html)}")
+                
+                # Check if agreement form is still present - look for multiple indicators
+                has_agreement_form_id = 'id="agreement_form"' in current_page_html
+                has_prohibition_field = 'prohibition_agreement' in current_page_html
+                has_get_access = 'Get Access' in current_page_html or 'get access' in current_page_html.lower()
+                has_terms_text = 'terms of use' in current_page_html.lower() or 'terms and conditions' in current_page_html.lower()
+                
+                # Also check for search form (if present, agreement might already be accepted)
+                has_search_form = 'report_type' in current_page_html or 'submitted_start_date' in current_page_html
+                
+                has_agreement_form = has_agreement_form_id or (has_prohibition_field and not has_search_form) or (has_get_access and not has_search_form)
+                
+                logger.info(f"📋 Agreement form check:")
+                logger.info(f"   - Has agreement_form id: {has_agreement_form_id}")
+                logger.info(f"   - Has prohibition_agreement field: {has_prohibition_field}")
+                logger.info(f"   - Has 'Get Access' text: {has_get_access}")
+                logger.info(f"   - Has search form: {has_search_form}")
+                logger.info(f"   - Overall: has_agreement_form = {has_agreement_form}")
+                
+                if not has_agreement_form:
+                    logger.info(f"✅ No agreement form found - agreement already accepted OR search form is available (attempt {attempt + 1})")
+                    agreement_accepted = True
+                    break
+                
+                logger.info(f"📋 Found agreement form - accepting terms (attempt {attempt + 1}/{max_agreement_attempts})...")
+                
+                # Extract CSRF token and form action URL from agreement form
                 import re
                 agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
-                agreement_csrf_match = re.search(agreement_csrf_pattern, search_html, re.IGNORECASE)
+                agreement_csrf_match = re.search(agreement_csrf_pattern, current_page_html, re.IGNORECASE)
+                
+                # Try to find the form action URL - it might be in a form tag
+                form_action_pattern = r'<form[^>]*(?:id=["\']agreement_form["\']|name=["\']agreement_form["\'])[^>]*action=["\']([^"\']+)["\']'
+                form_action_match = re.search(form_action_pattern, current_page_html, re.IGNORECASE)
+                
+                # If no action found in form tag, try to find any form with prohibition_agreement field
+                if not form_action_match:
+                    form_action_pattern = r'<form[^>]*>.*?prohibition_agreement.*?</form>'
+                    form_match = re.search(form_action_pattern, current_page_html, re.IGNORECASE | re.DOTALL)
+                    if form_match:
+                        action_match = re.search(r'action=["\']([^"\']+)["\']', form_match.group(0), re.IGNORECASE)
+                        if action_match:
+                            form_action_match = action_match
+                
+                # Use form action URL if found, otherwise default to search_url
+                agreement_post_url = search_url
+                if form_action_match:
+                    action_path = form_action_match.group(1)
+                    if action_path.startswith('/'):
+                        agreement_post_url = f"https://efdsearch.senate.gov{action_path}"
+                    elif action_path.startswith('http'):
+                        agreement_post_url = action_path
+                    else:
+                        agreement_post_url = f"{search_url.rstrip('/')}/{action_path}"
+                    logger.info(f"📋 Found form action URL: {agreement_post_url}")
+                else:
+                    # Since agreement POST redirects to /search/home/, try POSTing there directly
+                    home_search_url = "https://efdsearch.senate.gov/search/home/"
+                    logger.info(f"📋 No form action found - will try POSTing to /search/home/ since that's where redirects go: {home_search_url}")
+                    agreement_post_url = home_search_url
                 
                 if agreement_csrf_match:
                     agreement_csrf = agreement_csrf_match.group(1)
                     
-                    # Submit agreement form
+                    # Submit agreement form to the correct URL
                     agreement_data = {
                         'prohibition_agreement': '1',
                         'csrfmiddlewaretoken': agreement_csrf
                     }
                     
-                    logger.info(f"📋 Submitting agreement form...")
+                    logger.info(f"📋 Submitting agreement form to: {agreement_post_url}")
+                    logger.info(f"📋 CSRF token: {agreement_csrf[:20]}...")
+                    
+                    # Log cookies before POST
+                    cookies_before_post = list(session.cookies.keys())
+                    logger.info(f"📋 Cookies before agreement POST: {cookies_before_post}")
+                    for cookie_name in cookies_before_post:
+                        if cookie_name not in ['csrftoken', 'csrfmiddlewaretoken']:
+                            cookie_value = session.cookies.get(cookie_name)
+                            logger.info(f"📋 Cookie '{cookie_name}': {cookie_value[:50] if cookie_value else 'None'}...")
+                    
                     agreement_response = session.post(
-                        search_url,
+                        agreement_post_url,
                         data=agreement_data,
                         headers={
                             'Content-Type': 'application/x-www-form-urlencoded',
@@ -558,269 +755,304 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
                     )
                     agreement_response.raise_for_status()
                     
-                    # Parse Set-Cookie headers to ensure sessionid is captured
+                    # Log response details for debugging
+                    logger.info(f"📋 Agreement POST response status: {agreement_response.status_code}")
+                    logger.info(f"📋 Agreement POST response URL: {agreement_response.url}")
+                    logger.info(f"📋 Agreement POST response headers: {dict(agreement_response.headers)}")
+                    
+                    # Check response content - does it indicate success or still show agreement form?
+                    response_text_preview = agreement_response.text[:500] if agreement_response.text else ''
+                    has_agreement_in_response = 'id="agreement_form"' in response_text_preview or 'prohibition_agreement' in response_text_preview
+                    logger.info(f"📋 Agreement POST response contains agreement form: {has_agreement_in_response}")
+                    
+                    # Parse Set-Cookie headers to ensure session cookies are captured
                     set_cookie_header = agreement_response.headers.get('Set-Cookie', '')
                     if set_cookie_header:
                         logger.info(f"📋 Set-Cookie from agreement response: {set_cookie_header[:200]}...")
-                        # Manually parse sessionid if present
-                        if 'sessionid=' in set_cookie_header:
-                            import re
-                            from http.cookies import SimpleCookie
-                            try:
-                                cookie = SimpleCookie()
-                                cookie.load(set_cookie_header)
-                                for key, morsel in cookie.items():
-                                    domain = '.senate.gov'
-                                    if 'Domain=' in set_cookie_header:
-                                        domain_match = re.search(r'Domain=([^;]+)', set_cookie_header)
-                                        if domain_match:
-                                            domain = domain_match.group(1).strip()
-                                    session.cookies.set(key, morsel.value, domain=domain)
-                                logger.info(f"✅ Manually set session cookie from agreement response")
-                            except Exception as e:
-                                logger.warning(f"⚠️ Could not parse Set-Cookie: {e}")
-                    
-                    # Verify session cookie - Django might use a different name or create it later
-                    sessionid_cookie = session.cookies.get('sessionid')
-                    
-                    # Check all cookies - sometimes Django uses different session cookie names
-                    all_cookies = list(session.cookies.keys())
-                    logger.info(f"📋 All cookies after agreement: {all_cookies}")
-                    
-                    # Look for any cookie that might be a session cookie (long alphanumeric strings)
-                    # Django sometimes uses different cookie names or the sessionid might be in a different format
-                    potential_session_cookies = []
-                    for cookie_name in all_cookies:
-                        if cookie_name not in ['csrftoken', 'csrfmiddlewaretoken', 'messages']:
-                            cookie_value = session.cookies.get(cookie_name)
-                            if cookie_value:
-                                if len(cookie_value) > 20:  # Session cookies are usually long
-                                    potential_session_cookies.append((cookie_name, cookie_value))
-                                    logger.info(f"📋 Found potential session cookie '{cookie_name}': {cookie_value[:50]}...")
-                                # Also check if the cookie name itself looks like a session ID
-                                elif len(cookie_name) > 20 and cookie_name.replace('-', '').replace('_', '').isalnum():
-                                    potential_session_cookies.append((cookie_name, cookie_value))
-                                    logger.info(f"📋 Cookie name '{cookie_name}' might be session ID itself: {cookie_value[:50]}...")
-                    
-                    # If we found a potential session cookie but no 'sessionid', treat it as the session
-                    if not sessionid_cookie and potential_session_cookies:
-                        logger.info(f"💡 No 'sessionid' cookie, but found {len(potential_session_cookies)} potential session cookies")
-                        logger.info(f"💡 Django may be using a different session cookie name - proceeding with available cookies")
-                    
-                    if sessionid_cookie:
-                        logger.info(f"✅ Session ID cookie present after agreement: {sessionid_cookie[:50]}...")
+                        # Parse all cookies, not just sessionid
+                        from http.cookies import SimpleCookie
+                        try:
+                            cookie_jar = SimpleCookie()
+                            cookie_jar.load(set_cookie_header)
+                            for cookie_name, morsel in cookie_jar.items():
+                                domain = morsel.get('domain', '') or 'efdsearch.senate.gov'
+                                path = morsel.get('path', '/')
+                                if domain.startswith('.'):
+                                    domain = domain[1:]
+                                from http.cookiejar import Cookie
+                                cookie_obj = Cookie(
+                                    version=0, name=cookie_name, value=morsel.value,
+                                    port=None, port_specified=False,
+                                    domain=domain if domain else None, domain_specified=bool(domain),
+                                    domain_initial_dot=False,
+                                    path=path, path_specified=bool(path),
+                                    secure=morsel.get('secure', False) or 'Secure' in str(morsel),
+                                    expires=None, discard=False, comment=None, comment_url=None, rest={}
+                                )
+                                session.cookies.set_cookie(cookie_obj)
+                            logger.info(f"✅ Updated session cookies from agreement response")
+                            
+                            # Log cookies after parsing
+                            cookies_after_parse = list(session.cookies.keys())
+                            logger.info(f"📋 Cookies after parsing Set-Cookie: {cookies_after_parse}")
+                        except Exception as e:
+                            logger.warning(f"⚠️ Could not parse Set-Cookie: {e}")
+                            import traceback
+                            logger.warning(f"Traceback: {traceback.format_exc()}")
                     else:
-                        logger.warning(f"⚠️ No sessionid cookie after agreement acceptance - Django may create it on first access")
-                        logger.info(f"💡 Will attempt to access PTR URL - Django may set session cookie on first request")
+                        logger.warning(f"⚠️ No Set-Cookie header in agreement response")
                     
-                    logger.info("✅ Agreement accepted")
+                    # Check if we were redirected back to search page (agreement acceptance redirects)
+                    if '/search/' in agreement_response.url:
+                        logger.info(f"📋 Agreement POST redirected back to search page (normal behavior)")
+                        # The next iteration will check if agreement form is still present
+                    else:
+                        logger.info(f"📋 Agreement POST redirected to: {agreement_response.url}")
+                    
+                    logger.info(f"✅ Agreement POST completed (attempt {attempt + 1})")
+                    
+                    # Small delay to ensure server has processed the agreement
+                    import time
+                    time.sleep(0.1)
                 else:
-                    logger.warning("⚠️ Could not extract CSRF token from agreement form")
+                    logger.warning(f"⚠️ Could not extract CSRF token from agreement form (attempt {attempt + 1})")
+                    # Continue to next attempt - maybe the page changed
             
-            # Get CSRF cookie if available
+            if not agreement_accepted:
+                logger.warning(f"⚠️ Could not accept agreement after {max_agreement_attempts} attempts")
+                # Continue anyway - might still work
+            
+            # Verify cookies after agreement loop
+            final_cookies_after_agreement = list(session.cookies.keys())
+            logger.info(f"📋 Final cookies after agreement loop: {final_cookies_after_agreement}")
+            for cookie_name in final_cookies_after_agreement:
+                cookie_value = session.cookies.get(cookie_name)
+                if cookie_name not in ['csrftoken', 'csrfmiddlewaretoken', 'messages']:
+                    logger.info(f"📋 Session cookie '{cookie_name}': {cookie_value[:50] if cookie_value else 'None'}...")
+            
+            # IMPORTANT: After accepting agreement, perform the search again to simulate
+            # clicking the PTR link from the search results page (which opens in a new tab)
+            # This ensures we have the proper context and session state for accessing the PTR
+            logger.info(f"📋 Performing search after agreement acceptance to simulate clicking PTR link from results...")
+            
+            # Get CSRF token for the search
             csrf_cookie = session.cookies.get('csrftoken') or session.cookies.get('csrfmiddlewaretoken')
-            if csrf_cookie:
-                logger.debug(f"✅ Have CSRF cookie: {csrf_cookie[:20]}...")
+            if not csrf_cookie:
+                # Re-fetch search page to get fresh CSRF token
+                search_page_refresh = session.get(search_url, timeout=30)
+                search_page_refresh.raise_for_status()
+                import re
+                csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
+                csrf_match = re.search(csrf_pattern, search_page_refresh.text, re.IGNORECASE)
+                if csrf_match:
+                    csrf_cookie = csrf_match.group(1)
+                    logger.info(f"📋 Extracted fresh CSRF token: {csrf_cookie[:20]}...")
+            
+            # Perform search with the filing date
+            filing_date = ptr_data.get('filingDate') or ptr_data.get('filing_date', '')
+            if filing_date:
+                try:
+                    from datetime import datetime
+                    if '/' in filing_date:
+                        date_obj = datetime.strptime(filing_date, '%m/%d/%Y')
+                    else:
+                        date_obj = datetime.strptime(filing_date, '%Y-%m-%d')
+                    search_start_date = date_obj.strftime('%m/%d/%Y')
+                    search_end_date = search_start_date
+                except:
+                    from datetime import datetime
+                    today = datetime.now()
+                    search_start_date = today.strftime('%m/%d/%Y')
+                    search_end_date = search_start_date
+            else:
+                from datetime import datetime
+                today = datetime.now()
+                search_start_date = today.strftime('%m/%d/%Y')
+                search_end_date = search_start_date
+            
+            # Perform AJAX search to get results (simulating what user sees before clicking PTR link)
+            ajax_url = "https://efdsearch.senate.gov/search/report/data/"
+            ajax_date_start = f"{search_start_date} 00:00:00"
+            ajax_date_end = f"{search_end_date} 23:59:59"
+            
+            datatables_payload = {
+                'draw': '1',
+                'columns[0][data]': '0', 'columns[0][name]': '', 'columns[0][searchable]': 'true', 'columns[0][orderable]': 'true', 'columns[0][search][value]': '', 'columns[0][search][regex]': 'false',
+                'columns[1][data]': '1', 'columns[1][name]': '', 'columns[1][searchable]': 'true', 'columns[1][orderable]': 'true', 'columns[1][search][value]': '', 'columns[1][search][regex]': 'false',
+                'columns[4][data]': '4', 'columns[4][name]': '', 'columns[4][searchable]': 'true', 'columns[4][orderable]': 'true', 'columns[4][search][value]': '', 'columns[4][search][regex]': 'false',
+                'order[0][column]': '1', 'order[0][dir]': 'asc',
+                'order[1][column]': '0', 'order[1][dir]': 'asc',
+                'start': '0', 'length': '25',
+                'search[value]': '', 'search[regex]': 'false',
+                'report_types': '[11]', 'filer_types': '[]',
+                'submitted_start_date': ajax_date_start,
+                'submitted_end_date': ajax_date_end,
+                'candidate_state': '', 'senator_state': '', 'office_id': '',
+                'first_name': '', 'last_name': '',
+                'csrfmiddlewaretoken': csrf_cookie if csrf_cookie else ''
+            }
+            
+            ajax_headers = {
+                'Content-Type': 'application/x-www-form-urlencoded',
+                'X-Requested-With': 'XMLHttpRequest',
+                'X-CSRFToken': csrf_cookie if csrf_cookie else '',
+                'Referer': search_url,
+                'Origin': 'https://efdsearch.senate.gov'
+            }
+            
+            logger.info(f"📋 Performing search to get results page (simulating user viewing search results)...")
+            post_agreement_search_response = session.post(
+                ajax_url,
+                data=datatables_payload,
+                headers=ajax_headers,
+                timeout=30
+            )
+            post_agreement_search_response.raise_for_status()
+            
+            # Check for session cookie updates
+            post_search_set_cookie = post_agreement_search_response.headers.get('Set-Cookie', '')
+            if post_search_set_cookie:
+                logger.info(f"📋 Set-Cookie from post-agreement search: {post_search_set_cookie[:200]}...")
+            
+            # Log cookies after search
+            cookies_after_post_search = list(session.cookies.keys())
+            logger.info(f"📋 Cookies after post-agreement search: {cookies_after_post_search}")
+            for cookie_name in cookies_after_post_search:
+                if cookie_name not in ['csrftoken', 'csrfmiddlewaretoken', 'messages']:
+                    cookie_value = session.cookies.get(cookie_name)
+                    logger.info(f"📋 Session cookie '{cookie_name}': {cookie_value[:50] if cookie_value else 'None'}...")
+            
+            logger.info(f"✅ Performed search after agreement - session should now be ready for PTR access")
             
             # For Senate PTRs, the view URL is what we want (it contains the transaction table)
             # No need to access a separate print URL
+            # IMPORTANT: We've performed the search after accepting the agreement
+            # The session cookie should now allow access to PTR URLs
         
         # Before downloading PTR, check if we need to accept agreement on the PTR page itself
         # Some PTR pages require accepting agreement directly on that page
+        # IMPORTANT: The PTR link opens in a new tab in browsers, so we need to ensure
+        # the session cookie is properly maintained and sent with the request
         if source == 'senate':
             logger.info(f"📋 Attempting to access PTR URL: {url}")
             
-            # Log cookies before attempting access
+            # Log cookies before attempting access - verify session cookie is present
             pre_access_cookies = list(session.cookies.keys())
             logger.info(f"📋 Cookies before PTR access: {pre_access_cookies}")
             
-            # First attempt - with current session cookies
-            # Use allow_redirects=False first to see if we get redirected
-            response = session.get(url, timeout=30, allow_redirects=False, headers={
-                'Referer': search_url if source == 'senate' else url,
-                'User-Agent': session.headers.get('User-Agent'),
-                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-                'Accept-Language': 'en-US,en;q=0.9',
-                'Connection': 'keep-alive',
-                'Upgrade-Insecure-Requests': '1'
-            })
+            # Verify session cookie value is present and log it
+            session_cookie_name = None
+            session_cookie_value = None
+            for cookie_name in pre_access_cookies:
+                if cookie_name not in ['csrftoken', 'csrfmiddlewaretoken', 'messages']:
+                    cookie_value = session.cookies.get(cookie_name)
+                    if cookie_value:
+                        session_cookie_name = cookie_name
+                        session_cookie_value = cookie_value
+                        logger.info(f"📋 Session cookie '{cookie_name}': {cookie_value[:50]}...")
+                        break
             
-            # Check if we got redirected
-            if response.status_code in [301, 302, 303, 307, 308]:
-                redirect_location = response.headers.get('Location', '')
-                logger.info(f"📋 PTR URL returned {response.status_code} redirect to: {redirect_location}")
-                # Follow redirect manually to see where we end up
-                if redirect_location.startswith('/'):
-                    redirect_location = f"https://efdsearch.senate.gov{redirect_location}"
-                elif not redirect_location.startswith('http'):
-                    redirect_location = f"https://efdsearch.senate.gov/{redirect_location}"
-                logger.info(f"📋 Following redirect to: {redirect_location}")
-                response = session.get(redirect_location, timeout=30, allow_redirects=True, headers={
-                    'Referer': url,
-                    'User-Agent': session.headers.get('User-Agent')
-                })
-            else:
-                response.raise_for_status()
+            if not session_cookie_value:
+                logger.warning(f"⚠️ No session cookie found before PTR access!")
             
-            # Check if we got redirected to home page OR got agreement form on PTR page
+            # Build cookies string manually to ensure it's sent (requests should handle this, but let's be explicit)
+            cookies_dict = {}
+            for cookie_name in pre_access_cookies:
+                cookie_value = session.cookies.get(cookie_name)
+                if cookie_value:
+                    cookies_dict[cookie_name] = cookie_value
+            
+            logger.info(f"📋 Cookies to be sent: {list(cookies_dict.keys())}")
+            
+            # Use browser-like headers matching the working test script
+            # requests.Session() automatically handles cookies - no need to manually set them
+            browser_headers = {
+                'accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+                'accept-encoding': 'gzip, deflate, br',
+                'accept-language': 'en-US,en;q=0.9',
+                'connection': 'keep-alive',
+                'host': 'efdsearch.senate.gov',
+                'sec-ch-ua': '"Chromium";v="142", "Google Chrome";v="142", "Not_A Brand";v="99"',
+                'sec-ch-ua-mobile': '?0',
+                'sec-ch-ua-platform': '"Windows"',
+                'sec-fetch-dest': 'document',
+                'sec-fetch-mode': 'navigate',
+                'sec-fetch-site': 'none',
+                'sec-fetch-user': '?1',
+                'upgrade-insecure-requests': '1',
+                'user-agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36',
+                'referer': search_url if source == 'senate' else url
+            }
+            
+            logger.info(f"📋 Making GET request with browser-like headers...")
+            # Use allow_redirects=True to match browser behavior
+            response = session.get(url, timeout=30, allow_redirects=True, headers=browser_headers)
+            
+            # Log response details
+            logger.info(f"📋 PTR URL response status: {response.status_code}")
+            logger.info(f"📋 PTR URL final URL: {response.url}")
+            logger.info(f"📋 Content length: {len(response.content)} bytes")
+            logger.info(f"📋 Content type: {response.headers.get('Content-Type', 'N/A')}")
+            
+            response.raise_for_status()
+            
+            # Check response content
+            response_text = response.text
+            has_transactions = 'Transactions' in response_text and 'table-striped' in response_text
             is_home_redirect = '/search/home/' in response.url or 'eFD: Home' in response.text[:500] or response.text.find('<title>eFD: Home</title>') != -1
             has_agreement_form = 'id="agreement_form"' in response.text or 'prohibition_agreement' in response.text or 'Get Access' in response.text
             
-            if is_home_redirect:
-                logger.warning(f"⚠️ Got redirected to home page - trying to accept agreement on PTR page directly")
-                # Try accessing the PTR URL and accepting agreement there
-                # Sometimes the agreement needs to be accepted on the specific page
-                logger.info(f"📋 Re-fetching PTR URL to get agreement form...")
-                ptr_page_response = session.get(url, timeout=30, allow_redirects=False, headers={
-                    'Referer': search_url,
-                    'User-Agent': session.headers.get('User-Agent')
-                })
-                
-                # Check response - might be 302 redirect or 200 with agreement form
-                if ptr_page_response.status_code == 302:
-                    logger.info(f"📋 PTR URL redirects to: {ptr_page_response.headers.get('Location', 'unknown')}")
-                    # Follow redirect manually
-                    redirect_url = ptr_page_response.headers.get('Location', '')
-                    if redirect_url.startswith('/'):
-                        redirect_url = f"https://efdsearch.senate.gov{redirect_url}"
-                    logger.info(f"📋 Following redirect to: {redirect_url}")
-                    ptr_page_response = session.get(redirect_url, timeout=30, allow_redirects=True)
-                
-                ptr_html = ptr_page_response.text
-                if 'id="agreement_form"' in ptr_html or 'prohibition_agreement' in ptr_html:
-                    logger.info(f"📋 Found agreement form on PTR page - accepting...")
-                    import re
-                    agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
-                    agreement_csrf_match = re.search(agreement_csrf_pattern, ptr_html, re.IGNORECASE)
-                    
-                    if agreement_csrf_match:
-                        ptr_csrf = agreement_csrf_match.group(1)
-                        # POST agreement to the PTR URL itself
-                        agreement_post_response = session.post(
-                            url,
-                            data={'prohibition_agreement': '1', 'csrfmiddlewaretoken': ptr_csrf},
-                            headers={
-                                'Content-Type': 'application/x-www-form-urlencoded',
-                                'Referer': url,
-                                'Origin': 'https://efdsearch.senate.gov',
-                                'X-CSRFToken': ptr_csrf
-                            },
-                            allow_redirects=True
-                        )
-                        agreement_post_response.raise_for_status()
-                        
-                        # Check Set-Cookie from agreement POST
-                        post_set_cookie = agreement_post_response.headers.get('Set-Cookie', '')
-                        if post_set_cookie:
-                            logger.info(f"📋 Set-Cookie from PTR agreement POST: {post_set_cookie[:200]}...")
-                            # Parse sessionid if present
-                            if 'sessionid=' in post_set_cookie:
-                                from http.cookies import SimpleCookie
-                                try:
-                                    cookie = SimpleCookie()
-                                    cookie.load(post_set_cookie)
-                                    for key, morsel in cookie.items():
-                                        domain = '.senate.gov'
-                                        if 'Domain=' in post_set_cookie:
-                                            domain_match = re.search(r'Domain=([^;]+)', post_set_cookie)
-                                            if domain_match:
-                                                domain = domain_match.group(1).strip()
-                                        session.cookies.set(key, morsel.value, domain=domain)
-                                    logger.info(f"✅ Set session cookie from PTR agreement POST")
-                                except Exception as e:
-                                    logger.warning(f"⚠️ Could not parse Set-Cookie: {e}")
-                        
-                        # Now try accessing the PTR page again
-                        logger.info(f"📋 Re-accessing PTR URL after accepting agreement on page...")
-                        response = session.get(url, timeout=30, allow_redirects=True, headers={
-                            'Referer': url,
-                            'User-Agent': session.headers.get('User-Agent')
-                        })
-                        response.raise_for_status()
-                        
-                        # Verify we got the PTR page, not home page
-                        if '/search/home/' in response.url or 'eFD: Home' in response.text[:500]:
-                            raise Exception(f"Still redirected to home page after accepting agreement on PTR page")
-                        logger.info(f"✅ Successfully accessed PTR page after accepting agreement")
-                    else:
-                        raise Exception(f"Could not extract CSRF token from PTR agreement form")
-                else:
-                    raise Exception(f"PTR page does not contain agreement form but still redirects")
-            elif has_agreement_form:
-                # We got the agreement form on the PTR page - accept it
-                logger.info(f"📋 Found agreement form on PTR page - accepting...")
-                import re
-                agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
-                agreement_csrf_match = re.search(agreement_csrf_pattern, response.text, re.IGNORECASE)
-                
-                if agreement_csrf_match:
-                    ptr_csrf = agreement_csrf_match.group(1)
-                    agreement_post_response = session.post(
-                        url,
-                        data={'prohibition_agreement': '1', 'csrfmiddlewaretoken': ptr_csrf},
-                        headers={
-                            'Content-Type': 'application/x-www-form-urlencoded',
-                            'Referer': url,
-                            'Origin': 'https://efdsearch.senate.gov',
-                            'X-CSRFToken': ptr_csrf
-                        },
-                        allow_redirects=True
-                    )
-                    agreement_post_response.raise_for_status()
-                    
-                    # If POST response contains the PTR content, use it
-                    if 'Transactions' in agreement_post_response.text or 'table-striped' in agreement_post_response.text:
-                        logger.info(f"✅ Agreement POST response contains PTR content - using it")
-                        response = agreement_post_response
-                    else:
-                        # Retry GET request
-                        logger.info(f"📋 Re-accessing PTR URL after agreement acceptance...")
-                        response = session.get(url, timeout=30, allow_redirects=True, headers={
-                            'Referer': url,
-                            'User-Agent': session.headers.get('User-Agent')
-                        })
-                        response.raise_for_status()
-                else:
-                    raise Exception(f"Could not extract CSRF token from PTR agreement form")
-            else:
-                # We got the actual PTR page - success!
-                logger.info(f"✅ Successfully accessed PTR page")
-        
-        # Check if response is actually a PDF
-        content_type = response.headers.get('Content-Type', '').lower()
-        content_sample = response.content[:100]
-        
-        if 'application/pdf' in content_type or content_sample.startswith(b'%PDF'):
-            logger.info(f"✅ Downloaded PDF file ({len(response.content)} bytes)")
-            file_content = response.content
-            file_ext = 'pdf'
-        elif source == 'senate' and ('text/html' in content_type or content_sample.startswith(b'<html') or content_sample.startswith(b'<!DOCTYPE')):
-            # Senate PTR print page returns HTML with transaction table
-            # We prefer HTML over PDF because:
-            # 1. It's free (no Textract costs)
-            # 2. It's faster (direct parsing vs Textract processing)
-            # 3. It's more reliable (structured HTML vs OCR extraction)
-            # The HTML contains the same transaction data in a structured table
-            logger.info(f"📄 Senate PTR is HTML format - storing HTML page with transaction table")
-            logger.info(f"💡 Matcher will parse HTML table directly (cheaper/faster than PDF + Textract)")
-            file_content = response.content
-            file_ext = 'html'
-        else:
-            # Determine file extension from URL or content type
-            if s3_key.endswith('.pdf'):
-                file_ext = 'pdf'
-            elif url.endswith('.pdf'):
-                file_ext = 'pdf'
-            elif 'pdf' in content_type.lower():
-                file_ext = 'pdf'
-            else:
-                # Try to extract from URL
-                if '.' in url.split('/')[-1]:
-                    file_ext = url.split('/')[-1].split('.')[-1]
-                else:
-                    file_ext = 'pdf'  # Default for PTRs
+            logger.info(f"📋 Response analysis:")
+            logger.info(f"   Has transactions table: {has_transactions}")
+            logger.info(f"   Is home redirect: {is_home_redirect}")
+            logger.info(f"   Has agreement form: {has_agreement_form}")
             
-            file_content = response.content
+            if has_transactions:
+                logger.info(f"✅ Successfully accessed PTR page with transactions!")
+                # Store the HTML content for S3
+                html_content = response_text
+                # Extract transaction count for logging
+                import re
+                transaction_count_match = re.search(r'\((\d+)\s+transaction', response_text, re.IGNORECASE)
+                if transaction_count_match:
+                    logger.info(f"   Found {transaction_count_match.group(1)} transaction(s) in the report")
+            else:
+                # If we still got redirected or see agreement form, the session agreement wasn't properly set
+                logger.error(f"❌ Session agreement not properly set - still seeing agreement form or redirect")
+                raise Exception(f"Cannot access PTR URL - agreement not accepted in session. URL: {url}, Response URL: {response.url}")
+        
+        # For Senate PTRs, we already have html_content from the transaction table check above
+        # For other sources, we'll process the response below
+        if source == 'senate':
+            # Use the HTML content we already extracted
+            file_content = html_content.encode('utf-8')
+            file_ext = 'html'
+            content_type = 'text/html; charset=utf-8'
+        else:
+            # Check if response is actually a PDF
+            content_type = response.headers.get('Content-Type', '').lower()
+            content_sample = response.content[:100]
+            
+            if 'application/pdf' in content_type or content_sample.startswith(b'%PDF'):
+                logger.info(f"✅ Downloaded PDF file ({len(response.content)} bytes)")
+                file_content = response.content
+                file_ext = 'pdf'
+            else:
+                # Determine file extension from URL or content type
+                if s3_key.endswith('.pdf'):
+                    file_ext = 'pdf'
+                elif url.endswith('.pdf'):
+                    file_ext = 'pdf'
+                elif 'pdf' in content_type.lower():
+                    file_ext = 'pdf'
+                else:
+                    # Try to extract from URL
+                    if '.' in url.split('/')[-1]:
+                        file_ext = url.split('/')[-1].split('.')[-1]
+                    else:
+                        file_ext = 'pdf'  # Default for PTRs
+                
+                file_content = response.content
         
         # Update s3_key with correct extension if needed
         if not s3_key.endswith(f'.{file_ext}'):
@@ -884,9 +1116,40 @@ def lambda_handler(event, context):
     
     try:
         # Extract target date from event
-        target_date = event.get('filingDate') or event.get('filing_date') or event.get('date')
-        if not target_date:
+        # Get target_date from event and normalize to YYYY-MM-DD format
+        target_date_raw = event.get('filingDate') or event.get('filing_date') or event.get('date')
+        if not target_date_raw:
             raise ValueError("filingDate, filing_date, or date must be provided in event")
+        
+        # Normalize date to YYYY-MM-DD format for consistent S3 key structure
+        from datetime import datetime
+        try:
+            # Try parsing various date formats
+            if '/' in target_date_raw:
+                # MM/DD/YYYY format (from Senate PTRs)
+                date_obj = datetime.strptime(target_date_raw, '%m/%d/%Y')
+            elif '-' in target_date_raw:
+                # Check if it's YYYY-MM-DD or MM-DD-YYYY
+                parts = target_date_raw.split('-')
+                if len(parts) == 3 and len(parts[0]) == 4:
+                    # Already YYYY-MM-DD
+                    date_obj = datetime.strptime(target_date_raw, '%Y-%m-%d')
+                elif len(parts) == 3 and len(parts[0]) <= 2:
+                    # MM-DD-YYYY format (incorrect format)
+                    date_obj = datetime.strptime(target_date_raw, '%m-%d-%Y')
+                else:
+                    # Assume YYYY-MM-DD
+                    date_obj = datetime.strptime(target_date_raw, '%Y-%m-%d')
+            else:
+                # Try YYYYMMDD
+                date_obj = datetime.strptime(target_date_raw, '%Y%m%d')
+            
+            # Format as YYYY-MM-DD for S3 key
+            target_date = date_obj.strftime('%Y-%m-%d')
+            logger.info(f"📅 Normalized date: {target_date_raw} -> {target_date}")
+        except ValueError as e:
+            logger.error(f"❌ Could not parse date format: {target_date_raw}")
+            raise ValueError(f"Invalid date format: {target_date_raw}. Expected YYYY-MM-DD, MM/DD/YYYY, or MM-DD-YYYY")
         
         # Determine if this is a PTR download (has URL) or SEC form (has CIK/accession)
         url = event.get('url')
