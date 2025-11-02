@@ -930,8 +930,9 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 # Over $50,000,000
                 
                 # Define standard Senate PTR ranges (as tuples of (min, max))
+                # Note: Minimum reporting threshold is $1,000, but we handle sub-$1k amounts
                 SENATE_PTR_RANGES = [
-                    (1, 1000),
+                    (0, 1000),  # $0 - $1,000 (handles sub-$1k amounts)
                     (1001, 15000),
                     (15001, 50000),
                     (50001, 100000),
@@ -946,6 +947,10 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 
                 def find_standard_range(amount_value: float) -> tuple:
                     """Find the standard Senate PTR range that contains the given amount"""
+                    # Handle zero or negative amounts (use first range)
+                    if amount_value <= 0:
+                        return SENATE_PTR_RANGES[0]
+                    
                     for range_min, range_max in SENATE_PTR_RANGES:
                         if range_max is None:
                             if amount_value >= range_min:
@@ -1644,6 +1649,81 @@ def lambda_handler(event, context):
                     logger.debug(f"❌ No politician match found for filer: {filer_name}")
                 
                 if matched_politician:
+                    # Map exact amounts from SEC forms to standard Senate PTR ranges
+                    # Standard Senate PTR ranges:
+                    # $0 - $1,000 (handles sub-$1k amounts, though minimum reporting threshold is $1,000)
+                    # $1,001 - $15,000
+                    # $15,001 - $50,000
+                    # $50,001 - $100,000
+                    # $100,001 - $250,000
+                    # $250,001 - $500,000
+                    # $500,001 - $1,000,000
+                    # $1,000,001 - $5,000,000
+                    # $5,000,001 - $25,000,000
+                    # $25,000,001 - $50,000,000
+                    # Over $50,000,000
+                    
+                    SENATE_PTR_RANGES = [
+                        (0, 1000),  # $0 - $1,000 (handles sub-$1k amounts)
+                        (1001, 15000),
+                        (15001, 50000),
+                        (50001, 100000),
+                        (100001, 250000),
+                        (250001, 500000),
+                        (500001, 1000000),
+                        (1000001, 5000000),
+                        (5000001, 25000000),
+                        (25000001, 50000000),
+                        (50000001, None)  # Over $50,000,000 - max is None/unbounded
+                    ]
+                    
+                    def find_standard_range(amount_value: float) -> tuple:
+                        """Find the standard Senate PTR range that contains the given amount"""
+                        # Handle zero or negative amounts (use first range)
+                        if amount_value <= 0:
+                            return SENATE_PTR_RANGES[0]
+                        
+                        for range_min, range_max in SENATE_PTR_RANGES:
+                            if range_max is None:
+                                if amount_value >= range_min:
+                                    return (range_min, None)
+                            else:
+                                if range_min <= amount_value <= range_max:
+                                    return (range_min, range_max)
+                        # Fallback: if amount is less than minimum, use first range
+                        return SENATE_PTR_RANGES[0]
+                    
+                    # Get exact amount from SEC trade
+                    total_amount = trade.get('totalAmount') or trade.get('amount')
+                    exact_amount = None
+                    amount_range = None
+                    amount_min = None
+                    amount_max = None
+                    
+                    # If we have an exact amount, map it to a standard range
+                    if total_amount and isinstance(total_amount, (int, float)):
+                        exact_amount = int(total_amount)  # Store exact amount
+                        
+                        # Find the standard range this exact amount falls into
+                        standard_range = find_standard_range(float(total_amount))
+                        
+                        # Set amount_range to the standard range [min, max]
+                        if standard_range[1] is None:
+                            # For unbounded ranges (over $50M), use a large number
+                            amount_range = [standard_range[0], 999999999]
+                            amount_min = standard_range[0]
+                            amount_max = 999999999
+                        else:
+                            amount_range = [standard_range[0], standard_range[1]]
+                            amount_min = standard_range[0]
+                            amount_max = standard_range[1]
+                    else:
+                        # If amountMin/amountMax are already set (from range in SEC form), use those
+                        amount_min = trade.get('amountMin')
+                        amount_max = trade.get('amountMax')
+                        if amount_min is not None and amount_max is not None:
+                            amount_range = [int(amount_min), int(amount_max)]
+                    
                     # Convert transactionDate to numeric format for GSI range key
                     transaction_date_str = trade.get('transactionDate') or ''
                     transaction_date_num = None
@@ -1689,7 +1769,11 @@ def lambda_handler(event, context):
                         'transactionType': trade.get('transactionType'),  # GSI: TransactionTypeTradeDateIndex
                         'shares': trade.get('shares'),
                         'pricePerShare': trade.get('pricePerShare'),
-                        'totalAmount': trade.get('totalAmount'),
+                        'totalAmount': total_amount,  # Keep exact amount for backwards compatibility
+                        'amountMin': amount_min,  # Min of the standard range (for GSI: AmountRangeTradeDateIndex)
+                        'amountMax': amount_max,  # Max of the standard range
+                        'amountRange': amount_range,  # List of two integers [min, max] for standard Senate PTR range
+                        'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI)
                         'formCIK': cik,
                         'formS3Key': s3_key,
                         'matchConfidence': matched_politician.get('matchScore', 1.0),
