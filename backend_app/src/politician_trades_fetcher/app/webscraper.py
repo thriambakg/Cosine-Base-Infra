@@ -332,11 +332,56 @@ class CongressionalPTRScraper:
             response = self.session.get(search_url, timeout=30)
             response.raise_for_status()
             
-            # Ensure we capture cookies (especially CSRF cookie if Django sets one)
-            # Django typically sets csrftoken cookie that should be used
+            # Parse Set-Cookie headers manually to ensure we capture all cookies
+            # requests.Session should do this automatically, but Django sessions can be tricky
+            # requests stores multiple Set-Cookie headers under the same key
+            set_cookie_header = response.headers.get('Set-Cookie', '')
+            if set_cookie_header:
+                # If multiple Set-Cookie headers exist, requests combines them with comma
+                # But Django usually sends one Set-Cookie per cookie
+                logger.info(f"📋 Set-Cookie header: {set_cookie_header[:200]}...")
+            
+                # Parse sessionid from Set-Cookie if present
+                if 'sessionid=' in set_cookie_header:
+                    # Extract sessionid value
+                    sessionid_match = re.search(r'sessionid=([^;]+)', set_cookie_header)
+                    if sessionid_match:
+                        sessionid_value = sessionid_match.group(1)
+                        # Manually set it in the session cookies if not already set
+                        if not self.session.cookies.get('sessionid'):
+                            from http.cookies import SimpleCookie
+                            try:
+                                cookie = SimpleCookie()
+                                cookie.load(set_cookie_header)
+                                for key, morsel in cookie.items():
+                                    # Extract domain from cookie header
+                                    domain = '.senate.gov'
+                                    if 'Domain=' in set_cookie_header:
+                                        domain_match = re.search(r'Domain=([^;]+)', set_cookie_header)
+                                        if domain_match:
+                                            domain = domain_match.group(1).strip()
+                                    self.session.cookies.set(key, morsel.value, domain=domain)
+                                logger.info(f"✅ Manually set sessionid cookie: {sessionid_value[:50]}...")
+                            except Exception as e:
+                                logger.warning(f"⚠️ Could not parse Set-Cookie header: {e}")
+            
+            # Log all cookies received from initial GET
+            initial_cookies = list(self.session.cookies.keys())
+            logger.info(f"📋 Cookies from initial GET (after parsing): {initial_cookies}")
+            
+            # Ensure we capture cookies (especially CSRF cookie and sessionid)
             csrf_cookie = self.session.cookies.get('csrftoken') or self.session.cookies.get('csrfmiddlewaretoken')
+            sessionid_cookie = self.session.cookies.get('sessionid')
+            
             if csrf_cookie:
                 logger.info(f"✅ Found CSRF cookie: {csrf_cookie[:20]}...")
+            else:
+                logger.warning(f"⚠️ No CSRF cookie found from initial GET")
+            
+            if sessionid_cookie:
+                logger.info(f"✅ Found sessionid cookie from initial GET: {sessionid_cookie[:50]}...")
+            else:
+                logger.warning(f"⚠️ No sessionid cookie found from initial GET - Django may create it on POST")
             
             html_content = response.text
             
@@ -374,13 +419,76 @@ class CongressionalPTRScraper:
                             allow_redirects=True
                         )
                         
-                        if agreement_response.status_code == 200:
-                            logger.info("✅ Agreement accepted")
-                            # Update CSRF cookie after agreement
-                            updated_csrf_cookie = self.session.cookies.get('csrftoken') or self.session.cookies.get('csrfmiddlewaretoken')
-                            if updated_csrf_cookie:
-                                logger.info(f"🔄 CSRF cookie updated: {updated_csrf_cookie[:20]}...")
-                            return agreement_response.text
+                        # Check response - it might redirect (302/303) or return 200
+                        if agreement_response.status_code in [200, 302, 303]:
+                            # Follow redirects manually to ensure cookies are captured
+                            final_url = agreement_response.url
+                            logger.info(f"✅ Agreement POST response: status={agreement_response.status_code}, final_url={final_url}")
+                            
+                            # Parse Set-Cookie headers from agreement response to ensure sessionid is captured
+                            agreement_set_cookie = agreement_response.headers.get('Set-Cookie', '')
+                            if agreement_set_cookie:
+                                logger.info(f"📋 Agreement Set-Cookie header: {agreement_set_cookie[:200]}...")
+                                # Manually parse and set sessionid if present
+                                if 'sessionid=' in agreement_set_cookie:
+                                    from http.cookies import SimpleCookie
+                                    try:
+                                        cookie = SimpleCookie()
+                                        cookie.load(agreement_set_cookie)
+                                        for key, morsel in cookie.items():
+                                            # Extract domain from cookie header or use default
+                                            domain = '.senate.gov'
+                                            if 'Domain=' in agreement_set_cookie:
+                                                domain_match = re.search(r'Domain=([^;]+)', agreement_set_cookie)
+                                                if domain_match:
+                                                    domain = domain_match.group(1).strip()
+                                            self.session.cookies.set(key, morsel.value, domain=domain)
+                                            logger.info(f"✅ Set cookie from agreement response: {key}={morsel.value[:30]}...")
+                                    except Exception as e:
+                                        logger.warning(f"⚠️ Could not parse agreement Set-Cookie header: {e}")
+                            
+                            # Also check response.cookies (requests automatic parsing)
+                            response_cookies = agreement_response.cookies
+                            if response_cookies:
+                                logger.info(f"📋 Cookies automatically parsed by requests: {list(response_cookies.keys())}")
+                                # Update session cookies with response cookies
+                                self.session.cookies.update(response_cookies)
+                            
+                            # Verify session cookies are set properly after update
+                            sessionid_cookie = self.session.cookies.get('sessionid')
+                            csrf_cookie = self.session.cookies.get('csrftoken') or self.session.cookies.get('csrfmiddlewaretoken')
+                            
+                            if sessionid_cookie:
+                                logger.info(f"✅ Session ID cookie present: {sessionid_cookie[:50]}...")
+                                logger.info(f"📋 Session cookie length: {len(sessionid_cookie)} chars")
+                                # Decode to check for agreement (base64-encoded Django session)
+                                try:
+                                    import base64
+                                    # Django sessions are base64-encoded
+                                    decoded = base64.b64decode(sessionid_cookie.split(':')[0] + '==')
+                                    if b'search_agreement' in decoded:
+                                        logger.info("✅ Agreement found in session cookie!")
+                                    else:
+                                        logger.warning("⚠️ Agreement not found in session cookie")
+                                except Exception as e:
+                                    logger.debug(f"Could not decode session cookie: {e}")
+                            else:
+                                logger.warning(f"⚠️ Session ID cookie missing after agreement acceptance!")
+                                logger.info(f"📋 Response headers: {dict(agreement_response.headers)}")
+                            
+                            if csrf_cookie:
+                                logger.info(f"🔄 CSRF cookie present: {csrf_cookie[:20]}...")
+                            
+                            # Log all cookies for debugging
+                            logger.info(f"📋 All session cookies after agreement: {list(self.session.cookies.keys())}")
+                            
+                            # Get final page content (after redirects if any)
+                            if final_url != search_url:
+                                # Follow redirect to get final content
+                                final_response = self.session.get(final_url, timeout=30)
+                                return final_response.text
+                            else:
+                                return agreement_response.text
                         else:
                             logger.warning(f"⚠️ Agreement submission returned status {agreement_response.status_code}")
                     else:
@@ -935,7 +1043,14 @@ class CongressionalPTRScraper:
                     
                     logger.info(f"✅ Extracted {len(ptr_urls)} PTR URLs from JSON response")
                     
-                    # Process each PTR URL: Download HTML, parse transactions, and include in output
+                    # For now, skip transaction extraction in fetcher (session cookie issues)
+                    # The downloader Lambda will download the HTML with its own session,
+                    # and the matcher will parse transactions from S3
+                    # This avoids session management complexity in the fetcher
+                    logger.info(f"💡 Skipping transaction extraction in fetcher - downloader will handle HTML download")
+                    logger.info(f"💡 Matcher will parse transactions from S3 HTML files")
+                    
+                    # Process each PTR URL: Just extract metadata, no HTML download/parsing
                     for ptr_url in ptr_urls:
                         metadata = ptr_data_map.get(ptr_url, {})
                         filer_name = metadata.get('filer_name', 'Unknown')
@@ -957,51 +1072,73 @@ class CongressionalPTRScraper:
                             logger.debug(f"⏭️ Skipping PTR from {filing_date} (not {target_date_obj.date()})")
                             continue
                         
-                        # The view URL already contains the transaction table - no /print/ endpoint needed
-                        view_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/"
-                        logger.info(f"📥 Downloading Senate PTR HTML page with transactions: {view_url}")
+                        # Extract the href from the JSON data - it's a relative path like "/search/view/ptr/..."
+                        # href format: "/search/view/ptr/c6456d94-2e65-4740-87e8-15f307c7e596/"
+                        base_url = "https://efdsearch.senate.gov"
+                        href_match = re.search(r'href=["\']([^"\']+)["\']', link_html, re.IGNORECASE)
+                        if href_match:
+                            href_path = href_match.group(1)
+                            logger.info(f"📥 Extracted href path from JSON: {href_path}")
+                            
+                            # Build full URL by combining base URL with relative href
+                            if href_path.startswith('/'):
+                                view_url = f"{base_url}{href_path}"
+                            elif href_path.startswith('http'):
+                                view_url = href_path  # Already absolute
+                            else:
+                                # Relative path without leading slash - shouldn't happen but handle it
+                                view_url = f"{base_url}/{href_path}"
+                            logger.info(f"📥 Built full URL from href: {view_url}")
+                        else:
+                            # Fallback: construct URL from UUID if href extraction fails
+                            view_url = f"{base_url}/search/view/ptr/{uuid}/"
+                            logger.warning(f"⚠️ Could not extract href from link_html, using UUID fallback: {view_url}")
                         
-                        # Download HTML page with transaction table
-                        # Use the same session that was used for search (has cookies/CSRF)
-                        try:
-                            html_response = self.session.get(view_url, timeout=30, allow_redirects=True, headers={
-                                'Referer': search_url,
-                                'User-Agent': self.session.headers.get('User-Agent')
-                            })
-                            
-                            html_response.raise_for_status()
-                            html_content = html_response.text
-                            logger.info(f"✅ Downloaded HTML page ({len(html_content)} bytes)")
-                            
-                            # Verify we got HTML content, not an error page
-                            if len(html_content) < 100:
-                                logger.warning(f"⚠️ HTML content too short ({len(html_content)} bytes), might be an error page")
-                                raise Exception(f"HTML content too short: {len(html_content)} bytes")
-                            
-                            # Check if we got the agreement page instead of the actual PTR
-                            # If so, accept the agreement and retry
-                            if 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content or 'Get Access' in html_content:
-                                logger.info(f"📋 Got agreement form for PTR URL - accepting terms and retrying...")
-                                
-                                # Extract CSRF token from agreement form
-                                agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
-                                agreement_csrf_match = re.search(agreement_csrf_pattern, html_content, re.IGNORECASE)
-                                
-                                if agreement_csrf_match:
-                                    agreement_csrf = agreement_csrf_match.group(1)
+                        # Skip downloading HTML in fetcher - let downloader handle it
+                        # This avoids session cookie issues in the fetcher
+                        # The downloader Lambda has its own session management and will download the HTML
+                        # The matcher will parse transactions from the S3 HTML files
+                        logger.info(f"📋 PTR URL ready for downloader: {view_url}")
+                        logger.info(f"💡 Fetcher skipping HTML download/parsing - downloader will handle it")
+                        
+                        # No transactions extracted in fetcher - will be parsed by matcher from S3
+                        transactions = []
+                        
+                        # All HTML download/parsing logic removed
+                        # The downloader Lambda will handle downloading with its own session
+                        # The matcher will parse transactions from S3 HTML files
+                        
+                        # No exception handling needed - just return empty transactions
+                        
+                        s3_key = f"trades/{date_str.replace('/', '-')}/senate/senate-ptr-{uuid}.html"
+                        
+                        ptr_info = {
+                                    # The form on the view page POSTs to the view URL itself
+                                    form_action_match = re.search(r'<form[^>]*action=["\']([^"\']+)["\']', html_content, re.IGNORECASE)
+                                    if form_action_match:
+                                        form_action = form_action_match.group(1)
+                                        # Make it absolute if relative
+                                        if form_action.startswith('/'):
+                                            agreement_post_url = f"https://efdsearch.senate.gov{form_action}"
+                                        elif form_action.startswith('http'):
+                                            agreement_post_url = form_action
+                                        else:
+                                            agreement_post_url = view_url  # Default to view URL if action is relative or missing
+                                        logger.info(f"📋 Found form action URL: {agreement_post_url}")
+                                    else:
+                                        # Default to view URL if no action found
+                                        agreement_post_url = view_url
+                                        logger.info(f"📋 No form action found, defaulting to view URL: {agreement_post_url}")
                                     
-                                    # Submit agreement form - POST to the view URL itself (not search_url)
-                                    # The agreement form on the view page likely POSTs to the same URL or /search/
-                                    # Try posting to the view URL first, then fallback to /search/
                                     agreement_data = {
                                         'prohibition_agreement': '1',
                                         'csrfmiddlewaretoken': agreement_csrf
                                     }
                                     
-                                    logger.info(f"📋 Submitting agreement form for PTR access...")
-                                    # First try POSTing to the view URL itself
+                                    logger.info(f"📋 Submitting agreement form for PTR access (POST to {agreement_post_url})...")
+                                    # POST to the form action URL (usually the view URL itself)
                                     agreement_response = self.session.post(
-                                        view_url,
+                                        agreement_post_url,
                                         data=agreement_data,
                                         headers={
                                             'Content-Type': 'application/x-www-form-urlencoded',
@@ -1013,32 +1150,129 @@ class CongressionalPTRScraper:
                                         allow_redirects=True
                                     )
                                     agreement_response.raise_for_status()
-                                    logger.info("✅ Agreement accepted for PTR access")
+                                    logger.info(f"✅ Agreement POST response: status={agreement_response.status_code}, url={agreement_response.url}, content_length={len(agreement_response.text)}")
                                     
-                                    # Now retry accessing the PTR URL
-                                    logger.info(f"🔄 Retrying PTR URL after accepting agreement: {view_url}")
-                                    html_response = self.session.get(view_url, timeout=30, allow_redirects=True, headers={
-                                        'Referer': view_url,
-                                        'User-Agent': self.session.headers.get('User-Agent')
-                                    })
-                                    html_response.raise_for_status()
-                                    html_content = html_response.text
-                                    logger.info(f"✅ Downloaded HTML page after agreement ({len(html_content)} bytes)")
+                                    # Check if POST response redirected to home page (means agreement not accepted)
+                                    if '/search/home/' in agreement_response.url or 'eFD: Home' in agreement_response.text:
+                                        logger.warning(f"⚠️ Agreement POST redirected to home page - agreement may not have been accepted")
+                                        # Try accepting agreement on the search page first (global acceptance)
+                                        logger.info(f"📋 Trying to accept agreement globally on search page...")
+                                        # Get fresh CSRF from search page
+                                        search_page_resp = self.session.get(search_url, timeout=30)
+                                        search_page_html = search_page_resp.text
+                                        search_csrf_match = re.search(agreement_csrf_pattern, search_page_html, re.IGNORECASE)
+                                        if search_csrf_match:
+                                            search_csrf = search_csrf_match.group(1)
+                                            global_agreement_response = self.session.post(
+                                                search_url,
+                                                data={'prohibition_agreement': '1', 'csrfmiddlewaretoken': search_csrf},
+                                                headers={
+                                                    'Content-Type': 'application/x-www-form-urlencoded',
+                                                    'Referer': search_url,
+                                                    'Origin': 'https://efdsearch.senate.gov',
+                                                    'X-CSRFToken': search_csrf
+                                                },
+                                                allow_redirects=True
+                                            )
+                                            global_agreement_response.raise_for_status()
+                                            logger.info(f"✅ Global agreement accepted on search page: {global_agreement_response.url}")
+                                    else:
+                                        logger.info(f"✅ Agreement POST succeeded - response URL: {agreement_response.url}")
                                     
-                                    # Check if we still got the agreement form or search page
-                                    if 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content or 'Search Options' in html_content:
-                                        logger.warning(f"⚠️ Still got agreement form or search page after accepting - may need different approach")
-                                        # Check if we're on the search page - if so, we need to navigate to the view URL again
-                                        if 'Search Options' in html_content or 'Find Reports' in html_content:
-                                            logger.info(f"🔄 We're on the search page - directly accessing view URL with session...")
-                                            # The agreement was accepted, so now access the view URL directly
-                                            html_response = self.session.get(view_url, timeout=30, allow_redirects=True, headers={
+                                    # Check if POST response redirected or contains the PTR page
+                                    if 'Transactions' in agreement_response.text or 'table-striped' in agreement_response.text:
+                                        logger.info("✅ Agreement POST response contains transaction table - using it directly")
+                                        html_content = agreement_response.text
+                                    else:
+                                        # Now retry accessing the PTR URL with fresh session cookies
+                                        logger.info(f"🔄 Retrying PTR URL after accepting agreement: {view_url}")
+                                        html_response = self.session.get(view_url, timeout=30, allow_redirects=True, headers={
+                                            'Referer': search_url,
+                                            'User-Agent': self.session.headers.get('User-Agent')
+                                        })
+                                        html_response.raise_for_status()
+                                        html_content = html_response.text
+                                        logger.info(f"✅ Downloaded HTML page after agreement ({len(html_content)} bytes)")
+                                        
+                                        # Log a preview of what we got
+                                        content_preview = html_content[:500].replace('\n', ' ')
+                                        logger.info(f"📄 HTML preview (first 500 chars): {content_preview}")
+                                    
+                                    # Check if we got redirected to search page - if so, extract the PTR link and follow it
+                                    if 'Search Options' in html_content or ('Find Reports' in html_content and 'Transactions' not in html_content):
+                                        logger.info(f"🔄 Got redirected to search page - extracting PTR link from search results...")
+                                        
+                                        # Extract the PTR link from search results HTML
+                                        # Link format: <a href="/search/view/ptr/{uuid}/" target="_blank">Periodic Transaction Report for 10/30/2025</a>
+                                        # Use the uuid we already have to match the specific PTR link
+                                        ptr_link_pattern = rf'<a[^>]*href=["\'](/search/view/ptr/{re.escape(uuid)}/)["\'][^>]*>'
+                                        link_match = re.search(ptr_link_pattern, html_content, re.IGNORECASE)
+                                        
+                                        if link_match:
+                                            ptr_path = link_match.group(1)
+                                            absolute_view_url = f"https://efdsearch.senate.gov{ptr_path}"
+                                            
+                                            logger.info(f"🔄 Found PTR link in search results - accessing: {absolute_view_url}")
+                                            html_response = self.session.get(absolute_view_url, timeout=30, allow_redirects=True, headers={
                                                 'Referer': search_url,
                                                 'User-Agent': self.session.headers.get('User-Agent')
                                             })
                                             html_response.raise_for_status()
                                             html_content = html_response.text
-                                            logger.info(f"✅ Re-downloaded HTML page ({len(html_content)} bytes)")
+                                            logger.info(f"✅ Accessed PTR view page via search link ({len(html_content)} bytes)")
+                                        else:
+                                            logger.warning(f"⚠️ Could not find PTR link in search results HTML")
+                                    
+                                    # If we still have agreement form, it means we need to accept agreement on the view page itself
+                                    elif 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content:
+                                        logger.info(f"📋 View page still shows agreement - accepting on view page...")
+                                        
+                                        # Extract CSRF from the view page agreement form
+                                        agreement_csrf_match = re.search(agreement_csrf_pattern, html_content, re.IGNORECASE)
+                                        
+                                        if agreement_csrf_match:
+                                            view_csrf = agreement_csrf_match.group(1)
+                                            agreement_data = {
+                                                'prohibition_agreement': '1',
+                                                'csrfmiddlewaretoken': view_csrf
+                                            }
+                                            
+                                            # POST to the view URL itself
+                                            logger.info(f"📋 Submitting agreement on view page...")
+                                            agreement_response = self.session.post(
+                                                view_url,
+                                                data=agreement_data,
+                                                headers={
+                                                    'Content-Type': 'application/x-www-form-urlencoded',
+                                                    'Referer': view_url,
+                                                    'Origin': 'https://efdsearch.senate.gov',
+                                                    'User-Agent': self.session.headers.get('User-Agent'),
+                                                    'X-CSRFToken': view_csrf
+                                                },
+                                                allow_redirects=True
+                                            )
+                                            agreement_response.raise_for_status()
+                                            logger.info(f"✅ View page agreement POST response: status={agreement_response.status_code}, url={agreement_response.url}, content_length={len(agreement_response.text)}")
+                                            
+                                            # Check if POST response contains the PTR page
+                                            if 'Transactions' in agreement_response.text or 'table-striped' in agreement_response.text:
+                                                logger.info("✅ View page agreement POST response contains transaction table - using it directly")
+                                                html_content = agreement_response.text
+                                            else:
+                                                # Now get the actual view page content
+                                                html_response = self.session.get(view_url, timeout=30, allow_redirects=True, headers={
+                                                    'Referer': view_url,
+                                                    'User-Agent': self.session.headers.get('User-Agent')
+                                                })
+                                                html_response.raise_for_status()
+                                                html_content = html_response.text
+                                                logger.info(f"✅ Got PTR view page after view-page agreement ({len(html_content)} bytes)")
+                                                
+                                                # Log a preview of what we got
+                                                content_preview = html_content[:500].replace('\n', ' ')
+                                                logger.info(f"📄 HTML preview (first 500 chars): {content_preview}")
+                                        else:
+                                            logger.warning(f"⚠️ Could not extract CSRF from view page agreement form")
                                 else:
                                     logger.error(f"❌ Could not extract CSRF token from agreement form")
                                     raise Exception(f"Could not accept agreement - CSRF token not found")
@@ -1050,7 +1284,8 @@ class CongressionalPTRScraper:
                                 # The search results page has a link to the PTR view page
                                 # Extract the link from the search results table
                                 # Link format: <a href="/search/view/ptr/{uuid}/" target="_blank">Periodic Transaction Report for 10/30/2025</a>
-                                ptr_link_pattern = rf'<a[^>]*href=["\'](/search/view/ptr/{uuid}/)["\']'
+                                # Use re.escape to properly match UUID with hyphens in regex
+                                ptr_link_pattern = rf'<a[^>]*href=["\'](/search/view/ptr/{re.escape(uuid)}/)["\']'
                                 link_match = re.search(ptr_link_pattern, html_content, re.IGNORECASE)
                                 
                                 if link_match:
@@ -1119,12 +1354,20 @@ class CongressionalPTRScraper:
                                 logger.error(f"❌ Got 404/not found in response for {view_url}")
                                 raise Exception(f"404 Not Found for view URL: {view_url}")
                             
+                            # Check if we're still getting agreement form (even after accepting)
+                            still_has_agreement = 'id="agreement_form"' in html_content or 'prohibition_agreement' in html_content or 'Get Access' in html_content
+                            if still_has_agreement:
+                                logger.warning(f"⚠️ HTML still contains agreement form markers after accepting - page may not have redirected properly")
+                                # Log first 1000 chars to see what we got
+                                logger.warning(f"📄 HTML preview (first 1000 chars): {html_content[:1000]}")
+                            
                             # Log HTML content summary for debugging
                             has_transactions_keyword = 'Transactions' in html_content or 'transactions' in html_content.lower()
                             has_table_striped = 'table-striped' in html_content
                             has_table_tag = '<table' in html_content
                             has_tbody_tag = '<tbody' in html_content
                             has_periodic_report = 'Periodic Transaction Report' in html_content
+                            has_search_options = 'Search Options' in html_content or 'Find Reports' in html_content
                             
                             logger.info(f"🔍 HTML content analysis:")
                             logger.info(f"   - Contains 'Periodic Transaction Report': {has_periodic_report}")
@@ -1132,6 +1375,8 @@ class CongressionalPTRScraper:
                             logger.info(f"   - Contains 'table-striped': {has_table_striped}")
                             logger.info(f"   - Contains '<table': {has_table_tag}")
                             logger.info(f"   - Contains '<tbody': {has_tbody_tag}")
+                            logger.info(f"   - Contains 'Search Options': {has_search_options}")
+                            logger.info(f"   - Still has agreement form: {still_has_agreement}")
                             logger.info(f"   - Content length: {len(html_content)} bytes")
                             
                             # If we have the PTR page but no transactions keyword, something's wrong
