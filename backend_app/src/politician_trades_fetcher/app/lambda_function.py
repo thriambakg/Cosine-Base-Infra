@@ -17,12 +17,16 @@ import xml.etree.ElementTree as ET
 from urllib.parse import urlparse, parse_qs
 import re
 
-# Import web scraper helper
-from webscraper import CongressionalPTRScraper
-
-# Configure logging
+# Configure logging (must be before imports that use logger)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# Import web scraper helper
+try:
+    from webscraper import CongressionalPTRScraper
+except ImportError as e:
+    logger.error(f"❌ Failed to import webscraper: {e}")
+    raise
 
 # AWS clients
 s3_client = boto3.client('s3')
