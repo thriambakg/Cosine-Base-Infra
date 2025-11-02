@@ -11,6 +11,7 @@ from datetime import datetime, timedelta
 import re
 from urllib.parse import urljoin, urlparse
 import boto3
+import traceback
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
@@ -905,22 +906,68 @@ class CongressionalPTRScraper:
                             continue
                         
                         # Convert view URL to print URL (HTML with transaction table)
+                        # First try accessing the view URL to ensure we have session/auth, then get print URL
+                        view_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/"
                         print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
                         logger.info(f"📥 Downloading Senate PTR HTML page: {print_url}")
                         
                         # Download HTML page with transaction table
+                        # Use the same session that was used for search (has cookies/CSRF)
                         try:
-                            html_response = self.session.get(print_url, timeout=30)
+                            # First, try to access the view URL to ensure session is valid
+                            # This ensures cookies are maintained
+                            logger.debug(f"🔍 Accessing view URL first to maintain session: {view_url}")
+                            view_response = self.session.get(view_url, timeout=30, allow_redirects=True)
+                            
+                            if view_response.status_code != 200:
+                                logger.warning(f"⚠️ View URL returned status {view_response.status_code}, trying print URL anyway")
+                            
+                            # Now access the print URL with the same session
+                            html_response = self.session.get(print_url, timeout=30, allow_redirects=True, headers={
+                                'Referer': view_url,
+                                'User-Agent': self.session.headers.get('User-Agent')
+                            })
+                            
                             html_response.raise_for_status()
                             html_content = html_response.text
                             logger.info(f"✅ Downloaded HTML page ({len(html_content)} bytes)")
+                            
+                            # Verify we got HTML content, not an error page
+                            if len(html_content) < 100:
+                                logger.warning(f"⚠️ HTML content too short ({len(html_content)} bytes), might be an error page")
+                            
+                            # Check for error indicators
+                            if '404' in html_content or 'not found' in html_content.lower() or 'page not found' in html_content.lower():
+                                logger.error(f"❌ Got 404/not found in response for {print_url}")
+                                # Try alternative: maybe print URL format is different
+                                # Some sites use /print instead of /print/
+                                alt_print_url = print_url.rstrip('/')  # Remove trailing slash
+                                logger.info(f"🔄 Trying alternative print URL: {alt_print_url}")
+                                try:
+                                    alt_response = self.session.get(alt_print_url, timeout=30, allow_redirects=True, headers={
+                                        'Referer': view_url,
+                                        'User-Agent': self.session.headers.get('User-Agent')
+                                    })
+                                    if alt_response.status_code == 200 and len(alt_response.text) > 100:
+                                        html_content = alt_response.text
+                                        logger.info(f"✅ Alternative URL worked! Downloaded {len(html_content)} bytes")
+                                    else:
+                                        raise Exception(f"404 Not Found for print URL: {print_url} (tried both /print/ and /print)")
+                                except:
+                                    raise Exception(f"404 Not Found for print URL: {print_url}")
                             
                             # Extract transactions from HTML table
                             transactions = self._extract_senate_ptr_transactions(html_content, filer_name, filing_date_str)
                             logger.info(f"✅ Extracted {len(transactions)} transactions from {filer_name}'s PTR")
                             
+                        except requests.exceptions.HTTPError as e:
+                            logger.error(f"❌ HTTP error downloading PTR {print_url}: {e}")
+                            logger.error(f"   Status code: {e.response.status_code if hasattr(e, 'response') else 'unknown'}")
+                            transactions = []  # Empty transactions if download fails
                         except Exception as e:
-                            logger.error(f"❌ Error downloading/parsing PTR {ptr_url}: {e}")
+                            logger.error(f"❌ Error downloading/parsing PTR {print_url}: {e}")
+                            import traceback
+                            logger.error(f"Traceback: {traceback.format_exc()}")
                             transactions = []  # Empty transactions if parsing fails
                         
                         # Generate S3 key (use date_str which is the formatted date string)

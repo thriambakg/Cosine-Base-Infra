@@ -462,26 +462,34 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
         # The print page has the same data as the PDF but is easier/cheaper to parse
         # View URL: /search/view/ptr/{uuid}/
         # Print URL: /search/view/ptr/{uuid}/print/ (returns HTML with transaction table)
-        if source == 'senate' and '/view/ptr/' in url and not url.endswith('/print/'):
-            # Extract UUID from URL
-            import re
-            uuid_match = re.search(r'/ptr/([a-f0-9-]+)', url, re.IGNORECASE)
-            if uuid_match:
-                uuid = uuid_match.group(1)
-                # Convert to print page URL (HTML with transaction table)
-                if url.startswith('/'):
-                    # Relative URL
-                    print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
-                elif 'efdsearch.senate.gov' in url:
-                    # Absolute URL, replace the path
-                    print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
-                else:
-                    # Fallback: append /print/
-                    print_url = url.rstrip('/') + '/print/'
-                
-                logger.info(f"🔄 Converting Senate PTR view URL to print page (HTML): {url} -> {print_url}")
-                logger.info(f"💡 Using HTML page with transaction table (cheaper/faster than PDF + Textract)")
+        # Note: If transactions are already extracted in fetcher, we still need to download HTML for storage
+        if source == 'senate':
+            # Check if print_url is already provided (from fetcher)
+            print_url = ptr_data.get('print_url')
+            
+            if print_url:
+                logger.info(f"✅ Using provided print URL from fetcher: {print_url}")
                 url = print_url
+            elif '/view/ptr/' in url and not url.endswith('/print/'):
+                # Extract UUID from URL
+                import re
+                uuid_match = re.search(r'/ptr/([a-f0-9-]+)', url, re.IGNORECASE)
+                if uuid_match:
+                    uuid = uuid_match.group(1)
+                    # Convert to print page URL (HTML with transaction table)
+                    if url.startswith('/'):
+                        # Relative URL
+                        print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
+                    elif 'efdsearch.senate.gov' in url:
+                        # Absolute URL, replace the path
+                        print_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/print/"
+                    else:
+                        # Fallback: append /print/
+                        print_url = url.rstrip('/') + '/print/'
+                    
+                    logger.info(f"🔄 Converting Senate PTR view URL to print page (HTML): {url} -> {print_url}")
+                    logger.info(f"💡 Using HTML page with transaction table (cheaper/faster than PDF + Textract)")
+                    url = print_url
         
         logger.info(f"📥 Downloading PTR from {url}")
         logger.info(f"📦 Will store to S3: {s3_key}")
@@ -489,10 +497,75 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
         # Download the PTR file
         session = requests.Session()
         session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
         })
         
-        response = session.get(url, timeout=30)
+        # For Senate PTRs, we may need to accept agreement first to access the print page
+        if source == 'senate' and 'efdsearch.senate.gov' in url:
+            # First access the main search page to get session cookies and accept agreement if needed
+            search_url = "https://efdsearch.senate.gov/search/"
+            logger.info(f"🔍 Accessing Senate search page first to establish session: {search_url}")
+            search_response = session.get(search_url, timeout=30)
+            search_response.raise_for_status()
+            
+            # Check if agreement form is present
+            search_html = search_response.text
+            if 'id="agreement_form"' in search_html or 'prohibition_agreement' in search_html:
+                logger.info("📋 Found agreement form - accepting terms...")
+                
+                # Extract CSRF token from agreement form
+                import re
+                agreement_csrf_pattern = r'name=["\']csrfmiddlewaretoken["\'][^>]*value=["\']([^"\']+)["\']'
+                agreement_csrf_match = re.search(agreement_csrf_pattern, search_html, re.IGNORECASE)
+                
+                if agreement_csrf_match:
+                    agreement_csrf = agreement_csrf_match.group(1)
+                    
+                    # Submit agreement form
+                    agreement_data = {
+                        'prohibition_agreement': '1',
+                        'csrfmiddlewaretoken': agreement_csrf
+                    }
+                    
+                    logger.info(f"📋 Submitting agreement form...")
+                    agreement_response = session.post(
+                        search_url,
+                        data=agreement_data,
+                        headers={
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                            'Referer': search_url,
+                            'Origin': 'https://efdsearch.senate.gov',
+                            'X-CSRFToken': agreement_csrf
+                        }
+                    )
+                    agreement_response.raise_for_status()
+                    logger.info("✅ Agreement accepted")
+                else:
+                    logger.warning("⚠️ Could not extract CSRF token from agreement form")
+            
+            # Get CSRF cookie if available
+            csrf_cookie = session.cookies.get('csrftoken') or session.cookies.get('csrfmiddlewaretoken')
+            if csrf_cookie:
+                logger.debug(f"✅ Have CSRF cookie: {csrf_cookie[:20]}...")
+            
+            # If accessing print URL, first try accessing the view URL to maintain session
+            if '/print/' in url:
+                view_url = url.replace('/print/', '/')
+                logger.debug(f"🔍 Accessing view URL first to maintain session: {view_url}")
+                try:
+                    view_response = session.get(view_url, timeout=30, allow_redirects=True)
+                    if view_response.status_code == 200:
+                        logger.debug("✅ View URL accessed successfully")
+                    else:
+                        logger.warning(f"⚠️ View URL returned status {view_response.status_code}")
+                except Exception as e:
+                    logger.warning(f"⚠️ Could not access view URL: {e}")
+        
+        # Now download the actual PTR file/HTML
+        response = session.get(url, timeout=30, allow_redirects=True, headers={
+            'Referer': url if source != 'senate' else (view_url if '/print/' in url else url),
+            'User-Agent': session.headers.get('User-Agent')
+        })
         response.raise_for_status()
         
         # Check if response is actually a PDF
