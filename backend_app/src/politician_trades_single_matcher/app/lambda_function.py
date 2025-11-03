@@ -112,26 +112,57 @@ def load_politician_list() -> List[Dict[str, Any]]:
 def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     """
     Fuzzy match a filer name to a politician using Levenshtein distance
+    Handles various name formats:
+    - "Last, First (Senator)" vs "First Last"
+    - "(Senator)" suffix removal
+    - Case insensitivity
     """
     # Normalize names (lowercase, strip)
     filer_normalized = filer_name.lower().strip()
     politician_normalized = politician['name'].lower().strip()
     
-    # Check exact match first
-    if filer_normalized == politician_normalized:
+    # Remove position markers like "(Senator)", "(Representative)" from filer name
+    filer_clean = re.sub(r'\s*\([^)]*(?:senator|representative)[^)]*\)', '', filer_normalized, flags=re.IGNORECASE)
+    filer_clean = filer_clean.strip()
+    
+    # Check exact match first (after cleaning)
+    if filer_clean == politician_normalized:
         return 1.0
     
     # Check alternative names
     for alt_name in politician.get('alternativeNames', []):
-        if filer_normalized == alt_name.lower().strip():
+        alt_normalized = alt_name.lower().strip()
+        if filer_clean == alt_normalized:
             return 1.0
     
+    # Handle "Last, First" vs "First Last" format differences
+    # If filer name contains a comma, try reversing the order
+    if ',' in filer_clean:
+        # Split by comma and reverse: "blumenthal, richard" -> "richard blumenthal"
+        parts = [p.strip() for p in filer_clean.split(',')]
+        if len(parts) == 2:
+            filer_reversed = f"{parts[1]} {parts[0]}".strip()
+            if filer_reversed == politician_normalized:
+                return 1.0
+            # Also check similarity with reversed format
+            reversed_similarity = SequenceMatcher(None, filer_reversed, politician_normalized).ratio()
+            if reversed_similarity > 0.9:
+                return reversed_similarity
+    
     # Calculate similarity using SequenceMatcher
-    similarity = SequenceMatcher(None, filer_normalized, politician_normalized).ratio()
+    similarity = SequenceMatcher(None, filer_clean, politician_normalized).ratio()
     
     # Also check if names are subsets (e.g., "John Doe" vs "John A. Doe")
-    if filer_normalized in politician_normalized or politician_normalized in filer_normalized:
+    if filer_clean in politician_normalized or politician_normalized in filer_clean:
         similarity = max(similarity, 0.9)
+    
+    # If similarity is still low, try with reversed name format
+    if similarity < 0.85 and ',' in filer_clean:
+        parts = [p.strip() for p in filer_clean.split(',')]
+        if len(parts) == 2:
+            filer_reversed = f"{parts[1]} {parts[0]}".strip()
+            reversed_similarity = SequenceMatcher(None, filer_reversed, politician_normalized).ratio()
+            similarity = max(similarity, reversed_similarity)
     
     return similarity
 
