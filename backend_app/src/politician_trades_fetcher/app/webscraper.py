@@ -251,9 +251,62 @@ class CongressionalPTRScraper:
                     # Extract PTR metadata from this page
                     for row in data_array:
                         if len(row) >= 4:
-                            full_name = row[2] if len(row) > 2 else ''
+                            # Data structure:
+                            # row[0] = First name (or first part of name)
+                            # row[1] = Last name (or last part of name)  
+                            # row[2] = Full name with position (e.g., "Boozman, John (Senator)") OR just position (e.g., "Senator")
+                            # row[3] = Link HTML
+                            # row[4] = Filing date
+                            
+                            first_name_part = row[0].strip() if len(row) > 0 and row[0] else ''
+                            last_name_part = row[1].strip() if len(row) > 1 and row[1] else ''
+                            name_with_position = row[2].strip() if len(row) > 2 and row[2] else ''
                             link_html = row[3] if len(row) > 3 else ''
                             filing_date_str = row[4] if len(row) > 4 else ''
+                            
+                            # Determine full name: prefer row[2] if it contains a name, otherwise construct from row[0] and row[1]
+                            full_name = ''
+                            
+                            # Check if row[2] has a complete name (contains comma and parentheses, or is longer than just "Senator"/"Representative")
+                            if name_with_position:
+                                name_lower = name_with_position.lower()
+                                # If row[2] is just a position title, it's not a name
+                                if name_lower in ['senator', 'representative']:
+                                    # row[2] is just position, construct name from row[0] and row[1]
+                                    if first_name_part and last_name_part:
+                                        # Format as "Last, First (Senator)" to match standard format
+                                        full_name = f"{last_name_part}, {first_name_part} ({name_with_position})"
+                                    elif first_name_part or last_name_part:
+                                        # Only one part available, use what we have
+                                        full_name = f"{last_name_part} {first_name_part}".strip() or name_with_position
+                                    else:
+                                        full_name = name_with_position
+                                # If row[2] contains a comma (likely "Last, First (Senator)" format), use it
+                                elif ',' in name_with_position:
+                                    full_name = name_with_position
+                                # If row[2] is longer than a simple position and contains letters, might be a name
+                                elif len(name_with_position) > 10 and any(c.isalpha() for c in name_with_position):
+                                    full_name = name_with_position
+                                else:
+                                    # Unclear, prefer constructing from parts if available
+                                    if first_name_part and last_name_part:
+                                        full_name = f"{last_name_part}, {first_name_part} ({name_with_position})" if name_with_position else f"{last_name_part}, {first_name_part}"
+                                    else:
+                                        full_name = name_with_position
+                            
+                            # Fallback: if still empty or just position, construct from first/last parts
+                            if not full_name or full_name.lower() in ['senator', 'representative']:
+                                if first_name_part and last_name_part:
+                                    # Format as "Last, First (Senator)" - standard format
+                                    position = name_with_position if name_with_position else ''
+                                    if position and position.lower() in ['senator', 'representative']:
+                                        full_name = f"{last_name_part}, {first_name_part} ({position})"
+                                    else:
+                                        full_name = f"{last_name_part}, {first_name_part}"
+                                elif first_name_part or last_name_part:
+                                    full_name = f"{last_name_part} {first_name_part}".strip()
+                                else:
+                                    full_name = name_with_position or 'Unknown'
                             
                             # Extract UUID from link HTML - support both /ptr/ and /paper/ URLs
                             # Some filings (e.g., amendments, certain report types) use /paper/ instead of /ptr/
