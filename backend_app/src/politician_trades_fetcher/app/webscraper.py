@@ -255,21 +255,27 @@ class CongressionalPTRScraper:
                             link_html = row[3] if len(row) > 3 else ''
                             filing_date_str = row[4] if len(row) > 4 else ''
                             
-                            # Extract UUID from link HTML
-                            uuid_match = re.search(r'/ptr/([a-f0-9-]+)', link_html, re.IGNORECASE)
+                            # Extract UUID from link HTML - support both /ptr/ and /paper/ URLs
+                            # Some filings (e.g., amendments, certain report types) use /paper/ instead of /ptr/
+                            uuid_match = re.search(r'/(?:ptr|paper)/([a-f0-9-]+)', link_html, re.IGNORECASE)
                             if uuid_match:
                                 uuid = uuid_match.group(1)
                                 base_url = "https://efdsearch.senate.gov"
                                 
-                                # Extract href path
+                                # Extract href path (preserves original path, whether /ptr/ or /paper/)
                                 href_match = re.search(r'href=["\']([^"\']+)["\']', link_html, re.IGNORECASE)
                                 if href_match:
                                     href_path = href_match.group(1)
                                     if href_path.startswith('/'):
                                         view_url = f"{base_url}{href_path}"
                                     else:
-                                        view_url = f"{base_url}/search/view/ptr/{uuid}/"
+                                        # Determine URL type from href or default to /ptr/
+                                        if '/paper/' in href_path.lower():
+                                            view_url = f"{base_url}/search/view/paper/{uuid}/"
+                                        else:
+                                            view_url = f"{base_url}/search/view/ptr/{uuid}/"
                                 else:
+                                    # Default to /ptr/ if we can't determine from href
                                     view_url = f"{base_url}/search/view/ptr/{uuid}/"
                                 
                                 # Store metadata (avoid duplicates)
@@ -280,6 +286,8 @@ class CongressionalPTRScraper:
                                         'uuid': uuid,
                                         'link_html': link_html
                                     }
+                            else:
+                                logger.warning(f"⚠️ Could not extract UUID from link: {link_html[:100]}")
                     
                     # Check if we've fetched all records
                     if total_records is not None and start + len(data_array) >= total_records:

@@ -481,17 +481,38 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
                 logger.info(f"✅ Using provided view URL from fetcher: {view_url}")
                 url = view_url
             elif '/view/ptr/' in url:
-                # URL is already the view URL - no conversion needed
-                # The view URL already has the transaction table
-                logger.info(f"✅ Using view URL directly (contains transaction table): {url}")
+                # /view/ptr/ URLs contain transaction table directly in HTML
+                logger.info(f"✅ Using /view/ptr/ URL directly (contains transaction table): {url}")
+            elif '/view/paper/' in url:
+                # /view/paper/ URLs contain scanned images, not structured HTML
+                # Need to use the /print/paper/ endpoint instead for parseable HTML/PDF
+                logger.info(f"⚠️ /view/paper/ URL contains images - converting to /print/paper/ endpoint")
+                # Extract UUID from URL
+                import re
+                uuid_match = re.search(r'/paper/([a-f0-9-]+)', url, re.IGNORECASE)
+                if uuid_match:
+                    uuid = uuid_match.group(1)
+                    # Use print endpoint which should have structured data
+                    print_url = f"https://efdsearch.senate.gov/search/print/paper/{uuid}/"
+                    logger.info(f"🔄 Converting to print endpoint: {print_url}")
+                    url = print_url
+                else:
+                    logger.warning(f"⚠️ Could not extract UUID from /view/paper/ URL, using original: {url}")
             else:
                 # Extract UUID and construct view URL if needed
                 import re
-                uuid_match = re.search(r'/ptr/([a-f0-9-]+)', url, re.IGNORECASE)
+                # Support both /ptr/ and /paper/ UUIDs (amendments use /paper/)
+                uuid_match = re.search(r'/(?:ptr|paper)/([a-f0-9-]+)', url, re.IGNORECASE)
                 if uuid_match:
                     uuid = uuid_match.group(1)
-                    view_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/"
-                    logger.info(f"🔄 Constructing view URL: {view_url}")
+                    # Determine if this should be /paper/ or /ptr/ based on original URL
+                    # Amendments and some report types use /paper/ instead of /ptr/
+                    if '/paper/' in url.lower() or '/paper/' in str(ptr_data.get('link_html', '')).lower():
+                        view_url = f"https://efdsearch.senate.gov/search/view/paper/{uuid}/"
+                        logger.info(f"🔄 Constructing /paper/ view URL (amendment or special report): {view_url}")
+                    else:
+                        view_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/"
+                        logger.info(f"🔄 Constructing /ptr/ view URL: {view_url}")
                     logger.info(f"💡 View URL contains transaction table directly (cheaper/faster than PDF + Textract)")
                     url = view_url
         
