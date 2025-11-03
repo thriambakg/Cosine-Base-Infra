@@ -1,9 +1,0 @@
-{
-  "comment": "Test event for Senate PTR download - replace with actual URL from efdsearch.senate.gov",
-  "source": "senate",
-  "url": "https://efdsearch.senate.gov/search/view/doc/actual-document-url.pdf",
-  "s3_key": "trades/2025-10-31/senate/actual-filename.pdf",
-  "formType": "senate_ptr",
-  "filingDate": "2025-10-31"
-}
-
