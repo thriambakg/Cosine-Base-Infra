@@ -477,47 +477,58 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             # Check if view_url is already provided (from fetcher)
             view_url = ptr_data.get('view_url')
             
-            if view_url:
-                logger.info(f"✅ Using provided view URL from fetcher: {view_url}")
-                url = view_url
-            elif '/view/ptr/' in url:
-                # /view/ptr/ URLs contain transaction table directly in HTML
-                logger.info(f"✅ Using /view/ptr/ URL directly (contains transaction table): {url}")
-            elif '/view/paper/' in url:
-                # /view/paper/ URLs contain scanned images, not structured HTML
-                # Need to use the /print/paper/ endpoint instead for parseable HTML/PDF
-                logger.info(f"⚠️ /view/paper/ URL contains images - converting to /print/paper/ endpoint")
+            # Use view_url if provided, otherwise use url
+            url_to_process = view_url if view_url else url
+            
+            # IMPORTANT: Always convert /view/paper/ URLs to /print/paper/ for image-based filings
+            # /view/paper/ URLs contain scanned images, /print/paper/ has parseable HTML
+            if '/view/paper/' in url_to_process:
+                logger.info(f"⚠️ /view/paper/ URL detected - converting to /print/paper/ endpoint for parseable content")
                 # Extract UUID from URL
                 import re
-                uuid_match = re.search(r'/paper/([a-f0-9-]+)', url, re.IGNORECASE)
+                uuid_match = re.search(r'/paper/([a-f0-9-]+)', url_to_process, re.IGNORECASE)
                 if uuid_match:
                     uuid = uuid_match.group(1)
                     # Use print endpoint which should have structured data
                     print_url = f"https://efdsearch.senate.gov/search/print/paper/{uuid}/"
-                    logger.info(f"🔄 Converting to print endpoint: {print_url}")
+                    logger.info(f"🔄 Converted /view/paper/ to /print/paper/ endpoint: {print_url}")
                     url = print_url
                 else:
-                    logger.warning(f"⚠️ Could not extract UUID from /view/paper/ URL, using original: {url}")
+                    logger.warning(f"⚠️ Could not extract UUID from /view/paper/ URL, using original: {url_to_process}")
+                    url = url_to_process
+            elif '/view/ptr/' in url_to_process:
+                # /view/ptr/ URLs contain transaction table directly in HTML - use as-is
+                logger.info(f"✅ Using /view/ptr/ URL directly (contains transaction table): {url_to_process}")
+                url = url_to_process
             else:
                 # Extract UUID and construct view URL if needed
                 import re
                 # Support both /ptr/ and /paper/ UUIDs (amendments use /paper/)
-                uuid_match = re.search(r'/(?:ptr|paper)/([a-f0-9-]+)', url, re.IGNORECASE)
+                uuid_match = re.search(r'/(?:ptr|paper)/([a-f0-9-]+)', url_to_process, re.IGNORECASE)
                 if uuid_match:
                     uuid = uuid_match.group(1)
                     # Determine if this should be /paper/ or /ptr/ based on original URL
                     # Amendments and some report types use /paper/ instead of /ptr/
-                    if '/paper/' in url.lower() or '/paper/' in str(ptr_data.get('link_html', '')).lower():
-                        view_url = f"https://efdsearch.senate.gov/search/view/paper/{uuid}/"
-                        logger.info(f"🔄 Constructing /paper/ view URL (amendment or special report): {view_url}")
+                    if '/paper/' in url_to_process.lower() or '/paper/' in str(ptr_data.get('link_html', '')).lower():
+                        # For /paper/ URLs, use /print/paper/ endpoint for parseable content
+                        print_url = f"https://efdsearch.senate.gov/search/print/paper/{uuid}/"
+                        logger.info(f"🔄 Constructing /print/paper/ URL (amendment or special report): {print_url}")
+                        url = print_url
                     else:
+                        # For /ptr/ URLs, use /view/ptr/ which contains transaction table directly
                         view_url = f"https://efdsearch.senate.gov/search/view/ptr/{uuid}/"
-                        logger.info(f"🔄 Constructing /ptr/ view URL: {view_url}")
-                    logger.info(f"💡 View URL contains transaction table directly (cheaper/faster than PDF + Textract)")
-                    url = view_url
+                        logger.info(f"🔄 Constructing /view/ptr/ URL: {view_url}")
+                        logger.info(f"💡 View URL contains transaction table directly (cheaper/faster than PDF + Textract)")
+                        url = view_url
+                else:
+                    url = url_to_process
         
         logger.info(f"📥 Downloading PTR from {url}")
         logger.info(f"📦 Will store to S3: {s3_key}")
+        
+        # Initialize variables for response handling
+        is_pdf = False
+        html_content = None
         
         # Download the PTR file
         session = requests.Session()
@@ -1019,36 +1030,80 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             
             # Check response content
             response_text = response.text
+            content_type = response.headers.get('Content-Type', '').lower()
+            
+            # Check if this is a PDF response (for /print/paper/ endpoints)
+            is_pdf = 'application/pdf' in content_type or (response.content and response.content[:4] == b'%PDF')
+            
+            # For /view/ptr/ URLs, check for transactions table
+            # For /print/paper/ URLs, accept PDF or HTML (may be image-based, will use Textract later)
             has_transactions = 'Transactions' in response_text and 'table-striped' in response_text
             is_home_redirect = '/search/home/' in response.url or 'eFD: Home' in response.text[:500] or response.text.find('<title>eFD: Home</title>') != -1
             has_agreement_form = 'id="agreement_form"' in response.text or 'prohibition_agreement' in response.text or 'Get Access' in response.text
             
+            # Check if URL is a /print/paper/ endpoint (these may return PDFs or different HTML)
+            is_print_paper_url = '/print/paper/' in url
+            
             logger.info(f"📋 Response analysis:")
+            logger.info(f"   Is PDF: {is_pdf}")
+            logger.info(f"   Is /print/paper/ URL: {is_print_paper_url}")
             logger.info(f"   Has transactions table: {has_transactions}")
             logger.info(f"   Is home redirect: {is_home_redirect}")
             logger.info(f"   Has agreement form: {has_agreement_form}")
             
-            if has_transactions:
+            # Success criteria:
+            # 1. For /view/ptr/ URLs: Must have transactions table
+            # 2. For /print/paper/ URLs: Must have PDF or HTML content (not agreement form or redirect)
+            # 3. Never acceptable: Agreement form or home redirect
+            if has_agreement_form or is_home_redirect:
+                # Agreement form or redirect = failure
+                logger.error(f"❌ Session agreement not properly set - still seeing agreement form or redirect")
+                raise Exception(f"Cannot access PTR URL - agreement not accepted in session. URL: {url}, Response URL: {response.url}")
+            elif has_transactions:
+                # /view/ptr/ URL with transactions table = success
                 logger.info(f"✅ Successfully accessed PTR page with transactions!")
-                # Store the HTML content for S3
                 html_content = response_text
                 # Extract transaction count for logging
                 import re
                 transaction_count_match = re.search(r'\((\d+)\s+transaction', response_text, re.IGNORECASE)
                 if transaction_count_match:
                     logger.info(f"   Found {transaction_count_match.group(1)} transaction(s) in the report")
+            elif is_pdf or is_print_paper_url:
+                # /print/paper/ URL returning PDF or HTML (image-based) = success
+                # Will use Textract in matcher to extract transactions
+                logger.info(f"✅ Successfully accessed /print/paper/ endpoint (PDF or image-based content)")
+                if is_pdf:
+                    html_content = None  # PDF will be stored as binary
+                else:
+                    html_content = response_text
             else:
-                # If we still got redirected or see agreement form, the session agreement wasn't properly set
-                logger.error(f"❌ Session agreement not properly set - still seeing agreement form or redirect")
-                raise Exception(f"Cannot access PTR URL - agreement not accepted in session. URL: {url}, Response URL: {response.url}")
+                # Unexpected response format
+                logger.warning(f"⚠️ Unexpected response format - no transactions table, not PDF, not /print/paper/")
+                logger.warning(f"   Content preview: {response_text[:500]}")
+                # Still try to use it - might be valid HTML without transactions table
+                html_content = response_text
         
         # For Senate PTRs, we already have html_content from the transaction table check above
         # For other sources, we'll process the response below
         if source == 'senate':
-            # Use the HTML content we already extracted
-            file_content = html_content.encode('utf-8')
-            file_ext = 'html'
-            content_type = 'text/html; charset=utf-8'
+            # Check if we got a PDF (from /print/paper/ endpoint)
+            if is_pdf:
+                # PDF content - store as binary
+                logger.info(f"✅ Senate PTR is PDF format (from /print/paper/ endpoint)")
+                file_content = response.content
+                file_ext = 'pdf'
+                content_type = 'application/pdf'
+            elif html_content:
+                # HTML content - store as text
+                file_content = html_content.encode('utf-8')
+                file_ext = 'html'
+                content_type = 'text/html; charset=utf-8'
+            else:
+                # Fallback - use response content
+                logger.warning(f"⚠️ html_content is None, using response.text as fallback")
+                file_content = response.text.encode('utf-8')
+                file_ext = 'html'
+                content_type = 'text/html; charset=utf-8'
         else:
             # Check if response is actually a PDF
             content_type = response.headers.get('Content-Type', '').lower()
