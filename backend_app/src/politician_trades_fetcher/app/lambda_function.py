@@ -137,6 +137,13 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
             data_start_index += 1
         
         # Parse data lines
+        # SEC daily index format is fixed-width:
+        # Column 1: CIK (12 chars, right-aligned, padded)
+        # Column 2: Company Name (variable, ~60 chars)
+        # Column 3: Form Type (~10 chars)
+        # Column 4: Date Filed (8 chars, YYYYMMDD)
+        # Column 5: File Name (rest of line, can contain spaces)
+        
         forms_found = 0
         for line_num, line in enumerate(lines[data_start_index:], start=data_start_index):
             line = line.rstrip('\n\r')
@@ -144,81 +151,90 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
                 continue  # Skip empty lines
             
             try:
-                # Parse fixed-width format
-                # CIK is first 12 characters (padded with spaces)
-                # Company Name is next ~60 characters
-                # Form Type is next ~10 characters
-                # Date Filed is next 8 characters (YYYYMMDD)
-                # File Name is the rest
-                
-                # Try to parse - CIK is typically first 12 chars, but may have padding
-                parts = line.split()
-                if len(parts) < 4:
-                    continue  # Invalid line
-                
-                # CIK is typically the first numeric field
                 cik = None
                 form_type = None
                 date_filed = None
                 file_name = None
+                accession_number = None
                 
-                # More robust parsing: look for CIK (10 digits, may be padded), Form Type (3, 4, or 5), Date (YYYYMMDD)
-                for i, part in enumerate(parts):
-                    # Check if this looks like a CIK (10 digits, possibly with leading zeros)
-                    if part.isdigit() and len(part) == 10 and not cik:
-                        cik = part.lstrip('0') or '0'  # Remove leading zeros, but keep '0' if all zeros
-                    # Check if this is a Form Type we want (3, 4, or 5)
-                    elif part in form_types and not form_type:
-                        form_type = part
-                    # Check if this looks like a date (8 digits: YYYYMMDD)
-                    elif part.isdigit() and len(part) == 8 and not date_filed:
-                        try:
-                            parsed_date = datetime.strptime(part, '%Y%m%d').date()
-                            # Verify it matches our target date
-                            if parsed_date == date_obj:
-                                date_filed = part
-                        except ValueError:
-                            pass
+                # Strategy 1: Try regex-based parsing first (more flexible)
+                # Look for CIK (10 digits), Form Type (3/4/5), Date (YYYYMMDD), then filename/path
+                cik_match = re.search(r'\b(\d{10})\b', line)
+                form_match = re.search(r'\b([345])\b', line)
+                date_match = re.search(r'(\d{8})', line)
                 
-                # If we didn't find all required fields, try alternative parsing
-                if not all([cik, form_type, date_filed]):
-                    # Try regex-based parsing for more complex formats
-                    # Look for pattern: CIK (10 digits), Form Type (3/4/5), Date (YYYYMMDD), File Name
-                    cik_match = re.search(r'\b(\d{10})\b', line)
-                    form_match = re.search(r'\b([345])\b', line)
-                    date_match = re.search(r'(\d{8})', line)
-                    
-                    if cik_match:
-                        cik = cik_match.group(1).lstrip('0') or '0'
-                    if form_match and form_match.group(1) in form_types:
-                        form_type = form_match.group(1)
-                    if date_match:
-                        date_str_check = date_match.group(1)
-                        try:
-                            parsed_date = datetime.strptime(date_str_check, '%Y%m%d').date()
-                            if parsed_date == date_obj:
-                                date_filed = date_str_check
-                        except ValueError:
-                            pass
+                if cik_match:
+                    cik = cik_match.group(1).lstrip('0') or '0'
+                if form_match and form_match.group(1) in form_types:
+                    form_type = form_match.group(1)
+                if date_match:
+                    date_str_check = date_match.group(1)
+                    try:
+                        parsed_date = datetime.strptime(date_str_check, '%Y%m%d').date()
+                        if parsed_date == date_obj:
+                            date_filed = date_str_check
+                    except ValueError:
+                        pass
                 
                 # Only process if we have all required fields and form type matches
                 if cik and form_type in form_types and date_filed:
-                    # Extract file name - it's usually at the end of the line
-                    # Format is typically: edgar/data/{CIK}/{ACCESSION}/{FILENAME}
+                    # Extract file name and accession number
+                    # The daily index file format can vary:
+                    # 1. Full path: edgar/data/{CIK}/{ACCESSION}/{FILENAME}
+                    # 2. Just filename at end of line (after date)
+                    # 3. Accession number in path format
+                    
+                    # Strategy 1: Try to match full path format (most reliable)
                     file_match = re.search(r'edgar/data/\d+/([\d-]+)/([^\s]+)', line)
                     if file_match:
                         accession_number = file_match.group(1).replace('-', '')
                         file_name = file_match.group(2)
                     else:
-                        # Try to extract accession number from file path
-                        # Accession numbers are 18 digits: 10-2-6 format
+                        # Strategy 2: Extract accession number (18 digits, format: 10-2-6 with dashes)
                         acc_match = re.search(r'(\d{10}-\d{2}-\d{6})', line)
                         if acc_match:
                             accession_number = acc_match.group(1).replace('-', '')
-                            file_name = None  # Will be determined by downloader
                         else:
-                            # Skip if we can't extract accession
-                            continue
+                            # Strategy 3: Try to find accession number without dashes (18 consecutive digits)
+                            acc_no_digits = re.search(r'(\d{18})', line)
+                            if acc_no_digits:
+                                accession_number = acc_no_digits.group(1)
+                        
+                        # Now try to extract filename - it's typically after the date
+                        if accession_number:
+                            # Find the position of the date in the line
+                            date_pos = line.find(date_filed)
+                            if date_pos != -1:
+                                # Everything after the date (skip 8 chars for YYYYMMDD) should be the filename/path
+                                after_date = line[date_pos + 8:].strip()
+                                if after_date:
+                                    # Remove any leading whitespace/path separators
+                                    after_date = after_date.lstrip(' \t/\\')
+                                    if after_date:
+                                        # If it contains a path separator, extract just the filename
+                                        if '/' in after_date:
+                                            file_name = after_date.split('/')[-1]
+                                        elif '\\' in after_date:
+                                            file_name = after_date.split('\\')[-1]
+                                        else:
+                                            # It's already just a filename
+                                            file_name = after_date
+                                        
+                                        # Clean up filename (remove trailing whitespace/punctuation)
+                                        file_name = file_name.strip(' \t\r\n.,;')
+                                        
+                                        # If filename is empty after cleaning, set to None
+                                        if not file_name:
+                                            file_name = None
+                    
+                    # If we still don't have an accession number, skip this entry
+                    if not accession_number:
+                        logger.debug(f"⚠️ Could not extract accession number from line {line_num}: {line[:100]}...")
+                        continue
+                    
+                    # Log when we have accession but no filename (downloader will try default patterns)
+                    if accession_number and not file_name:
+                        logger.debug(f"⚠️ Extracted accession {accession_number} but no filename from line, downloader will try default patterns")
                     
                     forms.append({
                         'form_type': f'form{form_type}',
