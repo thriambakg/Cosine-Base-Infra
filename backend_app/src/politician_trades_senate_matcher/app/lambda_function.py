@@ -33,6 +33,38 @@ NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
 # This value represents unreadable/unparsed documents and allows "N/A" searches to map to it
 UNPARSED_AMOUNT_VALUE = 999999999999  # 999.999 billion - high enough to be clearly distinguishable
 
+# Standard Senate PTR ranges (as tuples of (min, max))
+# Note: Minimum reporting threshold is $1,000, but we handle sub-$1k amounts
+SENATE_PTR_RANGES = [
+    (0, 1000),  # $0 - $1,000 (handles sub-$1k amounts)
+    (1001, 15000),
+    (15001, 50000),
+    (50001, 100000),
+    (100001, 250000),
+    (250001, 500000),
+    (500001, 1000000),
+    (1000001, 5000000),
+    (5000001, 25000000),
+    (25000001, 50000000),
+    (50000001, None)  # Over $50,000,000 - max is None/unbounded
+]
+
+def find_standard_range(amount_value: float) -> tuple:
+    """Find the standard Senate PTR range that contains the given amount"""
+    # Handle zero or negative amounts (use first range)
+    if amount_value <= 0:
+        return SENATE_PTR_RANGES[0]
+    
+    for range_min, range_max in SENATE_PTR_RANGES:
+        if range_max is None:
+            if amount_value >= range_min:
+                return (range_min, None)
+        else:
+            if range_min <= amount_value <= range_max:
+                return (range_min, range_max)
+    # Fallback: if amount is less than minimum, use first range
+    return SENATE_PTR_RANGES[0]
+
 
 def load_politician_list() -> List[Dict[str, Any]]:
     """
@@ -265,14 +297,23 @@ def is_valid_trade(trade: Dict[str, Any]) -> bool:
             logger.debug(f"   Invalid filer name in trade: '{filer_name}' - likely table header/noise")
             return False
     
+    # Validate transactionType - it should NOT be an amount (contains "$" or looks like a range)
+    transaction_type = trade.get('transactionType') or trade.get('order')
+    if transaction_type:
+        trans_str = str(transaction_type).strip()
+        # If transactionType contains "$" or looks like an amount range, it's invalid
+        if '$' in trans_str or re.search(r'\d+.*[-–—].*\d+', trans_str):
+            logger.debug(f"   Invalid transactionType in trade: '{trans_str}' - looks like an amount, not a transaction type")
+            return False
+    
     # A valid trade should have at least one of:
     # - securityName (not empty, not just whitespace, not "--")
     # - securitySymbol (not empty, not "--")
-    # - transactionType (not empty) AND amountRange or amountMin/amountMax (not None)
+    # - transactionType (not empty, valid) AND amountRange or amountMin/amountMax (not None)
     
     has_security_name = trade.get('securityName') and trade.get('securityName').strip() and trade.get('securityName') != '--'
     has_security_symbol = trade.get('securitySymbol') and trade.get('securitySymbol').strip() and trade.get('securitySymbol') != '--'
-    has_transaction_type = trade.get('transactionType') and trade.get('transactionType').strip()
+    has_transaction_type = transaction_type and str(transaction_type).strip() and '$' not in str(transaction_type)
     has_amount = trade.get('amountRange') is not None or trade.get('amountMin') is not None or trade.get('amountMax') is not None
     
     # Need at least security info OR (transaction type AND amount) to be valid
@@ -1023,13 +1064,20 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                 # Extract transaction type
                 transaction_type = None
                 if type_col is not None and type_col < len(row):
-                    trans_text = row[type_col].strip().upper()
-                    if 'PURCHASE' in trans_text or 'BUY' in trans_text:
-                        transaction_type = 'P'  # Purchase
-                    elif 'SALE' in trans_text or 'SELL' in trans_text:
-                        transaction_type = 'S'  # Sale
+                    trans_text = row[type_col].strip()
+                    trans_text_upper = trans_text.upper()
+                    # If the text looks like an amount (contains "$" or digits with dashes), skip it
+                    if '$' in trans_text or re.search(r'\d+.*[-–—].*\d+', trans_text):
+                        logger.debug(f"   Skipping invalid transaction type (looks like amount): '{trans_text}'")
+                        transaction_type = None
+                    elif 'PURCHASE' in trans_text_upper or 'BUY' in trans_text_upper:
+                        transaction_type = 'Purchase'
+                    elif 'SALE' in trans_text_upper or 'SELL' in trans_text_upper:
+                        transaction_type = 'Sale'
+                    elif trans_text and len(trans_text) < 50:  # Only use if it's a reasonable transaction type
+                        transaction_type = trans_text.strip()
                     else:
-                        transaction_type = trans_text[:1] if trans_text else 'U'  # First letter or Unknown
+                        transaction_type = None
                 
                 # Extract amount (could be range like "$100,001 - $250,000")
                 shares = None
@@ -1071,7 +1119,18 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                         price_per_share = total_amount / shares
                 
                 # Only create trade if we have minimum required data
-                if transaction_date or security_name or security_symbol or total_amount:
+                # Don't create trade if transactionType is invalid (looks like amount)
+                if (transaction_date or security_name or security_symbol or total_amount) and transaction_type is not None:
+                    # Map amount range to standard Senate PTR ranges if we have amounts
+                    amount_range = None
+                    if amount_min is not None and amount_max is not None:
+                        # Use midpoint to find standard range
+                        midpoint = (amount_min + amount_max) / 2
+                        amount_range = find_standard_range(midpoint)
+                        if amount_range:
+                            amount_min = amount_range[0]
+                            amount_max = amount_range[1]
+                    
                     trade = {
                         'filerName': filer_name,
                         'securityName': security_name,
@@ -1080,12 +1139,14 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                         'owner': owner,  # Self, Joint, Spouse, Dependent Child
                         'transactionDate': transaction_date or filing_date,
                         'filingDate': filing_date,
-                        'transactionType': transaction_type or 'U',  # U = Unknown
+                        'transactionType': transaction_type,  # Don't use 'U' - only valid transaction types
+                        'order': transaction_type,  # Map to order field for compatibility
                         'shares': shares,
                         'pricePerShare': price_per_share,
                         'totalAmount': total_amount,
                         'amountMin': amount_min,  # For range amounts
                         'amountMax': amount_max,  # For range amounts
+                        'amountRange': amount_range if amount_range else ([amount_min, amount_max] if amount_min is not None and amount_max is not None else None),
                         'formType': f'{source}_ptr',
                         'source': source
                     }
@@ -1252,50 +1313,7 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 
                 # Parse amount (handles ranges like "$100,001 - $250,000")
                 # Senate PTR uses fixed standard ranges for reporting
-                # Standard Senate PTR ranges (fixed):
-                # $0 - $1,000
-                # $1,001 - $15,000
-                # $15,001 - $50,000
-                # $50,001 - $100,000
-                # $100,001 - $250,000
-                # $250,001 - $500,000
-                # $500,001 - $1,000,000
-                # $1,000,001 - $5,000,000
-                # $5,000,001 - $25,000,000
-                # $25,000,001 - $50,000,000
-                # Over $50,000,000
-                
-                # Define standard Senate PTR ranges (as tuples of (min, max))
-                # Note: Minimum reporting threshold is $1,000, but we handle sub-$1k amounts
-                SENATE_PTR_RANGES = [
-                    (0, 1000),  # $0 - $1,000 (handles sub-$1k amounts)
-                    (1001, 15000),
-                    (15001, 50000),
-                    (50001, 100000),
-                    (100001, 250000),
-                    (250001, 500000),
-                    (500001, 1000000),
-                    (1000001, 5000000),
-                    (5000001, 25000000),
-                    (25000001, 50000000),
-                    (50000001, None)  # Over $50,000,000 - max is None/unbounded
-                ]
-                
-                def find_standard_range(amount_value: float) -> tuple:
-                    """Find the standard Senate PTR range that contains the given amount"""
-                    # Handle zero or negative amounts (use first range)
-                    if amount_value <= 0:
-                        return SENATE_PTR_RANGES[0]
-                    
-                    for range_min, range_max in SENATE_PTR_RANGES:
-                        if range_max is None:
-                            if amount_value >= range_min:
-                                return (range_min, None)
-                        else:
-                            if range_min <= amount_value <= range_max:
-                                return (range_min, range_max)
-                    # Fallback: if amount is less than minimum, use first range
-                    return SENATE_PTR_RANGES[0]
+                # Use the module-level find_standard_range function
                 
                 amount_min = None
                 amount_max = None

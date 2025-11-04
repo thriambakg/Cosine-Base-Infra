@@ -110,27 +110,25 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
                 continue
             dynamodb_item[key] = value
         elif isinstance(value, list):
-            # Convert list elements - if it's amountRange, convert numeric elements to Decimal
-            if key == 'amountRange' and len(value) > 0:
-                converted_list = []
-                for item in value:
-                    if item is None:
-                        converted_list.append(None)
-                    elif isinstance(item, (int, float)):
-                        # Handle special float values (NaN, Inf)
-                        if isinstance(item, float) and (item != item or item == float('inf') or item == float('-inf')):
-                            logger.warning(f"⚠️ Skipping invalid numeric value in amountRange: {item} (NaN or Inf)")
-                            continue
-                        try:
-                            converted_list.append(Decimal(str(item)))
-                        except (ValueError, TypeError) as e:
-                            logger.warning(f"⚠️ Error converting amountRange element to Decimal: {item} - {e}")
-                            converted_list.append(item)  # Keep original if conversion fails
-                    else:
-                        converted_list.append(item)
-                dynamodb_item[key] = converted_list
-            else:
-                dynamodb_item[key] = value
+            # Convert list elements to DynamoDB-compatible types (e.g., amountRange)
+            # DynamoDB lists can contain Decimal values, so convert numeric elements
+            converted_list = []
+            for item in value:
+                if item is None:
+                    converted_list.append(None)
+                elif isinstance(item, (int, float)):
+                    # Handle special float values (NaN, Inf)
+                    if isinstance(item, float) and (item != item or item == float('inf') or item == float('-inf')):
+                        logger.warning(f"⚠️ Skipping invalid numeric value in list: {item} (NaN or Inf)")
+                        continue
+                    try:
+                        converted_list.append(Decimal(str(item)))
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"⚠️ Error converting list element to Decimal: {item} - {e}")
+                        converted_list.append(item)  # Keep original if conversion fails
+                else:
+                    converted_list.append(item)
+            dynamodb_item[key] = converted_list
         elif isinstance(value, dict):
             dynamodb_item[key] = value
         else:
