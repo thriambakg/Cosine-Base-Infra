@@ -8,6 +8,7 @@ import os
 import logging
 import re
 import boto3
+import math
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import csv
@@ -27,6 +28,10 @@ S3_BUCKET = os.environ.get('S3_BUCKET')
 
 # Name matching threshold (0.0 to 1.0)
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
+
+# Constant for unparsed documents - use a large number that can be searched as "N/A"
+# This value represents unreadable/unparsed documents and allows "N/A" searches to map to it
+UNPARSED_AMOUNT_VALUE = 999999999999  # 999.999 billion - high enough to be clearly distinguishable
 
 
 def load_politician_list() -> List[Dict[str, Any]]:
@@ -1579,16 +1584,17 @@ def lambda_handler(event, context):
             if filer_name and is_valid_filer_name(filer_name):
                 logger.info(f"📋 Creating single placeholder trade for unparsed document (filer: {filer_name})")
                 # Create placeholder trade with all required fields
+                # Use UNPARSED_AMOUNT_VALUE for amountMin/Max to allow "N/A" searches to map to this high value
                 placeholder_trade = {
                     'filerName': filer_name,
                     'transactionDate': filing_date,  # Use filing date as placeholder
                     'securityName': None,
                     'securitySymbol': None,
-                    'transactionType': None,
+                    'transactionType': None,  # Must be null for unparsed documents (no speculation)
                     'owner': None,
-                    'amountRange': None,
-                    'amountMin': None,
-                    'amountMax': None,
+                    'amountRange': [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE],  # High value for unreadable documents
+                    'amountMin': UNPARSED_AMOUNT_VALUE,  # High value to allow "N/A" search mapping
+                    'amountMax': UNPARSED_AMOUNT_VALUE,  # High value to allow "N/A" search mapping
                     'exactAmount': None,
                     'comment': None,
                     'isUnparsed': True,  # Flag indicating this requires manual review
@@ -1635,11 +1641,20 @@ def lambda_handler(event, context):
                 # Map Senate PTR transaction fields to standard format
                 # Senate PTRs use: securityName, assetType, order, amount
                 # Standard format uses: securityName, transactionType, totalAmount
-                transaction_type = trade.get('order') or trade.get('transactionType')
+                # For unparsed trades, transactionType must be None (not speculation)
+                if is_unparsed:
+                    transaction_type = None
+                else:
+                    transaction_type = trade.get('order') or trade.get('transactionType')
                 
                 # Get amountRange (list of two integers) and exactAmount
-                amount_range = trade.get('amountRange')  # [min, max] or [min, None]
-                exact_amount = trade.get('exactAmount')  # Exact dollar amount if provided
+                # For unparsed trades, use UNPARSED_AMOUNT_VALUE for amounts to allow "N/A" search mapping
+                if is_unparsed:
+                    amount_range = [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE]
+                    exact_amount = None
+                else:
+                    amount_range = trade.get('amountRange')  # [min, max] or [min, None]
+                    exact_amount = trade.get('exactAmount')  # Exact dollar amount if provided
                 
                 # Convert transactionDate to numeric format for GSI range key
                 # transactionDate should be stored as YYYYMMDD integer (e.g., 20251002 for 2025-10-02)
@@ -1717,15 +1732,16 @@ def lambda_handler(event, context):
                     'securitySymbol': trade.get('ticker') or trade.get('securitySymbol'),  # GSI: SecurityTradeDateIndex
                     'securityName': trade.get('securityName'),
                     'assetType': trade.get('assetType'),  # Include assetType for Senate PTRs
-                    'transactionType': transaction_type,  # GSI: TransactionTypeTradeDateIndex ("Purchase", "Sale", etc.)
+                    'transactionType': transaction_type,  # GSI: TransactionTypeTradeDateIndex ("Purchase", "Sale", etc.) - None for unparsed
                     'order': trade.get('order'),  # Keep original "order" field
                     'shares': trade.get('shares'),
                     'pricePerShare': trade.get('pricePerShare'),
                     'totalAmount': trade.get('amount') or trade.get('totalAmount'),
-                    'amountMin': trade.get('amountMin'),  # For backwards compatibility
-                    'amountMax': trade.get('amountMax'),  # For backwards compatibility
-                    'amountRange': amount_range,  # List of two integers [min, max] for standard Senate PTR range
-                    'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI)
+                    # For unparsed trades, use UNPARSED_AMOUNT_VALUE for amounts; otherwise use trade values
+                    'amountMin': UNPARSED_AMOUNT_VALUE if is_unparsed else trade.get('amountMin'),  # High value for unparsed, allows "N/A" search
+                    'amountMax': UNPARSED_AMOUNT_VALUE if is_unparsed else trade.get('amountMax'),  # High value for unparsed, allows "N/A" search
+                    'amountRange': amount_range,  # [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE] for unparsed, [min, max] for valid trades
+                    'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI) - None for unparsed
                     'owner': trade.get('owner'),
                     'comment': trade.get('comment'),
                     'formS3Key': s3_key,  # Critical: S3 key for downloading original filing

@@ -57,9 +57,19 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
     if 'amountRange' in item and isinstance(item.get('amountRange'), list) and len(item.get('amountRange', [])) > 0:
         amount_range = item.get('amountRange')
         if amount_range[0] is not None:
-            # Ensure amountMin is set from amountRange if not already present
-            if 'amountMin' not in item or item.get('amountMin') is None:
-                item['amountMin'] = amount_range[0]
+            # Validate the value is numeric before using it
+            try:
+                # Try to convert to float to validate it's a number
+                min_val = float(amount_range[0])
+                # Check for NaN or Inf
+                if min_val != min_val or min_val == float('inf') or min_val == float('-inf'):
+                    logger.warning(f"⚠️ Invalid amountRange[0] value: {amount_range[0]} (NaN or Inf)")
+                else:
+                    # Ensure amountMin is set from amountRange if not already present
+                    if 'amountMin' not in item or item.get('amountMin') is None:
+                        item['amountMin'] = amount_range[0]
+            except (ValueError, TypeError) as e:
+                logger.warning(f"⚠️ Invalid amountRange[0] value: {amount_range[0]} - {e}")
     
     for key, value in item.items():
         if value is None:
@@ -68,18 +78,68 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
             if key in gsi_hash_keys_string or key in gsi_hash_keys_numeric:
                 logger.debug(f"⚠️ Skipping null GSI hash key '{key}' - item won't appear in {key} GSI")
             continue
-        elif isinstance(value, (int, float)):
-            dynamodb_item[key] = Decimal(str(value))
         elif isinstance(value, bool):
             dynamodb_item[key] = value
-        elif isinstance(value, (str, list, dict)):
+        elif isinstance(value, (int, float)):
+            # Handle special float values (NaN, Inf) that can't be converted to Decimal
+            if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
+                logger.warning(f"⚠️ Skipping invalid numeric value for '{key}': {value} (NaN or Inf)")
+                continue
+            try:
+                # Convert to string first, then to Decimal
+                value_str = str(value)
+                # Check for invalid string representations
+                if value_str.lower() in ['none', 'null', 'nan', 'inf', '-inf', '']:
+                    logger.warning(f"⚠️ Skipping invalid numeric value for '{key}': '{value_str}'")
+                    continue
+                dynamodb_item[key] = Decimal(value_str)
+            except (ValueError, TypeError, Exception) as e:
+                logger.error(f"❌ Error converting '{key}' to Decimal: value={value} (type={type(value).__name__}), error={type(e).__name__}: {e}")
+                # Skip this field rather than failing the entire trade
+                continue
+        elif isinstance(value, str):
+            # Check if string represents a number (for edge cases)
+            if value.strip().lower() in ['none', 'null', 'nan', 'inf', '-inf', '']:
+                # Skip invalid string representations
+                if key in gsi_hash_keys_string or key in gsi_hash_keys_numeric:
+                    logger.debug(f"⚠️ Skipping invalid string value for GSI hash key '{key}': '{value}'")
+                continue
             # Ensure GSI hash keys are non-empty strings
-            if key in gsi_hash_keys_string and isinstance(value, str) and not value.strip():
+            if key in gsi_hash_keys_string and not value.strip():
                 logger.debug(f"⚠️ Skipping empty GSI hash key '{key}' - item won't appear in {key} GSI")
                 continue
             dynamodb_item[key] = value
+        elif isinstance(value, list):
+            # Convert list elements - if it's amountRange, convert numeric elements to Decimal
+            if key == 'amountRange' and len(value) > 0:
+                converted_list = []
+                for item in value:
+                    if item is None:
+                        converted_list.append(None)
+                    elif isinstance(item, (int, float)):
+                        # Handle special float values (NaN, Inf)
+                        if isinstance(item, float) and (item != item or item == float('inf') or item == float('-inf')):
+                            logger.warning(f"⚠️ Skipping invalid numeric value in amountRange: {item} (NaN or Inf)")
+                            continue
+                        try:
+                            converted_list.append(Decimal(str(item)))
+                        except (ValueError, TypeError) as e:
+                            logger.warning(f"⚠️ Error converting amountRange element to Decimal: {item} - {e}")
+                            converted_list.append(item)  # Keep original if conversion fails
+                    else:
+                        converted_list.append(item)
+                dynamodb_item[key] = converted_list
+            else:
+                dynamodb_item[key] = value
+        elif isinstance(value, dict):
+            dynamodb_item[key] = value
         else:
-            dynamodb_item[key] = str(value)
+            # Try to convert to string, but skip if it's None or invalid
+            try:
+                dynamodb_item[key] = str(value)
+            except Exception as e:
+                logger.warning(f"⚠️ Error converting '{key}' to string: {type(value).__name__} - {e}")
+                continue
     
     # Validate required GSI fields are present (securitySymbol and amountMin are optional)
     required_gsi_fields = ['politicianName', 'party', 'position', 'formType', 'transactionType', 'transactionDate']
@@ -91,17 +151,19 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
 
 def batch_write_trades(table, trades: List[Dict[str, Any]]) -> Dict[str, int]:
     """
-    Batch write trades to DynamoDB with idempotency
+    Batch write trades to DynamoDB
+    
+    All transactions are saved, even if they appear in multiple sources (SEC vs Senate).
+    The source field distinguishes filings, and table indexing handles any duplicates.
     
     Args:
         table: DynamoDB table resource
         trades: List of trade dicts
         
     Returns:
-        Dict with counts: {'saved': 45, 'skipped': 2, 'errors': 0}
+        Dict with counts: {'saved': 45, 'errors': 0}
     """
     saved = 0
-    skipped = 0
     errors = 0
     
     # Process in batches of 25 (DynamoDB batch_write limit)
@@ -109,65 +171,37 @@ def batch_write_trades(table, trades: List[Dict[str, Any]]) -> Dict[str, int]:
     
     for i in range(0, len(trades), batch_size):
         batch = trades[i:i + batch_size]
-        write_requests = []
         
+        # Process each trade individually for better error handling
         for trade in batch:
-            # Convert to DynamoDB format
-            dynamodb_item = convert_to_dynamodb_format(trade)
-            
-            # Add processing timestamp
-            dynamodb_item['processingDate'] = Decimal(str(int(datetime.now().timestamp())))
-            
-            # Prepare put request with condition expression for idempotency
-            write_requests.append({
-                'PutRequest': {
-                    'Item': dynamodb_item,
-                    # ConditionExpression would go here, but batch_write doesn't support it
-                    # We'll use individual put_item calls with ConditionExpression instead
-                }
-            })
-        
-        # Note: batch_write_item doesn't support ConditionExpression
-        # So we'll use individual put_item with ConditionExpression for idempotency
-        # For now, use batch_write and handle duplicates separately
-        
-        try:
-            # Write batch
-            response = table.batch_writer()
-            for trade in batch:
+            try:
+                # Convert to DynamoDB format
                 dynamodb_item = convert_to_dynamodb_format(trade)
+                
+                # Add processing timestamp
                 dynamodb_item['processingDate'] = Decimal(str(int(datetime.now().timestamp())))
                 
-                try:
-                    # Use put_item with ConditionExpression for idempotency
-                    table.put_item(
-                        Item=dynamodb_item,
-                        ConditionExpression='attribute_not_exists(tradeId)'
-                    )
-                    saved += 1
-                except table.meta.client.exceptions.ConditionalCheckFailedException:
-                    # Trade already exists - skip (idempotency)
-                    skipped += 1
-                    logger.debug(f"⏭️ Skipped duplicate trade: {trade.get('tradeId')}")
-                except Exception as e:
-                    logger.error(f"❌ Error saving trade {trade.get('tradeId')}: {e}")
-                    errors += 1
-            
-            response.__exit__(None, None, None)
-            
-        except Exception as e:
-            logger.error(f"❌ Error in batch write: {e}")
-            errors += len(batch)
+                # Save all transactions - each transaction should be saved even if it appears in multiple sources
+                # The source field distinguishes SEC vs Senate filings, and table indexing handles duplicates
+                table.put_item(Item=dynamodb_item)
+                saved += 1
+            except Exception as e:
+                trade_id = trade.get('tradeId', 'unknown')
+                logger.error(f"❌ Error saving trade {trade_id}: {type(e).__name__}: {e}")
+                logger.error(f"   Trade data: {json.dumps(trade, default=str)[:500]}")  # Log first 500 chars of trade
+                errors += 1
     
     return {
         'saved': saved,
-        'skipped': skipped,
         'errors': errors
     }
 
 def lambda_handler(event, context):
     """
     Lambda handler for saving matched trades to DynamoDB
+    
+    All transactions are saved, even if they appear in multiple sources (SEC vs Senate).
+    The source field distinguishes filings, and table indexing handles any duplicates.
     
     Expected input from Step 2:
     {
@@ -180,7 +214,6 @@ def lambda_handler(event, context):
     {
         "date": "2024-01-15",
         "tradesSaved": 45,
-        "tradesSkipped": 2,
         "errors": 0
     }
     """
@@ -208,17 +241,15 @@ def lambda_handler(event, context):
             'body': json.dumps({
                 'date': date,
                 'tradesSaved': 0,
-                'tradesSkipped': 0,
                 'errors': 0
             })
         }
     
     try:
-        # Batch write trades with idempotency
+        # Batch write all trades - each transaction is saved even if it appears in multiple sources
         results = batch_write_trades(table, matched_trades)
         
         logger.info(f"✅ Saved {results['saved']} trades")
-        logger.info(f"⏭️ Skipped {results['skipped']} duplicates")
         if results['errors'] > 0:
             logger.warning(f"⚠️ {results['errors']} errors during save")
         
@@ -227,7 +258,6 @@ def lambda_handler(event, context):
             'body': json.dumps({
                 'date': date,
                 'tradesSaved': results['saved'],
-                'tradesSkipped': results['skipped'],
                 'errors': results['errors']
             })
         }
