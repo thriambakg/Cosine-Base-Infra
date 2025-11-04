@@ -1932,7 +1932,7 @@ module "politician_trades_state_machine" {
             Next      = "GenerateDates"
           }
         ]
-        Default = "ProcessSingleDate"
+        Default = "FetchFormMetadata"
       }
 
       # Generate list of dates from range
@@ -2147,23 +2147,13 @@ module "politician_trades_state_machine" {
         End        = true
       }
 
-      # Single date processing (original flow)
-      ProcessSingleDate = {
-        Type    = "Pass"
-        Comment = "Process single date"
-        Parameters = {
-          "date.$" : "$.date"
-        }
-        Next = "FetchFormMetadata"
-      }
-
+      # Single date processing (original flow) - directly fetch metadata
+      # Lambda handles default date (yesterday) if date is not provided
       FetchFormMetadata = {
-        Type     = "Task"
-        Resource = module.politician_trades_fetcher.function_arn
-        Comment  = "Fetch SEC forms and Congressional PTRs metadata for a single date"
-        Parameters = {
-          "date.$" = "$.date"
-        }
+        Type       = "Task"
+        Resource   = module.politician_trades_fetcher.function_arn
+        Comment    = "Fetch SEC forms and Congressional PTRs metadata. Lambda defaults to yesterday if date not provided."
+        InputPath  = "$"
         ResultPath = "$.fetchResults"
         Next       = "ParallelPipelines"
         Retry = [
