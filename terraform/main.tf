@@ -1946,7 +1946,7 @@ module "politician_trades_state_machine" {
           "endDate.$"   = "$.endDate"
         }
         ResultSelector = {
-          "dates.$" = "$.Payload.dates"
+          "dates.$" = "$.dates"
         }
         Next = "ProcessDateRange"
         Retry = [
