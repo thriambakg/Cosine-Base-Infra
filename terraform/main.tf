@@ -1976,6 +1976,7 @@ module "politician_trades_state_machine" {
             "endDate.$"   = "$.input.endDate"
           }
         }
+        OutputPath = "$.Payload"
         ResultPath = "$.dateArray"
         Next       = "ProcessDatesInParallel"
         Retry = [
@@ -1998,6 +1999,7 @@ module "politician_trades_state_machine" {
             "date.$" = "$.input.date"
           }
         }
+        OutputPath = "$.Payload"
         ResultPath = "$.dateArray"
         Next       = "ProcessDatesInParallel"
         Retry = [
