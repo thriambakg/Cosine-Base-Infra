@@ -91,10 +91,18 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
                 # Fetch the daily index file
                 response = session.get(index_url, timeout=30)
                 
-                # Check if file exists (404 means no filings for that date)
+                # Check if file exists (404 means no filings for that date OR file not yet created)
                 if response.status_code == 404:
-                    logger.info(f"📭 No Form {form_type} index file found for {target_date} (404) - likely no filings that day")
-                    continue
+                    # Check if this is today's date - if so, fall back to RSS feed (index file might not be created yet)
+                    today = datetime.now().date()
+                    if date_obj == today:
+                        logger.info(f"📭 Daily index file not available for today's date ({target_date}) - falling back to RSS feed")
+                        # Fall back to RSS feed for today's filings
+                        forms.extend(_fetch_from_rss_feed(session, form_type, target_date))
+                        continue
+                    else:
+                        logger.info(f"📭 No Form {form_type} index file found for {target_date} (404) - likely no filings that day")
+                        continue
                 
                 response.raise_for_status()
                 
@@ -212,6 +220,222 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
         logger.error(f"❌ Error in SEC forms fetch: {e}")
     
     logger.info(f"📋 Found {len(forms)} SEC forms for {target_date}")
+    return forms
+
+
+def _fetch_from_rss_feed(session: requests.Session, form_type: str, target_date: str) -> List[Dict[str, Any]]:
+    """
+    Fallback: Fetch SEC forms from RSS feed (for today's date when daily index isn't available yet)
+    
+    This is a limited approach - only returns most recent 100 filings, but works for same-day access.
+    
+    Args:
+        session: Requests session with proper headers
+        form_type: Form type ('3', '4', or '5')
+        target_date: Target date in YYYY-MM-DD format
+        
+    Returns:
+        List of form metadata dicts
+    """
+    forms = []
+    
+    # SEC RSS feed for recent filings
+    rss_urls = [
+        f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form_type}&company=&count=100&output=rss",
+        f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form_type}&company=&count=100",
+        f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form_type}&output=atom",
+    ]
+    
+    for rss_url in rss_urls:
+        try:
+            response = session.get(rss_url, timeout=30)
+            response.raise_for_status()
+            
+            # Check if response is actually XML/RSS
+            content_type = response.headers.get('Content-Type', '').lower()
+            if 'text/html' in content_type or (response.text and response.text.strip().startswith('<!')):
+                logger.debug(f"⚠️ Form {form_type} RSS URL returned HTML, trying next format: {rss_url}")
+                continue
+            
+            # If we get here, we have a valid response - try to parse
+            break
+            
+        except Exception as url_error:
+            logger.debug(f"⚠️ Error with RSS URL {rss_url}: {url_error}, trying next...")
+            continue
+    else:
+        # If we exhausted all URLs, return empty
+        logger.warning(f"⚠️ Could not fetch valid RSS feed for Form {form_type} with any URL format")
+        return forms
+    
+    # Try to parse as XML
+    try:
+        # SEC feeds might have encoding issues - try to decode properly
+        if isinstance(response.content, bytes):
+            try:
+                xml_content = response.content.decode('utf-8')
+            except UnicodeDecodeError:
+                try:
+                    xml_content = response.content.decode('latin-1')
+                except UnicodeDecodeError:
+                    xml_content = response.content.decode('utf-8', errors='ignore')
+        else:
+            xml_content = response.text
+        
+        # Remove BOM if present
+        if xml_content and xml_content.startswith('\ufeff'):
+            xml_content = xml_content[1:]
+        
+        xml_content = xml_content.strip()
+        
+        # Try to parse XML
+        parser = ET.XMLParser(encoding='utf-8')
+        try:
+            root = ET.fromstring(xml_content.encode('utf-8'), parser=parser)
+        except ET.ParseError:
+            root = ET.fromstring(xml_content)
+        
+        # Try without namespace first (some feeds don't use namespaces)
+        items = root.findall('.//item')
+        if not items:
+            items = root.findall('.//{http://purl.org/rss/1.0/}item')
+        if not items:
+            items = root.findall('.//{http://www.w3.org/2005/Atom}entry')
+        if not items:
+            items = root.findall('.//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}item')
+        
+        logger.info(f"📥 Fetched RSS feed for Form {form_type}: found {len(items)} items (fallback for today)")
+        
+        if len(items) == 0:
+            return forms
+        
+        target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+        items_matching_date = 0
+        
+        for item in items:
+            try:
+                # Extract filing date
+                pub_date_elem = None
+                for tag_name in [
+                    '{http://www.w3.org/2005/Atom}updated',
+                    'pubDate',
+                    'date',
+                    '{http://purl.org/dc/elements/1.1/}date'
+                ]:
+                    pub_date_elem = item.find(tag_name)
+                    if pub_date_elem is not None:
+                        break
+                
+                if pub_date_elem is None or not pub_date_elem.text:
+                    continue
+                
+                # Parse date
+                filing_date_str = pub_date_elem.text.strip()
+                filing_date = None
+                
+                date_formats = [
+                    '%Y-%m-%dT%H:%M:%S%z',
+                    '%Y-%m-%dT%H:%M:%SZ',
+                    '%Y-%m-%dT%H:%M:%S',
+                    '%a, %d %b %Y %H:%M:%S %Z',
+                    '%a, %d %b %Y %H:%M:%S %z',
+                    '%a, %d %b %Y %H:%M:%S',
+                    '%Y-%m-%d',
+                    '%Y-%m-%d %H:%M:%S',
+                    '%d %b %Y',
+                    '%b %d, %Y',
+                    '%m/%d/%Y',
+                    '%Y/%m/%d'
+                ]
+                
+                for fmt in date_formats:
+                    try:
+                        filing_date = datetime.strptime(filing_date_str, fmt).date()
+                        break
+                    except ValueError:
+                        continue
+                
+                if not filing_date or filing_date != target_date_obj:
+                    continue
+                
+                items_matching_date += 1
+                
+                # Extract link/guid
+                link_elem = None
+                filing_url = None
+                
+                for tag_name in ['{http://www.w3.org/2005/Atom}link', 'link', 'guid']:
+                    link_elem = item.find(tag_name)
+                    if link_elem is not None:
+                        break
+                
+                if link_elem is not None:
+                    if link_elem.get('href'):
+                        filing_url = link_elem.get('href').strip()
+                    elif link_elem.text:
+                        filing_url = link_elem.text.strip()
+                
+                if not filing_url:
+                    continue
+                
+                # Extract CIK and accession number
+                cik = None
+                accession_number = None
+                filename = None
+                
+                if '/Archives/edgar/data/' in filing_url:
+                    parts = filing_url.split('/Archives/edgar/data/')[1].split('/')
+                    if len(parts) >= 2:
+                        cik = parts[0].strip()
+                        accession_number = parts[1].strip().replace('-', '')
+                        if len(parts) >= 3:
+                            filename = parts[2].strip()
+                
+                elif 'cik=' in filing_url and 'accession_number=' in filing_url:
+                    parsed_url = urlparse(filing_url)
+                    params = parse_qs(parsed_url.query)
+                    cik = params.get('cik', [None])[0]
+                    accession_number = params.get('accession_number', [None])[0]
+                    if accession_number:
+                        accession_number = accession_number.replace('-', '')
+                
+                if not cik or not accession_number:
+                    # Try description
+                    desc_elem = item.find('description')
+                    if desc_elem is not None and desc_elem.text:
+                        cik_match = re.search(r'CIK[:\s]+(\d+)', desc_elem.text, re.IGNORECASE)
+                        acc_match = re.search(r'Accession[:\s]+([\d-]+)', desc_elem.text, re.IGNORECASE)
+                        if cik_match:
+                            cik = cik_match.group(1)
+                        if acc_match:
+                            accession_number = acc_match.group(1).replace('-', '')
+                
+                if not cik or not accession_number:
+                    continue
+                
+                if not filename:
+                    accession_dashed = f"{accession_number[:10]}-{accession_number[10:12]}-{accession_number[12:]}"
+                    filename = f"{accession_dashed}.txt"
+                
+                forms.append({
+                    'form_type': f'form{form_type}',
+                    'cik': cik,
+                    'accession_number': accession_number,
+                    'filename': filename,
+                    'filing_date': target_date
+                })
+                
+            except Exception as item_error:
+                logger.debug(f"⚠️ Error parsing RSS item: {item_error}")
+                continue
+        
+        logger.info(f"📊 Form {form_type} (RSS fallback): {items_matching_date} matched date {target_date}, {len(forms)} successfully extracted")
+    
+    except ET.ParseError as parse_error:
+        logger.error(f"❌ XML parsing error for Form {form_type} RSS: {parse_error}")
+    except Exception as parse_error:
+        logger.error(f"❌ Unexpected error parsing Form {form_type} RSS: {parse_error}")
+    
     return forms
 
 def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> Optional[str]:
@@ -368,6 +592,18 @@ def lambda_handler(event, context):
     if isinstance(event, dict) and event.get('date'):
         target_date = event.get('date')
         logger.info(f"📅 Processing single date: {target_date}")
+        
+        # If scheduler passes today's date (runs at 2 AM EST), convert to yesterday
+        # Daily index files for yesterday are finalized, but today's might not be available yet
+        try:
+            date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+            today = datetime.now().date()
+            if date_obj == today:
+                # Convert to yesterday for scheduler runs (processes previous day's finalized filings)
+                target_date = get_yesterday_date()
+                logger.info(f"📅 Converted today's date to yesterday for scheduler run: {target_date}")
+        except ValueError:
+            pass  # Will be caught below
     else:
         # Default: yesterday's date (fallback for backwards compatibility)
         target_date = get_yesterday_date()

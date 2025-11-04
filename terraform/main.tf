@@ -2454,7 +2454,7 @@ module "politician_trades_scheduler" {
   target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
 
   target_input = jsonencode({
-    date = "{{aws:eventTime|yyyy-MM-dd}}"
+    date = "{{aws:eventTime|yyyy-MM-dd-1d}}"
   })
 
   purpose     = "PoliticianTradesAggregation"
