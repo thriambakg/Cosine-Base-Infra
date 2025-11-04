@@ -80,7 +80,9 @@ resource "aws_s3_object" "glue_script_files" {
 # ==============================================================================
 
 resource "aws_iam_role" "glue_job_role" {
-  name_prefix = "${replace(var.job_name, "_", "-")}-role-"
+  # Truncate job name to ensure name_prefix fits within 38-character limit
+  # AWS appends ~26 char random suffix, so prefix must be ≤38 chars
+  name_prefix = length("${replace(var.job_name, "_", "-")}-role-") > 38 ? "${substr("${replace(var.job_name, "_", "-")}-role-", 0, 38)}" : "${replace(var.job_name, "_", "-")}-role-"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -282,9 +284,13 @@ resource "aws_cloudwatch_log_group" "glue_job_logs" {
 
 locals {
   # Determine script location - use provided script_location or construct from uploaded script
-  resolved_script_location = var.script_location != null && startswith(var.script_location, "s3://") ? var.script_location : (
+  # Check if script_location is provided and valid
+  script_location_provided = var.script_location != null && var.script_location != ""
+  script_location_is_s3    = local.script_location_provided ? startswith(var.script_location, "s3://") : false
+
+  resolved_script_location = local.script_location_is_s3 ? var.script_location : (
     var.source_code_dir != null ? "s3://${data.aws_s3_bucket.script_bucket.id}/${var.script_s3_prefix}/${var.job_name}/main.py" : (
-      var.script_location != null ? var.script_location : "s3://${data.aws_s3_bucket.script_bucket.id}/${var.script_s3_prefix}/${var.job_name}/main.py"
+      local.script_location_provided ? var.script_location : "s3://${data.aws_s3_bucket.script_bucket.id}/${var.script_s3_prefix}/${var.job_name}/main.py"
     )
   )
 
