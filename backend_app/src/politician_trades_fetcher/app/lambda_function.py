@@ -203,67 +203,34 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
                 
                 # Only process if we have all required fields and form type matches
                 if cik and form_type in form_types and date_filed:
-                    # Extract file path from the line - SEC daily index includes full path
+                    # Extract file name - it's usually at the end of the line
                     # Format is typically: edgar/data/{CIK}/{ACCESSION}/{FILENAME}
-                    # The file path is usually at the end of the line after the date
-                    accession_number = None
-                    file_name = None
-                    file_path = None
-                    
-                    # Try to find the full file path in the line
-                    # Look for patterns like: edgar/data/1025378/0001025378-25-000136/form4.xml
-                    file_path_match = re.search(r'edgar/data/(\d+)/(\d{10}-\d{2}-\d{6})/([^\s]+)', line)
-                    if file_path_match:
-                        # Full path found - extract components
-                        cik_from_path = file_path_match.group(1)
-                        accession_dashed = file_path_match.group(2)
-                        file_name = file_path_match.group(3)
-                        accession_number = accession_dashed.replace('-', '')
-                        file_path = f"edgar/data/{cik_from_path}/{accession_dashed}/{file_name}"
-                        
-                        # Verify CIK matches
-                        if cik_from_path.lstrip('0') != cik.lstrip('0'):
-                            logger.warning(f"⚠️ CIK mismatch: path={cik_from_path}, parsed={cik}, using path CIK")
-                            cik = cik_from_path.lstrip('0') or '0'
+                    file_match = re.search(r'edgar/data/\d+/([\d-]+)/([^\s]+)', line)
+                    if file_match:
+                        accession_number = file_match.group(1).replace('-', '')
+                        file_name = file_match.group(2)
                     else:
-                        # Try to extract accession number from various patterns
-                        # Pattern 1: 10-2-6 format (0001025378-25-000136)
+                        # Try to extract accession number from file path
+                        # Accession numbers are 18 digits: 10-2-6 format
                         acc_match = re.search(r'(\d{10}-\d{2}-\d{6})', line)
                         if acc_match:
-                            accession_dashed = acc_match.group(1)
-                            accession_number = accession_dashed.replace('-', '')
-                            
-                            # Try to find filename after accession number
-                            # Look for common file extensions after the accession
-                            filename_match = re.search(rf'{re.escape(accession_dashed)}[^\s]*\.(xml|txt|htm|html)', line, re.IGNORECASE)
-                            if filename_match:
-                                file_name = line[filename_match.start():filename_match.end()].strip()
+                            accession_number = acc_match.group(1).replace('-', '')
+                            file_name = None  # Will be determined by downloader
                         else:
-                            # Try 18-digit accession without dashes
-                            acc_match_18 = re.search(r'\b(\d{18})\b', line)
-                            if acc_match_18:
-                                accession_number = acc_match_18.group(1)
-                            else:
-                                # Skip if we can't extract accession
-                                logger.debug(f"⚠️ Could not extract accession number from line: {line[:100]}")
-                                continue
-                    
-                    if not accession_number:
-                        logger.debug(f"⚠️ No accession number found for line: {line[:100]}")
-                        continue
+                            # Skip if we can't extract accession
+                            continue
                     
                     forms.append({
                         'form_type': f'form{form_type}',
                         'cik': cik,
                         'accession_number': accession_number,
                         'filename': file_name,
-                        'file_path': file_path,  # Store full path if available
                         'filing_date': target_date
                     })
                     
                     forms_found += 1
                     if forms_found <= 5:  # Log first few
-                        logger.debug(f"✅ Extracted Form {form_type}: CIK={cik}, Accession={accession_number[:10]}..., File={file_name or 'N/A'}")
+                        logger.debug(f"✅ Extracted Form {form_type}: CIK={cik}, Accession={accession_number[:10]}...")
                 
             except Exception as line_error:
                 logger.debug(f"⚠️ Error parsing line {line_num}: {line_error}")
@@ -402,28 +369,20 @@ def lambda_handler(event, context):
     """
     Lambda handler for fetching SEC forms and Congressional PTRs
     
-    Supports four input modes:
+    Supports three input modes:
     
-    1. Generate dates list (for Step Functions date range processing):
-    {
-        "action": "generateDates",
-        "startDate": "2025-01-01",
-        "endDate": "2025-01-31"
-    }
-    Returns: {"dates": ["2025-01-01", "2025-01-02", ...]}
-    
-    2. Single date (backwards compatible):
+    1. Single date (backwards compatible):
     {
         "date": "2025-10-30"
     }
     
-    3. Date range (DEPRECATED - use Step Functions Map state instead):
+    2. Date range (for backfilling historical data):
     {
         "startDate": "2025-01-01",
         "endDate": "2025-12-31"
     }
     
-    4. Default (from EventBridge daily scheduler):
+    3. Default (from EventBridge daily scheduler):
     {
         "source": "scheduler-daily",
         "timestamp": "2025-10-31T00:00:00Z"
@@ -454,48 +413,15 @@ def lambda_handler(event, context):
     if not S3_BUCKET:
         raise ValueError("S3_BUCKET environment variable not set")
     
-    # Handle special "generateDates" action for Step Functions date range processing
-    if isinstance(event, dict) and event.get('action') == 'generateDates':
-        start_date_str = event.get('startDate')
-        end_date_str = event.get('endDate')
-        
-        if not start_date_str or not end_date_str:
-            raise ValueError("startDate and endDate required for generateDates action")
-        
-        try:
-            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
-            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
-            
-            if start_date > end_date:
-                raise ValueError("startDate must be <= endDate")
-            
-            # Generate list of dates
-            dates = []
-            current_date = start_date
-            while current_date <= end_date:
-                dates.append(current_date.strftime('%Y-%m-%d'))
-                current_date += timedelta(days=1)
-            
-            logger.info(f"📅 Generated {len(dates)} dates from {start_date_str} to {end_date_str}")
-            return {
-                "dates": dates,
-                "startDate": start_date_str,
-                "endDate": end_date_str,
-                "totalDays": len(dates)
-            }
-        except ValueError as e:
-            logger.error(f"❌ Invalid date format in generateDates: {e}")
-            raise ValueError(f"Invalid date range: startDate='{start_date_str}', endDate='{end_date_str}'. Expected YYYY-MM-DD format.")
-    
     # Parse date input - support both single date and date range
     # Options:
     # 1. Single date: {"date": "2025-10-30"}
-    # 2. Date range: {"startDate": "2025-01-01", "endDate": "2025-12-31"} (DEPRECATED - use Step Functions Map instead)
+    # 2. Date range: {"startDate": "2025-01-01", "endDate": "2025-12-31"}
     # 3. Default: yesterday's date (for scheduled runs)
     target_dates = []
     
     if isinstance(event, dict):
-        if event.get('startDate') and event.get('endDate') and not event.get('action'):
+        if event.get('startDate') and event.get('endDate'):
             # Date range mode - backfill historical data
             start_date_str = event.get('startDate')
             end_date_str = event.get('endDate')
@@ -563,7 +489,6 @@ def lambda_handler(event, context):
                     'cik': form_data.get('cik'),
                     'accessionNumber': form_data.get('accession_number'),
                     'filename': form_data.get('filename'),
-                    'filePath': form_data.get('file_path'),  # Full path from daily index if available
                     'filingDate': target_date
                 })
                 aggregate_results['secFormsFetched'] += 1

@@ -1908,6 +1908,24 @@ module "politician_trades_saver" {
   depends_on = [module.politician_trades_table]
 }
 
+# Date Range Splitter Lambda (utility function for Step Functions)
+module "date_range_splitter" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-date-range-splitter-${var.environment}"
+  description   = "Utility function to split date ranges into 5-day batches for Step Functions"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 30
+  memory_size   = 128
+
+  source_dir = "${path.module}/../backend_app/src/date_range_splitter/app"
+
+  environment_variables = {}
+
+  tags = var.common_tags
+}
+
 # Step Functions State Machine for Politician Trades Aggregation
 module "politician_trades_state_machine" {
   source = "./modules/step-functions"
@@ -1915,76 +1933,76 @@ module "politician_trades_state_machine" {
   state_machine_name = "${var.project_name}-politician-trades-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition with 4 steps (parallel downloads)
-  # Modified to handle date ranges by processing each date individually to avoid payload size limits
+  # Step Functions definition with date range batching
   definition = jsonencode({
-    Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} for single date, {'startDate': 'YYYY-MM-DD', 'endDate': 'YYYY-MM-DD'} for date range, or omit for default (yesterday)."
-    StartAt = "CheckDateRange"
+    Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Supports single date {'date': 'YYYY-MM-DD'} or date range {'startDate': 'YYYY-MM-DD', 'endDate': 'YYYY-MM-DD'}. Date ranges are automatically split into 5-day batches for parallel processing."
+    StartAt = "BatchDateRanges"
     States = {
-      # Step 0: Check if date range is provided, generate list of dates if needed
+      # Step 0: Batch date ranges into 5-day chunks if date range is provided
+      BatchDateRanges = {
+        Type      = "Pass"
+        Comment   = "Split date ranges into 5-day batches for parallel processing. If single date or no date range, pass through unchanged."
+        InputPath = "$"
+        Parameters = {
+          # If startDate and endDate exist, we'll use a Map state to process batches
+          # Otherwise, pass through to FetchFormMetadata
+          "startDate.$" : "$.startDate",
+          "endDate.$" : "$.endDate",
+          "date.$" : "$.date",
+          "source.$" : "$.source",
+          "timestamp.$" : "$.timestamp"
+        }
+        Next = "CheckDateRange"
+      }
+
       CheckDateRange = {
         Type    = "Choice"
-        Comment = "Check if input has date range - if yes, process each date individually to avoid payload size limits"
+        Comment = "Check if input is a date range (startDate/endDate) or single date"
         Choices = [
           {
             Variable  = "$.startDate"
             IsPresent = true
-            Next      = "GenerateDates"
+            Next      = "SplitDateRange"
           }
         ]
         Default = "FetchFormMetadata"
       }
 
-      # Generate list of dates from range
-      GenerateDates = {
-        Type     = "Task"
-        Resource = module.politician_trades_fetcher.function_arn
-        Comment  = "Generate list of dates from startDate to endDate"
-        Parameters = {
-          "action"      = "generateDates"
-          "startDate.$" = "$.startDate"
-          "endDate.$"   = "$.endDate"
-        }
-        ResultSelector = {
-          "dates.$" = "$.dates"
-        }
-        Next = "ProcessDateRange"
+      SplitDateRange = {
+        Type       = "Task"
+        Resource   = module.date_range_splitter.function_arn
+        Comment    = "Split date range into 5-day batches using utility Lambda"
+        InputPath  = "$"
+        ResultPath = "$.batchResults"
+        Next       = "ProcessDateBatches"
         Retry = [
           {
             ErrorEquals     = ["States.ALL"]
-            IntervalSeconds = 10
+            IntervalSeconds = 2
             MaxAttempts     = 3
             BackoffRate     = 2.0
           }
         ]
       }
 
-      # Process each date in range individually - each date processes fully and saves independently
-      ProcessDateRange = {
+      ProcessDateBatches = {
         Type           = "Map"
-        Comment        = "Process each date individually to avoid Step Functions payload size limits. Each date: fetch → download → match → save."
-        ItemsPath      = "$.dates"
-        MaxConcurrency = 5
+        Comment        = "Process each 5-day batch in parallel. Each batch runs the full pipeline independently."
+        ItemsPath      = "$.batchResults.batches"
+        MaxConcurrency = 10
         Iterator = {
-          StartAt = "WrapDateInput"
+          StartAt = "FetchFormMetadata"
           States = {
-            WrapDateInput = {
-              Type    = "Pass"
-              Comment = "Wrap date string in object for processing"
-              Parameters = {
-                "date.$" = "$"
-              }
-              Next = "FetchFormMetadataDate"
-            }
-            FetchFormMetadataDate = {
+            FetchFormMetadata = {
               Type     = "Task"
               Resource = module.politician_trades_fetcher.function_arn
-              Comment  = "Fetch SEC forms and Congressional PTRs metadata for a single date"
+              Comment  = "Fetch SEC forms and Congressional PTRs metadata for date batch"
               Parameters = {
-                "date.$" = "$.date"
+                "startDate.$" : "$.startDate"
+                "endDate.$" : "$.endDate"
               }
               ResultPath = "$.fetchResults"
-              Next       = "ParallelPipelinesDate"
+              Next       = "ParallelPipelines"
               Retry = [
                 {
                   ErrorEquals     = ["States.ALL"]
@@ -1997,64 +2015,56 @@ module "politician_trades_state_machine" {
                 {
                   ErrorEquals = ["States.ALL"]
                   ResultPath  = "$.error"
-                  Next        = "FetchFormsFailedDate"
+                  Next        = "FetchFormsFailed"
                 }
               ]
             }
-            FetchFormsFailedDate = {
+            FetchFormsFailed = {
               Type    = "Pass"
-              Comment = "Continue even if fetch fails for this date"
-              Result = {
-                "date.$"     = "$.date"
-                "error"      = "Fetch failed"
-                "secForms"   = []
-                "senatePTRs" = []
-                "housePTRs"  = []
-              }
-              Next = "ParallelPipelinesDate"
+              Comment = "Continue with other batches even if one fails"
+              Result  = { "error" : "Batch fetch failed" }
+              End     = true
             }
-
-            # Complete pipeline for each date (duplicated to avoid state name conflicts)
-            ParallelPipelinesDate = {
+            ParallelPipelines = {
               Type    = "Parallel"
-              Comment = "Three parallel pipelines: SEC, Senate, House. Each: Transform → Download → Match."
+              Comment = "Three parallel pipelines: SEC, Senate, House"
               Branches = [
                 {
-                  StartAt = "TransformSECDate"
+                  StartAt = "TransformSEC"
                   States = {
-                    TransformSECDate = {
+                    TransformSEC = {
                       Type = "Pass"
                       Parameters = {
                         "date.$" : "$.fetchResults.date",
                         "items.$" : "$.fetchResults.secForms",
                         "source" : "sec"
                       }
-                      Next = "DownloadSECDate"
+                      Next = "DownloadSEC"
                     }
-                    DownloadSECDate = {
+                    DownloadSEC = {
                       Type           = "Map"
                       ItemsPath      = "$.items"
                       MaxConcurrency = 10
                       Iterator = {
-                        StartAt = "DownloadFormDate"
+                        StartAt = "DownloadForm"
                         States = {
-                          DownloadFormDate = {
+                          DownloadForm = {
                             Type     = "Task"
                             Resource = module.politician_trades_downloader.function_arn
                             End      = true
                           }
                         }
                       }
-                      Next = "MatchSECDate"
+                      Next = "MatchSEC"
                     }
-                    MatchSECDate = {
+                    MatchSEC = {
                       Type           = "Map"
-                      ItemsPath      = "$"
+                      ItemsPath      = "$.downloadResults"
                       MaxConcurrency = 10
                       Iterator = {
-                        StartAt = "MatchFileSecDate"
+                        StartAt = "MatchFileSec"
                         States = {
-                          MatchFileSecDate = {
+                          MatchFileSec = {
                             Type     = "Task"
                             Resource = module.politician_trades_sec_matcher.function_arn
                             End      = true
@@ -2066,41 +2076,41 @@ module "politician_trades_state_machine" {
                   }
                 },
                 {
-                  StartAt = "TransformSenateDate"
+                  StartAt = "TransformSenate"
                   States = {
-                    TransformSenateDate = {
+                    TransformSenate = {
                       Type = "Pass"
                       Parameters = {
                         "date.$" : "$.fetchResults.date",
                         "items.$" : "$.fetchResults.senatePTRs",
                         "source" : "senate"
                       }
-                      Next = "DownloadSenateDate"
+                      Next = "DownloadSenate"
                     }
-                    DownloadSenateDate = {
+                    DownloadSenate = {
                       Type           = "Map"
                       ItemsPath      = "$.items"
                       MaxConcurrency = 10
                       Iterator = {
-                        StartAt = "DownloadSenatePTRDate"
+                        StartAt = "DownloadSenatePTR"
                         States = {
-                          DownloadSenatePTRDate = {
+                          DownloadSenatePTR = {
                             Type     = "Task"
                             Resource = module.politician_trades_downloader.function_arn
                             End      = true
                           }
                         }
                       }
-                      Next = "MatchSenateDate"
+                      Next = "MatchSenate"
                     }
-                    MatchSenateDate = {
+                    MatchSenate = {
                       Type           = "Map"
-                      ItemsPath      = "$"
+                      ItemsPath      = "$.downloadResults"
                       MaxConcurrency = 10
                       Iterator = {
-                        StartAt = "MatchFileSenateDate"
+                        StartAt = "MatchFileSenate"
                         States = {
-                          MatchFileSenateDate = {
+                          MatchFileSenate = {
                             Type     = "Task"
                             Resource = module.politician_trades_senate_matcher.function_arn
                             End      = true
@@ -2110,40 +2120,26 @@ module "politician_trades_state_machine" {
                       End = true
                     }
                   }
-                },
-                {
-                  StartAt = "TransformHouseDate"
-                  States = {
-                    TransformHouseDate = {
-                      Type   = "Pass"
-                      Result = []
-                      End    = true
-                    }
-                  }
                 }
               ]
-              ResultPath = "$.pipelineResults"
-              Next       = "AggregateAndSaveDate"
+              Next = "AggregateMatchesBatch"
             }
-
-            AggregateAndSaveDate = {
+            AggregateMatchesBatch = {
               Type = "Pass"
               Parameters = {
-                "secMatchResults.$" : "$.pipelineResults[0]",
-                "senateMatchResults.$" : "$.pipelineResults[1]",
+                "secMatchResults.$" : "$.pipelineResults[0].matchResults",
+                "senateMatchResults.$" : "$.pipelineResults[1].matchResults",
                 "date.$" : "$.fetchResults.date"
               }
-              Next = "AggregateMatchesTaskDate"
+              Next = "AggregateMatchesTaskBatch"
             }
-
-            AggregateMatchesTaskDate = {
+            AggregateMatchesTaskBatch = {
               Type       = "Task"
               Resource   = module.politician_trades_matcher.function_arn
               ResultPath = "$.aggregateResults"
-              Next       = "SaveTradesDate"
+              Next       = "SaveTradesBatch"
             }
-
-            SaveTradesDate = {
+            SaveTradesBatch = {
               Type       = "Task"
               Resource   = module.politician_trades_saver.function_arn
               ResultPath = "$.saveResults"
@@ -2151,17 +2147,25 @@ module "politician_trades_state_machine" {
             }
           }
         }
-        ResultPath = "$.dateRangeResults"
-        End        = true
+        Next = "AggregateAllBatches"
       }
 
-      # Single date processing (original flow) - directly fetch metadata
-      # Lambda handles default date (yesterday) if date is not provided
+      AggregateAllBatches = {
+        Type    = "Pass"
+        Comment = "Aggregate results from all date batches"
+        Parameters = {
+          "batches.$" : "$"
+          "totalBatches" : "States.ArrayLength($)"
+        }
+        End = true
+      }
+
+      # Step 1: Fetch SEC Forms and Congressional PTRs metadata (no downloads) - for single date mode
       FetchFormMetadata = {
         Type       = "Task"
         Resource   = module.politician_trades_fetcher.function_arn
-        Comment    = "Fetch SEC forms and Congressional PTRs metadata. Lambda defaults to yesterday if date not provided."
-        InputPath  = "$"
+        Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) metadata. Returns URLs/metadata only - NO downloads. Lambda defaults to yesterday if date not provided."
+        InputPath  = "$" # Pass through entire input - Lambda will extract 'date' or default
         ResultPath = "$.fetchResults"
         Next       = "ParallelPipelines"
         Retry = [
@@ -2187,7 +2191,7 @@ module "politician_trades_state_machine" {
         Cause = "Failed to fetch SEC forms or Congressional PTRs metadata"
       }
 
-      # Step 2: Parallel pipelines for SEC, Senate, House (shared by single-date flow)
+      # Step 2: Parallel pipelines for SEC, Senate, House
       # Architecture:
       #   Fetcher → fans out to 3 Transform states (parallel)
       #   Each Transform → Download → Match (separate pipeline per source)
@@ -2530,6 +2534,7 @@ module "politician_trades_state_machine" {
 
   # Lambda ARNs for IAM permissions (all Lambdas that Step Functions will invoke)
   lambda_function_arns = [
+    module.date_range_splitter.function_arn,
     module.politician_trades_fetcher.function_arn,
     module.politician_trades_downloader.function_arn,
     module.politician_trades_sec_matcher.function_arn,

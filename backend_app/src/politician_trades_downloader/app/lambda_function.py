@@ -45,62 +45,12 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
         accession = form_data.get('accessionNumber') or form_data.get('accession_number')
         form_type = form_data.get('formType') or form_data.get('form_type')
         filename = form_data.get('filename')
-        file_path = form_data.get('filePath') or form_data.get('file_path')  # Full path from daily index if available
         
         if not all([cik, accession]):
             logger.warning(f"⚠️ Missing required fields (CIK/accession) for form download: {form_data}")
             return None
         
-        # Initialize session
-        session = requests.Session()
-        session.headers.update({'User-Agent': SEC_USER_AGENT})
-        
-        # If we have a full file path from the daily index, use it directly
-        if file_path:
-            # file_path format: edgar/data/{CIK}/{ACCESSION}/{FILENAME}
-            # Construct full URL
-            full_url = f"https://www.sec.gov/Archives/{file_path}"
-            logger.info(f"📥 Using file path from daily index: {full_url}")
-            
-            try:
-                response = session.get(full_url, timeout=30)
-                if response.status_code == 200:
-                    file_content = response.content
-                    # Determine file extension from filename
-                    if filename and '.' in filename:
-                        file_ext = filename.split('.')[-1].lower()
-                    else:
-                        file_ext = 'xml'  # Default
-                    
-                    # Detect content type
-                    if file_ext == 'xml' or file_content.startswith(b'<?xml'):
-                        content_type = 'application/xml'
-                    elif file_ext == 'txt':
-                        content_type = 'text/plain'
-                    elif file_ext in ['htm', 'html']:
-                        content_type = 'text/html'
-                    else:
-                        content_type = 'application/octet-stream'
-                    
-                    # Generate S3 key
-                    s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{target_date}.{file_ext}"
-                    
-                    # Upload to S3
-                    s3_client.put_object(
-                        Bucket=S3_BUCKET,
-                        Key=s3_key,
-                        Body=file_content,
-                        ContentType=content_type
-                    )
-                    
-                    logger.info(f"✅ Stored SEC form to S3: {s3_key}")
-                    return s3_key
-                else:
-                    logger.warning(f"⚠️ HTTP {response.status_code} for index file path, falling back to URL construction")
-            except Exception as e:
-                logger.warning(f"⚠️ Error downloading from index file path: {e}, falling back to URL construction")
-        
-        # Fallback: Construct accession number with dashes (format: 0001234567-12-345678)
+        # Construct accession number with dashes (format: 0001234567-12-345678)
         # Accession numbers are 18 digits, formatted as 10-2-6
         if len(accession) == 18:
             accession_dashed = f"{accession[:10]}-{accession[10:12]}-{accession[12:]}"
@@ -109,6 +59,9 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
         
         # Build base URL
         base_url = f"https://www.sec.gov/Archives/edgar/data/{cik}/{accession_dashed}"
+        
+        session = requests.Session()
+        session.headers.update({'User-Agent': SEC_USER_AGENT})
         
         # Try to download the file
         file_content = None
