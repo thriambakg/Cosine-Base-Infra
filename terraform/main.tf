@@ -1736,27 +1736,6 @@ module "politician_trades_fetcher" {
   depends_on = [module.politician_trades_s3]
 }
 
-# Date Transformer Lambda - converts date range to array of dates or single date to array
-module "politician_trades_date_transformer" {
-  source = "./modules/lambda"
-
-  function_name = "${var.project_name}-pol-trades-date-transformer-${var.environment}"
-  description   = "Transforms date range or single date into array of dates for parallel processing"
-  runtime       = "python3.11"
-  handler       = "lambda_function.lambda_handler"
-  timeout       = 60
-  memory_size   = 256
-
-  source_dir = "${path.module}/../backend_app/src/politician_trades_date_transformer/app"
-
-  # Lambda layers - uses core_layer (standard library only, but core_layer for consistency)
-  layers = [
-    module.core_layer.layer_arn
-  ]
-
-  tags = var.common_tags
-}
-
 # Lambda 2: Download SEC Forms (parallel processing)
 module "politician_trades_downloader" {
   source = "./modules/lambda"
@@ -1929,6 +1908,121 @@ module "politician_trades_saver" {
   depends_on = [module.politician_trades_table]
 }
 
+# Glue Job: SEC ETL Pipeline
+# Handles fetching, downloading, parsing, and matching SEC filings (Forms 3, 4, 5)
+# This is separate from the Lambda-based Senate PTR pipeline due to scale (2000+ filings/day)
+module "politician_trades_sec_glue_job" {
+  source = "./modules/glue"
+
+  job_name       = "${var.project_name}-pol-trades-sec-etl-${var.environment}"
+  description    = "Glue ETL job for SEC filings: fetch daily index files, download forms, parse XML, match to politicians, save to DynamoDB"
+  glue_version   = "4.0"
+  python_version = "3"
+
+  # Source code directory (will be uploaded to S3)
+  source_code_dir     = "${path.module}/../backend_app/src/politician_trades_sec_glue/app"
+  script_s3_prefix    = "glue-scripts"
+  script_s3_bucket_id = module.politician_trades_s3.bucket_id
+
+  # Worker configuration - use G.1X workers for cost efficiency
+  worker_type       = "G.1X"
+  number_of_workers = 10 # Scale based on expected load (2000+ filings)
+  timeout           = 60 # 60 minutes (adjust based on processing time)
+  max_retries       = 1
+
+  # S3 buckets the job needs access to
+  s3_bucket_ids = [
+    module.politician_trades_s3.bucket_id
+  ]
+
+  # DynamoDB tables the job needs access to
+  dynamodb_table_names = [
+    module.politician_trades_table.table_name
+  ]
+
+  # Default arguments passed to the Glue job script
+  default_arguments = {
+    "--s3-bucket"                        = module.politician_trades_s3.bucket_id
+    "--dynamodb-table"                   = module.politician_trades_table.table_name
+    "--temp-dir"                         = "s3://${module.politician_trades_s3.bucket_id}/temp/"
+    "--enable-continuous-cloudwatch-log" = "true"
+    "--enable-metrics"                   = "true"
+  }
+
+  # Environment variables (passed as --env-var-* arguments)
+  environment_variables = {
+    "S3_BUCKET"      = module.politician_trades_s3.bucket_id
+    "DYNAMODB_TABLE" = module.politician_trades_table.table_name
+  }
+
+  # KMS keys for encryption (if using encrypted buckets)
+  kms_key_arns = [
+    module.kms.kms_key_arn
+  ]
+
+  # CloudWatch Logs
+  enable_cloudwatch_logs = true
+  log_retention_days     = 7
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.politician_trades_s3,
+    module.politician_trades_table,
+    module.kms
+  ]
+}
+
+# IAM Policy for Step Functions to invoke Glue jobs and access S3
+resource "aws_iam_policy" "step_functions_glue_s3_policy" {
+  name        = "${var.project_name}-stepfunctions-glue-s3-${var.environment}"
+  description = "Allows Step Functions to invoke Glue jobs and read S3 objects"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "glue:StartJobRun",
+          "glue:GetJobRun",
+          "glue:GetJobRuns",
+          "glue:BatchStopJobRun"
+        ]
+        Resource = [
+          module.politician_trades_sec_glue_job.job_arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:GetObjectVersion"
+        ]
+        Resource = [
+          "${module.politician_trades_s3.bucket_arn}/temp/*"
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = [
+          module.politician_trades_s3.bucket_arn
+        ]
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "temp/*"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
 # Step Functions State Machine for Politician Trades Aggregation
 module "politician_trades_state_machine" {
   source = "./modules/step-functions"
@@ -1936,484 +2030,348 @@ module "politician_trades_state_machine" {
   state_machine_name = "${var.project_name}-politician-trades-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition - outer layer handles date range transformation, inner layer processes single dates
+  # Step Functions definition with 4 steps (parallel downloads)
   definition = jsonencode({
-    Comment = "Politician trades aggregation - supports single date or date range. Date range is broken into individual dates processed in parallel. Each date goes through: fetch metadata → download forms → match trades → save to database."
-    StartAt = "TransformDateInput"
+    Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
+    StartAt = "FetchFormMetadata"
     States = {
-      # Transform date input: single date or date range → array of dates
-      TransformDateInput = {
-        Type    = "Pass"
-        Comment = "Transform input: if date range, will be expanded by DateRangeTransformer Lambda; if single date, pass through as array"
-        Parameters = {
-          # Check if we have a date range or single date
-          "input.$" = "$"
-        }
-        Next = "CheckDateRange"
-      }
-
-      # Check if input has date range or single date
-      CheckDateRange = {
-        Type = "Choice"
-        Choices = [
-          {
-            Variable  = "$.input.startDate"
-            IsPresent = true
-            Next      = "ExpandDateRange"
-          }
-        ]
-        Default = "SingleDateArray"
-      }
-
-      # Expand date range into array of dates using Lambda
-      ExpandDateRange = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::lambda:invoke"
-        Parameters = {
-          FunctionName = module.politician_trades_date_transformer.function_arn
-          Payload = {
-            "startDate.$" = "$.input.startDate"
-            "endDate.$"   = "$.input.endDate"
-          }
-        }
-        ResultSelector = {
-          "dates.$" = "$.Payload.dates"
-        }
-        ResultPath = "$.dateArray"
-        Next       = "ProcessDatesInParallel"
+      # Step 1: Fetch SEC Forms and Congressional PTRs metadata (no downloads)
+      FetchFormMetadata = {
+        Type       = "Task"
+        Resource   = module.politician_trades_fetcher.function_arn
+        Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) metadata. Returns URLs/metadata only - NO downloads. Lambda defaults to yesterday if date not provided."
+        InputPath  = "$" # Pass through entire input - Lambda will extract 'date' or default
+        ResultPath = "$.fetchResults"
+        Next       = "ParallelPipelines"
         Retry = [
           {
             ErrorEquals     = ["States.ALL"]
-            IntervalSeconds = 2
+            IntervalSeconds = 30
             MaxAttempts     = 3
             BackoffRate     = 2.0
           }
         ]
-      }
-
-      # Single date - use same Lambda to wrap in array (handles both cases)
-      SingleDateArray = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::lambda:invoke"
-        Parameters = {
-          FunctionName = module.politician_trades_date_transformer.function_arn
-          Payload = {
-            "date.$" = "$.input.date"
-          }
-        }
-        ResultSelector = {
-          "dates.$" = "$.Payload.dates"
-        }
-        ResultPath = "$.dateArray"
-        Next       = "ProcessDatesInParallel"
-        Retry = [
+        Catch = [
           {
-            ErrorEquals     = ["States.ALL"]
-            IntervalSeconds = 2
-            MaxAttempts     = 3
-            BackoffRate     = 2.0
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "FetchFormsFailed"
           }
         ]
       }
 
-      # Process all dates in parallel using Map
-      ProcessDatesInParallel = {
-        Type           = "Map"
-        Comment        = "Process each date in parallel through the full pipeline"
-        ItemsPath      = "$.dateArray.dates"
-        MaxConcurrency = 50
-        Iterator = {
-          StartAt = "ProcessSingleDate"
-          States = {
-            ProcessSingleDate = {
-              Type    = "Pass"
-              Comment = "Single date pipeline - wraps existing state machine logic"
-              Parameters = {
-                "date.$" = "$"
+      FetchFormsFailed = {
+        Type  = "Fail"
+        Error = "FetchFormsFailed"
+        Cause = "Failed to fetch SEC forms or Congressional PTRs metadata"
+      }
+
+      # Step 2: Parallel pipelines for SEC, Senate, House
+      # Architecture:
+      #   Fetcher → fans out to 3 Transform states (parallel)
+      #   Each Transform → Download → Match (separate pipeline per source)
+      #   All 3 pipelines run in parallel, then aggregate results
+      ParallelPipelines = {
+        Type    = "Parallel"
+        Comment = "Three parallel pipelines: SEC, Senate, House. Each: Transform → Download → Match. All run simultaneously."
+        Branches = [
+          {
+            # SEC Pipeline - Now uses Glue Job (handles fetch + download + match + save)
+            StartAt = "ProcessSECFilings"
+            States = {
+              ProcessSECFilings = {
+                Type     = "Task"
+                Comment  = "Glue ETL job: Fetch SEC daily index, download forms, parse XML, match to politicians, save to DynamoDB"
+                Resource = "arn:aws:states:::glue:startJobRun.sync"
+                Parameters = {
+                  JobName = module.politician_trades_sec_glue_job.job_name
+                  Arguments = {
+                    "--date" = "$.fetchResults.date"
+                  }
+                }
+                Retry = [
+                  {
+                    ErrorEquals     = ["Glue.ConcurrentRunsExceededException", "Glue.ServiceException"]
+                    IntervalSeconds = 60
+                    MaxAttempts     = 3
+                    BackoffRate     = 2.0
+                  },
+                  {
+                    ErrorEquals     = ["States.ALL"]
+                    IntervalSeconds = 30
+                    MaxAttempts     = 2
+                    BackoffRate     = 2.0
+                  }
+                ]
+                Catch = [
+                  {
+                    ErrorEquals = ["States.ALL"]
+                    ResultPath  = "$.error"
+                    Next        = "SECProcessingFailed"
+                  }
+                ]
+                ResultPath = "$.secResults"
+                Next       = "LoadSECResults"
               }
-              Next = "FetchFormMetadata"
-            }
-
-            # Step 1: Fetch SEC Forms and Congressional PTRs metadata (no downloads)
-            FetchFormMetadata = {
-              Type       = "Task"
-              Resource   = module.politician_trades_fetcher.function_arn
-              Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) metadata for a single date. Input must have 'date' field."
-              InputPath  = "$"
-              ResultPath = "$.fetchResults"
-              Next       = "ParallelPipelines"
-              Retry = [
-                {
-                  ErrorEquals     = ["States.ALL"]
-                  IntervalSeconds = 30
-                  MaxAttempts     = 3
-                  BackoffRate     = 2.0
+              SECProcessingFailed = {
+                Type    = "Pass"
+                Comment = "Continue even if SEC processing fails - Glue job writes directly to DynamoDB"
+                Parameters = {
+                  "success" : false
+                  "error.$" : "$.error.Error"
+                  "errorCause.$" : "$.error.Cause"
+                  "matchedTrades" : []
+                  "totalMatched" : 0
                 }
-              ]
-              Catch = [
-                {
-                  ErrorEquals = ["States.ALL"]
-                  ResultPath  = "$.error"
-                  Next        = "FetchFormsFailed"
+                Next = "LoadSECResults"
+              }
+              LoadSECResults = {
+                Type     = "Task"
+                Comment  = "Load SEC results summary from S3 (written by Glue job)"
+                Resource = "arn:aws:states:::aws-sdk:s3:getObject"
+                Parameters = {
+                  Bucket  = module.politician_trades_s3.bucket_id
+                  "Key.$" = "States.Format('temp/sec-results-{}.json', $.fetchResults.date)"
                 }
-              ]
+                ResultPath = "$.secSummary"
+                Next       = "TransformSECResults"
+              }
+              TransformSECResults = {
+                Type    = "Pass"
+                Comment = "Transform SEC results to match expected format"
+                Parameters = {
+                  "matchedTrades.$"  = "States.StringToJson($.secSummary.Body).matchedTrades"
+                  "totalMatched.$"   = "States.StringToJson($.secSummary.Body).totalMatched"
+                  "unmatchedCount.$" = "States.StringToJson($.secSummary.Body).unmatchedCount"
+                  "date.$"           = "$.fetchResults.date"
+                }
+                End = true
+              }
             }
-
-            FetchFormsFailed = {
-              Type  = "Fail"
-              Error = "FetchFormsFailed"
-              Cause = "Failed to fetch SEC forms or Congressional PTRs metadata"
-            }
-
-            # Step 2: Parallel pipelines for SEC, Senate, House
-            # Architecture:
-            #   Fetcher → fans out to 3 Transform states (parallel)
-            #   Each Transform → Download → Match (separate pipeline per source)
-            #   All 3 pipelines run in parallel, then aggregate results
-            ParallelPipelines = {
-              Type    = "Parallel"
-              Comment = "Three parallel pipelines: SEC, Senate, House. Each: Transform → Download → Match. All run simultaneously."
-              Branches = [
-                {
-                  # SEC Pipeline
-                  StartAt = "TransformSEC"
+          },
+          {
+            # Senate Pipeline
+            StartAt = "TransformSenate"
+            States = {
+              TransformSenate = {
+                Type    = "Pass"
+                Comment = "Transform: Extract senatePTRs array from fetchResults"
+                Parameters = {
+                  "date.$" : "$.fetchResults.date",
+                  "items.$" : "$.fetchResults.senatePTRs",
+                  "source" : "senate"
+                }
+                Next = "DownloadSenate"
+              }
+              DownloadSenate = {
+                Type           = "Map"
+                Comment        = "Download Senate PTRs in parallel - saves to trades/YYYY-MM-DD/senate/*"
+                ItemsPath      = "$.items"
+                MaxConcurrency = 10
+                Iterator = {
+                  StartAt = "DownloadSenatePTR"
                   States = {
-                    TransformSEC = {
-                      Type    = "Pass"
-                      Comment = "Transform: Extract secForms array from fetchResults"
-                      Parameters = {
-                        "date.$" : "$.fetchResults.date",
-                        "items.$" : "$.fetchResults.secForms",
-                        "source" : "sec"
-                      }
-                      Next = "DownloadSEC"
-                    }
-                    DownloadSEC = {
-                      Type           = "Map"
-                      Comment        = "Download SEC forms in parallel - saves to trades/YYYY-MM-DD/sec/*"
-                      ItemsPath      = "$.items"
-                      MaxConcurrency = 10
-                      Iterator = {
-                        StartAt = "DownloadForm"
-                        States = {
-                          DownloadForm = {
-                            Type     = "Task"
-                            Resource = module.politician_trades_downloader.function_arn
-                            Comment  = "Download a single SEC form"
-                            Retry = [
-                              {
-                                ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
-                                IntervalSeconds = 60
-                                MaxAttempts     = 5
-                                BackoffRate     = 2.0
-                              },
-                              {
-                                ErrorEquals     = ["States.ALL"]
-                                IntervalSeconds = 10
-                                MaxAttempts     = 2
-                                BackoffRate     = 2.0
-                              }
-                            ]
-                            Catch = [
-                              {
-                                ErrorEquals = ["States.ALL"]
-                                ResultPath  = "$.error"
-                                Next        = "DownloadFailed"
-                              }
-                            ]
-                            End = true
-                          }
-                          DownloadFailed = {
-                            Type    = "Pass"
-                            Comment = "Continue even if download fails"
-                            Parameters = {
-                              "success" : false,
-                              "error.$" : "$.error.Error",
-                              "errorCause.$" : "$.error.Cause",
-                              "formType" : null,
-                              "cik" : null,
-                              "accessionNumber" : null,
-                              "filingDate" : null
-                            }
-                            End = true
-                          }
+                    DownloadSenatePTR = {
+                      Type     = "Task"
+                      Resource = module.politician_trades_downloader.function_arn
+                      Comment  = "Download a single Senate PTR"
+                      Retry = [
+                        {
+                          ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                          IntervalSeconds = 60
+                          MaxAttempts     = 5
+                          BackoffRate     = 2.0
+                        },
+                        {
+                          ErrorEquals     = ["States.ALL"]
+                          IntervalSeconds = 10
+                          MaxAttempts     = 2
+                          BackoffRate     = 2.0
                         }
-                      }
-                      ResultPath = "$.downloadResults"
-                      Next       = "MatchSEC"
-                    }
-                    MatchSEC = {
-                      Type           = "Map"
-                      Comment        = "Match trades from SEC forms to politicians - reads from trades/YYYY-MM-DD/sec/*"
-                      ItemsPath      = "$.downloadResults"
-                      MaxConcurrency = 10
-                      Iterator = {
-                        StartAt = "MatchFileSec"
-                        States = {
-                          MatchFileSec = {
-                            Type     = "Task"
-                            Resource = module.politician_trades_sec_matcher.function_arn
-                            Comment  = "Match trades from a single SEC file to politicians"
-                            Retry = [
-                              {
-                                ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
-                                IntervalSeconds = 60
-                                MaxAttempts     = 5
-                                BackoffRate     = 2.0
-                              },
-                              {
-                                ErrorEquals     = ["States.ALL"]
-                                IntervalSeconds = 10
-                                MaxAttempts     = 2
-                                BackoffRate     = 2.0
-                              }
-                            ]
-                            Catch = [
-                              {
-                                ErrorEquals = ["States.ALL"]
-                                ResultPath  = "$.error"
-                                Next        = "MatchFailedSec"
-                              }
-                            ]
-                            End = true
-                          }
-                          MatchFailedSec = {
-                            Type    = "Pass"
-                            Comment = "Continue even if matching fails"
-                            Result  = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
-                            End     = true
-                          }
+                      ]
+                      Catch = [
+                        {
+                          ErrorEquals = ["States.ALL"]
+                          ResultPath  = "$.error"
+                          Next        = "DownloadSenatePTRFailed"
                         }
-                      }
-                      ResultPath = "$.matchResults"
-                      End        = true
+                      ]
+                      End = true
                     }
-                  }
-                },
-                {
-                  # Senate Pipeline
-                  StartAt = "TransformSenate"
-                  States = {
-                    TransformSenate = {
+                    DownloadSenatePTRFailed = {
                       Type    = "Pass"
-                      Comment = "Transform: Extract senatePTRs array from fetchResults"
-                      Parameters = {
-                        "date.$" : "$.fetchResults.date",
-                        "items.$" : "$.fetchResults.senatePTRs",
-                        "source" : "senate"
-                      }
-                      Next = "DownloadSenate"
-                    }
-                    DownloadSenate = {
-                      Type           = "Map"
-                      Comment        = "Download Senate PTRs in parallel - saves to trades/YYYY-MM-DD/senate/*"
-                      ItemsPath      = "$.items"
-                      MaxConcurrency = 10
-                      Iterator = {
-                        StartAt = "DownloadSenatePTR"
-                        States = {
-                          DownloadSenatePTR = {
-                            Type     = "Task"
-                            Resource = module.politician_trades_downloader.function_arn
-                            Comment  = "Download a single Senate PTR"
-                            Retry = [
-                              {
-                                ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
-                                IntervalSeconds = 60
-                                MaxAttempts     = 5
-                                BackoffRate     = 2.0
-                              },
-                              {
-                                ErrorEquals     = ["States.ALL"]
-                                IntervalSeconds = 10
-                                MaxAttempts     = 2
-                                BackoffRate     = 2.0
-                              }
-                            ]
-                            Catch = [
-                              {
-                                ErrorEquals = ["States.ALL"]
-                                ResultPath  = "$.error"
-                                Next        = "DownloadSenatePTRFailed"
-                              }
-                            ]
-                            End = true
-                          }
-                          DownloadSenatePTRFailed = {
-                            Type    = "Pass"
-                            Comment = "Continue even if download fails"
-                            Result  = { "success" : false, "error" : "Download failed" }
-                            End     = true
-                          }
-                        }
-                      }
-                      ResultPath = "$.downloadResults"
-                      Next       = "MatchSenate"
-                    }
-                    MatchSenate = {
-                      Type           = "Map"
-                      Comment        = "Match trades from Senate PTRs to politicians - reads from trades/YYYY-MM-DD/senate/*"
-                      ItemsPath      = "$.downloadResults"
-                      MaxConcurrency = 10
-                      Iterator = {
-                        StartAt = "MatchFileSenate"
-                        States = {
-                          MatchFileSenate = {
-                            Type     = "Task"
-                            Resource = module.politician_trades_senate_matcher.function_arn
-                            Comment  = "Match trades from a single Senate PTR to politicians"
-                            Retry = [
-                              {
-                                ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
-                                IntervalSeconds = 60
-                                MaxAttempts     = 5
-                                BackoffRate     = 2.0
-                              },
-                              {
-                                ErrorEquals     = ["States.ALL"]
-                                IntervalSeconds = 10
-                                MaxAttempts     = 2
-                                BackoffRate     = 2.0
-                              }
-                            ]
-                            Catch = [
-                              {
-                                ErrorEquals = ["States.ALL"]
-                                ResultPath  = "$.error"
-                                Next        = "MatchFailedSenate"
-                              }
-                            ]
-                            End = true
-                          }
-                          MatchFailedSenate = {
-                            Type    = "Pass"
-                            Comment = "Continue even if matching fails"
-                            Result  = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
-                            End     = true
-                          }
-                        }
-                      }
-                      ResultPath = "$.matchResults"
-                      End        = true
-                    }
-                  }
-                },
-                {
-                  # House Pipeline (placeholder - skip for now)
-                  StartAt = "TransformHouse"
-                  States = {
-                    TransformHouse = {
-                      Type    = "Pass"
-                      Comment = "Transform: Extract housePTRs from fetchResults (placeholder - not implemented)"
-                      Parameters = {
-                        "date.$" : "$.fetchResults.date",
-                        "items.$" : "$.fetchResults.housePTRs",
-                        "source" : "house"
-                      }
-                      Next = "MatchHouse"
-                    }
-                    MatchHouse = {
-                      Type    = "Pass"
-                      Comment = "House pipeline placeholder - returns empty results"
-                      Result  = []
+                      Comment = "Continue even if download fails"
+                      Result  = { "success" : false, "error" : "Download failed" }
                       End     = true
                     }
                   }
                 }
-              ]
-              ResultPath = "$.pipelineResults"
-              Next       = "AggregateMatches"
-            }
-
-
-            # Aggregate match results from parallel pipelines
-            # pipelineResults is an array: [SEC branch result, Senate branch result]
-            # Each branch result has matchResults containing matched trades
-            AggregateMatches = {
-              Type    = "Pass"
-              Comment = "Extract match results from parallel pipeline branches for aggregator"
-              Parameters = {
-                # pipelineResults is array from Parallel state:
-                # [0] = SEC branch result (has matchResults)
-                # [1] = Senate branch result (has matchResults)
-                # [2] = House branch result (empty for now)
-                "secMatchResults.$" : "$.pipelineResults[0].matchResults",
-                "senateMatchResults.$" : "$.pipelineResults[1].matchResults",
-                "houseMatchResults.$" : "$.pipelineResults[2]", # House pipeline returns empty array
-                "date.$" : "$.fetchResults.date"
+                ResultPath = "$.downloadResults"
+                Next       = "MatchSenate"
               }
-              Next = "AggregateMatchesTask"
-            }
-
-            AggregateMatchesTask = {
-              Type       = "Task"
-              Resource   = module.politician_trades_matcher.function_arn
-              Comment    = "Aggregate matched trades from all sources (SEC, Senate, House)"
-              ResultPath = "$.aggregateResults"
-              Next       = "SaveTrades"
-              Retry = [
-                {
-                  ErrorEquals     = ["States.ALL"]
-                  IntervalSeconds = 30
-                  MaxAttempts     = 3
-                  BackoffRate     = 2.0
+              MatchSenate = {
+                Type           = "Map"
+                Comment        = "Match trades from Senate PTRs to politicians - reads from trades/YYYY-MM-DD/senate/*"
+                ItemsPath      = "$.downloadResults"
+                MaxConcurrency = 10
+                Iterator = {
+                  StartAt = "MatchFileSenate"
+                  States = {
+                    MatchFileSenate = {
+                      Type     = "Task"
+                      Resource = module.politician_trades_senate_matcher.function_arn
+                      Comment  = "Match trades from a single Senate PTR to politicians"
+                      Retry = [
+                        {
+                          ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                          IntervalSeconds = 60
+                          MaxAttempts     = 5
+                          BackoffRate     = 2.0
+                        },
+                        {
+                          ErrorEquals     = ["States.ALL"]
+                          IntervalSeconds = 10
+                          MaxAttempts     = 2
+                          BackoffRate     = 2.0
+                        }
+                      ]
+                      Catch = [
+                        {
+                          ErrorEquals = ["States.ALL"]
+                          ResultPath  = "$.error"
+                          Next        = "MatchFailedSenate"
+                        }
+                      ]
+                      End = true
+                    }
+                    MatchFailedSenate = {
+                      Type    = "Pass"
+                      Comment = "Continue even if matching fails"
+                      Result  = { "matchedTrades" : [], "unmatchedCount" : 1, "error" : "Match failed" }
+                      End     = true
+                    }
+                  }
                 }
-              ]
-              Catch = [
-                {
-                  ErrorEquals = ["States.ALL"]
-                  ResultPath  = "$.error"
-                  Next        = "MatchTradesFailed"
-                }
-              ]
+                ResultPath = "$.matchResults"
+                End        = true
+              }
             }
-
-            MatchTradesFailed = {
-              Type  = "Fail"
-              Error = "MatchTradesFailed"
-              Cause = "Failed to match trades to politicians"
-            }
-
-            # Step 4: Save Trades to Database
-            SaveTrades = {
-              Type       = "Task"
-              Resource   = module.politician_trades_saver.function_arn
-              Comment    = "Batch write matched trades to DynamoDB with idempotency"
-              ResultPath = "$.saveResults"
-              End        = true
-              Retry = [
-                {
-                  ErrorEquals     = ["States.ALL"]
-                  IntervalSeconds = 30
-                  MaxAttempts     = 3
-                  BackoffRate     = 2.0
+          },
+          {
+            # House Pipeline (placeholder - skip for now)
+            StartAt = "TransformHouse"
+            States = {
+              TransformHouse = {
+                Type    = "Pass"
+                Comment = "Transform: Extract housePTRs from fetchResults (placeholder - not implemented)"
+                Parameters = {
+                  "date.$" : "$.fetchResults.date",
+                  "items.$" : "$.fetchResults.housePTRs",
+                  "source" : "house"
                 }
-              ]
-              Catch = [
-                {
-                  ErrorEquals = ["States.ALL"]
-                  ResultPath  = "$.error"
-                  Next        = "SaveTradesFailed"
-                }
-              ]
-            }
-
-            SaveTradesFailed = {
-              Type  = "Fail"
-              Error = "SaveTradesFailed"
-              Cause = "Failed to save trades to database"
+                Next = "MatchHouse"
+              }
+              MatchHouse = {
+                Type    = "Pass"
+                Comment = "House pipeline placeholder - returns empty results"
+                Result  = []
+                End     = true
+              }
             }
           }
+        ]
+        ResultPath = "$.pipelineResults"
+        Next       = "AggregateMatches"
+      }
+
+
+      # Aggregate match results from parallel pipelines
+      # pipelineResults is an array: [SEC branch result, Senate branch result]
+      # Each branch result has matchResults containing matched trades
+      AggregateMatches = {
+        Type    = "Pass"
+        Comment = "Extract match results from parallel pipeline branches for aggregator"
+        Parameters = {
+          # pipelineResults is array from Parallel state:
+          # [0] = SEC branch result (has matchedTrades from TransformSECResults)
+          # [1] = Senate branch result (has matchResults)
+          # [2] = House branch result (empty for now)
+          "secMatchResults.$" : "$.pipelineResults[0]",
+          "senateMatchResults.$" : "$.pipelineResults[1].matchResults",
+          "houseMatchResults.$" : "$.pipelineResults[2]", # House pipeline returns empty array
+          "date.$" : "$.fetchResults.date"
         }
-        ResultPath = "$.dateResults"
+        Next = "AggregateMatchesTask"
+      }
+
+      AggregateMatchesTask = {
+        Type       = "Task"
+        Resource   = module.politician_trades_matcher.function_arn
+        Comment    = "Aggregate matched trades from all sources (SEC, Senate, House)"
+        ResultPath = "$.aggregateResults"
+        Next       = "SaveTrades"
+        Retry = [
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 30
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "MatchTradesFailed"
+          }
+        ]
+      }
+
+      MatchTradesFailed = {
+        Type  = "Fail"
+        Error = "MatchTradesFailed"
+        Cause = "Failed to match trades to politicians"
+      }
+
+      # Step 4: Save Trades to Database
+      SaveTrades = {
+        Type       = "Task"
+        Resource   = module.politician_trades_saver.function_arn
+        Comment    = "Batch write matched trades to DynamoDB with idempotency"
+        ResultPath = "$.saveResults"
         End        = true
+        Retry = [
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 30
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "SaveTradesFailed"
+          }
+        ]
+      }
+
+      SaveTradesFailed = {
+        Type  = "Fail"
+        Error = "SaveTradesFailed"
+        Cause = "Failed to save trades to database"
       }
     }
   })
 
+  # Additional IAM policies for Glue and S3 access
+  additional_policy_arns = [
+    aws_iam_policy.step_functions_glue_s3_policy.arn
+  ]
+
   # Lambda ARNs for IAM permissions (all Lambdas that Step Functions will invoke)
   lambda_function_arns = [
-    module.politician_trades_date_transformer.function_arn,
     module.politician_trades_fetcher.function_arn,
     module.politician_trades_downloader.function_arn,
     module.politician_trades_sec_matcher.function_arn,
@@ -2454,7 +2412,8 @@ module "politician_trades_scheduler" {
   target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
 
   target_input = jsonencode({
-    date = "{{aws:eventTime|yyyy-MM-dd-1d}}"
+    source    = "scheduler-daily"
+    timestamp = "{{.Timestamp}}"
   })
 
   purpose     = "PoliticianTradesAggregation"
