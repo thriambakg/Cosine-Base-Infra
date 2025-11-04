@@ -1946,7 +1946,7 @@ module "politician_trades_state_machine" {
           "endDate.$"   = "$.endDate"
         }
         ResultSelector = {
-          "dates.$" = "$.dates"
+          "dates.$" = "$.Payload.dates"
         }
         Next = "ProcessDateRange"
         Retry = [
@@ -1966,14 +1966,22 @@ module "politician_trades_state_machine" {
         ItemsPath      = "$.dates"
         MaxConcurrency = 5
         Iterator = {
-          StartAt = "FetchFormMetadataDate"
+          StartAt = "WrapDateInput"
           States = {
+            WrapDateInput = {
+              Type    = "Pass"
+              Comment = "Wrap date string in object for processing"
+              Parameters = {
+                "date.$" = "$"
+              }
+              Next = "FetchFormMetadataDate"
+            }
             FetchFormMetadataDate = {
               Type     = "Task"
               Resource = module.politician_trades_fetcher.function_arn
               Comment  = "Fetch SEC forms and Congressional PTRs metadata for a single date"
               Parameters = {
-                "date.$" = "$"
+                "date.$" = "$.date"
               }
               ResultPath = "$.fetchResults"
               Next       = "ParallelPipelinesDate"
@@ -1997,7 +2005,7 @@ module "politician_trades_state_machine" {
               Type    = "Pass"
               Comment = "Continue even if fetch fails for this date"
               Result = {
-                "date.$"     = "$"
+                "date.$"     = "$.date"
                 "error"      = "Fetch failed"
                 "secForms"   = []
                 "senatePTRs" = []
