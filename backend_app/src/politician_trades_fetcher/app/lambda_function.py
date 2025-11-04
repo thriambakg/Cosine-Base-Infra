@@ -369,20 +369,28 @@ def lambda_handler(event, context):
     """
     Lambda handler for fetching SEC forms and Congressional PTRs
     
-    Supports three input modes:
+    Supports four input modes:
     
-    1. Single date (backwards compatible):
+    1. Generate dates list (for Step Functions date range processing):
+    {
+        "action": "generateDates",
+        "startDate": "2025-01-01",
+        "endDate": "2025-01-31"
+    }
+    Returns: {"dates": ["2025-01-01", "2025-01-02", ...]}
+    
+    2. Single date (backwards compatible):
     {
         "date": "2025-10-30"
     }
     
-    2. Date range (for backfilling historical data):
+    3. Date range (DEPRECATED - use Step Functions Map state instead):
     {
         "startDate": "2025-01-01",
         "endDate": "2025-12-31"
     }
     
-    3. Default (from EventBridge daily scheduler):
+    4. Default (from EventBridge daily scheduler):
     {
         "source": "scheduler-daily",
         "timestamp": "2025-10-31T00:00:00Z"
@@ -413,15 +421,48 @@ def lambda_handler(event, context):
     if not S3_BUCKET:
         raise ValueError("S3_BUCKET environment variable not set")
     
+    # Handle special "generateDates" action for Step Functions date range processing
+    if isinstance(event, dict) and event.get('action') == 'generateDates':
+        start_date_str = event.get('startDate')
+        end_date_str = event.get('endDate')
+        
+        if not start_date_str or not end_date_str:
+            raise ValueError("startDate and endDate required for generateDates action")
+        
+        try:
+            start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
+            end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+            
+            if start_date > end_date:
+                raise ValueError("startDate must be <= endDate")
+            
+            # Generate list of dates
+            dates = []
+            current_date = start_date
+            while current_date <= end_date:
+                dates.append(current_date.strftime('%Y-%m-%d'))
+                current_date += timedelta(days=1)
+            
+            logger.info(f"📅 Generated {len(dates)} dates from {start_date_str} to {end_date_str}")
+            return {
+                "dates": dates,
+                "startDate": start_date_str,
+                "endDate": end_date_str,
+                "totalDays": len(dates)
+            }
+        except ValueError as e:
+            logger.error(f"❌ Invalid date format in generateDates: {e}")
+            raise ValueError(f"Invalid date range: startDate='{start_date_str}', endDate='{end_date_str}'. Expected YYYY-MM-DD format.")
+    
     # Parse date input - support both single date and date range
     # Options:
     # 1. Single date: {"date": "2025-10-30"}
-    # 2. Date range: {"startDate": "2025-01-01", "endDate": "2025-12-31"}
+    # 2. Date range: {"startDate": "2025-01-01", "endDate": "2025-12-31"} (DEPRECATED - use Step Functions Map instead)
     # 3. Default: yesterday's date (for scheduled runs)
     target_dates = []
     
     if isinstance(event, dict):
-        if event.get('startDate') and event.get('endDate'):
+        if event.get('startDate') and event.get('endDate') and not event.get('action'):
             # Date range mode - backfill historical data
             start_date_str = event.get('startDate')
             end_date_str = event.get('endDate')
