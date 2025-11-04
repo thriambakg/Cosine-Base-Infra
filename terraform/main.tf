@@ -1770,18 +1770,52 @@ module "politician_trades_downloader" {
   depends_on = [module.politician_trades_s3]
 }
 
-# Lambda 3: Match Trades to Politicians (single file, parallel processing)
-module "politician_trades_single_matcher" {
+# Lambda 3a: Match SEC Trades to Politicians (single file, parallel processing)
+module "politician_trades_sec_matcher" {
   source = "./modules/lambda"
 
-  function_name = "${var.project_name}-pol-trades-matcher-${var.environment}"
-  description   = "Matches trades from a single file to politicians (invoked in parallel)"
+  function_name = "${var.project_name}-pol-trades-sec-matcher-${var.environment}"
+  description   = "Matches trades from a single SEC form to politicians (invoked in parallel)"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
   timeout       = 300  # 5 minutes per file (for PDF parsing)
   memory_size   = 2048 # Higher memory for PDF parsing and text processing
 
-  source_dir = "${path.module}/../backend_app/src/politician_trades_single_matcher/app"
+  source_dir = "${path.module}/../backend_app/src/politician_trades_sec_matcher/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET = module.politician_trades_s3.bucket_id
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    aws_iam_policy.lambda_politician_trades_s3_policy.arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.politician_trades_s3]
+}
+
+# Lambda 3b: Match Senate PTR Trades to Politicians (single file, parallel processing)
+module "politician_trades_senate_matcher" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-pol-trades-senate-matcher-${var.environment}"
+  description   = "Matches trades from a single Senate PTR to politicians (invoked in parallel)"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 300  # 5 minutes per file (for PDF parsing and Textract)
+  memory_size   = 2048 # Higher memory for PDF parsing, text processing, and Textract
+
+  source_dir = "${path.module}/../backend_app/src/politician_trades_senate_matcher/app"
 
   # Environment variables
   environment_variables = {
@@ -2004,7 +2038,7 @@ module "politician_trades_state_machine" {
                   States = {
                     MatchFileSec = {
                       Type     = "Task"
-                      Resource = module.politician_trades_single_matcher.function_arn
+                      Resource = module.politician_trades_sec_matcher.function_arn
                       Comment  = "Match trades from a single SEC file to politicians"
                       Retry = [
                         {
@@ -2112,7 +2146,7 @@ module "politician_trades_state_machine" {
                   States = {
                     MatchFileSenate = {
                       Type     = "Task"
-                      Resource = module.politician_trades_single_matcher.function_arn
+                      Resource = module.politician_trades_senate_matcher.function_arn
                       Comment  = "Match trades from a single Senate PTR to politicians"
                       Retry = [
                         {
@@ -2262,7 +2296,8 @@ module "politician_trades_state_machine" {
   lambda_function_arns = [
     module.politician_trades_fetcher.function_arn,
     module.politician_trades_downloader.function_arn,
-    module.politician_trades_single_matcher.function_arn,
+    module.politician_trades_sec_matcher.function_arn,
+    module.politician_trades_senate_matcher.function_arn,
     module.politician_trades_matcher.function_arn,
     module.politician_trades_saver.function_arn
   ]

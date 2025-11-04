@@ -1256,12 +1256,10 @@ def lambda_handler(event, context):
                 return {
                     "s3Key": s3_key,
                     "s3_key": s3_key,
-                    "formType": event.get('formType') or event.get('form_type'),
-                    "form_type": event.get('formType') or event.get('form_type'),
+                    "formType": event.get('formType'),
                     "source": source,
                     "filingDate": target_date,
-                    "filing_date": target_date,
-                    "filer_name": event.get('filer_name'),
+                    "filer_name": event.get('filer_name'),  # Always pass through filer_name
                     "transactions": event.get('transactions', []),  # Pass through pre-extracted transactions
                     "success": True
                 }
@@ -1276,11 +1274,10 @@ def lambda_handler(event, context):
                 return {
                     "s3Key": s3_key,
                     "s3_key": s3_key,  # Support both formats
-                    "formType": event.get('formType') or event.get('form_type'),
-                    "form_type": event.get('formType') or event.get('form_type'),
+                    "formType": event.get('formType'),
                     "source": source or ('house' if 'house' in str(event.get('formType', '')).lower() else 'senate'),
                     "filingDate": target_date,
-                    "filing_date": target_date,
+                    "filer_name": event.get('filer_name'),  # Always pass through filer_name if available
                     "success": True
                 }
         else:
@@ -1294,10 +1291,10 @@ def lambda_handler(event, context):
             # Return format that matches matcher Lambda expectations
             return {
                 "s3Key": s3_key,
-                "formType": event.get('formType') or event.get('form_type'),
+                "formType": event.get('formType'),
                 "cik": event.get('cik'),
                 "filingDate": target_date,
-                "accessionNumber": event.get('accessionNumber') or event.get('accession_number'),
+                "accessionNumber": event.get('accessionNumber'),
                 "source": "sec",
                 "success": True
             }

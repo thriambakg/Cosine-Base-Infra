@@ -366,10 +366,8 @@ class CongressionalPTRScraper:
                     'url': view_url,
                     'view_url': view_url,
                     'formType': 'senate_ptr',
-                    'form_type': 'senate_ptr',
                     'source': 'senate',
                     'filingDate': filing_date_str if filing_date_str else date_str,
-                    'filing_date': filing_date_str if filing_date_str else date_str,
                     'filer_name': filer_name,
                     'uuid': uuid,
                     'transactions': []  # Empty - will be parsed by matcher from S3

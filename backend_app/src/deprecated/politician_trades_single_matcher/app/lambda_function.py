@@ -109,6 +109,38 @@ def load_politician_list() -> List[Dict[str, Any]]:
         return []
 
 
+def is_valid_filer_name(filer_name: str) -> bool:
+    """
+    Filter out obviously invalid filer names (OCR noise, garbage text)
+    
+    Args:
+        filer_name: Filer name to validate
+    
+    Returns:
+        True if name appears valid, False otherwise
+    """
+    if not filer_name or len(filer_name.strip()) < 3:
+        return False
+    
+    # Filter out common OCR noise patterns
+    invalid_patterns = [
+        r'^[Yy]r\s+[Dd]ay',  # "Yr Day" - common OCR error
+        r'^[A-Z]{1,2}\s+[A-Z]{1,2}$',  # Single letters like "A B"
+        r'^\d+$',  # Pure numbers
+        r'^[^\w\s]+$',  # Only special characters
+    ]
+    
+    for pattern in invalid_patterns:
+        if re.match(pattern, filer_name.strip()):
+            return False
+    
+    # Must contain at least one letter
+    if not re.search(r'[A-Za-z]', filer_name):
+        return False
+    
+    return True
+
+
 def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     """
     Fuzzy match a filer name to a politician using Levenshtein distance
@@ -386,9 +418,9 @@ def parse_sec_form_pdf(s3_key: str) -> List[Dict[str, Any]]:
     return trades
 
 
-def extract_image_url_from_html(html_content: str, flexible: bool = False) -> Optional[str]:
+def extract_image_urls_from_html(html_content: str, flexible: bool = False) -> List[str]:
     """
-    Extract image URL from HTML content
+    Extract all image URLs from HTML content
     Looks for <img> tags with class="filingImage" or similar patterns
     
     Args:
@@ -396,41 +428,42 @@ def extract_image_url_from_html(html_content: str, flexible: bool = False) -> Op
         flexible: If True, use more flexible patterns to find any image
     
     Returns:
-        Image URL if found, None otherwise
+        List of image URLs found (empty list if none found)
     """
+    image_urls = []
     try:
-        # Pattern 1: Look for filingImage class (most common for Senate PTRs)
+        # Pattern 1: Look for filingImage class (most common for Senate PTRs) - get ALL matches
         pattern1 = r'<img[^>]*class=["\']filingImage["\'][^>]*src=["\']([^"\']+)["\']'
-        match = re.search(pattern1, html_content, re.IGNORECASE)
-        if match:
-            image_url = match.group(1)
-            logger.info(f"✅ Extracted image URL using filingImage pattern: {image_url}")
-            return image_url
+        matches = re.findall(pattern1, html_content, re.IGNORECASE)
+        if matches:
+            image_urls.extend(matches)
+            logger.info(f"✅ Extracted {len(matches)} image URL(s) using filingImage pattern")
+            return image_urls
         
         # Pattern 2: Look for any img tag with src containing efd-media-public.senate.gov
         if flexible:
             pattern2 = r'<img[^>]*src=["\']([^"\']*efd-media-public\.senate\.gov[^"\']+)["\']'
-            match = re.search(pattern2, html_content, re.IGNORECASE)
-            if match:
-                image_url = match.group(1)
-                logger.info(f"✅ Extracted image URL using efd-media-public pattern: {image_url}")
-                return image_url
+            matches = re.findall(pattern2, html_content, re.IGNORECASE)
+            if matches:
+                image_urls.extend(matches)
+                logger.info(f"✅ Extracted {len(matches)} image URL(s) using efd-media-public pattern")
+                return image_urls
             
             # Pattern 3: Any img tag with src (most flexible)
             pattern3 = r'<img[^>]*src=["\']([^"\']+\.(?:gif|jpg|jpeg|png|webp))["\']'
-            match = re.search(pattern3, html_content, re.IGNORECASE)
-            if match:
-                image_url = match.group(1)
-                logger.info(f"✅ Extracted image URL using flexible pattern: {image_url}")
-                return image_url
+            matches = re.findall(pattern3, html_content, re.IGNORECASE)
+            if matches:
+                image_urls.extend(matches)
+                logger.info(f"✅ Extracted {len(matches)} image URL(s) using flexible pattern")
+                return image_urls
         
-        return None
+        return image_urls
     except Exception as e:
-        logger.error(f"❌ Error extracting image URL from HTML: {e}")
-        return None
+        logger.error(f"❌ Error extracting image URLs from HTML: {e}")
+        return []
 
 
-def parse_senate_ptr_from_image(image_url: str, s3_key: str) -> List[Dict[str, Any]]:
+def parse_senate_ptr_from_image(image_url: str, s3_key: str, filer_name: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Download image from URL and process with Textract to extract transaction data
     Handles amendments and regular filings
@@ -438,6 +471,7 @@ def parse_senate_ptr_from_image(image_url: str, s3_key: str) -> List[Dict[str, A
     Args:
         image_url: URL of the image to download
         s3_key: S3 key of the original HTML file (for context)
+        filer_name: Optional filer name from event (from fetcher)
     
     Returns:
         List of extracted trades
@@ -537,7 +571,8 @@ def parse_senate_ptr_from_image(image_url: str, s3_key: str) -> List[Dict[str, A
         logger.info(f"✅ Textract analysis complete - extracting structured data...")
         
         # Parse Textract response to extract transactions
-        trades = parse_textract_response_for_senate_ptr(response_textract, s3_key)
+        # Pass filer_name if available from event
+        trades = parse_textract_response_for_senate_ptr(response_textract, s3_key, filer_name=filer_name)
         
         logger.info(f"✅ Extracted {len(trades)} trades from image using Textract")
         
@@ -549,7 +584,7 @@ def parse_senate_ptr_from_image(image_url: str, s3_key: str) -> List[Dict[str, A
     return trades
 
 
-def parse_textract_response_for_senate_ptr(textract_response: Dict[str, Any], s3_key: str) -> List[Dict[str, Any]]:
+def parse_textract_response_for_senate_ptr(textract_response: Dict[str, Any], s3_key: str, filer_name: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Parse Textract response to extract Senate PTR transaction data
     Handles both regular filings and amendments
@@ -557,6 +592,7 @@ def parse_textract_response_for_senate_ptr(textract_response: Dict[str, Any], s3
     Args:
         textract_response: Textract AnalyzeDocument response
         s3_key: S3 key for context
+        filer_name: Optional filer name from event (from fetcher)
     
     Returns:
         List of extracted trades
@@ -577,6 +613,39 @@ def parse_textract_response_for_senate_ptr(textract_response: Dict[str, Any], s3
         full_text = '\n'.join(all_text)
         logger.info(f"📋 Extracted text from image ({len(full_text)} characters)")
         logger.debug(f"   Text preview: {full_text[:500]}...")
+        
+        # Use filer_name from event if provided, otherwise extract from text
+        if not filer_name:
+            # Extract filer name from text (look for senator name patterns)
+            # Pattern 1: Look for "Richard Blumenthal" or "Blumenthal, Richard" format
+            name_patterns = [
+                r'(?:Senator|The Honorable)\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',  # "Senator Richard Blumenthal"
+                r'([A-Z][a-z]+,\s+[A-Z][a-z]+(?:\s+[A-Z][a-z.]+)?)',  # "Blumenthal, Richard"
+                r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)\s*\(',  # "Richard Blumenthal (Senator)"
+            ]
+            for pattern in name_patterns:
+                match = re.search(pattern, full_text)
+                if match:
+                    extracted_name = match.group(1).strip()
+                    # Convert "Last, First" to "First Last" format
+                    if ',' in extracted_name:
+                        parts = [p.strip() for p in extracted_name.split(',', 1)]
+                        if len(parts) == 2:
+                            extracted_name = f"{parts[1]} {parts[0]}".strip()
+                    
+                    # Validate extracted name (filter OCR noise)
+                    if is_valid_filer_name(extracted_name):
+                        filer_name = extracted_name
+                        logger.info(f"✅ Extracted valid filer name from text: {filer_name}")
+                        break
+                    else:
+                        logger.warning(f"⚠️ Extracted name failed validation (likely OCR noise): '{extracted_name}', continuing search...")
+        
+        if filer_name and is_valid_filer_name(filer_name):
+            logger.info(f"✅ Using filer name: {filer_name}")
+        else:
+            logger.warning(f"⚠️ Could not extract valid filer name from document or event")
+            filer_name = None  # Clear invalid filer name
         
         # Detect if this is an amendment
         is_amendment = 'amendment' in full_text.lower() or 'amend' in full_text.lower()
@@ -605,14 +674,19 @@ def parse_textract_response_for_senate_ptr(textract_response: Dict[str, Any], s3
                 
                 if table_data:
                     # Try to parse table as transaction data
-                    table_trades = parse_table_as_senate_transactions(table_data, full_text, s3_key)
+                    table_trades = parse_table_as_senate_transactions(table_data, full_text, s3_key, filer_name=filer_name)
                     trades.extend(table_trades)
+                    logger.info(f"   ✅ Extracted {len(table_trades)} trade(s) from table {table_idx}")
                 else:
                     logger.warning(f"   ⚠️ Could not extract table data from table {table_idx}")
         else:
             # No structured tables - try to extract from text patterns
             logger.info(f"   No structured tables found - attempting pattern-based extraction...")
             text_trades = extract_transactions_from_text(full_text, s3_key)
+            # Add filer name to text trades
+            for trade in text_trades:
+                if filer_name and not trade.get('filerName'):
+                    trade['filerName'] = filer_name
             trades.extend(text_trades)
         
     except Exception as e:
@@ -623,10 +697,16 @@ def parse_textract_response_for_senate_ptr(textract_response: Dict[str, Any], s3
     return trades
 
 
-def parse_table_as_senate_transactions(table_data: List[List[str]], full_text: str, s3_key: str) -> List[Dict[str, Any]]:
+def parse_table_as_senate_transactions(table_data: List[List[str]], full_text: str, s3_key: str, filer_name: Optional[str] = None) -> List[Dict[str, Any]]:
     """
     Parse table data as Senate PTR transactions
     Handles standard transaction table format
+    
+    Args:
+        table_data: Extracted table data (list of rows)
+        full_text: Full text from document (for context)
+        s3_key: S3 key for context
+        filer_name: Optional filer name (extracted from document or event)
     """
     trades = []
     
@@ -656,10 +736,15 @@ def parse_table_as_senate_transactions(table_data: List[List[str]], full_text: s
         # Process data rows
         for row_idx, row in enumerate(table_data[1:], 1):
             if len(row) < len(headers):
+                logger.warning(f"   ⚠️ Row {row_idx} has {len(row)} cells, expected {len(headers)}")
                 continue
             
             try:
                 trade = {}
+                
+                # Add filer name if provided
+                if filer_name:
+                    trade['filerName'] = filer_name
                 
                 # Extract fields
                 if 'owner' in col_indices:
@@ -688,14 +773,18 @@ def parse_table_as_senate_transactions(table_data: List[List[str]], full_text: s
                 
                 if trade:
                     trades.append(trade)
-                    logger.debug(f"   Extracted trade {row_idx}: {trade}")
+                    logger.debug(f"   Extracted trade {row_idx}: {trade.get('securityName', 'N/A')} - {trade.get('transactionType', 'N/A')} on {trade.get('transactionDate', 'N/A')}")
             
             except Exception as e:
                 logger.warning(f"⚠️ Error parsing row {row_idx}: {e}")
+                import traceback
+                logger.warning(f"   Traceback: {traceback.format_exc()}")
                 continue
         
     except Exception as e:
         logger.error(f"❌ Error parsing table as transactions: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
     
     return trades
 
@@ -1502,17 +1591,28 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
     return trades
 
 
-def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
+def parse_senate_ptr(s3_key: str, event: Optional[Dict[str, Any]] = None) -> List[Dict[str, Any]]:
     """
     Parse Senate PTR - handles:
     1. HTML with transaction table (direct parsing)
     2. HTML with embedded image (Textract)
     3. PDF format (Textract)
+    
+    Args:
+        s3_key: S3 key of the file to parse
+        event: Optional event dict that may contain filer_name from fetcher
     """
     trades = []
     
     try:
         logger.info(f"📄 Parsing Senate PTR: {s3_key}")
+        
+        # Get filer_name from event if available (from fetcher)
+        filer_name_from_event = None
+        if event:
+            filer_name_from_event = event.get('filer_name') or event.get('filerName')
+            if filer_name_from_event:
+                logger.info(f"✅ Using filer_name from event: {filer_name_from_event}")
         
         # Download file from S3
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
@@ -1526,13 +1626,18 @@ def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
             logger.info(f"📄 Senate PTR is HTML format")
             html_content = file_content.decode('utf-8', errors='ignore')
             
-            # Check for embedded image (image-based filings like amendments)
-            image_url = extract_image_url_from_html(html_content)
+            # Check for embedded images (image-based filings like amendments)
+            # Multi-page documents can have multiple images
+            image_urls = extract_image_urls_from_html(html_content)
             
-            if image_url:
-                logger.info(f"🖼️ HTML contains embedded image - will use Textract to process")
-                logger.info(f"   Image URL: {image_url}")
-                trades = parse_senate_ptr_from_image(image_url, s3_key)
+            if image_urls:
+                logger.info(f"🖼️ HTML contains {len(image_urls)} embedded image(s) - will use Textract to process")
+                for idx, image_url in enumerate(image_urls, 1):
+                    logger.info(f"   Image {idx}/{len(image_urls)}: {image_url}")
+                    image_trades = parse_senate_ptr_from_image(image_url, s3_key, filer_name=filer_name_from_event)
+                    trades.extend(image_trades)
+                
+                logger.info(f"✅ Processed {len(image_urls)} image(s), extracted {len(trades)} trade(s) total")
             else:
                 # Try to parse transaction table directly
                 logger.info(f"📋 HTML appears to contain transaction table - parsing directly")
@@ -1549,12 +1654,15 @@ def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
                     logger.info(f"   Has image tag: {has_image_tag}")
                     if has_image_tag and not has_table:
                         logger.info(f"   💡 HTML contains image but no transaction table - this may be an image-based filing")
-                        logger.info(f"   💡 Attempting to extract image URL for Textract processing...")
-                        # Try to extract image URL with more flexible patterns
-                        image_url = extract_image_url_from_html(html_content, flexible=True)
-                        if image_url:
-                            logger.info(f"   ✅ Found image URL: {image_url}")
-                            trades = parse_senate_ptr_from_image(image_url, s3_key)
+                        logger.info(f"   💡 Attempting to extract image URLs for Textract processing...")
+                        # Try to extract image URLs with more flexible patterns
+                        image_urls = extract_image_urls_from_html(html_content, flexible=True)
+                        if image_urls:
+                            logger.info(f"   ✅ Found {len(image_urls)} image URL(s)")
+                            for idx, image_url in enumerate(image_urls, 1):
+                                logger.info(f"   Processing image {idx}/{len(image_urls)}: {image_url}")
+                                image_trades = parse_senate_ptr_from_image(image_url, s3_key, filer_name=filer_name_from_event)
+                                trades.extend(image_trades)
         else:
             # It's PDF - use Textract
             logger.info(f"📄 Senate PTR is PDF format - using Textract")
@@ -2083,14 +2191,24 @@ def lambda_handler(event, context):
         elif source == 'house':
             trades = parse_house_ptr(s3_key)
         elif source == 'senate':
+            # Get filer_name and filingDate from event (from downloader/fetcher)
+            # These are more reliable than extracting from text
+            filer_name_from_event = event.get('filer_name')
+            filing_date_from_event = event.get('filingDate') or filing_date
+            
             # Check if transactions are already extracted at fetcher level
             if event.get('transactions'):
                 logger.info(f"✅ Using {len(event.get('transactions', []))} pre-extracted transactions from fetcher")
                 trades = event.get('transactions', [])
+                # Ensure all trades have filer_name from event
+                for trade in trades:
+                    if not trade.get('filerName') and filer_name_from_event:
+                        trade['filerName'] = filer_name_from_event
             else:
                 # Fallback: parse from S3 file
                 logger.info(f"📄 No pre-extracted transactions found, parsing from S3 file")
-                trades = parse_senate_ptr(s3_key)
+                # Pass filer_name from event - this is more reliable than OCR extraction
+                trades = parse_senate_ptr(s3_key, event=event)
         else:
             logger.warning(f"⚠️ Unknown source type: {source}")
             return {
@@ -2107,6 +2225,34 @@ def lambda_handler(event, context):
         logger.info(f"📊 Processing {len(trades)} extracted trades/ownership records")
         if len(trades) == 0:
             logger.warning(f"⚠️ No trades/ownership records extracted from {s3_key}. File may contain no transactions or parsing failed.")
+            
+            # For Senate PTRs, create a placeholder trade if we have a filer name
+            # This allows users to download the original filing via S3 key
+            if source == 'senate':
+                # Use filer_name from event (from downloader/fetcher) - more reliable
+                filer_name = event.get('filer_name')
+                if filer_name and is_valid_filer_name(filer_name):
+                    logger.info(f"📋 Creating placeholder trade for unparsed document (filer: {filer_name})")
+                    # Create placeholder trade with all required fields
+                    placeholder_trade = {
+                        'filerName': filer_name,
+                        'transactionDate': filing_date,  # Use filing date as placeholder
+                        'securityName': None,
+                        'securitySymbol': None,
+                        'transactionType': None,
+                        'owner': None,
+                        'amountRange': None,
+                        'amountMin': None,
+                        'amountMax': None,
+                        'exactAmount': None,
+                        'comment': None,
+                        'isUnparsed': True,  # Flag indicating this requires manual review
+                        'requiresManualReview': True  # Alternative flag for clarity
+                    }
+                    trades.append(placeholder_trade)
+                    logger.info(f"✅ Created placeholder trade - users can download original filing from S3: {s3_key}")
+                else:
+                    logger.warning(f"⚠️ Cannot create placeholder trade - no filer_name available")
         
         for trade in trades:
             if source == 'sec':
@@ -2256,15 +2402,35 @@ def lambda_handler(event, context):
                 else:
                     unmatched_count += 1
             else:  # house or senate
-                # For Senate PTRs, use filerName from trade (pre-extracted from HTML)
+                # For Senate PTRs, use filerName from trade (pre-extracted from HTML or Textract)
                 # For House PTRs, may have politicianName or filerName
                 filer_name = trade.get('filerName') or trade.get('politicianName')
+                
+                # If no filer_name in trade, try to get from event (for Senate PTRs)
+                if not filer_name and source == 'senate':
+                    filer_name = event.get('filer_name')
+                
                 if not filer_name:
+                    logger.warning(f"⚠️ Trade missing filerName/politicianName, skipping: {json.dumps(trade, default=str)}")
                     unmatched_count += 1
                     continue
                 
+                # Filter out invalid filer names (OCR noise)
+                if not is_valid_filer_name(filer_name):
+                    logger.warning(f"⚠️ Invalid filer name detected (likely OCR noise): '{filer_name}', skipping trade")
+                    unmatched_count += 1
+                    continue
+                
+                logger.info(f"🔍 Attempting to match filer: {filer_name}")
                 matched_politician = find_matching_politician(filer_name, politicians)
                 if matched_politician:
+                    logger.info(f"✅ Matched '{filer_name}' to politician: {matched_politician.get('name')} (confidence: {matched_politician.get('matchScore', 'N/A')})")
+                else:
+                    logger.warning(f"❌ No match found for filer: {filer_name}")
+                if matched_politician:
+                    # Check if this is an unparsed placeholder trade
+                    is_unparsed = trade.get('isUnparsed', False) or trade.get('requiresManualReview', False)
+                    
                     # Map Senate PTR transaction fields to standard format
                     # Senate PTRs use: securityName, assetType, order, amount
                     # Standard format uses: securityName, transactionType, totalAmount
@@ -2278,7 +2444,15 @@ def lambda_handler(event, context):
                     # transactionDate should be stored as YYYYMMDD integer (e.g., 20251002 for 2025-10-02)
                     transaction_date_str = trade.get('transactionDate') or ''
                     transaction_date_num = None
-                    if transaction_date_str:
+                    
+                    # For placeholder/unparsed trades, use filing date directly
+                    if is_unparsed:
+                        try:
+                            filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
+                            transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
+                        except:
+                            pass
+                    elif transaction_date_str:
                         try:
                             # If it's already in YYYY-MM-DD format, convert to YYYYMMDD integer
                             if len(transaction_date_str) == 10 and '-' in transaction_date_str:
@@ -2287,6 +2461,23 @@ def lambda_handler(event, context):
                             elif len(transaction_date_str) == 10 and '/' in transaction_date_str:
                                 parsed_date = datetime.strptime(transaction_date_str, '%m/%d/%Y').date()
                                 transaction_date_num = int(parsed_date.strftime('%Y%m%d'))
+                            # If it's in M/D/YY format (from Textract - e.g., "8/14/25")
+                            elif '/' in transaction_date_str and len(transaction_date_str) < 10:
+                                # Try to parse M/D/YY or MM/DD/YY format
+                                parts = transaction_date_str.split('/')
+                                if len(parts) == 3:
+                                    month = int(parts[0])
+                                    day = int(parts[1])
+                                    year_str = parts[2].strip()
+                                    # Handle 2-digit year (assume 20xx for years < 50, 19xx for years >= 50)
+                                    if len(year_str) == 2:
+                                        year_int = int(year_str)
+                                        year = 2000 + year_int if year_int < 50 else 1900 + year_int
+                                    else:
+                                        year = int(year_str)
+                                    parsed_date = datetime(year, month, day).date()
+                                    transaction_date_num = int(parsed_date.strftime('%Y%m%d'))
+                                    logger.debug(f"   Parsed date '{transaction_date_str}' -> {parsed_date.strftime('%Y-%m-%d')} ({transaction_date_num})")
                             # If it's already numeric, use it
                             elif transaction_date_str.isdigit():
                                 transaction_date_num = int(transaction_date_str)
@@ -2294,15 +2485,18 @@ def lambda_handler(event, context):
                             else:
                                 parsed_date = datetime.strptime(transaction_date_str, '%Y-%m-%d').date()
                                 transaction_date_num = int(parsed_date.strftime('%Y%m%d'))
-                        except:
+                        except Exception as e:
+                            logger.warning(f"⚠️ Error parsing transaction date '{transaction_date_str}': {e}")
                             # Fallback: use filing date as transaction date
                             try:
                                 filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
                                 transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
+                                logger.warning(f"   Using filing date as fallback: {transaction_date_num}")
                             except:
                                 pass
                     else:
                         # Use filing date if transaction date is missing
+                        logger.warning(f"⚠️ No transaction date in trade, using filing date")
                         try:
                             filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
                             transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
@@ -2333,10 +2527,15 @@ def lambda_handler(event, context):
                         'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI)
                         'owner': trade.get('owner'),
                         'comment': trade.get('comment'),
-                        'formS3Key': s3_key,
+                        'formS3Key': s3_key,  # Critical: S3 key for downloading original filing
                         'matchConfidence': matched_politician.get('matchScore', 1.0),
-                        'source': source
+                        'source': source,
+                        'isUnparsed': is_unparsed,  # Flag indicating this filing could not be parsed automatically
+                        'requiresManualReview': is_unparsed  # Alternative flag for clarity
                     }
+                    
+                    if is_unparsed:
+                        logger.info(f"📋 Matched unparsed placeholder trade - original filing available at S3: {s3_key}")
                     matched_trades.append(matched_trade)
                 else:
                     unmatched_count += 1
