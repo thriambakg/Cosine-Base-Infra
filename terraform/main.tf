@@ -1956,8 +1956,10 @@ module "politician_trades_sec_glue_job" {
   }
 
   # KMS keys for encryption (if using encrypted buckets)
+  # Use main key for S3 access, DynamoDB key for table access
   kms_key_arns = [
-    module.kms.kms_key_arn
+    module.kms.main_key_arn,
+    module.kms.dynamodb_key_arn
   ]
 
   # CloudWatch Logs
