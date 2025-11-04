@@ -45,7 +45,10 @@ def get_yesterday_date() -> str:
 
 def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
     """
-    Fetch SEC Forms 3, 4, 5 from EDGAR API for a specific date
+    Fetch SEC Forms 3, 4, 5 from EDGAR daily index files for a specific date
+    
+    Uses SEC's daily index files which list ALL filings for a specific date:
+    https://www.sec.gov/Archives/edgar/daily-index/{YEAR}/QTR{N}/{form_type}/{date}.idx
     
     Args:
         target_date: Date in YYYY-MM-DD format
@@ -62,284 +65,116 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
     session = requests.Session()
     session.headers.update({
         'User-Agent': SEC_USER_AGENT,
-        'Accept': 'application/json'
+        'Accept': 'text/plain'
     })
     
     try:
-        # Note: SEC EDGAR API doesn't have a simple "get all forms by date" endpoint
-        # For production, you would need to:
-        # 1. Use RSS feeds to get recent filings
-        # 2. Parse RSS XML to extract CIK, accession numbers, filing dates
-        # 3. Filter by target_date
-        # 4. Construct download URLs from accession numbers
+        # Parse target date to get year, quarter, and date string
+        date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+        year = date_obj.year
+        month = date_obj.month
+        quarter = ((month - 1) // 3) + 1  # Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec
+        date_str = date_obj.strftime('%Y%m%d')  # Format: 20251025
         
-        # For Forms 3, 4, 5, use RSS feed:
-        # https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&company=&count=100
+        # SEC daily index file format: {form_type}/{date}.idx
+        # Example: form4/20251025.idx
+        # URL: https://www.sec.gov/Archives/edgar/daily-index/{YEAR}/QTR{N}/{form_type}/{date}.idx
         
         for form_type in form_types:
-            # SEC RSS feed for recent filings
-            # Note: SEC changed RSS feed format - try different URL patterns
-            rss_urls = [
-                f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form_type}&company=&count=100&output=rss",
-                f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form_type}&company=&count=100",
-                f"https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type={form_type}&output=atom",
-            ]
+            # Build daily index file URL
+            # Format: https://www.sec.gov/Archives/edgar/daily-index/{YEAR}/QTR{N}/{form_type}/{date}.idx
+            index_url = f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{quarter}/form{form_type}/{date_str}.idx"
             
-            rss_url = rss_urls[0]  # Try first format
+            logger.info(f"📥 Fetching SEC daily index for Form {form_type} from: {index_url}")
             
-            # Try multiple URL formats if first fails
-            parsed_successfully = False
-            for rss_url in rss_urls:
-                try:
-                    response = session.get(rss_url, timeout=30)
-                    response.raise_for_status()
-                    
-                    # Check if response is actually XML/RSS
-                    content_type = response.headers.get('Content-Type', '').lower()
-                    content_preview = (response.text[:500] if hasattr(response, 'text') and response.text else 
-                                      response.content[:500].decode('utf-8', errors='ignore'))
-                    
-                    # SEC RSS feeds sometimes return HTML error pages
-                    if 'text/html' in content_type or (response.text and response.text.strip().startswith('<!')):
-                        logger.debug(f"⚠️ Form {form_type} RSS URL returned HTML, trying next format: {rss_url}")
+            try:
+                # Fetch the daily index file
+                response = session.get(index_url, timeout=30)
+                
+                # Check if file exists (404 means no filings for that date)
+                if response.status_code == 404:
+                    logger.info(f"📭 No Form {form_type} index file found for {target_date} (404) - likely no filings that day")
+                    continue
+                
+                response.raise_for_status()
+                
+                # Daily index files are plain text with specific format
+                # Format varies, but typically:
+                # Header lines (skip)
+                # Data lines: CIK|Company Name|Form Type|Date Filed|File Name
+                # Or: CIK|Company Name|Form Type|Date Filed|CIK|Accession Number|File Name
+                
+                content = response.text
+                lines = content.split('\n')
+                
+                logger.info(f"📄 Parsed daily index file for Form {form_type}: {len(lines)} lines")
+                
+                # Find the header line (usually starts with "CIK" or has "|" separator)
+                header_line_idx = None
+                for idx, line in enumerate(lines):
+                    if line.strip().startswith('CIK') and '|' in line:
+                        header_line_idx = idx
+                        break
+                
+                if header_line_idx is None:
+                    logger.warning(f"⚠️ Could not find header line in Form {form_type} index file")
+                    continue
+                
+                # Parse data lines (skip header and empty lines)
+                forms_for_this_type = 0
+                for line_idx, line in enumerate(lines[header_line_idx + 1:], start=header_line_idx + 1):
+                    line = line.strip()
+                    if not line or line.startswith('-') or line.startswith('--'):
                         continue
                     
-                    # If we get here, we have a valid response - try to parse
-                    break
+                    # Split by pipe separator
+                    parts = [p.strip() for p in line.split('|')]
                     
-                except Exception as url_error:
-                    logger.debug(f"⚠️ Error with RSS URL {rss_url}: {url_error}, trying next...")
-                    continue
-            else:
-                # If we exhausted all URLs, skip this form type
-                logger.warning(f"⚠️ Could not fetch valid RSS feed for Form {form_type} with any URL format")
-                continue
-            
-            # Try to parse as XML
-            try:
-                # SEC feeds might have encoding issues - try to decode properly
-                if isinstance(response.content, bytes):
-                    # Try UTF-8 first, then latin-1 as fallback
+                    if len(parts) < 4:
+                        continue
+                    
                     try:
-                        xml_content = response.content.decode('utf-8')
-                    except UnicodeDecodeError:
-                        try:
-                            xml_content = response.content.decode('latin-1')
-                        except UnicodeDecodeError:
-                            # Try with error handling
-                            xml_content = response.content.decode('utf-8', errors='ignore')
-                else:
-                    xml_content = response.text
-                
-                # Remove BOM if present
-                if xml_content and xml_content.startswith('\ufeff'):
-                    xml_content = xml_content[1:]
-                
-                # Clean up any leading whitespace
-                xml_content = xml_content.strip()
-                
-                # Try to parse XML - use XMLParser to handle errors gracefully
-                parser = ET.XMLParser(encoding='utf-8')
-                try:
-                    root = ET.fromstring(xml_content.encode('utf-8'), parser=parser)
-                except ET.ParseError:
-                    # Try without encoding
-                    root = ET.fromstring(xml_content)
-                
-                logger.debug(f"📄 Successfully parsed XML for Form {form_type}, root tag: {root.tag}")
-                
-                # RSS namespace
-                ns = {'rss': 'http://purl.org/rss/1.0/', 'dc': 'http://purl.org/dc/elements/1.1/'}
-                
-                # Try without namespace first (some feeds don't use namespaces)
-                items = root.findall('.//item')
-                if not items:
-                    # Try with common RSS namespaces
-                    items = root.findall('.//{http://purl.org/rss/1.0/}item')
-                if not items:
-                    # Try Atom format
-                    items = root.findall('.//{http://www.w3.org/2005/Atom}entry')
-                if not items:
-                    # Try RDF format
-                    items = root.findall('.//{http://www.w3.org/1999/02/22-rdf-syntax-ns#}item')
-                
-                logger.info(f"📥 Fetched RSS feed for Form {form_type}: found {len(items)} items")
-                
-                if len(items) == 0:
-                    logger.warning(f"⚠️ No items found in RSS feed for Form {form_type}. Root tag: {root.tag}")
-                    # Log first few child elements to debug structure
-                    if len(root) > 0:
-                        logger.debug(f"Root children tags: {[child.tag for child in root[:5]]}")
-                    continue  # Skip to next form type if no items
-                
-                # Track items before and after date filtering
-                items_before_date_filter = len(items)
-                items_matching_date = 0
-                
-                for item_index, item in enumerate(items):
-                    try:
-                        # Extract filing date - SEC uses Atom format with 'updated' field
-                        pub_date_elem = None
-                        for tag_name in [
-                            '{http://www.w3.org/2005/Atom}updated',  # Atom format (SEC uses this)
-                            'pubDate',  # RSS format
-                            'date',  # Generic
-                            '{http://purl.org/dc/elements/1.1/}date'  # Dublin Core
-                        ]:
-                            pub_date_elem = item.find(tag_name)
-                            if pub_date_elem is not None:
-                                break
-                        
-                        # Log item structure for first few items to debug
-                        if item_index < 3:
-                            # Get all child element tags
-                            child_tags = [child.tag for child in item]
-                            logger.info(f"🔍 RSS item #{item_index} child tags: {child_tags}")
-                            if pub_date_elem is not None:
-                                logger.info(f"✅ Found date element: tag='{pub_date_elem.tag}', text='{pub_date_elem.text}'")
-                            else:
-                                logger.warning(f"⚠️ No date element found in item #{item_index}")
-                        
-                        if pub_date_elem is None or not pub_date_elem.text:
-                            if item_index < 3:
-                                logger.debug(f"⏭️ Skipping item #{item_index}: no date element or empty text")
+                        # Extract CIK (first field)
+                        cik = parts[0].strip()
+                        if not cik or not cik.isdigit():
                             continue
                         
-                        # Parse date (format: "Wed, 30 Oct 2025 16:30:00 EST")
-                        try:
-                            # Common RSS date formats
-                            date_formats = [
-                                '%Y-%m-%dT%H:%M:%S%z',  # Atom format: 2025-10-31T12:00:00-04:00
-                                '%Y-%m-%dT%H:%M:%SZ',  # Atom format: 2025-10-31T12:00:00Z
-                                '%Y-%m-%dT%H:%M:%S',  # Atom format: 2025-10-31T12:00:00
-                                '%a, %d %b %Y %H:%M:%S %Z',  # RSS format
-                                '%a, %d %b %Y %H:%M:%S %z',
-                                '%a, %d %b %Y %H:%M:%S',
-                                '%Y-%m-%d',
-                                '%Y-%m-%d %H:%M:%S',
-                                '%d %b %Y',
-                                '%b %d, %Y',
-                                '%m/%d/%Y',
-                                '%Y/%m/%d'
-                            ]
-                            
-                            filing_date_str = pub_date_elem.text.strip()
-                            filing_date = None
-                            
-                            # Log first few date strings we encounter for debugging (before parsing)
-                            if item_index < 3:
-                                logger.info(f"🔍 Raw date string from RSS item #{item_index}: '{filing_date_str}'")
-                            
-                            for fmt in date_formats:
-                                try:
-                                    filing_date = datetime.strptime(filing_date_str, fmt).date()
-                                    break
-                                except ValueError:
-                                    continue
-                            
-                            if not filing_date:
-                                # Log failed date parsing for first few items
-                                if item_index < 3:
-                                    logger.warning(f"⚠️ Could not parse date: '{filing_date_str}' with any standard format")
-                                continue
-                            
-                            # Log parsed date for first few items
-                            if item_index < 3:
-                                logger.info(f"📅 Parsed date: {filing_date} (target: {target_date})")
-                            
-                            # Compare dates (YYYY-MM-DD format)
-                            target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
-                            
-                            if filing_date != target_date_obj:
-                                # Log why we're skipping for first few items
-                                if item_index < 3:
-                                    logger.debug(f"⏭️ Skipping: filing_date={filing_date}, target={target_date_obj}")
-                                continue  # Skip if not matching target date
-                            
-                            items_matching_date += 1
-                            
-                        except Exception as date_error:
-                            logger.debug(f"⚠️ Could not parse date for item: {date_error}")
-                            continue
+                        # Extract accession number (varies by format, but usually in the middle)
+                        # Format examples:
+                        # CIK|Company|Form|Date|Filename
+                        # CIK|Company|Form|Date|CIK|Accession|Filename
                         
-                        # Extract link/guid to get CIK and accession number
-                        # Atom format uses <link href="..."/> with href attribute, RSS uses text content
-                        link_elem = None
-                        filing_url = None
-                        
-                        for tag_name in ['{http://www.w3.org/2005/Atom}link', 'link', 'guid']:
-                            link_elem = item.find(tag_name)
-                            if link_elem is not None:
-                                break
-                        
-                        if link_elem is not None:
-                            # Atom links use href attribute, RSS links use text content
-                            if link_elem.get('href'):
-                                filing_url = link_elem.get('href').strip()
-                            elif link_elem.text:
-                                filing_url = link_elem.text.strip()
-                        
-                        if not filing_url:
-                            if item_index < 3:
-                                logger.debug(f"⚠️ Could not extract link URL from item #{item_index}")
-                            continue
-                        
-                        # Extract CIK and accession number from URL
-                        # Format: https://www.sec.gov/cgi-bin/viewer?action=view&cik={CIK}&accession_number={ACCESSION}&xbrl_type=v
-                        # Or: https://www.sec.gov/Archives/edgar/data/{CIK}/{ACCESSION}/...
-                        
-                        cik = None
                         accession_number = None
                         filename = None
                         
-                        # Try to extract from different URL formats
-                        if '/Archives/edgar/data/' in filing_url:
-                            # Format: .../Archives/edgar/data/{CIK}/{ACCESSION}/{filename}
-                            parts = filing_url.split('/Archives/edgar/data/')[1].split('/')
-                            if len(parts) >= 2:
-                                cik = parts[0].strip()
-                                accession_number = parts[1].strip().replace('-', '')  # Remove dashes
-                                if len(parts) >= 3:
-                                    filename = parts[2].strip()
+                        # Try to find accession number - it's usually 18 digits (with or without dashes)
+                        for part in parts:
+                            # Remove dashes and check if it's 18 digits
+                            part_clean = part.replace('-', '').strip()
+                            if part_clean.isdigit() and len(part_clean) == 18:
+                                accession_number = part_clean
+                                break
                         
-                        elif 'cik=' in filing_url and 'accession_number=' in filing_url:
-                            # Format: ...?cik={CIK}&accession_number={ACCESSION}...
-                            parsed_url = urlparse(filing_url)
-                            params = parse_qs(parsed_url.query)
-                            cik = params.get('cik', [None])[0]
-                            accession_number = params.get('accession_number', [None])[0]
-                            if accession_number:
-                                accession_number = accession_number.replace('-', '')
+                        # If no accession found, try to extract from filename (last field usually)
+                        if not accession_number and len(parts) > 4:
+                            filename_field = parts[-1].strip()
+                            # Try to extract accession from filename (format: 0001234567-12-345678.txt)
+                            acc_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename_field)
+                            if acc_match:
+                                accession_number = acc_match.group(1).replace('-', '')
+                                filename = filename_field
                         
-                        # If we still don't have CIK/accession, try to find primary document link
-                        if not cik or not accession_number:
-                            # Look for description or content that might have links
-                            desc_elem = item.find('description')
-                            if desc_elem is not None and desc_elem.text:
-                                # Try to extract from description HTML
-                                cik_match = re.search(r'CIK[:\s]+(\d+)', desc_elem.text, re.IGNORECASE)
-                                acc_match = re.search(r'Accession[:\s]+([\d-]+)', desc_elem.text, re.IGNORECASE)
-                                if cik_match:
-                                    cik = cik_match.group(1)
-                                if acc_match:
-                                    accession_number = acc_match.group(1).replace('-', '')
-                        
-                        if not cik or not accession_number:
-                            logger.debug(f"⚠️ Could not extract CIK/accession from: {filing_url}")
+                        # If still no accession, skip this line
+                        if not accession_number:
+                            logger.debug(f"⚠️ Could not extract accession number from line: {line[:100]}")
                             continue
                         
-                        # Determine filename - try to get primary document
-                        # Usually the primary document is: {accession}.txt or {accession}-primary-document.xml
+                        # Set default filename if not found
                         if not filename:
-                            # Try common patterns
                             accession_dashed = f"{accession_number[:10]}-{accession_number[10:12]}-{accession_number[12:]}"
-                            
-                            # Primary document is usually the .txt file with the accession number
                             filename = f"{accession_dashed}.txt"
-                            # But might also be XML
-                            # We'll try .txt first, then .xml if download fails
                         
-                        # Add to forms list
+                        # Add to forms list (all entries in daily index are for the target date)
                         forms.append({
                             'form_type': f'form{form_type}',
                             'cik': cik,
@@ -348,31 +183,26 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
                             'filing_date': target_date
                         })
                         
-                        logger.debug(f"✅ Extracted Form {form_type}: CIK={cik}, Accession={accession_number[:10]}...")
+                        forms_for_this_type += 1
                         
-                    except Exception as item_error:
-                        logger.warning(f"⚠️ Error parsing RSS item: {item_error}")
+                        if forms_for_this_type <= 5:
+                            logger.debug(f"✅ Extracted Form {form_type}: CIK={cik}, Accession={accession_number[:10]}...")
+                    
+                    except Exception as line_error:
+                        logger.debug(f"⚠️ Error parsing line {line_idx}: {line_error}")
                         continue
                 
-                # Log summary of date filtering
-                if items_before_date_filter > 0:
-                    forms_for_this_type = [f for f in forms if f.get('form_type') == f'form{form_type}']
-                    logger.info(f"📊 Form {form_type}: {items_before_date_filter} total items in RSS, {items_matching_date} matched date {target_date}, {len(forms_for_this_type)} successfully extracted")
+                logger.info(f"📊 Form {form_type}: Extracted {forms_for_this_type} forms from daily index for {target_date}")
             
-            except ET.ParseError as parse_error:
-                logger.error(f"❌ XML parsing error for Form {form_type} RSS: {parse_error}")
-                logger.error(f"Response URL: {rss_url}")
-                if 'response' in locals():
-                    logger.error(f"Response status: {response.status_code}")
-                    logger.error(f"Response headers: {dict(response.headers)}")
-                    # Log first 1000 chars of response for debugging
-                    response_preview = (response.text[:1000] if hasattr(response, 'text') and response.text 
-                                       else response.content[:1000].decode('utf-8', errors='replace'))
-                    logger.error(f"Response content (first 1000 chars): {response_preview}")
+            except requests.exceptions.HTTPError as http_error:
+                if http_error.response.status_code == 404:
+                    logger.info(f"📭 No Form {form_type} index file found for {target_date} (404) - likely no filings that day")
+                else:
+                    logger.error(f"❌ HTTP error fetching Form {form_type} daily index: {http_error}")
                 continue
             except Exception as parse_error:
-                logger.error(f"❌ Unexpected error parsing Form {form_type} RSS: {parse_error}")
-                logger.error(f"Response URL: {rss_url if 'rss_url' in locals() else 'unknown'}")
+                logger.error(f"❌ Error fetching/parsing Form {form_type} daily index: {parse_error}")
+                logger.error(f"Index URL: {index_url}")
                 continue
             
             # Rate limiting: SEC requires 10 requests/second max
