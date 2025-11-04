@@ -1991,9 +1991,9 @@ module "politician_trades_state_machine" {
         ItemsPath      = "$.batchResults.batches"
         MaxConcurrency = 10
         Iterator = {
-          StartAt = "FetchFormMetadata"
+          StartAt = "BatchFetchFormMetadata"
           States = {
-            FetchFormMetadata = {
+            BatchFetchFormMetadata = {
               Type     = "Task"
               Resource = module.politician_trades_fetcher.function_arn
               Comment  = "Fetch SEC forms and Congressional PTRs metadata for date batch"
@@ -2002,7 +2002,7 @@ module "politician_trades_state_machine" {
                 "endDate.$" : "$.endDate"
               }
               ResultPath = "$.fetchResults"
-              Next       = "ParallelPipelines"
+              Next       = "BatchParallelPipelines"
               Retry = [
                 {
                   ErrorEquals     = ["States.ALL"]
@@ -2015,56 +2015,56 @@ module "politician_trades_state_machine" {
                 {
                   ErrorEquals = ["States.ALL"]
                   ResultPath  = "$.error"
-                  Next        = "FetchFormsFailed"
+                  Next        = "BatchFetchFormsFailed"
                 }
               ]
             }
-            FetchFormsFailed = {
+            BatchFetchFormsFailed = {
               Type    = "Pass"
               Comment = "Continue with other batches even if one fails"
               Result  = { "error" : "Batch fetch failed" }
               End     = true
             }
-            ParallelPipelines = {
+            BatchParallelPipelines = {
               Type    = "Parallel"
               Comment = "Three parallel pipelines: SEC, Senate, House"
               Branches = [
                 {
-                  StartAt = "TransformSEC"
+                  StartAt = "BatchTransformSEC"
                   States = {
-                    TransformSEC = {
+                    BatchTransformSEC = {
                       Type = "Pass"
                       Parameters = {
                         "date.$" : "$.fetchResults.date",
                         "items.$" : "$.fetchResults.secForms",
                         "source" : "sec"
                       }
-                      Next = "DownloadSEC"
+                      Next = "BatchDownloadSEC"
                     }
-                    DownloadSEC = {
+                    BatchDownloadSEC = {
                       Type           = "Map"
                       ItemsPath      = "$.items"
                       MaxConcurrency = 10
                       Iterator = {
-                        StartAt = "DownloadForm"
+                        StartAt = "BatchDownloadForm"
                         States = {
-                          DownloadForm = {
+                          BatchDownloadForm = {
                             Type     = "Task"
                             Resource = module.politician_trades_downloader.function_arn
                             End      = true
                           }
                         }
                       }
-                      Next = "MatchSEC"
+                      Next = "BatchMatchSEC"
                     }
-                    MatchSEC = {
+                    BatchMatchSEC = {
                       Type           = "Map"
                       ItemsPath      = "$.downloadResults"
                       MaxConcurrency = 10
                       Iterator = {
-                        StartAt = "MatchFileSec"
+                        StartAt = "BatchMatchFileSec"
                         States = {
-                          MatchFileSec = {
+                          BatchMatchFileSec = {
                             Type     = "Task"
                             Resource = module.politician_trades_sec_matcher.function_arn
                             End      = true
@@ -2076,41 +2076,41 @@ module "politician_trades_state_machine" {
                   }
                 },
                 {
-                  StartAt = "TransformSenate"
+                  StartAt = "BatchTransformSenate"
                   States = {
-                    TransformSenate = {
+                    BatchTransformSenate = {
                       Type = "Pass"
                       Parameters = {
                         "date.$" : "$.fetchResults.date",
                         "items.$" : "$.fetchResults.senatePTRs",
                         "source" : "senate"
                       }
-                      Next = "DownloadSenate"
+                      Next = "BatchDownloadSenate"
                     }
-                    DownloadSenate = {
+                    BatchDownloadSenate = {
                       Type           = "Map"
                       ItemsPath      = "$.items"
                       MaxConcurrency = 10
                       Iterator = {
-                        StartAt = "DownloadSenatePTR"
+                        StartAt = "BatchDownloadSenatePTR"
                         States = {
-                          DownloadSenatePTR = {
+                          BatchDownloadSenatePTR = {
                             Type     = "Task"
                             Resource = module.politician_trades_downloader.function_arn
                             End      = true
                           }
                         }
                       }
-                      Next = "MatchSenate"
+                      Next = "BatchMatchSenate"
                     }
-                    MatchSenate = {
+                    BatchMatchSenate = {
                       Type           = "Map"
                       ItemsPath      = "$.downloadResults"
                       MaxConcurrency = 10
                       Iterator = {
-                        StartAt = "MatchFileSenate"
+                        StartAt = "BatchMatchFileSenate"
                         States = {
-                          MatchFileSenate = {
+                          BatchMatchFileSenate = {
                             Type     = "Task"
                             Resource = module.politician_trades_senate_matcher.function_arn
                             End      = true
@@ -2122,24 +2122,24 @@ module "politician_trades_state_machine" {
                   }
                 }
               ]
-              Next = "AggregateMatchesBatch"
+              Next = "BatchAggregateMatches"
             }
-            AggregateMatchesBatch = {
+            BatchAggregateMatches = {
               Type = "Pass"
               Parameters = {
                 "secMatchResults.$" : "$.pipelineResults[0].matchResults",
                 "senateMatchResults.$" : "$.pipelineResults[1].matchResults",
                 "date.$" : "$.fetchResults.date"
               }
-              Next = "AggregateMatchesTaskBatch"
+              Next = "BatchAggregateMatchesTask"
             }
-            AggregateMatchesTaskBatch = {
+            BatchAggregateMatchesTask = {
               Type       = "Task"
               Resource   = module.politician_trades_matcher.function_arn
               ResultPath = "$.aggregateResults"
-              Next       = "SaveTradesBatch"
+              Next       = "BatchSaveTrades"
             }
-            SaveTradesBatch = {
+            BatchSaveTrades = {
               Type       = "Task"
               Resource   = module.politician_trades_saver.function_arn
               ResultPath = "$.saveResults"
