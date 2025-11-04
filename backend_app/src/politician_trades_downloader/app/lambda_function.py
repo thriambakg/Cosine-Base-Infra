@@ -484,6 +484,7 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             # /view/paper/ URLs contain scanned images, /print/paper/ has parseable HTML
             if '/view/paper/' in url_to_process:
                 logger.info(f"⚠️ /view/paper/ URL detected - converting to /print/paper/ endpoint for parseable content")
+                logger.info(f"   Original URL: {url_to_process}")
                 # Extract UUID from URL
                 import re
                 uuid_match = re.search(r'/paper/([a-f0-9-]+)', url_to_process, re.IGNORECASE)
@@ -493,6 +494,7 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
                     print_url = f"https://efdsearch.senate.gov/search/print/paper/{uuid}/"
                     logger.info(f"🔄 Converted /view/paper/ to /print/paper/ endpoint: {print_url}")
                     url = print_url
+                    logger.info(f"   Final URL to download: {url}")
                 else:
                     logger.warning(f"⚠️ Could not extract UUID from /view/paper/ URL, using original: {url_to_process}")
                     url = url_to_process
@@ -1058,7 +1060,11 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
             if has_agreement_form or is_home_redirect:
                 # Agreement form or redirect = failure
                 logger.error(f"❌ Session agreement not properly set - still seeing agreement form or redirect")
-                raise Exception(f"Cannot access PTR URL - agreement not accepted in session. URL: {url}, Response URL: {response.url}")
+                logger.error(f"   Request URL: {url}")
+                logger.error(f"   Response URL: {response.url}")
+                logger.error(f"   Original input URL: {ptr_data.get('url', 'N/A')}")
+                logger.error(f"   Original view_url: {ptr_data.get('view_url', 'N/A')}")
+                raise Exception(f"Cannot access PTR URL - agreement not accepted in session. Request URL: {url}, Response URL: {response.url}")
             elif has_transactions:
                 # /view/ptr/ URL with transactions table = success
                 logger.info(f"✅ Successfully accessed PTR page with transactions!")

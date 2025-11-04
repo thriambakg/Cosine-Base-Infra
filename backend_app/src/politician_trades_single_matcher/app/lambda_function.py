@@ -386,6 +386,416 @@ def parse_sec_form_pdf(s3_key: str) -> List[Dict[str, Any]]:
     return trades
 
 
+def extract_image_url_from_html(html_content: str, flexible: bool = False) -> Optional[str]:
+    """
+    Extract image URL from HTML content
+    Looks for <img> tags with class="filingImage" or similar patterns
+    
+    Args:
+        html_content: HTML content as string
+        flexible: If True, use more flexible patterns to find any image
+    
+    Returns:
+        Image URL if found, None otherwise
+    """
+    try:
+        # Pattern 1: Look for filingImage class (most common for Senate PTRs)
+        pattern1 = r'<img[^>]*class=["\']filingImage["\'][^>]*src=["\']([^"\']+)["\']'
+        match = re.search(pattern1, html_content, re.IGNORECASE)
+        if match:
+            image_url = match.group(1)
+            logger.info(f"✅ Extracted image URL using filingImage pattern: {image_url}")
+            return image_url
+        
+        # Pattern 2: Look for any img tag with src containing efd-media-public.senate.gov
+        if flexible:
+            pattern2 = r'<img[^>]*src=["\']([^"\']*efd-media-public\.senate\.gov[^"\']+)["\']'
+            match = re.search(pattern2, html_content, re.IGNORECASE)
+            if match:
+                image_url = match.group(1)
+                logger.info(f"✅ Extracted image URL using efd-media-public pattern: {image_url}")
+                return image_url
+            
+            # Pattern 3: Any img tag with src (most flexible)
+            pattern3 = r'<img[^>]*src=["\']([^"\']+\.(?:gif|jpg|jpeg|png|webp))["\']'
+            match = re.search(pattern3, html_content, re.IGNORECASE)
+            if match:
+                image_url = match.group(1)
+                logger.info(f"✅ Extracted image URL using flexible pattern: {image_url}")
+                return image_url
+        
+        return None
+    except Exception as e:
+        logger.error(f"❌ Error extracting image URL from HTML: {e}")
+        return None
+
+
+def parse_senate_ptr_from_image(image_url: str, s3_key: str) -> List[Dict[str, Any]]:
+    """
+    Download image from URL and process with Textract to extract transaction data
+    Handles amendments and regular filings
+    
+    Args:
+        image_url: URL of the image to download
+        s3_key: S3 key of the original HTML file (for context)
+    
+    Returns:
+        List of extracted trades
+    """
+    trades = []
+    
+    try:
+        from urllib.request import urlopen, Request
+        from urllib.parse import urlparse, urljoin
+        
+        logger.info(f"📥 Downloading image from: {image_url}")
+        
+        # Handle relative URLs - convert to absolute if needed
+        if image_url.startswith('//'):
+            image_url = 'https:' + image_url
+        elif image_url.startswith('/'):
+            # Extract domain from s3_key context or use default
+            image_url = 'https://efdsearch.senate.gov' + image_url
+        
+        # Download image using urllib (standard library)
+        req = Request(image_url, headers={
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
+        })
+        
+        with urlopen(req, timeout=30) as response:
+            image_content = response.read()
+            logger.info(f"✅ Downloaded image ({len(image_content)} bytes)")
+            
+            # Check image format
+            content_type = response.headers.get('Content-Type', '').lower()
+            logger.info(f"   Content-Type: {content_type}")
+        
+        # Textract only supports PNG, JPEG, PDF, TIFF - convert GIF and other formats
+        # Check file extension and content type
+        is_gif = (content_type == 'image/gif' or 
+                 image_url.lower().endswith('.gif') or
+                 image_content[:6] == b'GIF89a' or 
+                 image_content[:6] == b'GIF87a')
+        
+        if is_gif:
+            logger.info(f"🔄 Converting GIF to PNG (Textract doesn't support GIF format)...")
+            try:
+                from PIL import Image
+                from io import BytesIO
+                
+                # Open GIF image
+                img = Image.open(BytesIO(image_content))
+                
+                # Convert to RGB if needed (GIFs may have palette mode)
+                if img.mode in ('RGBA', 'LA', 'P'):
+                    # Convert palette/transparency to RGB
+                    rgb_img = Image.new('RGB', img.size, (255, 255, 255))
+                    if img.mode == 'P':
+                        img = img.convert('RGBA')
+                    rgb_img.paste(img, mask=img.split()[-1] if img.mode == 'RGBA' else None)
+                    img = rgb_img
+                elif img.mode != 'RGB':
+                    img = img.convert('RGB')
+                
+                # Save as PNG to bytes
+                png_buffer = BytesIO()
+                img.save(png_buffer, format='PNG')
+                image_content = png_buffer.getvalue()
+                logger.info(f"✅ Converted GIF to PNG ({len(image_content)} bytes)")
+                
+            except ImportError:
+                logger.error(f"❌ PIL/Pillow not available - cannot convert GIF to PNG")
+                logger.error(f"   Please add 'Pillow' to requirements.txt")
+                raise Exception("GIF format not supported by Textract and PIL not available for conversion")
+            except Exception as e:
+                logger.error(f"❌ Error converting GIF to PNG: {e}")
+                raise Exception(f"Failed to convert GIF to PNG: {e}")
+        
+        # Use Textract to extract text from image
+        logger.info(f"🔍 Using Textract to extract text from image...")
+        textract_client = boto3.client('textract')
+        
+        # Textract supports: PNG, JPEG, PDF, TIFF
+        try:
+            response_textract = textract_client.analyze_document(
+                Document={'Bytes': image_content},
+                FeatureTypes=['FORMS', 'TABLES']
+            )
+        except Exception as e:
+            # Check if it's an unsupported format error
+            error_str = str(e).lower()
+            if 'unsupported' in error_str or 'format' in error_str:
+                logger.error(f"❌ Textract doesn't support this image format")
+                logger.error(f"   Content-Type: {content_type}")
+                logger.error(f"   Supported formats: PNG, JPEG, PDF, TIFF")
+                logger.error(f"   Consider using LLM-based extraction for this format")
+                raise Exception(f"Unsupported image format for Textract: {content_type}")
+            else:
+                raise
+        
+        # Extract text and tables from Textract response
+        logger.info(f"✅ Textract analysis complete - extracting structured data...")
+        
+        # Parse Textract response to extract transactions
+        trades = parse_textract_response_for_senate_ptr(response_textract, s3_key)
+        
+        logger.info(f"✅ Extracted {len(trades)} trades from image using Textract")
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing Senate PTR from image {image_url}: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    return trades
+
+
+def parse_textract_response_for_senate_ptr(textract_response: Dict[str, Any], s3_key: str) -> List[Dict[str, Any]]:
+    """
+    Parse Textract response to extract Senate PTR transaction data
+    Handles both regular filings and amendments
+    
+    Args:
+        textract_response: Textract AnalyzeDocument response
+        s3_key: S3 key for context
+    
+    Returns:
+        List of extracted trades
+    """
+    trades = []
+    
+    try:
+        blocks = textract_response.get('Blocks', [])
+        
+        # Extract all text
+        all_text = []
+        for block in blocks:
+            if block.get('BlockType') == 'LINE':
+                text = block.get('Text', '').strip()
+                if text:
+                    all_text.append(text)
+        
+        full_text = '\n'.join(all_text)
+        logger.info(f"📋 Extracted text from image ({len(full_text)} characters)")
+        logger.debug(f"   Text preview: {full_text[:500]}...")
+        
+        # Detect if this is an amendment
+        is_amendment = 'amendment' in full_text.lower() or 'amend' in full_text.lower()
+        if is_amendment:
+            logger.info(f"📝 Detected amendment document")
+            # Extract amendment details
+            # Look for patterns like "amendment to a Periodic Transaction Report filed on [date]"
+            amendment_date_match = re.search(
+                r'(?:filed|filing)\s+on\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})',
+                full_text,
+                re.IGNORECASE
+            )
+            if amendment_date_match:
+                original_filing_date = amendment_date_match.group(1)
+                logger.info(f"   Original filing date: {original_filing_date}")
+        
+        # Extract transaction table from Textract tables
+        tables = [b for b in blocks if b.get('BlockType') == 'TABLE']
+        logger.info(f"📊 Found {len(tables)} table(s) in document")
+        
+        if tables:
+            # Process each table
+            for table_idx, table_block in enumerate(tables, 1):
+                logger.info(f"   Processing table {table_idx}...")
+                table_data = extract_table_data(table_block, blocks)
+                
+                if table_data:
+                    # Try to parse table as transaction data
+                    table_trades = parse_table_as_senate_transactions(table_data, full_text, s3_key)
+                    trades.extend(table_trades)
+                else:
+                    logger.warning(f"   ⚠️ Could not extract table data from table {table_idx}")
+        else:
+            # No structured tables - try to extract from text patterns
+            logger.info(f"   No structured tables found - attempting pattern-based extraction...")
+            text_trades = extract_transactions_from_text(full_text, s3_key)
+            trades.extend(text_trades)
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing Textract response: {e}")
+        import traceback
+        logger.error(f"Traceback: {traceback.format_exc()}")
+    
+    return trades
+
+
+def parse_table_as_senate_transactions(table_data: List[List[str]], full_text: str, s3_key: str) -> List[Dict[str, Any]]:
+    """
+    Parse table data as Senate PTR transactions
+    Handles standard transaction table format
+    """
+    trades = []
+    
+    try:
+        if not table_data or len(table_data) < 2:
+            logger.warning(f"⚠️ Table data insufficient for parsing")
+            return trades
+        
+        # First row is typically headers
+        headers = [h.strip().lower() for h in table_data[0]]
+        logger.info(f"📋 Table headers: {headers}")
+        
+        # Find column indices
+        col_indices = {}
+        for i, header in enumerate(headers):
+            if 'owner' in header:
+                col_indices['owner'] = i
+            elif 'asset' in header or 'security' in header or 'ticker' in header:
+                col_indices['asset'] = i
+            elif 'transaction' in header or 'type' in header:
+                col_indices['transaction_type'] = i
+            elif 'date' in header:
+                col_indices['date'] = i
+            elif 'amount' in header:
+                col_indices['amount'] = i
+        
+        # Process data rows
+        for row_idx, row in enumerate(table_data[1:], 1):
+            if len(row) < len(headers):
+                continue
+            
+            try:
+                trade = {}
+                
+                # Extract fields
+                if 'owner' in col_indices:
+                    trade['owner'] = row[col_indices['owner']].strip()
+                if 'asset' in col_indices:
+                    asset = row[col_indices['asset']].strip()
+                    trade['securityName'] = asset
+                    # Try to extract ticker if present
+                    ticker_match = re.search(r'\(([A-Z]{1,5})\)', asset)
+                    if ticker_match:
+                        trade['securitySymbol'] = ticker_match.group(1)
+                if 'transaction_type' in col_indices:
+                    trans_type = row[col_indices['transaction_type']].strip()
+                    trade['transactionType'] = trans_type
+                if 'date' in col_indices:
+                    date_str = row[col_indices['date']].strip()
+                    trade['transactionDate'] = date_str
+                if 'amount' in col_indices:
+                    amount_str = row[col_indices['amount']].strip()
+                    # Parse amount range
+                    amount_range = parse_amount_range(amount_str)
+                    if amount_range:
+                        trade['amountMin'] = amount_range[0]
+                        trade['amountMax'] = amount_range[1]
+                        trade['amountRange'] = amount_range
+                
+                if trade:
+                    trades.append(trade)
+                    logger.debug(f"   Extracted trade {row_idx}: {trade}")
+            
+            except Exception as e:
+                logger.warning(f"⚠️ Error parsing row {row_idx}: {e}")
+                continue
+        
+    except Exception as e:
+        logger.error(f"❌ Error parsing table as transactions: {e}")
+    
+    return trades
+
+
+def parse_amount_range(amount_str: str) -> Optional[List[int]]:
+    """
+    Parse amount string like "$1,001-$15,000" or "$1,001 - $15,000" into [min, max]
+    
+    Args:
+        amount_str: Amount string from document
+    
+    Returns:
+        [min, max] as list of integers, or None if parsing fails
+    """
+    try:
+        # Remove currency symbols and whitespace
+        amount_str = re.sub(r'[\$,\s]', '', amount_str)
+        
+        # Pattern: number-number or number - number
+        range_match = re.search(r'(\d+)\s*[-–—]\s*(\d+)', amount_str)
+        if range_match:
+            min_val = int(range_match.group(1))
+            max_val = int(range_match.group(2))
+            return [min_val, max_val]
+        
+        # Pattern: single number (use as both min and max)
+        single_match = re.search(r'(\d+)', amount_str)
+        if single_match:
+            val = int(single_match.group(1))
+            return [val, val]
+        
+        return None
+    except Exception as e:
+        logger.debug(f"⚠️ Error parsing amount range '{amount_str}': {e}")
+        return None
+
+
+def extract_transactions_from_text(text: str, s3_key: str) -> List[Dict[str, Any]]:
+    """
+    Extract transaction data from unstructured text using patterns
+    Fallback when no structured tables are found
+    
+    Note: For better results on complex documents, consider using Bedrock for semantic understanding
+    """
+    trades = []
+    
+    # This is a simplified pattern-based extraction
+    # For better results, consider using Bedrock for semantic understanding
+    logger.info(f"📋 Attempting pattern-based extraction from text...")
+    
+    # Look for transaction patterns
+    # Example: "Sale" followed by date and amount
+    # This is a basic implementation - can be enhanced
+    
+    # Pattern: Look for transaction type, date, and amount
+    # Example: "Sale 8/14/25 $1,001-$15,000"
+    transaction_pattern = re.compile(
+        r'(?:Sale|Purchase|Exchange|Conversion)\s+(\d{1,2}[/-]\d{1,2}[/-]\d{2,4})\s+([^\n]+?)(?:\s+(\$?[\d,]+(?:\s*[-–—]\s*\$?[\d,]+)?))?',
+        re.IGNORECASE
+    )
+    
+    matches = transaction_pattern.finditer(text)
+    for match in matches:
+        try:
+            trans_type = match.group(0).split()[0].title()  # "Sale" or "Purchase"
+            date_str = match.group(1)
+            details = match.group(2).strip() if match.group(2) else ''
+            amount_str = match.group(3) if match.group(3) else ''
+            
+            trade = {
+                'transactionType': trans_type,
+                'transactionDate': date_str,
+            }
+            
+            # Extract security name/ticker from details
+            if details:
+                trade['securityName'] = details
+                ticker_match = re.search(r'\(([A-Z]{1,5})\)', details)
+                if ticker_match:
+                    trade['securitySymbol'] = ticker_match.group(1)
+            
+            # Parse amount
+            if amount_str:
+                amount_range = parse_amount_range(amount_str)
+                if amount_range:
+                    trade['amountMin'] = amount_range[0]
+                    trade['amountMax'] = amount_range[1]
+                    trade['amountRange'] = amount_range
+            
+            if trade:
+                trades.append(trade)
+                logger.debug(f"   Extracted trade from text: {trade}")
+        
+        except Exception as e:
+            logger.debug(f"   ⚠️ Error parsing text match: {e}")
+            continue
+    
+    return trades
+
+
 def parse_ptr_with_textract(pdf_content: bytes, source: str = 'house') -> List[Dict[str, Any]]:
     """
     Parse PTR PDF using AWS Textract to extract trade data
@@ -1094,7 +1504,10 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
 
 def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
     """
-    Parse Senate PTR - handles both PDF and HTML formats
+    Parse Senate PTR - handles:
+    1. HTML with transaction table (direct parsing)
+    2. HTML with embedded image (Textract)
+    3. PDF format (Textract)
     """
     trades = []
     
@@ -1109,10 +1522,39 @@ def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
         content_start = file_content[:100].lower()
         
         if b'<html' in content_start or b'<!doctype' in content_start:
-            # It's HTML - parse the transaction table directly
-            logger.info(f"📄 Senate PTR is HTML format - parsing table directly")
+            # It's HTML - check if it contains an image or transaction table
+            logger.info(f"📄 Senate PTR is HTML format")
             html_content = file_content.decode('utf-8', errors='ignore')
-            trades = parse_senate_ptr_html(html_content)
+            
+            # Check for embedded image (image-based filings like amendments)
+            image_url = extract_image_url_from_html(html_content)
+            
+            if image_url:
+                logger.info(f"🖼️ HTML contains embedded image - will use Textract to process")
+                logger.info(f"   Image URL: {image_url}")
+                trades = parse_senate_ptr_from_image(image_url, s3_key)
+            else:
+                # Try to parse transaction table directly
+                logger.info(f"📋 HTML appears to contain transaction table - parsing directly")
+                trades = parse_senate_ptr_html(html_content)
+                
+                # If no trades found, log more details for debugging
+                if not trades:
+                    logger.warning(f"⚠️ No trades extracted from HTML table parsing")
+                    logger.info(f"📋 Checking HTML structure for debugging...")
+                    # Check for common indicators
+                    has_table = 'table' in html_content.lower() and 'table-striped' in html_content.lower()
+                    has_image_tag = '<img' in html_content.lower()
+                    logger.info(f"   Has table-striped: {has_table}")
+                    logger.info(f"   Has image tag: {has_image_tag}")
+                    if has_image_tag and not has_table:
+                        logger.info(f"   💡 HTML contains image but no transaction table - this may be an image-based filing")
+                        logger.info(f"   💡 Attempting to extract image URL for Textract processing...")
+                        # Try to extract image URL with more flexible patterns
+                        image_url = extract_image_url_from_html(html_content, flexible=True)
+                        if image_url:
+                            logger.info(f"   ✅ Found image URL: {image_url}")
+                            trades = parse_senate_ptr_from_image(image_url, s3_key)
         else:
             # It's PDF - use Textract
             logger.info(f"📄 Senate PTR is PDF format - using Textract")

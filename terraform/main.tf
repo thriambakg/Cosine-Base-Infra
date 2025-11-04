@@ -784,6 +784,22 @@ module "news_layer" {
   depends_on = [module.static_hosting_bucket]
 }
 
+# Document/Image Processing Dependencies Layer for Lambda functions
+module "document_processing_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "document-processing"
+  layer_description   = "Document and image processing dependencies (Pillow for GIF/PNG conversion, future LLM image processing)"
+  requirements_file   = "document-processing-dependencies.txt"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.static_hosting_bucket.bucket_id
+  python_command      = "python3.11"
+
+  depends_on = [module.static_hosting_bucket]
+}
+
 # SQS Queue for News Processing
 module "news_queue" {
   source = "./modules/sqs"
@@ -1772,9 +1788,10 @@ module "politician_trades_single_matcher" {
     S3_BUCKET = module.politician_trades_s3.bucket_id
   }
 
-  # Lambda layers
+  # Lambda layers - includes document processing layer for Pillow (GIF to PNG conversion)
   layers = [
-    module.core_layer.layer_arn
+    module.core_layer.layer_arn,
+    module.document_processing_layer.layer_arn
   ]
 
   # IAM policies
@@ -1786,7 +1803,7 @@ module "politician_trades_single_matcher" {
 
   tags = var.common_tags
 
-  depends_on = [module.politician_trades_s3]
+  depends_on = [module.politician_trades_s3, module.document_processing_layer]
 }
 
 # Lambda 4: Aggregate Matched Trades

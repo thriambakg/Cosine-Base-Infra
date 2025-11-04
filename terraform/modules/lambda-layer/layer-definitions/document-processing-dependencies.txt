@@ -1,0 +1,7 @@
+# Document/Image Processing Dependencies Layer
+# For processing images, PDFs, and documents in Lambda functions
+# Used by: politician_trades_single_matcher (for GIF to PNG conversion and future LLM image processing)
+
+# Image processing
+Pillow>=10.0.0,<11.0.0
+
