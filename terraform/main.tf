@@ -2025,7 +2025,8 @@ module "politician_trades_state_machine" {
                   StartAt = "BatchTransformSEC"
                   States = {
                     BatchTransformSEC = {
-                      Type = "Pass"
+                      Type    = "Pass"
+                      Comment = "Extract SEC forms array from fetchResults"
                       Parameters = {
                         "date.$" : "$.fetchResults.date",
                         "items.$" : "$.fetchResults.secForms",
@@ -2037,6 +2038,7 @@ module "politician_trades_state_machine" {
                       Type           = "Map"
                       ItemsPath      = "$.items"
                       MaxConcurrency = 10
+                      ResultPath     = "$.downloadResults"
                       Iterator = {
                         StartAt = "BatchDownloadForm"
                         States = {
@@ -2053,6 +2055,7 @@ module "politician_trades_state_machine" {
                       Type           = "Map"
                       ItemsPath      = "$.downloadResults"
                       MaxConcurrency = 10
+                      ResultPath     = "$.matchResults"
                       Iterator = {
                         StartAt = "BatchMatchFileSec"
                         States = {
@@ -2071,7 +2074,8 @@ module "politician_trades_state_machine" {
                   StartAt = "BatchTransformSenate"
                   States = {
                     BatchTransformSenate = {
-                      Type = "Pass"
+                      Type    = "Pass"
+                      Comment = "Extract Senate PTRs array from fetchResults"
                       Parameters = {
                         "date.$" : "$.fetchResults.date",
                         "items.$" : "$.fetchResults.senatePTRs",
@@ -2083,6 +2087,7 @@ module "politician_trades_state_machine" {
                       Type           = "Map"
                       ItemsPath      = "$.items"
                       MaxConcurrency = 10
+                      ResultPath     = "$.downloadResults"
                       Iterator = {
                         StartAt = "BatchDownloadSenatePTR"
                         States = {
@@ -2099,6 +2104,7 @@ module "politician_trades_state_machine" {
                       Type           = "Map"
                       ItemsPath      = "$.downloadResults"
                       MaxConcurrency = 10
+                      ResultPath     = "$.matchResults"
                       Iterator = {
                         StartAt = "BatchMatchFileSenate"
                         States = {
