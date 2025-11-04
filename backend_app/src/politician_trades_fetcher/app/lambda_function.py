@@ -62,10 +62,15 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
     form_types = ['3', '4', '5']
     
     # Create requests session with required headers
+    # SEC requires proper User-Agent and headers to avoid 403 errors
     session = requests.Session()
     session.headers.update({
         'User-Agent': SEC_USER_AGENT,
-        'Accept': 'text/plain'
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,text/plain;q=0.8,*/*;q=0.7',
+        'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1'
     })
     
     try:
@@ -76,20 +81,68 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
         quarter = ((month - 1) // 3) + 1  # Q1=Jan-Mar, Q2=Apr-Jun, Q3=Jul-Sep, Q4=Oct-Dec
         date_str = date_obj.strftime('%Y%m%d')  # Format: 20251025
         
-        # SEC daily index file format: {form_type}/{date}.idx
-        # Example: form4/20251025.idx
+        # SEC daily index file format
         # URL: https://www.sec.gov/Archives/edgar/daily-index/{YEAR}/QTR{N}/{form_type}/{date}.idx
+        # Note: Some dates may not have index files, or format may vary
         
         for form_type in form_types:
             # Build daily index file URL
-            # Format: https://www.sec.gov/Archives/edgar/daily-index/{YEAR}/QTR{N}/{form_type}/{date}.idx
-            index_url = f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{quarter}/form{form_type}/{date_str}.idx"
+            # SEC daily index files are at: /Archives/edgar/daily-index/{YEAR}/QTR{N}/{form_type}/{date}.idx
+            # Try both lowercase and uppercase form type variations
+            index_urls = [
+                f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{quarter}/form{form_type}/{date_str}.idx",
+                f"https://www.sec.gov/Archives/edgar/daily-index/{year}/QTR{quarter}/FORM{form_type}/{date_str}.idx",
+            ]
+            
+            index_url = index_urls[0]  # Try lowercase first
             
             logger.info(f"📥 Fetching SEC daily index for Form {form_type} from: {index_url}")
             
+            # Add delay before each request to avoid rate limiting/403 errors
+            # SEC has strict bot protection - be respectful with delays
+            # Wait 1 second between requests to stay under 10 requests/second limit
+            if form_type != form_types[0]:  # Don't delay before first form type
+                time.sleep(1.0)
+            else:
+                # Small initial delay to avoid immediate 403
+                time.sleep(0.5)
+            
             try:
-                # Fetch the daily index file
-                response = session.get(index_url, timeout=30)
+                # Try both URL formats (lowercase and uppercase)
+                response = None
+                for url in index_urls:
+                    try:
+                        # Fetch the daily index file
+                        # SEC requires proper headers and respectful rate limiting to avoid 403 errors
+                        response = session.get(url, timeout=30, allow_redirects=True)
+                        
+                        # If we get a valid response (200) or 404, use this URL
+                        if response.status_code in [200, 404]:
+                            index_url = url  # Update to the working URL
+                            break
+                        # If 403, try next URL format
+                        elif response.status_code == 403:
+                            logger.debug(f"⚠️ 403 Forbidden for {url}, trying alternative format...")
+                            continue
+                    except Exception as url_error:
+                        logger.debug(f"⚠️ Error with URL {url}: {url_error}, trying next...")
+                        continue
+                
+                # If all URLs failed, handle 403 or other errors
+                if response is None or response.status_code == 403:
+                    logger.warning(f"⚠️ 403 Forbidden for Form {form_type} daily index - falling back to RSS feed")
+                    logger.warning(f"   URLs attempted: {index_urls}")
+                    # For 403 errors, try RSS feed as fallback (for recent dates)
+                    today = datetime.now().date()
+                    if date_obj == today or date_obj >= today - timedelta(days=1):
+                        logger.info(f"📭 Falling back to RSS feed for Form {form_type} due to 403 error")
+                        forms.extend(_fetch_from_rss_feed(session, form_type, target_date))
+                    else:
+                        logger.warning(f"⚠️ Cannot fetch Form {form_type} for historical date {target_date} - daily index unavailable due to 403")
+                    continue
+                
+                # Check response status - raise for errors other than 404
+                response.raise_for_status()
                 
                 # Check if file exists (404 means no filings for that date OR file not yet created)
                 if response.status_code == 404:
@@ -205,6 +258,14 @@ def fetch_sec_forms(target_date: str) -> List[Dict[str, Any]]:
             except requests.exceptions.HTTPError as http_error:
                 if http_error.response.status_code == 404:
                     logger.info(f"📭 No Form {form_type} index file found for {target_date} (404) - likely no filings that day")
+                elif http_error.response.status_code == 403:
+                    logger.warning(f"⚠️ 403 Forbidden for Form {form_type} daily index - may need to wait or check URL format")
+                    logger.warning(f"   URL attempted: {index_url}")
+                    # For 403 errors, try RSS feed as fallback
+                    today = datetime.now().date()
+                    if date_obj == today or date_obj >= today - timedelta(days=1):
+                        logger.info(f"📭 Falling back to RSS feed for Form {form_type} due to 403 error")
+                        forms.extend(_fetch_from_rss_feed(session, form_type, target_date))
                 else:
                     logger.error(f"❌ HTTP error fetching Form {form_type} daily index: {http_error}")
                 continue
