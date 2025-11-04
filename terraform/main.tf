@@ -2407,6 +2407,7 @@ module "politician_trades_state_machine" {
 
   # Lambda ARNs for IAM permissions (all Lambdas that Step Functions will invoke)
   lambda_function_arns = [
+    module.politician_trades_date_transformer.function_arn,
     module.politician_trades_fetcher.function_arn,
     module.politician_trades_downloader.function_arn,
     module.politician_trades_sec_matcher.function_arn,
