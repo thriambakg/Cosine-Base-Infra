@@ -1940,19 +1940,11 @@ module "politician_trades_state_machine" {
     States = {
       # Step 0: Batch date ranges into 5-day chunks if date range is provided
       BatchDateRanges = {
-        Type      = "Pass"
-        Comment   = "Split date ranges into 5-day batches for parallel processing. If single date or no date range, pass through unchanged."
-        InputPath = "$"
-        Parameters = {
-          # If startDate and endDate exist, we'll use a Map state to process batches
-          # Otherwise, pass through to FetchFormMetadata
-          "startDate.$" : "$.startDate",
-          "endDate.$" : "$.endDate",
-          "date.$" : "$.date",
-          "source.$" : "$.source",
-          "timestamp.$" : "$.timestamp"
-        }
-        Next = "CheckDateRange"
+        Type       = "Pass"
+        Comment    = "Pass through input - will check for date range in next state"
+        InputPath  = "$"
+        OutputPath = "$"
+        Next       = "CheckDateRange"
       }
 
       CheckDateRange = {
