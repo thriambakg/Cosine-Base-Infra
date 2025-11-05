@@ -2129,7 +2129,7 @@ module "politician_trades_state_machine" {
               }
               LoadSECResults = {
                 Type     = "Task"
-                Comment  = "Load SEC results summary from S3 (written by Glue job)"
+                Comment  = "Load SEC results summary from S3 (written by Glue job) - Body contains JSON string"
                 Resource = "arn:aws:states:::aws-sdk:s3:getObject"
                 Parameters = {
                   Bucket  = module.politician_trades_s3.bucket_id
@@ -2140,12 +2140,11 @@ module "politician_trades_state_machine" {
               }
               TransformSECResults = {
                 Type    = "Pass"
-                Comment = "Transform SEC results to match expected format"
+                Comment = "Pass SEC results - aggregator Lambda will parse JSON from Body string"
                 Parameters = {
-                  "matchedTrades.$"  = "States.StringToJson($.secSummary.Body).matchedTrades"
-                  "totalMatched.$"   = "States.StringToJson($.secSummary.Body).totalMatched"
-                  "unmatchedCount.$" = "States.StringToJson($.secSummary.Body).unmatchedCount"
+                  "secResultsJson.$" = "$.secSummary.Body"
                   "date.$"           = "$.fetchResults.date"
+                  "source"           = "sec"
                 }
                 End = true
               }
@@ -2295,10 +2294,10 @@ module "politician_trades_state_machine" {
         Comment = "Extract match results from parallel pipeline branches for aggregator"
         Parameters = {
           # pipelineResults is array from Parallel state:
-          # [0] = SEC branch result (has matchedTrades from TransformSECResults)
+          # [0] = SEC branch result (has secResultsJson string from TransformSECResults)
           # [1] = Senate branch result (has matchResults)
           # [2] = House branch result (empty for now)
-          "secMatchResults.$" : "$.pipelineResults[0]",
+          "secResultsJson.$" : "$.pipelineResults[0].secResultsJson",
           "senateMatchResults.$" : "$.pipelineResults[1].matchResults",
           "houseMatchResults.$" : "$.pipelineResults[2]", # House pipeline returns empty array
           "date.$" : "$.fetchResults.date"
