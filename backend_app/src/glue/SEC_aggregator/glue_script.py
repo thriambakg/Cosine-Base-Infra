@@ -456,6 +456,9 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
     
     cik = form_data.get('cik', 'unknown')
     accession = form_data.get('accession_number', 'unknown')
+    form_type = form_data.get('form_type', 'unknown')
+    
+    local_logger.info(f"      🔍 DOWNLOAD DETAILS: CIK={cik}, Accession={accession}, Type={form_type}")
     
     try:
         form_type = form_data.get('form_type')
@@ -495,7 +498,10 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                 else:
                     file_url = f"{base_url}/{accession_dashed}.pdf"
                 
+                local_logger.info(f"      🔄 Attempting download: {ext} from {file_url}")
                 response = session.get(file_url, timeout=30)
+                local_logger.info(f"      📡 Response: Status={response.status_code}, Size={len(response.content)} bytes")
+                
                 if response.status_code == 200:
                     file_content = response.content
                     file_ext = ext[1:]  # Remove dot
@@ -504,19 +510,33 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                     # For .txt files, check if it's XML
                     if ext == '.txt' and file_content.startswith(b'<?xml'):
                         file_ext = 'xml'
+                        local_logger.info(f"      ℹ️ Detected XML content in .txt file")
                     
-                    local_logger.info(f"   ✅ DOWNLOAD SUCCESS: CIK={cik}, Accession={accession}, URL={file_url}, Size={len(file_content)} bytes")
+                    # Check if it's HTML (for parsing)
+                    if file_content.startswith(b'<!DOCTYPE') or file_content.startswith(b'<html'):
+                        if file_ext != 'html':
+                            file_ext = 'html'
+                            local_logger.info(f"      ℹ️ Detected HTML content, changed extension to html")
+                    
+                    local_logger.info(f"      ✅ DOWNLOAD SUCCESS: CIK={cik}, Accession={accession}, URL={file_url}, Size={len(file_content):,} bytes, Ext={file_ext}")
+                    local_logger.info(f"      📄 File Content Preview (first 200 chars): {file_content[:200].decode('utf-8', errors='ignore')}")
                     break
                 else:
-                    local_logger.debug(f"      Attempted {ext}: Status {response.status_code}")
+                    local_logger.warning(f"      ⚠️ Attempted {ext}: Status {response.status_code}, Response preview: {response.text[:200]}")
             except Exception as e:
-                local_logger.debug(f"      Attempted {ext}: Error - {str(e)[:100]}")
+                local_logger.warning(f"      ⚠️ Attempted {ext}: Exception - {type(e).__name__}: {str(e)[:200]}")
+                import traceback
+                local_logger.debug(f"         Traceback: {traceback.format_exc()[:500]}")
                 continue
         
         if not file_content:
-            local_logger.error(f"   ❌ DOWNLOAD FAILED: CIK={cik}, Accession={accession_dashed}")
-            local_logger.error(f"      Tried URLs: {base_url}/[accession]-primary-document.xml, "
-                          f"{base_url}/[accession].txt, {base_url}/[accession].pdf")
+            local_logger.error(f"      ❌ DOWNLOAD FAILED: CIK={cik}, Accession={accession_dashed}")
+            local_logger.error(f"         Tried all file extensions: .xml, .txt, .pdf")
+            local_logger.error(f"         Base URL: {base_url}")
+            local_logger.error(f"         Tried URLs:")
+            local_logger.error(f"            - {base_url}/{accession_dashed}-primary-document.xml")
+            local_logger.error(f"            - {base_url}/{accession_dashed}.txt")
+            local_logger.error(f"            - {base_url}/{accession_dashed}.pdf")
             return None
         
         # Generate S3 key
@@ -532,7 +552,8 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             ContentType='application/xml' if file_ext == 'xml' else 'application/pdf'
         )
         
-        local_logger.info(f"   ✅ S3 UPLOAD SUCCESS: S3Key={s3_key}, Bucket={s3_bucket_name}, Size={len(file_content)} bytes")
+        local_logger.info(f"      ✅ S3 UPLOAD SUCCESS: S3Key={s3_key}, Bucket={s3_bucket_name}, Size={len(file_content)} bytes")
+        local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing (ext: {file_ext}, size: {len(file_content):,} bytes)")
         
         return {
             's3_key': s3_key,
@@ -545,9 +566,10 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         }
         
     except Exception as e:
-        local_logger.error(f"   ❌ Error downloading form (CIK={cik}, Accession={accession}): {e}")
+        local_logger.error(f"      ❌ DOWNLOAD EXCEPTION: CIK={cik}, Accession={accession}, Error={e}")
+        local_logger.error(f"         Error type: {type(e).__name__}")
         import traceback
-        local_logger.error(f"      Traceback: {traceback.format_exc()}")
+        local_logger.error(f"         Traceback: {traceback.format_exc()}")
         return None
 
 
@@ -1376,16 +1398,41 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     parsed_data = parse_sec_form_metadata(content_str, form_data, accepted_date_str)
     parse_duration = (datetime.now() - parse_start).total_seconds()
     
-    # Log parsed data summary
+    # Log parsed data summary with full details
     local_logger.info(f"   ✅ Parsing complete in {parse_duration:.2f}s:")
-    local_logger.info(f"      - Name: {parsed_data.get('name', 'N/A')}")
-    local_logger.info(f"      - Issuer: {parsed_data.get('issuerName', 'N/A')} ({parsed_data.get('tickerSymbol', 'N/A')})")
-    local_logger.info(f"      - Relationship: {parsed_data.get('relationship', 'N/A')}")
-    local_logger.info(f"      - Event Date: {parsed_data.get('eventDate', 'N/A')}")
-    local_logger.info(f"      - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
-    local_logger.info(f"      - Table I rows: {len(parsed_data.get('nonDerivativeSecurities', []))}")
-    local_logger.info(f"      - Table II rows: {len(parsed_data.get('derivativeSecurities', []))}")
-    local_logger.info(f"      - Amendment: {parsed_data.get('amendment', False)}")
+    local_logger.info(f"      📊 PARSED DATA SUMMARY:")
+    local_logger.info(f"         - Form Type: {parsed_data.get('formType', 'N/A')}")
+    local_logger.info(f"         - Name: {parsed_data.get('name', 'N/A')}")
+    local_logger.info(f"         - Address: {parsed_data.get('address', 'N/A')}")
+    local_logger.info(f"         - Issuer: {parsed_data.get('issuerName', 'N/A')}")
+    local_logger.info(f"         - Ticker: {parsed_data.get('tickerSymbol', 'N/A')}")
+    local_logger.info(f"         - Relationship: {parsed_data.get('relationship', 'N/A')}")
+    local_logger.info(f"         - Relationship Additional: {parsed_data.get('relationshipAdditionalText', 'N/A')}")
+    local_logger.info(f"         - Event Date: {parsed_data.get('eventDate', 'N/A')}")
+    local_logger.info(f"         - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
+    local_logger.info(f"         - Signature Name: {parsed_data.get('signatureName', 'N/A')}")
+    local_logger.info(f"         - Amendment: {parsed_data.get('amendment', False)}")
+    local_logger.info(f"         - Table I rows (Non-Derivative): {len(parsed_data.get('nonDerivativeSecurities', []))}")
+    if parsed_data.get('nonDerivativeSecurities'):
+        local_logger.info(f"            First row: {json.dumps(parsed_data['nonDerivativeSecurities'][0], default=str)[:200]}")
+    local_logger.info(f"         - Table II rows (Derivative): {len(parsed_data.get('derivativeSecurities', []))}")
+    if parsed_data.get('derivativeSecurities'):
+        local_logger.info(f"            First row: {json.dumps(parsed_data['derivativeSecurities'][0], default=str)[:200]}")
+    local_logger.info(f"         - Misc/Explanations: {len(parsed_data.get('misc', {}))} entries")
+    if parsed_data.get('misc'):
+        misc_preview = {k: str(v)[:100] for k, v in list(parsed_data['misc'].items())[:3]}
+        local_logger.info(f"            Preview: {json.dumps(misc_preview, default=str)[:300]}")
+    
+    # Check for critical missing fields
+    missing_fields = []
+    if not parsed_data.get('name'):
+        missing_fields.append('name')
+    if not parsed_data.get('formType'):
+        missing_fields.append('formType')
+    if not parsed_data.get('reportingDate'):
+        missing_fields.append('reportingDate')
+    if missing_fields:
+        local_logger.warning(f"      ⚠️ WARNING: Missing critical fields: {', '.join(missing_fields)}")
     
     # Check politician match
     match_start = datetime.now()
@@ -1532,6 +1579,18 @@ try:
     logger.info(f"   Form Type Breakdown:")
     for form_type, count in sorted(form_type_counts.items()):
         logger.info(f"      - {form_type}: {count}")
+    
+    # Log preview of fetched files (first 10)
+    logger.info("")
+    logger.info(f"   📋 Preview of Fetched Files (showing first {min(10, len(forms))} of {len(forms)}):")
+    for idx, form in enumerate(forms[:10], 1):
+        logger.info(f"      {idx}. CIK={form.get('cik', 'N/A')}, "
+                   f"Accession={form.get('accession_number', 'N/A')[:20]}, "
+                   f"Type={form.get('form_type', 'N/A')}, "
+                   f"FilingDate={form.get('filing_date', 'N/A')}, "
+                   f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
+    if len(forms) > 10:
+        logger.info(f"      ... ({len(forms) - 10} more files)")
     logger.info("=" * 80)
     
     # Step 3: Process forms in parallel using Spark
@@ -1655,15 +1714,48 @@ try:
     logger.info(f"   - Forms without politician match: {no_politician_matches} ({no_politician_matches/successful_stored*100 if successful_stored > 0 else 0:.1f}% of stored)")
     logger.info("")
     
+    # Detailed failure analysis
+    logger.info("")
+    logger.info(f"🔍 Detailed Failure Analysis:")
+    logger.info(f"   - Skipped (date mismatch): {skipped_date_mismatch} forms")
+    logger.info(f"   - Skipped (download failed): {skipped_download_failed} forms")
+    logger.info(f"   - Skipped (unsupported file type): {skipped_unsupported_type} forms")
+    logger.info(f"   - Failed to store: {failed_stored} forms")
+    
+    # Show sample of failed results for debugging
+    if failed_stored > 0:
+        logger.info("")
+        logger.info(f"   📋 Sample of Failed Forms (first 5):")
+        failed_samples = [r for r in results if not r.get('success') and not r.get('skipped')][:5]
+        for idx, failed in enumerate(failed_samples, 1):
+            logger.info(f"      {idx}. Error: {failed.get('error', 'Unknown error')}")
+    
+    if skipped_download_failed > 0:
+        logger.info("")
+        logger.info(f"   📋 Sample of Download Failures (first 5):")
+        download_failed_samples = [r for r in results if r.get('skipped') and r.get('reason') == 'download_failed'][:5]
+        for idx, failed in enumerate(download_failed_samples, 1):
+            logger.info(f"      {idx}. Reason: {failed.get('reason', 'Unknown')}")
+    
+    if skipped_date_mismatch > 0:
+        logger.info("")
+        logger.info(f"   ⚠️ Note: {skipped_date_mismatch} forms were skipped due to date mismatch")
+        logger.info(f"      This is normal if the filing date in the form doesn't match the target date")
+    
     if successful_stored == 0:
-        logger.warning(f"   ⚠️ WARNING: No forms were successfully stored!")
+        logger.warning("")
+        logger.warning(f"   ⚠️ CRITICAL WARNING: No forms were successfully stored!")
         logger.warning(f"      This could indicate:")
-        logger.warning(f"      - Download failures for all forms")
-        logger.warning(f"      - Parsing failures for all forms")
-        logger.warning(f"      - Date mismatches for all forms")
+        logger.warning(f"      - Download failures for all forms (check network/SEC website)")
+        logger.warning(f"      - Parsing failures for all forms (check HTML structure)")
+        logger.warning(f"      - Date mismatches for all forms (check target date)")
+        logger.warning(f"      - DynamoDB write failures (check permissions/table)")
+        logger.warning(f"      Review the detailed logs above for specific error messages")
     elif successful_stored < total_forms_processed * 0.5:
+        logger.warning("")
         logger.warning(f"   ⚠️ WARNING: Less than 50% of forms were successfully stored!")
         logger.warning(f"      Success rate: {successful_stored/total_forms_processed*100:.1f}%")
+        logger.warning(f"      Review the detailed logs above for specific error messages")
     
     logger.info("=" * 80)
     logger.info("")
