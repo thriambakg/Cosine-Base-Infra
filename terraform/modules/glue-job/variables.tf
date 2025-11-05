@@ -57,17 +57,23 @@ variable "job_bookmark_option" {
 }
 
 variable "s3_bucket_arn" {
-  description = "ARN of the S3 bucket for data access"
+  description = "ARN of the primary S3 bucket for data access"
   type        = string
 }
 
+variable "additional_s3_bucket_arns" {
+  description = "List of additional S3 bucket ARNs for jobs that need access to multiple buckets"
+  type        = list(string)
+  default     = null
+}
+
 variable "spark_logs_bucket" {
-  description = "S3 bucket name for Spark UI logs"
+  description = "S3 bucket name (ID) for Spark UI logs"
   type        = string
 }
 
 variable "temp_bucket" {
-  description = "S3 bucket name for temporary files"
+  description = "S3 bucket name (ID) for temporary files"
   type        = string
 }
 
@@ -90,9 +96,15 @@ variable "default_arguments" {
 }
 
 variable "additional_policies" {
-  description = "Map of additional IAM policies to attach (key = policy name, value = policy JSON)"
+  description = "Map of additional IAM policies to create and attach (key = policy name, value = policy JSON document)"
   type        = map(string)
   default     = {}
+}
+
+variable "additional_policy_arns" {
+  description = "List of additional IAM policy ARNs to attach (for shared/managed policies)"
+  type        = list(string)
+  default     = []
 }
 
 variable "tags" {

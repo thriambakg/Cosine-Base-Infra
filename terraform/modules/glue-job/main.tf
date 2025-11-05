@@ -89,6 +89,7 @@ resource "aws_iam_role_policy" "cloudwatch_logs" {
 }
 
 # S3 permissions (for reading/writing data)
+# Supports multiple buckets via additional_s3_bucket_arns
 resource "aws_iam_role_policy" "s3_access" {
   name_prefix = "${var.job_name}-s3-"
   role        = aws_iam_role.glue_role.id
@@ -104,10 +105,16 @@ resource "aws_iam_role_policy" "s3_access" {
           "s3:DeleteObject",
           "s3:ListBucket"
         ]
-        Resource = [
-          "${var.s3_bucket_arn}/*",
-          var.s3_bucket_arn
-        ]
+        Resource = concat(
+          [
+            "${var.s3_bucket_arn}/*",
+            var.s3_bucket_arn
+          ],
+          var.additional_s3_bucket_arns != null ? [
+            for bucket_arn in var.additional_s3_bucket_arns : "${bucket_arn}/*"
+          ] : [],
+          var.additional_s3_bucket_arns != null ? var.additional_s3_bucket_arns : []
+        )
       }
     ]
   })
@@ -174,5 +181,13 @@ resource "aws_iam_role_policy" "custom" {
   role        = aws_iam_role.glue_role.id
 
   policy = each.value
+}
+
+# Support for attaching additional IAM policy ARNs (for shared policies)
+resource "aws_iam_role_policy_attachment" "additional" {
+  for_each = toset(var.additional_policy_arns)
+
+  role       = aws_iam_role.glue_role.name
+  policy_arn = each.value
 }
 

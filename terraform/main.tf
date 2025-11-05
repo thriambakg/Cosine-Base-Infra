@@ -2299,7 +2299,7 @@ module "politician_trades_sec_glue_job" {
   source = "./modules/glue-job"
 
   job_name        = "${var.project_name}-politician-trades-sec-etl-${var.environment}"
-  script_location = "s3://${module.politician_trades_s3.bucket_name}/glue-scripts/politician-trades-sec-etl.py"
+  script_location = "s3://${module.politician_trades_s3.bucket_id}/glue-scripts/politician-trades-sec-etl.py"
   python_version  = "3"
   glue_version    = "4.0"
   max_retries     = 1
@@ -2312,18 +2312,18 @@ module "politician_trades_sec_glue_job" {
   job_bookmark_option = "job-bookmark-disable"
 
   s3_bucket_arn     = module.politician_trades_s3.bucket_arn
-  spark_logs_bucket = module.politician_trades_s3.bucket_name
-  temp_bucket       = module.politician_trades_s3.bucket_name
+  spark_logs_bucket = module.politician_trades_s3.bucket_id
+  temp_bucket       = module.politician_trades_s3.bucket_id
 
   dynamodb_table_arn = module.politician_trades_table.table_arn
   kms_key_arn        = module.kms.main_key_arn
 
   default_arguments = {
     "--enable-spark-ui"                  = "true"
-    "--spark-event-logs-path"            = "s3://${module.politician_trades_s3.bucket_name}/glue-logs/"
+    "--spark-event-logs-path"            = "s3://${module.politician_trades_s3.bucket_id}/glue-logs/"
     "--enable-continuous-cloudwatch-log" = "true"
     "--enable-metrics"                   = "true"
-    "--TempDir"                          = "s3://${module.politician_trades_s3.bucket_name}/glue-temp/"
+    "--TempDir"                          = "s3://${module.politician_trades_s3.bucket_id}/glue-temp/"
     "--enable-glue-datacatalog"          = "false"
   }
 
