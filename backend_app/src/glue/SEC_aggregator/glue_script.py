@@ -412,7 +412,7 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                     if ext == '.txt' and file_content.startswith(b'<?xml'):
                         file_ext = 'xml'
                     
-                    local_logger.debug(f"      Downloaded from: {file_url} ({len(file_content)} bytes)")
+                    local_logger.info(f"   ✅ DOWNLOAD SUCCESS: CIK={cik}, Accession={accession}, URL={file_url}, Size={len(file_content)} bytes")
                     break
                 else:
                     local_logger.debug(f"      Attempted {ext}: Status {response.status_code}")
@@ -421,8 +421,8 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                 continue
         
         if not file_content:
-            local_logger.warning(f"   ⚠️ Could not download form from any URL: CIK={cik}, accession={accession_dashed}")
-            local_logger.warning(f"      Tried URLs: {base_url}/[accession]-primary-document.xml, "
+            local_logger.error(f"   ❌ DOWNLOAD FAILED: CIK={cik}, Accession={accession_dashed}")
+            local_logger.error(f"      Tried URLs: {base_url}/[accession]-primary-document.xml, "
                           f"{base_url}/[accession].txt, {base_url}/[accession].pdf")
             return None
         
@@ -439,7 +439,7 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             ContentType='application/xml' if file_ext == 'xml' else 'application/pdf'
         )
         
-        local_logger.debug(f"      Uploaded to S3: {s3_key} ({len(file_content)} bytes)")
+        local_logger.info(f"   ✅ S3 UPLOAD SUCCESS: S3Key={s3_key}, Bucket={s3_bucket_name}, Size={len(file_content)} bytes")
         
         return {
             's3_key': s3_key,
@@ -462,9 +462,15 @@ def parse_sec_form_html(html_content: str, s3_key: str, filing_date: str) -> Lis
     """
     Parse SEC Form HTML and extract trade data (full implementation from SEC matcher)
     """
+    # Import inside function to avoid serialization issues
+    import logging
+    local_logger = logging.getLogger()
+    
     trades = []
     
     try:
+        local_logger.info(f"   🔍 PARSING: Starting parse for S3Key={s3_key}")
+        
         # Extract filer/owner name
         # Pattern: <a href="/cgi-bin/browse-edgar?action=getcompany&CIK=...">Name</a>
         name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
@@ -485,10 +491,10 @@ def parse_sec_form_html(html_content: str, s3_key: str, filing_date: str) -> Lis
                     break
         
         if not filer_name:
-            logger.warning(f"⚠️ Could not extract filer name from HTML {s3_key}")
+            local_logger.warning(f"   ⚠️ PARSE WARNING: Could not extract filer name from HTML S3Key={s3_key}")
             return trades
         
-        logger.info(f"✅ Extracted filer name from HTML: {filer_name}")
+        local_logger.info(f"   ✅ PARSED FILER NAME: FilerName={filer_name}, S3Key={s3_key}")
         
         # Detect form type
         form_number = None
@@ -745,12 +751,26 @@ def parse_sec_form_html(html_content: str, s3_key: str, filing_date: str) -> Lis
                         }
                         trades.append(trade)
         
-        logger.info(f"✅ Extracted {len(trades)} trades from {s3_key}")
+        local_logger.info(f"   ✅ PARSED DATA: Extracted {len(trades)} trades from S3Key={s3_key}")
+        
+        # Log all parsed trades for verification
+        if trades:
+            local_logger.info(f"   📋 PARSED TRADES DETAIL (S3Key={s3_key}):")
+            for trade_idx, trade in enumerate(trades, 1):
+                local_logger.info(f"      Trade {trade_idx}: Filer={trade.get('filerName', 'N/A')}, "
+                                f"Security={trade.get('securityName', 'N/A')[:60]}, "
+                                f"Symbol={trade.get('securitySymbol', 'N/A')}, "
+                                f"Type={trade.get('transactionType', 'N/A')}, "
+                                f"Amount=${trade.get('totalAmount', 'N/A')}, "
+                                f"Shares={trade.get('shares', 'N/A')}, "
+                                f"Date={trade.get('transactionDate', 'N/A')}")
+        else:
+            local_logger.warning(f"   ⚠️ PARSED DATA: No trades extracted from S3Key={s3_key}")
         
     except Exception as e:
-        logger.error(f"❌ Error parsing SEC form HTML {s3_key}: {e}")
+        local_logger.error(f"   ❌ PARSE ERROR: Error parsing SEC form HTML S3Key={s3_key}: {e}")
         import traceback
-        logger.error(f"   Traceback: {traceback.format_exc()}")
+        local_logger.error(f"      Traceback: {traceback.format_exc()}")
     
     return trades
 
@@ -782,21 +802,36 @@ def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
 
 def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Find best matching politician for a filer name"""
+    # Import inside function to avoid serialization issues
+    import logging
+    local_logger = logging.getLogger()
+    
+    local_logger.info(f"      🔍 SEARCHING: Looking for filer '{filer_name}' in politician CSV list ({len(politicians)} politicians)")
+    
     best_match = None
     best_score = 0.0
+    checked_count = 0
     
     for politician in politicians:
+        checked_count += 1
         score = fuzzy_match_name(filer_name, politician)
         if score > best_score:
             best_score = score
             best_match = politician
+            if score >= NAME_MATCH_THRESHOLD:
+                local_logger.info(f"      ✅ MATCH FOUND: Filer='{filer_name}' → Politician='{politician.get('name', 'N/A')}' "
+                                f"(Score={score:.3f}, Threshold={NAME_MATCH_THRESHOLD})")
     
     if best_score >= NAME_MATCH_THRESHOLD:
+        local_logger.info(f"      ✅ MATCH ACCEPTED: Filer='{filer_name}' → Politician='{best_match.get('name', 'N/A')}' "
+                        f"(Score={best_score:.3f}, Checked={checked_count} politicians)")
         return {
             **best_match,
             'matchScore': best_score
         }
     
+    local_logger.warning(f"      ❌ NO MATCH: Filer='{filer_name}' not found in politician CSV "
+                        f"(BestScore={best_score:.3f} < Threshold={NAME_MATCH_THRESHOLD}, Checked={checked_count} politicians)")
     return None
 
 
@@ -834,19 +869,12 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext})")
     
     # Parse form
-    local_logger.info(f"   📊 Step 2/3: Parsing form content...")
+    local_logger.info(f"   📊 Step 2/3: Parsing form content from S3Key={s3_key}...")
     trades = []
     if downloaded['file_ext'] == 'html' or downloaded['file_ext'] == 'xml':
         content_str = downloaded['content'].decode('utf-8', errors='ignore')
         trades = parse_sec_form_html(content_str, downloaded['s3_key'], target_date)
-        local_logger.info(f"   ✅ Parsed: Extracted {len(trades)} trades from form")
-        
-        # Log sample trades for debugging
-        if trades:
-            sample_trade = trades[0]
-            local_logger.info(f"   📋 Sample trade: filer={sample_trade.get('filerName', 'N/A')}, "
-                       f"security={sample_trade.get('securityName', 'N/A')[:50]}, "
-                       f"amount=${sample_trade.get('totalAmount', 'N/A')}")
+        local_logger.info(f"   ✅ PARSE COMPLETE: Extracted {len(trades)} trades from S3Key={s3_key}")
     else:
         local_logger.warning(f"   ⚠️ Unsupported file type: {downloaded['file_ext']} (CIK={cik}, Accession={accession})")
         return []
@@ -864,11 +892,15 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     for trade_idx, trade in enumerate(trades, 1):
         filer_name = trade.get('filerName')
         if not filer_name:
-            local_logger.debug(f"      Trade {trade_idx}/{len(trades)}: Skipping (no filer name)")
+            local_logger.info(f"      Trade {trade_idx}/{len(trades)}: ⚠️ SKIPPING (no filer name)")
             unmatched_trades.append(trade)
             continue
         
         unique_filers.add(filer_name)
+        
+        local_logger.info(f"      Trade {trade_idx}/{len(trades)}: 🔍 MATCHING - "
+                        f"FilerName='{filer_name}', Security='{trade.get('securityName', 'N/A')[:50]}', "
+                        f"Amount=${trade.get('totalAmount', 'N/A')}")
         
         matched_politician = find_matching_politician(filer_name, politicians)
         if matched_politician:
@@ -926,15 +958,18 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             }
             matched_trades.append(matched_trade)
             
-            local_logger.debug(f"      Trade {trade_idx}/{len(trades)}: ✅ MATCHED - "
-                        f"filer='{filer_name}' → politician='{matched_politician['name']}' "
-                        f"(confidence={matched_politician.get('matchScore', 1.0):.2f}), "
-                        f"security={trade.get('securityName', 'N/A')[:40]}, "
-                        f"amount=${total_amount}")
+            local_logger.info(f"      Trade {trade_idx}/{len(trades)}: ✅ MATCHED - "
+                        f"Filer='{filer_name}' → Politician='{matched_politician['name']}' "
+                        f"(Confidence={matched_politician.get('matchScore', 1.0):.3f}), "
+                        f"Security='{trade.get('securityName', 'N/A')[:50]}', "
+                        f"Symbol='{trade.get('securitySymbol', 'N/A')}', "
+                        f"Type='{trade.get('transactionType', 'N/A')}', "
+                        f"Amount=${total_amount}, "
+                        f"AmountRange=[{amount_min}, {amount_max}]")
         else:
             unmatched_trades.append(trade)
-            local_logger.debug(f"      Trade {trade_idx}/{len(trades)}: ❌ NO MATCH - "
-                        f"filer='{filer_name}' (no politician match found)")
+            local_logger.warning(f"      Trade {trade_idx}/{len(trades)}: ❌ NO MATCH - "
+                        f"Filer='{filer_name}' (no politician match found in CSV)")
     
     # Summary logging
     local_logger.info(f"   📊 Matching Summary:")
