@@ -78,9 +78,12 @@ variable "temp_bucket" {
 }
 
 variable "dynamodb_table_arn" {
-  description = "ARN of DynamoDB table (optional, for jobs that write to DynamoDB)"
+  description = "ARN of DynamoDB table (optional, for jobs that write to DynamoDB). If provided, must be known at plan time (not from module output) to avoid count evaluation errors."
   type        = string
   default     = null
+
+  # Note: When this is set from a module output (unknown at plan time), Terraform cannot
+  # evaluate count expressions that depend on it. Workaround: Use -target to create the table first.
 }
 
 variable "kms_key_arn" {

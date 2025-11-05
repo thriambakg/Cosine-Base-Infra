@@ -1,6 +1,22 @@
 # Generic Glue Job Module
 # Creates an AWS Glue job with configurable settings
 
+# Note: Terraform cannot evaluate count when it depends on unknown values from module outputs.
+# To work around this, we need to ensure the table is created first using -target, or
+# we can restructure to avoid count. For now, we'll use a workaround that creates the
+# resource conditionally, but requires the table to exist first.
+# 
+# The proper solution is to run: terraform apply -target=module.sec_filings_table first,
+# then apply the rest, OR to make dynamodb_table_arn a required variable.
+
+# Locals - these will be unknown until the table is created, but Terraform can still plan
+locals {
+  # When dynamodb_table_arn is provided (even if unknown), this evaluates to true
+  # When it's null (default), this evaluates to false
+  needs_dynamodb = var.dynamodb_table_arn != null
+  needs_kms      = var.kms_key_arn != null
+}
+
 # Glue Job Script Location
 resource "aws_glue_job" "this" {
   name     = var.job_name
@@ -130,15 +146,18 @@ resource "aws_iam_role_policy" "s3_access" {
 }
 
 # DynamoDB permissions (if needed)
-# Use try() to safely handle unknown values - if value is unknown, assume it's provided (count=1)
-# The depends_on in the calling module ensures the table exists before this resource
+# WORKAROUND: Always create the resource (count = 1) to avoid count evaluation errors
+# when var.dynamodb_table_arn is unknown from module output. The policy will be
+# conditional - if ARN is null/empty, it's an empty no-op policy.
 resource "aws_iam_role_policy" "dynamodb_access" {
-  count = try(var.dynamodb_table_arn != null, false) ? 1 : 0
+  count = 1
 
   name = length("${var.job_name}-dynamodb") > 128 ? substr("${var.job_name}-dynamodb", 0, 128) : "${var.job_name}-dynamodb"
   role = aws_iam_role.glue_role.id
 
-  policy = var.dynamodb_table_arn != null ? jsonencode({
+  # Use try() to safely check if ARN is provided and non-empty
+  # If ARN is null/empty/unknown, create empty policy (no-op)
+  policy = try(var.dynamodb_table_arn != null && var.dynamodb_table_arn != "", false) ? jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
@@ -165,14 +184,17 @@ resource "aws_iam_role_policy" "dynamodb_access" {
 }
 
 # KMS permissions (if needed for encrypted S3/DynamoDB)
-# Use try() to safely handle unknown values - if value is unknown, assume it's provided (count=1)
+# WORKAROUND: Always create the resource to avoid count issues with unknown values.
 resource "aws_iam_role_policy" "kms_access" {
-  count = try(var.kms_key_arn != null, false) ? 1 : 0
+  # Always create (count = 1) when ARN is provided, even if unknown
+  count = 1
 
   name = length("${var.job_name}-kms") > 128 ? substr("${var.job_name}-kms", 0, 128) : "${var.job_name}-kms"
   role = aws_iam_role.glue_role.id
 
-  policy = jsonencode({
+  # Use try() to safely check if ARN is provided and non-empty
+  # If ARN is null/empty/unknown, create empty policy (no-op)
+  policy = try(var.kms_key_arn != null && var.kms_key_arn != "", false) ? jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
@@ -185,6 +207,9 @@ resource "aws_iam_role_policy" "kms_access" {
         Resource = var.kms_key_arn
       }
     ]
+    }) : jsonencode({
+    Version   = "2012-10-17"
+    Statement = []
   })
 }
 
