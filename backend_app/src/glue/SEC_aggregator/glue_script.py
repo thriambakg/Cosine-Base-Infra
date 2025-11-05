@@ -910,7 +910,7 @@ def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     filer_last = filer_name.split()[-1].lower() if filer_name.split() else ''
     politician_last = politician_name.split()[-1].lower() if politician_name.split() else ''
     if filer_last and politician_last and filer_last == politician_last:
-        similarity = min(1.0, similarity + 0.1)
+        similarity = builtins.min(1.0, similarity + 0.1)
     
     return similarity
 
@@ -1582,7 +1582,7 @@ try:
     
     # Log preview of fetched files (first 10)
     logger.info("")
-    logger.info(f"   📋 Preview of Fetched Files (showing first {min(10, len(forms))} of {len(forms)}):")
+    logger.info(f"   📋 Preview of Fetched Files (showing first {builtins.min(10, len(forms))} of {len(forms)}):")
     for idx, form in enumerate(forms[:10], 1):
         logger.info(f"      {idx}. CIK={form.get('cik', 'N/A')}, "
                    f"Accession={form.get('accession_number', 'N/A')[:20]}, "

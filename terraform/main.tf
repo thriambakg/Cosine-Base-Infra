@@ -2491,8 +2491,9 @@ module "politician_trades_sec_glue_job" {
   number_of_workers = null
   max_capacity      = 2 # 2 DPUs for small-medium jobs
 
-  # Allow up to 3 concurrent runs to handle overlapping executions
-  concurrent_executions = 3
+  # Allow only 1 concurrent run (Step Functions invokes once per day)
+  # Set to 1 to prevent multiple simultaneous executions from the same trigger
+  concurrent_executions = 1
 
   job_bookmark_option = "job-bookmark-disable"
 
