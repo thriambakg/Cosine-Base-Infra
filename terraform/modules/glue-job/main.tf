@@ -42,8 +42,10 @@ resource "aws_glue_job" "this" {
 }
 
 # IAM Role for Glue Job
+# Use name instead of name_prefix to avoid length issues with long job names
+# AWS role names max 64 chars, job names can be long, so we truncate if needed
 resource "aws_iam_role" "glue_role" {
-  name_prefix = "${var.job_name}-glue-role-"
+  name = length("${var.job_name}-role") > 64 ? substr("${var.job_name}-role", 0, 64) : "${var.job_name}-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -69,8 +71,8 @@ resource "aws_iam_role_policy_attachment" "glue_service_role" {
 
 # CloudWatch Logs permissions
 resource "aws_iam_role_policy" "cloudwatch_logs" {
-  name_prefix = "${var.job_name}-cloudwatch-"
-  role        = aws_iam_role.glue_role.id
+  name = length("${var.job_name}-cloudwatch") > 128 ? substr("${var.job_name}-cloudwatch", 0, 128) : "${var.job_name}-cloudwatch"
+  role = aws_iam_role.glue_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -91,8 +93,8 @@ resource "aws_iam_role_policy" "cloudwatch_logs" {
 # S3 permissions (for reading/writing data)
 # Supports multiple buckets via additional_s3_bucket_arns
 resource "aws_iam_role_policy" "s3_access" {
-  name_prefix = "${var.job_name}-s3-"
-  role        = aws_iam_role.glue_role.id
+  name = length("${var.job_name}-s3") > 128 ? substr("${var.job_name}-s3", 0, 128) : "${var.job_name}-s3"
+  role = aws_iam_role.glue_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -124,8 +126,8 @@ resource "aws_iam_role_policy" "s3_access" {
 resource "aws_iam_role_policy" "dynamodb_access" {
   count = var.dynamodb_table_arn != null ? 1 : 0
 
-  name_prefix = "${var.job_name}-dynamodb-"
-  role        = aws_iam_role.glue_role.id
+  name = length("${var.job_name}-dynamodb") > 128 ? substr("${var.job_name}-dynamodb", 0, 128) : "${var.job_name}-dynamodb"
+  role = aws_iam_role.glue_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -154,8 +156,8 @@ resource "aws_iam_role_policy" "dynamodb_access" {
 resource "aws_iam_role_policy" "kms_access" {
   count = var.kms_key_arn != null ? 1 : 0
 
-  name_prefix = "${var.job_name}-kms-"
-  role        = aws_iam_role.glue_role.id
+  name = length("${var.job_name}-kms") > 128 ? substr("${var.job_name}-kms", 0, 128) : "${var.job_name}-kms"
+  role = aws_iam_role.glue_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -177,8 +179,8 @@ resource "aws_iam_role_policy" "kms_access" {
 resource "aws_iam_role_policy" "custom" {
   for_each = var.additional_policies
 
-  name_prefix = "${var.job_name}-custom-${each.key}-"
-  role        = aws_iam_role.glue_role.id
+  name = length("${var.job_name}-custom-${each.key}") > 128 ? substr("${var.job_name}-custom-${each.key}", 0, 128) : "${var.job_name}-custom-${each.key}"
+  role = aws_iam_role.glue_role.id
 
   policy = each.value
 }
