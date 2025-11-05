@@ -221,8 +221,23 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 # Build paginated URL (matches user's CURL example)
                 url = f"{SEC_BROWSE_EDGAR_URL}?action=getcurrent&datea=&dateb=&company=&type={form_type}&SIC=&State=&Country=&CIK=&owner=only&accno=&start={start}&count={count}"
                 
-                logger.info(f"   Fetching page {page} (start={start}, count={count})...")
+                logger.info(f"   📡 Calling SEC browse-edgar API:")
+                logger.info(f"      URL: {url}")
+                logger.info(f"      Method: GET")
+                logger.info(f"      Parameters: start={start}, count={count}, type={form_type}")
+                logger.info(f"      Headers: User-Agent={SEC_USER_AGENT}")
+                
+                api_call_start = datetime.now()
                 response = session.get(url, timeout=30)
+                api_call_duration = (datetime.now() - api_call_start).total_seconds()
+                
+                logger.info(f"   📥 SEC API Response:")
+                logger.info(f"      Status Code: {response.status_code}")
+                logger.info(f"      Response Headers: {dict(response.headers)}")
+                logger.info(f"      Response Size: {len(response.content):,} bytes")
+                logger.info(f"      Response Time: {api_call_duration:.2f}s")
+                logger.info(f"      Response Preview (first 500 chars): {response.text[:500]}")
+                
                 response.raise_for_status()
                 
                 html_content = response.text
@@ -240,6 +255,11 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 )
                 
                 rows = table_row_pattern.findall(html_content)
+                logger.info(f"      📊 HTML Parsing Results:")
+                logger.info(f"         Total table rows found: {len(rows)}")
+                logger.info(f"         HTML size: {len(html_content):,} characters")
+                if rows:
+                    logger.info(f"         First row preview (first 200 chars): {rows[0][:200]}")
                 
                 page_forms = []
                 page_forms_before_date_filter = 0
@@ -254,7 +274,10 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                     archive_matches = archive_link_pattern.findall(row)
                     
                     if not archive_matches:
+                        logger.debug(f"         Row {page_forms_before_date_filter + 1}: No archive link found, skipping")
                         continue
+                    
+                    logger.debug(f"         Row {page_forms_before_date_filter + 1}: Found archive link, extracting data...")
                     
                     page_forms_before_date_filter += 1
                     
@@ -375,6 +398,16 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                     page_forms.append(form_data)
                 
                 logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
+                
+                # Log sample of parsed forms from this page
+                if page_forms:
+                    logger.info(f"      📋 Sample forms from page {page} (first 3):")
+                    for idx, form in enumerate(page_forms[:3], 1):
+                        logger.info(f"         {idx}. CIK={form.get('cik', 'N/A')}, "
+                                   f"Accession={form.get('accession_number', 'N/A')[:15]}..., "
+                                   f"Type={form.get('form_type', 'N/A')}, "
+                                   f"FilingDate={form.get('filing_date', 'N/A')}, "
+                                   f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
                 
                 # Check if FIRST file in batch matches target date
                 # If first file doesn't match target date, we've moved to a different day - stop fetching
@@ -499,8 +532,22 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                     file_url = f"{base_url}/{accession_dashed}.pdf"
                 
                 local_logger.info(f"      🔄 Attempting download: {ext} from {file_url}")
+                local_logger.info(f"         📡 Calling SEC Archives API:")
+                local_logger.info(f"            URL: {file_url}")
+                local_logger.info(f"            Method: GET")
+                local_logger.info(f"            Headers: User-Agent={SEC_USER_AGENT_LOCAL}")
+                
+                download_start_time = datetime.now()
                 response = session.get(file_url, timeout=30)
-                local_logger.info(f"      📡 Response: Status={response.status_code}, Size={len(response.content)} bytes")
+                download_duration = (datetime.now() - download_start_time).total_seconds()
+                
+                local_logger.info(f"         📥 SEC Archives API Response:")
+                local_logger.info(f"            Status Code: {response.status_code}")
+                local_logger.info(f"            Response Headers: {dict(response.headers)}")
+                local_logger.info(f"            Response Size: {len(response.content):,} bytes")
+                local_logger.info(f"            Response Time: {download_duration:.2f}s")
+                if len(response.content) > 0:
+                    local_logger.info(f"            Response Preview (first 300 chars): {response.content[:300].decode('utf-8', errors='ignore')}")
                 
                 if response.status_code == 200:
                     file_content = response.content
@@ -1465,35 +1512,89 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     # Store to DynamoDB
     store_start = datetime.now()
     local_logger.info(f"   💾 Storing to DynamoDB (TradeId={trade_id})...")
+    local_logger.info(f"      📊 DynamoDB Write Details:")
+    local_logger.info(f"         Table: {dynamodb_table_name}")
+    local_logger.info(f"         TradeId: {trade_id}")
+    local_logger.info(f"         Item Keys: {list(parsed_data.keys())}")
+    
     try:
         # Create DynamoDB client locally
+        local_logger.info(f"      🔄 Creating DynamoDB client...")
         dynamodb_local = boto3.resource('dynamodb')
         table_local = dynamodb_local.Table(dynamodb_table_name)
+        local_logger.info(f"      ✅ DynamoDB client created, accessing table: {dynamodb_table_name}")
         
         # Convert to DynamoDB format
+        local_logger.info(f"      🔄 Converting to DynamoDB format...")
         dynamodb_item = {}
+        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0}
+        
         for key, value in parsed_data.items():
             if value is None or value == '':
+                conversion_stats['skipped'] += 1
+                local_logger.debug(f"         Skipping {key}: None or empty")
                 continue
-            elif isinstance(value, (int, float)):
-                if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
-                    continue
-                dynamodb_item[key] = Decimal(str(value))
-            elif isinstance(value, list):
-                # Lists of dicts (JSON arrays) - store as JSON string
-                dynamodb_item[key] = json.dumps(value)
-            elif isinstance(value, dict):
-                # Dicts (JSON objects) - store as JSON string
-                dynamodb_item[key] = json.dumps(value)
-            else:
-                dynamodb_item[key] = str(value)
+            try:
+                if isinstance(value, (int, float)):
+                    if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
+                        conversion_stats['skipped'] += 1
+                        local_logger.warning(f"         Skipping {key}: Invalid float value {value}")
+                        continue
+                    dynamodb_item[key] = Decimal(str(value))
+                    conversion_stats['converted'] += 1
+                elif isinstance(value, list):
+                    # Lists of dicts (JSON arrays) - store as JSON string
+                    dynamodb_item[key] = json.dumps(value)
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: JSON array ({len(value)} items)")
+                elif isinstance(value, dict):
+                    # Dicts (JSON objects) - store as JSON string
+                    dynamodb_item[key] = json.dumps(value)
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: JSON object ({len(value)} keys)")
+                else:
+                    dynamodb_item[key] = str(value)
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: String ({len(str(value))} chars)")
+            except Exception as e:
+                conversion_stats['errors'] += 1
+                local_logger.error(f"         Error converting {key}: {e}")
         
-        table_local.put_item(Item=dynamodb_item)
+        local_logger.info(f"      ✅ Conversion complete: {conversion_stats['converted']} converted, {conversion_stats['skipped']} skipped, {conversion_stats['errors']} errors")
+        
+        local_logger.info(f"      📦 DynamoDB Item Preview:")
+        local_logger.info(f"         TradeId: {dynamodb_item.get('tradeId', 'N/A')}")
+        local_logger.info(f"         FormType: {dynamodb_item.get('formType', 'N/A')}")
+        local_logger.info(f"         Name: {dynamodb_item.get('name', 'N/A')}")
+        local_logger.info(f"         IssuerName: {dynamodb_item.get('issuerName', 'N/A')}")
+        local_logger.info(f"         TickerSymbol: {dynamodb_item.get('tickerSymbol', 'N/A')}")
+        local_logger.info(f"         ReportingDate: {dynamodb_item.get('reportingDate', 'N/A')}")
+        local_logger.info(f"         EventDate: {dynamodb_item.get('eventDate', 'N/A')}")
+        local_logger.info(f"         Relationship: {dynamodb_item.get('relationship', 'N/A')}")
+        local_logger.info(f"         Politician: {dynamodb_item.get('politician', 'N/A')}")
+        local_logger.info(f"         FormS3Key: {dynamodb_item.get('formS3Key', 'N/A')}")
+        local_logger.info(f"         Total Fields: {len(dynamodb_item)}")
+        
+        # Log full item for debugging (truncated)
+        item_preview = {k: (str(v)[:100] + '...' if len(str(v)) > 100 else v) for k, v in list(dynamodb_item.items())[:10]}
+        local_logger.info(f"         Item Preview (first 10 fields): {json.dumps(item_preview, default=str)}")
+        
+        local_logger.info(f"      📡 Calling DynamoDB PutItem API...")
+        db_write_start = datetime.now()
+        put_response = table_local.put_item(Item=dynamodb_item)
+        db_write_duration = (datetime.now() - db_write_start).total_seconds()
+        
+        local_logger.info(f"      ✅ DynamoDB PutItem Response:")
+        local_logger.info(f"         Success: True")
+        local_logger.info(f"         Response Metadata: {put_response.get('ResponseMetadata', {}).get('HTTPStatusCode', 'N/A')}")
+        local_logger.info(f"         Write Time: {db_write_duration:.2f}s")
+        
         store_duration = (datetime.now() - store_start).total_seconds()
         total_duration = (datetime.now() - form_start_time).total_seconds()
         
         local_logger.info(f"   ✅ STORED: TradeId={trade_id}, S3Key={s3_key} in {store_duration:.2f}s")
-        local_logger.info(f"   ✅ Form processing complete: Total time {total_duration:.2f}s (Download: {download_duration:.2f}s, Parse: {parse_duration:.2f}s, Match: {match_duration:.2f}s, Store: {store_duration:.2f}s)")
+        local_logger.info(f"   ✅ Form processing complete: Total time {total_duration:.2f}s")
+        local_logger.info(f"      Breakdown: Download={download_duration:.2f}s, Parse={parse_duration:.2f}s, Match={match_duration:.2f}s, Store={store_duration:.2f}s")
         
         return {'success': True, 'tradeId': trade_id, 'politicianMatch': politician_match is not None}
     
