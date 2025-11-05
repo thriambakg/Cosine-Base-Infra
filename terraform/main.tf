@@ -1920,11 +1920,11 @@ module "politician_trades_state_machine" {
     Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
     StartAt = "FetchFormMetadata"
     States = {
-      # Step 1: Fetch SEC Forms and Congressional PTRs metadata (no downloads)
+      # Step 1: Fetch Senate PTR metadata only (SEC handled by Glue job independently)
       FetchFormMetadata = {
         Type       = "Task"
         Resource   = module.politician_trades_fetcher.function_arn
-        Comment    = "Fetch SEC forms (3, 4, 5) and Congressional PTRs (House/Senate) metadata. Returns URLs/metadata only - NO downloads. Lambda defaults to yesterday if date not provided."
+        Comment    = "Fetch Senate PTR metadata only. SEC forms are handled by Glue job independently. Returns URLs/metadata only - NO downloads. Lambda defaults to yesterday if date not provided."
         InputPath  = "$" # Pass through entire input - Lambda will extract 'date' or default
         ResultPath = "$.fetchResults"
         Next       = "ParallelPipelines"
@@ -1948,30 +1948,31 @@ module "politician_trades_state_machine" {
       FetchFormsFailed = {
         Type  = "Fail"
         Error = "FetchFormsFailed"
-        Cause = "Failed to fetch SEC forms or Congressional PTRs metadata"
+        Cause = "Failed to fetch Senate PTR metadata"
       }
 
-      # Step 2: Parallel pipelines for SEC (Glue), Senate (Lambda), House (TODO)
+      # Step 2: Parallel pipelines for SEC (Glue) and Senate/House (Lambda)
       # Architecture:
-      #   SEC: Glue job handles fetch → download → parse → match → store (all internally)
-      #   Senate: Fetcher → Downloader → Matcher (Lambda-based)
+      #   SEC: Glue job - standalone, gets date from top-level input, handles fetch → download → parse → match → save (all internally)
+      #   Senate: Fetcher → Downloader → Matcher → Saver (Lambda chain, saves directly to DB)
       #   House: TODO (placeholder)
+      #   Note: No aggregation step - each pipeline saves directly to DynamoDB
       ParallelPipelines = {
         Type    = "Parallel"
-        Comment = "Parallel pipelines: SEC (Glue job), Senate (Lambda), House (TODO). SEC handled entirely by Glue, writes directly to DynamoDB."
+        Comment = "Parallel pipelines: SEC (Glue, standalone) and Senate/House (Lambda chain). Each saves directly to DynamoDB - no aggregation needed."
         Branches = [
           {
-            # SEC Pipeline (Glue Job)
+            # SEC Pipeline (Glue Job) - Standalone, no output to aggregator
             StartAt = "ProcessSECFilings"
             States = {
               ProcessSECFilings = {
                 Type     = "Task"
                 Resource = "arn:aws:states:::glue:startJobRun.sync"
-                Comment  = "SEC ETL Glue Job: Fetches, downloads, parses, matches, and stores SEC forms. Writes directly to DynamoDB and summary to S3."
+                Comment  = "SEC ETL Glue Job: Standalone pipeline. Gets date from top-level input. Fetches, downloads, parses, matches, and saves directly to DynamoDB. No output to aggregator."
                 Parameters = {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
-                    "--date.$"         = "$.fetchResults.date"
+                    "--date.$"         = "$.date" # Get date from top-level input (same as fetcher)
                     "--s3_bucket"      = module.politician_trades_s3.bucket_id
                     "--dynamodb_table" = module.politician_trades_table.table_name
                     "--JOB_NAME"       = module.politician_trades_sec_glue_job.job_name
@@ -2002,8 +2003,8 @@ module "politician_trades_state_machine" {
               }
               SECProcessingFailed = {
                 Type    = "Pass"
-                Comment = "SEC Glue job failed - continue with empty results"
-                Result  = { "matchedTrades" : [], "unmatchedCount" : 0, "error" : "SEC Glue job failed" }
+                Comment = "SEC Glue job failed - no output needed (job saves directly to DB)"
+                Result  = { "status" : "failed", "error" : "SEC Glue job failed" }
                 End     = true
               }
             }
@@ -2014,19 +2015,21 @@ module "politician_trades_state_machine" {
             States = {
               TransformSenate = {
                 Type    = "Pass"
-                Comment = "Transform: Extract senatePTRs array from fetchResults"
+                Comment = "Transform: Extract senatePTRs array from fetchResults. Preserve date for later use."
                 Parameters = {
-                  "date.$" : "$.fetchResults.date",
+                  "date.$" : "$.fetchResults.date", # Will be available at $.date in subsequent states
                   "items.$" : "$.fetchResults.senatePTRs",
                   "source" : "senate"
                 }
-                Next = "DownloadSenate"
+                ResultPath = "$" # Replace entire state with transformed data
+                Next       = "DownloadSenate"
               }
               DownloadSenate = {
                 Type           = "Map"
                 Comment        = "Download Senate PTRs in parallel - saves to trades/YYYY-MM-DD/senate/*"
                 ItemsPath      = "$.items"
                 MaxConcurrency = 10
+                ResultPath     = "$.downloadResults"
                 Iterator = {
                   StartAt = "DownloadSenatePTR"
                   States = {
@@ -2065,14 +2068,14 @@ module "politician_trades_state_machine" {
                     }
                   }
                 }
-                ResultPath = "$.downloadResults"
-                Next       = "MatchSenate"
+                Next = "MatchSenate"
               }
               MatchSenate = {
                 Type           = "Map"
                 Comment        = "Match trades from Senate PTRs to politicians - reads from trades/YYYY-MM-DD/senate/*"
                 ItemsPath      = "$.downloadResults"
                 MaxConcurrency = 10
+                ResultPath     = "$.matchResults"
                 Iterator = {
                   StartAt = "MatchFileSenate"
                   States = {
@@ -2111,8 +2114,44 @@ module "politician_trades_state_machine" {
                     }
                   }
                 }
-                ResultPath = "$.matchResults"
+                Next = "SaveSenateTrades"
+              }
+              SaveSenateTrades = {
+                Type    = "Pass"
+                Comment = "Collect all matched trades from MatchSenate Map results and flatten into single array. Date preserved from TransformSenate."
+                Parameters = {
+                  "date.$" : "$.date", # Date preserved from TransformSenate (before Map states)
+                  "matchedTrades.$" : "$.matchResults[*].matchedTrades[*]"
+                }
+                Next = "SaveSenateTradesTask"
+              }
+              SaveSenateTradesTask = {
+                Type       = "Task"
+                Resource   = module.politician_trades_saver.function_arn
+                Comment    = "Save matched Senate trades directly to DynamoDB (no aggregation needed)"
+                ResultPath = "$.saveResults"
                 End        = true
+                Retry = [
+                  {
+                    ErrorEquals     = ["States.ALL"]
+                    IntervalSeconds = 30
+                    MaxAttempts     = 3
+                    BackoffRate     = 2.0
+                  }
+                ]
+                Catch = [
+                  {
+                    ErrorEquals = ["States.ALL"]
+                    ResultPath  = "$.error"
+                    Next        = "SaveSenateTradesFailed"
+                  }
+                ]
+              }
+              SaveSenateTradesFailed = {
+                Type    = "Pass"
+                Comment = "Continue even if save fails"
+                Result  = { "success" : false, "error" : "Save failed" }
+                End     = true
               }
             }
           },
@@ -2140,88 +2179,11 @@ module "politician_trades_state_machine" {
           }
         ]
         ResultPath = "$.pipelineResults"
-        Next       = "AggregateMatches"
-      }
-
-
-      # Aggregate match results from parallel pipelines
-      # pipelineResults is an array: [SEC branch result (Glue), Senate branch result]
-      # SEC Glue job writes directly to DynamoDB and summary to S3
-      # Aggregator will read SEC summary from S3 and combine with Senate results
-      AggregateMatches = {
-        Type    = "Pass"
-        Comment = "Extract match results from parallel pipeline branches. SEC results in S3, Senate results from Lambda."
-        Parameters = {
-          # pipelineResults is array from Parallel state:
-          # [0] = SEC branch result (Glue job output - contains summary S3 key)
-          # [1] = Senate branch result (has matchResults from Lambda)
-          # [2] = House branch result (empty for now)
-          "secGlueOutput.$" : "$.pipelineResults[0]",
-          "senateMatchResults.$" : "$.pipelineResults[1].matchResults",
-          "houseMatchResults.$" : "$.pipelineResults[2]", # House pipeline returns empty array
-          "date.$" : "$.fetchResults.date",
-          "s3Bucket" : module.politician_trades_s3.bucket_id
-        }
-        Next = "AggregateMatchesTask"
-      }
-
-      AggregateMatchesTask = {
-        Type       = "Task"
-        Resource   = module.politician_trades_matcher.function_arn
-        Comment    = "Aggregate matched trades from all sources (SEC, Senate, House)"
-        ResultPath = "$.aggregateResults"
-        Next       = "SaveTrades"
-        Retry = [
-          {
-            ErrorEquals     = ["States.ALL"]
-            IntervalSeconds = 30
-            MaxAttempts     = 3
-            BackoffRate     = 2.0
-          }
-        ]
-        Catch = [
-          {
-            ErrorEquals = ["States.ALL"]
-            ResultPath  = "$.error"
-            Next        = "MatchTradesFailed"
-          }
-        ]
-      }
-
-      MatchTradesFailed = {
-        Type  = "Fail"
-        Error = "MatchTradesFailed"
-        Cause = "Failed to match trades to politicians"
-      }
-
-      # Step 4: Save Trades to Database
-      SaveTrades = {
-        Type       = "Task"
-        Resource   = module.politician_trades_saver.function_arn
-        Comment    = "Batch write matched trades to DynamoDB with idempotency"
-        ResultPath = "$.saveResults"
         End        = true
-        Retry = [
-          {
-            ErrorEquals     = ["States.ALL"]
-            IntervalSeconds = 30
-            MaxAttempts     = 3
-            BackoffRate     = 2.0
-          }
-        ]
-        Catch = [
-          {
-            ErrorEquals = ["States.ALL"]
-            ResultPath  = "$.error"
-            Next        = "SaveTradesFailed"
-          }
-        ]
-      }
-
-      SaveTradesFailed = {
-        Type  = "Fail"
-        Error = "SaveTradesFailed"
-        Cause = "Failed to save trades to database"
+        # No aggregation step - each pipeline saves directly to DynamoDB:
+        # - SEC Glue job: Saves internally (no output to aggregator)
+        # - Senate pipeline: Saves via SaveSenateTrades Lambda at end of chain
+        # - House pipeline: Placeholder (will save when implemented)
       }
     }
   })
@@ -2231,9 +2193,10 @@ module "politician_trades_state_machine" {
     module.politician_trades_fetcher.function_arn,
     module.politician_trades_downloader.function_arn,
     module.politician_trades_senate_matcher.function_arn,
-    module.politician_trades_matcher.function_arn,
     module.politician_trades_saver.function_arn
-    # Note: politician_trades_sec_matcher removed - SEC handled by Glue job
+    # Note: 
+    # - politician_trades_sec_matcher removed - SEC handled by Glue job
+    # - politician_trades_matcher (aggregator) removed - no aggregation needed, each pipeline saves directly
   ]
 
   # Glue job names for IAM permissions
@@ -2250,8 +2213,8 @@ module "politician_trades_state_machine" {
 
   depends_on = [
     module.politician_trades_fetcher,
-    module.politician_trades_matcher,
-    module.politician_trades_saver
+    module.politician_trades_saver,
+    module.politician_trades_sec_glue_job
   ]
 }
 
