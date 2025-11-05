@@ -206,12 +206,14 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     })
     
     for form_type in form_types:
-        logger.info(f"📋 Fetching Form {form_type} filings for {target_date}...")
+        logger.info("")
+        logger.info(f"   📋 Fetching Form {form_type} filings for {target_date}...")
         forms_for_type = []
         start = 0
         count = 100
         page = 1
         max_pages = 100  # Safety limit to prevent infinite loops
+        form_type_start = datetime.now()
         
         while page <= max_pages:
             try:
@@ -427,7 +429,8 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 logger.error(f"   Traceback: {traceback.format_exc()}")
                 break
         
-        logger.info(f"✅ Found {len(forms_for_type)} Form {form_type} filings for {target_date} (across {page-1} pages)")
+        form_type_duration = (datetime.now() - form_type_start).total_seconds()
+        logger.info(f"   ✅ Form {form_type} Complete: Found {len(forms_for_type)} filings in {page-1} pages ({form_type_duration:.2f} seconds)")
         all_forms.extend(forms_for_type)
     
     logger.info(f"📊 Total forms fetched: {len(all_forms)}")
@@ -1321,9 +1324,11 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     filing_date_str = form_data.get('filing_date', target_date)
     accepted_date_str = form_data.get('accepted_date')
     
+    form_start_time = datetime.now()
     local_logger.info(f"📄 Processing Form: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date_str}")
     
     # First check: Verify filing date matches target date before downloading
+    local_logger.info(f"   🔍 Step 1/4: Validating filing date...")
     filing_date_obj = None
     if filing_date_str:
         try:
@@ -1342,39 +1347,63 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} doesn't match target {target_date_obj}")
         return {'skipped': True, 'reason': 'date_mismatch'}
     
+    local_logger.info(f"   ✅ Date validation passed: {filing_date_obj or 'unknown'} matches target {target_date_obj}")
+    
     # Download form
-    local_logger.info(f"   📥 Step 1/4: Downloading form...")
+    download_start = datetime.now()
+    local_logger.info(f"   📥 Step 2/4: Downloading form...")
     downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
+    download_duration = (datetime.now() - download_start).total_seconds()
+    
     if not downloaded:
-        local_logger.warning(f"   ❌ FAILED: Could not download form (CIK={cik}, Accession={accession})")
+        local_logger.warning(f"   ❌ FAILED: Could not download form (CIK={cik}, Accession={accession}) after {download_duration:.2f}s")
         return {'skipped': True, 'reason': 'download_failed'}
     
     s3_key = downloaded.get('s3_key', 'unknown')
     file_ext = downloaded.get('file_ext', 'unknown')
-    local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext})")
+    file_size = len(downloaded.get('content', b''))
+    local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext}, size: {file_size:,} bytes) in {download_duration:.2f}s")
     
     # Parse form metadata
-    local_logger.info(f"   📊 Step 2/4: Parsing form metadata from S3Key={s3_key}...")
+    parse_start = datetime.now()
+    local_logger.info(f"   📊 Step 3/4: Parsing form metadata from S3Key={s3_key}...")
     if downloaded['file_ext'] != 'html':
         local_logger.warning(f"   ⚠️ Unsupported file type: {downloaded['file_ext']} (CIK={cik}, Accession={accession})")
         return {'skipped': True, 'reason': 'unsupported_file_type'}
     
     content_str = downloaded['content'].decode('utf-8', errors='ignore')
     parsed_data = parse_sec_form_metadata(content_str, form_data, accepted_date_str)
+    parse_duration = (datetime.now() - parse_start).total_seconds()
+    
+    # Log parsed data summary
+    local_logger.info(f"   ✅ Parsing complete in {parse_duration:.2f}s:")
+    local_logger.info(f"      - Name: {parsed_data.get('name', 'N/A')}")
+    local_logger.info(f"      - Issuer: {parsed_data.get('issuerName', 'N/A')} ({parsed_data.get('tickerSymbol', 'N/A')})")
+    local_logger.info(f"      - Relationship: {parsed_data.get('relationship', 'N/A')}")
+    local_logger.info(f"      - Event Date: {parsed_data.get('eventDate', 'N/A')}")
+    local_logger.info(f"      - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
+    local_logger.info(f"      - Table I rows: {len(parsed_data.get('nonDerivativeSecurities', []))}")
+    local_logger.info(f"      - Table II rows: {len(parsed_data.get('derivativeSecurities', []))}")
+    local_logger.info(f"      - Amendment: {parsed_data.get('amendment', False)}")
     
     # Check politician match
-    local_logger.info(f"   🔍 Step 3/4: Checking politician match for name='{parsed_data.get('name', 'N/A')}'...")
+    match_start = datetime.now()
+    local_logger.info(f"   🔍 Step 4/4: Checking politician match for name='{parsed_data.get('name', 'N/A')}'...")
     politician_match = None
     if parsed_data.get('name'):
         politician_match = find_matching_politician(parsed_data['name'], politicians)
         if politician_match:
-            local_logger.info(f"   ✅ POLITICIAN MATCH: Name='{parsed_data['name']}' → Politician='{politician_match.get('name', 'N/A')}'")
+            local_logger.info(f"   ✅ POLITICIAN MATCH: Name='{parsed_data['name']}' → Politician='{politician_match.get('name', 'N/A')}' (Score={politician_match.get('matchScore', 0):.3f})")
             parsed_data['politician'] = 1  # True (DynamoDB doesn't support boolean, use 1/0)
         else:
             local_logger.info(f"   ℹ️ NO POLITICIAN MATCH: Name='{parsed_data['name']}' not in politician list")
             parsed_data['politician'] = 0  # False
     else:
+        local_logger.warning(f"   ⚠️ No name extracted from form, cannot check politician match")
         parsed_data['politician'] = 0  # False
+    
+    match_duration = (datetime.now() - match_start).total_seconds()
+    local_logger.info(f"   ✅ Matching complete in {match_duration:.2f}s")
     
     # Generate trade ID
     trade_id = f"sec_{form_data.get('form_type', 'form4')}_{cik}_{accession}_{target_date.replace('-', '')}"
@@ -1386,7 +1415,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     # TODO: Query DynamoDB to find original trade and link them
     
     # Store to DynamoDB
-    local_logger.info(f"   💾 Step 4/4: Storing to DynamoDB...")
+    store_start = datetime.now()
+    local_logger.info(f"   💾 Storing to DynamoDB (TradeId={trade_id})...")
     try:
         # Create DynamoDB client locally
         dynamodb_local = boto3.resource('dynamodb')
@@ -1411,12 +1441,18 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                 dynamodb_item[key] = str(value)
         
         table_local.put_item(Item=dynamodb_item)
-        local_logger.info(f"   ✅ STORED: TradeId={trade_id}, S3Key={s3_key}")
+        store_duration = (datetime.now() - store_start).total_seconds()
+        total_duration = (datetime.now() - form_start_time).total_seconds()
+        
+        local_logger.info(f"   ✅ STORED: TradeId={trade_id}, S3Key={s3_key} in {store_duration:.2f}s")
+        local_logger.info(f"   ✅ Form processing complete: Total time {total_duration:.2f}s (Download: {download_duration:.2f}s, Parse: {parse_duration:.2f}s, Match: {match_duration:.2f}s, Store: {store_duration:.2f}s)")
         
         return {'success': True, 'tradeId': trade_id, 'politicianMatch': politician_match is not None}
     
     except Exception as e:
-        local_logger.error(f"   ❌ STORAGE ERROR: Failed to store to DynamoDB: {e}")
+        store_duration = (datetime.now() - store_start).total_seconds()
+        total_duration = (datetime.now() - form_start_time).total_seconds()
+        local_logger.error(f"   ❌ STORAGE ERROR: Failed to store to DynamoDB after {store_duration:.2f}s (Total: {total_duration:.2f}s): {e}")
         import traceback
         local_logger.error(f"      Traceback: {traceback.format_exc()}")
         return {'success': False, 'error': str(e)}
@@ -1455,20 +1491,56 @@ def write_to_dynamodb(trades: List[Dict[str, Any]], dynamodb_table_name: str):
 
 # Main execution
 try:
-    logger.info(f"🚀 SEC ETL Glue Job started for date: {target_date}")
+    logger.info("=" * 80)
+    logger.info("🚀 SEC ETL GLUE JOB STARTING")
+    logger.info("=" * 80)
+    logger.info(f"📅 Target Date: {target_date}")
+    logger.info(f"📦 S3 Bucket: {s3_bucket}")
+    logger.info(f"🗄️  DynamoDB Table: {dynamodb_table}")
+    logger.info(f"⏰ Job Start Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 80)
     
     # Step 1: Load politician list
-    logger.info("📋 Loading politician list...")
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📋 STAGE 1: LOADING POLITICIAN LIST")
+    logger.info("=" * 80)
+    stage1_start = datetime.now()
     politicians = load_politician_list()
+    stage1_duration = (datetime.now() - stage1_start).total_seconds()
+    logger.info(f"✅ Stage 1 Complete: Loaded {len(politicians)} politicians in {stage1_duration:.2f} seconds")
+    logger.info("=" * 80)
     
     # Step 2: Fetch SEC forms with pagination
-    logger.info(f"📋 Fetching SEC forms for {target_date}...")
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📋 STAGE 2: FETCHING SEC FORMS")
+    logger.info("=" * 80)
+    logger.info(f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}")
+    stage2_start = datetime.now()
     forms = fetch_sec_forms_paginated(target_date)
-    logger.info(f"✅ Fetched {len(forms)} forms")
+    stage2_duration = (datetime.now() - stage2_start).total_seconds()
+    logger.info("")
+    logger.info(f"✅ Stage 2 Complete: Fetched {len(forms)} forms in {stage2_duration:.2f} seconds")
+    
+    # Log form type breakdown
+    form_type_counts = {}
+    for form in forms:
+        form_type = form.get('form_type', 'unknown')
+        form_type_counts[form_type] = form_type_counts.get(form_type, 0) + 1
+    logger.info(f"   Form Type Breakdown:")
+    for form_type, count in sorted(form_type_counts.items()):
+        logger.info(f"      - {form_type}: {count}")
+    logger.info("=" * 80)
     
     # Step 3: Process forms in parallel using Spark
-    logger.info(f"📊 Processing {len(forms)} forms...")
-    logger.info(f"   Using Spark to process forms in parallel")
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📊 STAGE 3: PROCESSING FORMS")
+    logger.info("=" * 80)
+    logger.info(f"🔄 Processing {len(forms)} forms in parallel using Spark")
+    logger.info(f"   This stage will: download, parse metadata, check politician match, and store to DynamoDB")
+    stage3_start = datetime.now()
     
     # Broadcast necessary variables to avoid serialization issues
     # Broadcast variables are sent once to each worker, not serialized with each task
@@ -1535,14 +1607,18 @@ try:
             local_logger.error(f"   Traceback: {traceback.format_exc()}")
             return {'success': False, 'error': str(e)}
     
+    logger.info(f"   Starting Spark parallel processing...")
     results_rdd = forms_rdd.map(process_form_wrapper)
     results = results_rdd.collect()
+    logger.info(f"   ✅ Spark processing completed, collecting results...")
     
     # Clean up broadcast variables
     politicians_broadcast.destroy()
     target_date_broadcast.destroy()
     s3_bucket_broadcast.destroy()
     dynamodb_table_broadcast.destroy()
+    
+    stage3_duration = (datetime.now() - stage3_start).total_seconds()
     
     # Calculate final statistics
     total_forms_processed = len(forms)
@@ -1554,15 +1630,28 @@ try:
     politician_matches = sum(1 for r in results if r.get('politicianMatch'))
     no_politician_matches = successful_stored - politician_matches
     
-    logger.info(f"📊 Processing Complete - Final Statistics:")
+    logger.info("")
+    logger.info(f"✅ Stage 3 Complete: Processed {total_forms_processed} forms in {stage3_duration:.2f} seconds")
+    logger.info(f"   Average processing time per form: {stage3_duration / total_forms_processed if total_forms_processed > 0 else 0:.2f} seconds")
+    logger.info("=" * 80)
+    
+    # Step 4: Final Summary
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("📊 STAGE 4: FINAL SUMMARY")
+    logger.info("=" * 80)
+    logger.info(f"📈 Processing Statistics:")
     logger.info(f"   - Total forms fetched: {total_forms_processed}")
-    logger.info(f"   - Successfully stored: {successful_stored}")
-    logger.info(f"   - Failed to store: {failed_stored}")
-    logger.info(f"   - Skipped (date mismatch): {skipped_date_mismatch}")
-    logger.info(f"   - Skipped (download failed): {skipped_download_failed}")
-    logger.info(f"   - Skipped (unsupported file type): {skipped_unsupported_type}")
-    logger.info(f"   - Politician matches: {politician_matches}")
-    logger.info(f"   - No politician matches: {no_politician_matches}")
+    logger.info(f"   - Successfully stored: {successful_stored} ({successful_stored/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info(f"   - Failed to store: {failed_stored} ({failed_stored/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info(f"   - Skipped (date mismatch): {skipped_date_mismatch} ({skipped_date_mismatch/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info(f"   - Skipped (download failed): {skipped_download_failed} ({skipped_download_failed/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info(f"   - Skipped (unsupported file type): {skipped_unsupported_type} ({skipped_unsupported_type/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info("")
+    logger.info(f"👤 Politician Matching Statistics:")
+    logger.info(f"   - Forms with politician match: {politician_matches} ({politician_matches/successful_stored*100 if successful_stored > 0 else 0:.1f}% of stored)")
+    logger.info(f"   - Forms without politician match: {no_politician_matches} ({no_politician_matches/successful_stored*100 if successful_stored > 0 else 0:.1f}% of stored)")
+    logger.info("")
     
     if successful_stored == 0:
         logger.warning(f"   ⚠️ WARNING: No forms were successfully stored!")
@@ -1570,8 +1659,19 @@ try:
         logger.warning(f"      - Download failures for all forms")
         logger.warning(f"      - Parsing failures for all forms")
         logger.warning(f"      - Date mismatches for all forms")
+    elif successful_stored < total_forms_processed * 0.5:
+        logger.warning(f"   ⚠️ WARNING: Less than 50% of forms were successfully stored!")
+        logger.warning(f"      Success rate: {successful_stored/total_forms_processed*100:.1f}%")
     
-    logger.info(f"✅ SEC ETL Job completed successfully")
+    logger.info("=" * 80)
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("✅ SEC ETL JOB COMPLETED SUCCESSFULLY")
+    logger.info("=" * 80)
+    total_duration = (datetime.now() - stage1_start).total_seconds()
+    logger.info(f"⏰ Total Job Duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)")
+    logger.info(f"⏰ Job End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 80)
     
     job.commit()
     
