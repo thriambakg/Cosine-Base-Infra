@@ -373,37 +373,7 @@ def lambda_handler(event, context):
     
     # Get match results from parallel processing
     # Support both old format (single matchResults array) and new format (separate arrays)
-    # SEC results come from Glue job as JSON string (secResultsJson)
-    sec_results_json = event.get('secResultsJson')
-    sec_match_results = []
-    
-    if sec_results_json:
-        try:
-            # Parse JSON string from S3 Body (Glue job writes summary as JSON)
-            if isinstance(sec_results_json, str):
-                sec_results = json.loads(sec_results_json)
-            else:
-                sec_results = sec_results_json
-            
-            # Extract matched trades from SEC results
-            # Format: {"matchedTrades": [...], "totalMatched": 1500, "unmatchedCount": 500, "date": "2025-10-30"}
-            matched_trades = sec_results.get('matchedTrades', [])
-            if matched_trades:
-                # Create a single match result object for consistency
-                sec_match_results = [{
-                    'matchedTrades': matched_trades,
-                    'unmatchedCount': sec_results.get('unmatchedCount', 0),
-                    'totalMatched': sec_results.get('totalMatched', len(matched_trades)),
-                    'source': 'sec'
-                }]
-                logger.info(f"✅ Parsed SEC results: {len(matched_trades)} matched trades")
-            else:
-                logger.info("⚠️ SEC results contain no matched trades")
-        except (json.JSONDecodeError, TypeError) as e:
-            logger.error(f"❌ Error parsing SEC results JSON: {e}")
-            logger.error(f"   SEC results JSON (first 500 chars): {str(sec_results_json)[:500]}")
-    
-    # Get Senate and House match results (from Lambda pipeline)
+    sec_match_results = event.get('secMatchResults', [])
     house_match_results = event.get('houseMatchResults', [])
     senate_match_results = event.get('senateMatchResults', [])
     
