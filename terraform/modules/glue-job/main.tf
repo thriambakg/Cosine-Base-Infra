@@ -19,9 +19,11 @@ resource "aws_glue_job" "this" {
   timeout      = var.timeout
 
   # Worker configuration
-  number_of_workers = var.number_of_workers
-  worker_type       = var.worker_type
-  max_capacity      = var.max_capacity
+  # Note: worker_type/number_of_workers and max_capacity are mutually exclusive
+  # Use worker_type if provided, otherwise use max_capacity
+  number_of_workers = var.worker_type != null ? var.number_of_workers : null
+  worker_type       = var.worker_type != null ? var.worker_type : null
+  max_capacity      = var.worker_type == null ? var.max_capacity : null
 
   # Default arguments (can be overridden at runtime)
   default_arguments = merge(

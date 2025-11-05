@@ -33,19 +33,19 @@ variable "timeout" {
 }
 
 variable "worker_type" {
-  description = "Worker type (G.1X, G.2X, G.4X, G.8X, Standard, or Z.2X)"
+  description = "Worker type (G.1X, G.2X, G.4X, G.8X, Standard, or Z.2X). If set, max_capacity must be null."
   type        = string
-  default     = "G.1X"
+  default     = null
 }
 
 variable "number_of_workers" {
-  description = "Number of workers (for Standard worker type, use max_capacity instead)"
+  description = "Number of workers (only used when worker_type is set). Required when worker_type is G.1X, G.2X, G.4X, G.8X, or Z.2X."
   type        = number
   default     = null
 }
 
 variable "max_capacity" {
-  description = "Maximum number of DPUs (Data Processing Units) for the job"
+  description = "Maximum number of DPUs (Data Processing Units) for the job. Use this when worker_type is null (Standard worker type)."
   type        = number
   default     = null
 }

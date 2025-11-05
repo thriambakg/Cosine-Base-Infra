@@ -2305,7 +2305,9 @@ module "politician_trades_sec_glue_job" {
   max_retries     = 1
   timeout         = 2880 # 48 hours
 
-  worker_type       = "G.1X"
+  # Use max_capacity for flexible scaling (Standard worker type)
+  # Alternative: Use worker_type="G.1X" with number_of_workers=2 for G.1X workers
+  worker_type       = null # Use max_capacity instead
   number_of_workers = null
   max_capacity      = 2 # 2 DPUs for small-medium jobs
 
