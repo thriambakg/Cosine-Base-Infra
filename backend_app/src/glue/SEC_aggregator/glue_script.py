@@ -76,10 +76,8 @@ else:
 # start_date = args.get('start_date')  # Not currently used
 # end_date = args.get('end_date')       # Not currently used
 
-# AWS clients
-s3_client = boto3.client('s3')
-dynamodb = boto3.resource('dynamodb')
-table = dynamodb.Table(dynamodb_table)
+# NOTE: Do NOT create boto3 clients at module level - they contain SSLContext objects that can't be pickled
+# Create clients inside functions that need them to avoid Spark serialization issues
 
 # SEC API configuration
 SEC_BASE_URL = "https://www.sec.gov"
@@ -122,8 +120,10 @@ def find_standard_range(amount_value: float) -> tuple:
 
 def load_politician_list() -> List[Dict[str, Any]]:
     """Load congress-legislators CSV from S3"""
+    # Create client locally to avoid Spark serialization issues
+    s3_client_local = boto3.client('s3')
     try:
-        response = s3_client.get_object(
+        response = s3_client_local.get_object(
             Bucket=s3_bucket,
             Key='congress-legislators.csv'
         )
@@ -415,8 +415,10 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str) -> Optional[D
         # Generate S3 key
         s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{target_date}.{file_ext}"
         
+        # Create S3 client locally to avoid Spark serialization issues
+        s3_client_local = boto3.client('s3')
         # Upload to S3
-        s3_client.put_object(
+        s3_client_local.put_object(
             Bucket=s3_bucket,
             Key=s3_key,
             Body=file_content,
@@ -934,13 +936,17 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     return matched_trades
 
 
-def write_to_dynamodb(trades: List[Dict[str, Any]]):
+def write_to_dynamodb(trades: List[Dict[str, Any]], dynamodb_table_name: str):
     """Batch write trades to DynamoDB"""
     if not trades:
         return
     
+    # Create DynamoDB resource and table locally to avoid Spark serialization issues
+    dynamodb_local = boto3.resource('dynamodb')
+    table_local = dynamodb_local.Table(dynamodb_table_name)
+    
     # Convert to DynamoDB format
-    with table.batch_writer() as batch:
+    with table_local.batch_writer() as batch:
         for trade in trades:
             # Convert numeric fields to Decimal
             dynamodb_item = {}
@@ -1045,7 +1051,7 @@ try:
     
     # Step 4: Write to DynamoDB
     logger.info(f"💾 Writing {len(matched_trades)} trades to DynamoDB...")
-    write_to_dynamodb(matched_trades)
+    write_to_dynamodb(matched_trades, dynamodb_table)
     
     # Step 5: Write summary to S3
     summary = {
@@ -1056,8 +1062,10 @@ try:
         'source': 'sec'
     }
     
+    # Create S3 client locally to avoid Spark serialization issues
+    s3_client_local = boto3.client('s3')
     summary_key = f"temp/sec-results-{target_date}.json"
-    s3_client.put_object(
+    s3_client_local.put_object(
         Bucket=s3_bucket,
         Key=summary_key,
         Body=json.dumps(summary, default=str),
