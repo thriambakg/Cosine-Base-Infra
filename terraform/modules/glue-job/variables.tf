@@ -107,6 +107,16 @@ variable "additional_policy_arns" {
   default     = []
 }
 
+variable "concurrent_executions" {
+  description = "Maximum number of concurrent runs for this Glue job (default: 1, max: 10)"
+  type        = number
+  default     = 1
+  validation {
+    condition     = var.concurrent_executions >= 1 && var.concurrent_executions <= 10
+    error_message = "concurrent_executions must be between 1 and 10"
+  }
+}
+
 variable "tags" {
   description = "Tags to apply to resources"
   type        = map(string)

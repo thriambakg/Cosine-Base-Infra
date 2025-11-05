@@ -1958,7 +1958,13 @@ module "politician_trades_state_machine" {
                 }
                 Retry = [
                   {
-                    ErrorEquals     = ["Glue.ConcurrentRunsExceededException", "Glue.ServiceException"]
+                    ErrorEquals     = ["Glue.ConcurrentRunsExceededException"]
+                    IntervalSeconds = 120 # Wait 2 minutes for concurrent runs to complete
+                    MaxAttempts     = 10  # Retry up to 10 times (20 minutes total)
+                    BackoffRate     = 1.5 # Exponential backoff: 2min, 3min, 4.5min, etc.
+                  },
+                  {
+                    ErrorEquals     = ["Glue.ServiceException"]
                     IntervalSeconds = 60
                     MaxAttempts     = 5
                     BackoffRate     = 2.0
@@ -2304,6 +2310,9 @@ module "politician_trades_sec_glue_job" {
   worker_type       = null # Use max_capacity instead
   number_of_workers = null
   max_capacity      = 2 # 2 DPUs for small-medium jobs
+
+  # Allow up to 3 concurrent runs to handle overlapping executions
+  concurrent_executions = 3
 
   job_bookmark_option = "job-bookmark-disable"
 

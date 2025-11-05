@@ -14,9 +14,10 @@ resource "aws_glue_job" "this" {
   }
 
   # Job configuration
-  glue_version = var.glue_version
-  max_retries  = var.max_retries
-  timeout      = var.timeout
+  glue_version          = var.glue_version
+  max_retries           = var.max_retries
+  timeout               = var.timeout
+  concurrent_executions = var.concurrent_executions # Allow multiple concurrent runs (default: 1)
 
   # Worker configuration
   # Note: worker_type/number_of_workers and max_capacity are mutually exclusive
