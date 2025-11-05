@@ -345,13 +345,22 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     return all_forms
 
 
-def download_sec_form(form_data: Dict[str, Any], target_date: str) -> Optional[Dict[str, Any]]:
+def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_name: str) -> Optional[Dict[str, Any]]:
     """
     Download SEC form and return file content
+    
+    Args:
+        form_data: Form metadata
+        target_date: Target date for S3 key
+        s3_bucket_name: S3 bucket name (passed explicitly to avoid capturing module-level vars)
     
     Returns:
         Dict with 's3_key', 'content', 'file_ext' or None if download fails
     """
+    # Import inside function to avoid serialization issues
+    import logging
+    local_logger = logging.getLogger()
+    
     cik = form_data.get('cik', 'unknown')
     accession = form_data.get('accession_number', 'unknown')
     
@@ -359,7 +368,7 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str) -> Optional[D
         form_type = form_data.get('form_type')
         
         if not all([cik, accession]):
-            logger.warning(f"   ⚠️ Missing CIK/accession: CIK={cik}, Accession={accession}")
+            local_logger.warning(f"   ⚠️ Missing CIK/accession: CIK={cik}, Accession={accession}")
             return None
         
         # Format accession number
@@ -368,10 +377,15 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str) -> Optional[D
         else:
             accession_dashed = accession
         
-        base_url = f"{SEC_BASE_URL}/Archives/edgar/data/{cik}/{accession_dashed}"
+        # Use constants directly (strings are safe to serialize)
+        SEC_BASE_URL_LOCAL = "https://www.sec.gov"
+        SEC_USER_AGENT_LOCAL = "Cosine Financial Platform contact@cosine.financial"
         
+        base_url = f"{SEC_BASE_URL_LOCAL}/Archives/edgar/data/{cik}/{accession_dashed}"
+        
+        # Create session inside function - each worker gets its own
         session = requests.Session()
-        session.headers.update({'User-Agent': SEC_USER_AGENT})
+        session.headers.update({'User-Agent': SEC_USER_AGENT_LOCAL})
         
         # Try to download the file
         file_extensions = ['.xml', '.txt', '.pdf']
@@ -398,17 +412,17 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str) -> Optional[D
                     if ext == '.txt' and file_content.startswith(b'<?xml'):
                         file_ext = 'xml'
                     
-                    logger.debug(f"      Downloaded from: {file_url} ({len(file_content)} bytes)")
+                    local_logger.debug(f"      Downloaded from: {file_url} ({len(file_content)} bytes)")
                     break
                 else:
-                    logger.debug(f"      Attempted {ext}: Status {response.status_code}")
+                    local_logger.debug(f"      Attempted {ext}: Status {response.status_code}")
             except Exception as e:
-                logger.debug(f"      Attempted {ext}: Error - {str(e)[:100]}")
+                local_logger.debug(f"      Attempted {ext}: Error - {str(e)[:100]}")
                 continue
         
         if not file_content:
-            logger.warning(f"   ⚠️ Could not download form from any URL: CIK={cik}, accession={accession_dashed}")
-            logger.warning(f"      Tried URLs: {base_url}/[accession]-primary-document.xml, "
+            local_logger.warning(f"   ⚠️ Could not download form from any URL: CIK={cik}, accession={accession_dashed}")
+            local_logger.warning(f"      Tried URLs: {base_url}/[accession]-primary-document.xml, "
                           f"{base_url}/[accession].txt, {base_url}/[accession].pdf")
             return None
         
@@ -419,13 +433,13 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str) -> Optional[D
         s3_client_local = boto3.client('s3')
         # Upload to S3
         s3_client_local.put_object(
-            Bucket=s3_bucket,
+            Bucket=s3_bucket_name,
             Key=s3_key,
             Body=file_content,
             ContentType='application/xml' if file_ext == 'xml' else 'application/pdf'
         )
         
-        logger.debug(f"      Uploaded to S3: {s3_key} ({len(file_content)} bytes)")
+        local_logger.debug(f"      Uploaded to S3: {s3_key} ({len(file_content)} bytes)")
         
         return {
             's3_key': s3_key,
@@ -438,9 +452,9 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str) -> Optional[D
         }
         
     except Exception as e:
-        logger.error(f"   ❌ Error downloading form (CIK={cik}, Accession={accession}): {e}")
+        local_logger.error(f"   ❌ Error downloading form (CIK={cik}, Accession={accession}): {e}")
         import traceback
-        logger.error(f"      Traceback: {traceback.format_exc()}")
+        local_logger.error(f"      Traceback: {traceback.format_exc()}")
         return None
 
 
@@ -786,53 +800,63 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]])
     return None
 
 
-def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[Dict[str, Any]], s3_bucket_name: str) -> List[Dict[str, Any]]:
     """
     Process a single SEC form: download, parse, match
     
+    Args:
+        form_data: Form metadata
+        target_date: Target date
+        politicians: List of politicians for matching
+        s3_bucket_name: S3 bucket name (passed explicitly to avoid capturing module-level vars)
+    
     Logs detailed information at each stage for tracking and debugging.
     """
+    # Import inside function to avoid serialization issues
+    import logging
+    local_logger = logging.getLogger()
+    
     cik = form_data.get('cik', 'unknown')
     accession = form_data.get('accession_number', 'unknown')
     form_type = form_data.get('form_type', 'unknown')
     
-    logger.info(f"📄 Processing Form: CIK={cik}, Accession={accession}, Type={form_type}")
+    local_logger.info(f"📄 Processing Form: CIK={cik}, Accession={accession}, Type={form_type}")
     
     # Download form
-    logger.info(f"   📥 Step 1/3: Downloading form...")
-    downloaded = download_sec_form(form_data, target_date)
+    local_logger.info(f"   📥 Step 1/3: Downloading form...")
+    downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
     if not downloaded:
-        logger.warning(f"   ❌ FAILED: Could not download form (CIK={cik}, Accession={accession})")
+        local_logger.warning(f"   ❌ FAILED: Could not download form (CIK={cik}, Accession={accession})")
         return []
     
     s3_key = downloaded.get('s3_key', 'unknown')
     file_ext = downloaded.get('file_ext', 'unknown')
-    logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext})")
+    local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext})")
     
     # Parse form
-    logger.info(f"   📊 Step 2/3: Parsing form content...")
+    local_logger.info(f"   📊 Step 2/3: Parsing form content...")
     trades = []
     if downloaded['file_ext'] == 'html' or downloaded['file_ext'] == 'xml':
         content_str = downloaded['content'].decode('utf-8', errors='ignore')
         trades = parse_sec_form_html(content_str, downloaded['s3_key'], target_date)
-        logger.info(f"   ✅ Parsed: Extracted {len(trades)} trades from form")
+        local_logger.info(f"   ✅ Parsed: Extracted {len(trades)} trades from form")
         
         # Log sample trades for debugging
         if trades:
             sample_trade = trades[0]
-            logger.info(f"   📋 Sample trade: filer={sample_trade.get('filerName', 'N/A')}, "
+            local_logger.info(f"   📋 Sample trade: filer={sample_trade.get('filerName', 'N/A')}, "
                        f"security={sample_trade.get('securityName', 'N/A')[:50]}, "
                        f"amount=${sample_trade.get('totalAmount', 'N/A')}")
     else:
-        logger.warning(f"   ⚠️ Unsupported file type: {downloaded['file_ext']} (CIK={cik}, Accession={accession})")
+        local_logger.warning(f"   ⚠️ Unsupported file type: {downloaded['file_ext']} (CIK={cik}, Accession={accession})")
         return []
     
     if not trades:
-        logger.warning(f"   ⚠️ No trades extracted from form (CIK={cik}, Accession={accession}, S3={s3_key})")
+        local_logger.warning(f"   ⚠️ No trades extracted from form (CIK={cik}, Accession={accession}, S3={s3_key})")
         return []
     
     # Match trades to politicians
-    logger.info(f"   🔍 Step 3/3: Matching {len(trades)} trades to politicians...")
+    local_logger.info(f"   🔍 Step 3/3: Matching {len(trades)} trades to politicians...")
     matched_trades = []
     unmatched_trades = []
     unique_filers = set()
@@ -840,7 +864,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     for trade_idx, trade in enumerate(trades, 1):
         filer_name = trade.get('filerName')
         if not filer_name:
-            logger.debug(f"      Trade {trade_idx}/{len(trades)}: Skipping (no filer name)")
+            local_logger.debug(f"      Trade {trade_idx}/{len(trades)}: Skipping (no filer name)")
             unmatched_trades.append(trade)
             continue
         
@@ -902,35 +926,35 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             }
             matched_trades.append(matched_trade)
             
-            logger.debug(f"      Trade {trade_idx}/{len(trades)}: ✅ MATCHED - "
+            local_logger.debug(f"      Trade {trade_idx}/{len(trades)}: ✅ MATCHED - "
                         f"filer='{filer_name}' → politician='{matched_politician['name']}' "
                         f"(confidence={matched_politician.get('matchScore', 1.0):.2f}), "
                         f"security={trade.get('securityName', 'N/A')[:40]}, "
                         f"amount=${total_amount}")
         else:
             unmatched_trades.append(trade)
-            logger.debug(f"      Trade {trade_idx}/{len(trades)}: ❌ NO MATCH - "
+            local_logger.debug(f"      Trade {trade_idx}/{len(trades)}: ❌ NO MATCH - "
                         f"filer='{filer_name}' (no politician match found)")
     
     # Summary logging
-    logger.info(f"   📊 Matching Summary:")
-    logger.info(f"      - Total trades extracted: {len(trades)}")
-    logger.info(f"      - Trades matched to politicians: {len(matched_trades)}")
-    logger.info(f"      - Trades unmatched: {len(unmatched_trades)}")
-    logger.info(f"      - Unique filers in form: {len(unique_filers)}")
+    local_logger.info(f"   📊 Matching Summary:")
+    local_logger.info(f"      - Total trades extracted: {len(trades)}")
+    local_logger.info(f"      - Trades matched to politicians: {len(matched_trades)}")
+    local_logger.info(f"      - Trades unmatched: {len(unmatched_trades)}")
+    local_logger.info(f"      - Unique filers in form: {len(unique_filers)}")
     
     if unique_filers:
         filer_list = ', '.join(list(unique_filers)[:5])  # Show first 5
         if len(unique_filers) > 5:
             filer_list += f" ... (+{len(unique_filers) - 5} more)"
-        logger.info(f"      - Filer names: {filer_list}")
+        local_logger.info(f"      - Filer names: {filer_list}")
     
     if unmatched_trades and len(unmatched_trades) > 0:
         unmatched_filers = set(t.get('filerName') for t in unmatched_trades if t.get('filerName'))
         if unmatched_filers:
-            logger.warning(f"      ⚠️ Unmatched filers: {', '.join(list(unmatched_filers)[:5])}")
+            local_logger.warning(f"      ⚠️ Unmatched filers: {', '.join(list(unmatched_filers)[:5])}")
     
-    logger.info(f"   ✅ Completed processing form: CIK={cik}, Accession={accession}, "
+    local_logger.info(f"   ✅ Completed processing form: CIK={cik}, Accession={accession}, "
                f"Matched={len(matched_trades)}/{len(trades)}, S3={s3_key}")
     
     return matched_trades
@@ -984,6 +1008,12 @@ try:
     logger.info(f"📊 Processing {len(forms)} forms...")
     logger.info(f"   Using Spark to process forms in parallel")
     
+    # Broadcast necessary variables to avoid serialization issues
+    # Broadcast variables are sent once to each worker, not serialized with each task
+    politicians_broadcast = sc.broadcast(politicians)
+    target_date_broadcast = sc.broadcast(target_date)
+    s3_bucket_broadcast = sc.broadcast(s3_bucket)
+    
     # Create RDD from forms list
     forms_rdd = sc.parallelize(forms)
     
@@ -1003,32 +1033,52 @@ try:
     }
     
     # Process each form (download, parse, match)
+    # Use a standalone function that doesn't capture module-level variables
     def process_form_wrapper(form_data):
+        # Import inside function to avoid capturing module-level state
+        import logging
+        import traceback
+        
+        # Get logger locally - don't use module-level logger
+        local_logger = logging.getLogger()
+        local_logger.setLevel(logging.INFO)
+        
         try:
+            # Get broadcasted values
+            politicians_local = politicians_broadcast.value
+            target_date_local = target_date_broadcast.value
+            s3_bucket_local = s3_bucket_broadcast.value
+            
             cik = form_data.get('cik', 'unknown')
             accession = form_data.get('accession_number', 'unknown')
             
-            logger.info(f"🔄 Starting processing: Form {form_data.get('form_type', 'unknown')} - CIK={cik}, Accession={accession}")
+            local_logger.info(f"🔄 Starting processing: Form {form_data.get('form_type', 'unknown')} - CIK={cik}, Accession={accession}")
             
-            matched_trades = process_form(form_data, target_date, politicians)
+            # Call process_form with explicit parameters from broadcast
+            # Note: process_form will create its own boto3 clients inside, so no SSLContext issues
+            matched_trades = process_form(form_data, target_date_local, politicians_local, s3_bucket_local)
             
             # Update stats (these will be approximate since we're in distributed processing)
             if matched_trades:
-                logger.info(f"✅ Form completed: CIK={cik}, Matched trades={len(matched_trades)}")
+                local_logger.info(f"✅ Form completed: CIK={cik}, Matched trades={len(matched_trades)}")
             else:
-                logger.info(f"⚠️ Form completed (no matches): CIK={cik}, Accession={accession}")
+                local_logger.info(f"⚠️ Form completed (no matches): CIK={cik}, Accession={accession}")
             
             return matched_trades
         except Exception as e:
             cik = form_data.get('cik', 'unknown')
             accession = form_data.get('accession_number', 'unknown')
-            logger.error(f"❌ FATAL ERROR processing form (CIK={cik}, Accession={accession}): {e}")
-            import traceback
-            logger.error(f"   Traceback: {traceback.format_exc()}")
+            local_logger.error(f"❌ FATAL ERROR processing form (CIK={cik}, Accession={accession}): {e}")
+            local_logger.error(f"   Traceback: {traceback.format_exc()}")
             return []
     
     matched_trades_rdd = forms_rdd.flatMap(process_form_wrapper)
     matched_trades = matched_trades_rdd.collect()
+    
+    # Clean up broadcast variables
+    politicians_broadcast.destroy()
+    target_date_broadcast.destroy()
+    s3_bucket_broadcast.destroy()
     
     # Calculate final statistics
     total_trades = len(matched_trades)
