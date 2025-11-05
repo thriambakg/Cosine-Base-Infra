@@ -2160,7 +2160,7 @@ module "politician_trades_state_machine" {
           "senateMatchResults.$" : "$.pipelineResults[1].matchResults",
           "houseMatchResults.$" : "$.pipelineResults[2]", # House pipeline returns empty array
           "date.$" : "$.fetchResults.date",
-          "s3Bucket" : module.politician_trades_s3.bucket_name
+          "s3Bucket" : module.politician_trades_s3.bucket_id
         }
         Next = "AggregateMatchesTask"
       }
@@ -2286,7 +2286,7 @@ module "politician_trades_scheduler" {
 
 # Upload Glue script to S3
 resource "aws_s3_object" "sec_glue_script" {
-  bucket = module.politician_trades_s3.bucket_name
+  bucket = module.politician_trades_s3.bucket_id
   key    = "glue-scripts/politician-trades-sec-etl.py"
   source = "${path.module}/../backend_app/src/glue/SEC_aggregator/glue_script.py"
   etag   = filemd5("${path.module}/../backend_app/src/glue/SEC_aggregator/glue_script.py")
