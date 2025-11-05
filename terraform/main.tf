@@ -2494,6 +2494,8 @@ module "politician_trades_sec_glue_job" {
   dynamodb_table_arn = module.sec_filings_table.table_arn
   kms_key_arn        = module.kms.main_key_arn
 
+  # Note: We pass the policy ARN directly, but it will be resolved at apply time
+  # The count-based approach in the module handles unknown values correctly
   additional_policy_arns = [
     aws_iam_policy.glue_sec_filings_s3_policy.arn
   ]
@@ -2509,5 +2511,10 @@ module "politician_trades_sec_glue_job" {
 
   tags = var.common_tags
 
-  depends_on = [aws_s3_object.sec_glue_script, module.sec_filings_s3, module.sec_filings_table]
+  depends_on = [
+    aws_s3_object.sec_glue_script,
+    module.sec_filings_s3,
+    module.sec_filings_table,
+    aws_iam_policy.glue_sec_filings_s3_policy
+  ]
 }

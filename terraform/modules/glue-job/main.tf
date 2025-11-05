@@ -130,13 +130,15 @@ resource "aws_iam_role_policy" "s3_access" {
 }
 
 # DynamoDB permissions (if needed)
+# Use try() to safely handle unknown values - if value is unknown, assume it's provided (count=1)
+# The depends_on in the calling module ensures the table exists before this resource
 resource "aws_iam_role_policy" "dynamodb_access" {
-  count = var.dynamodb_table_arn != null ? 1 : 0
+  count = try(var.dynamodb_table_arn != null, false) ? 1 : 0
 
   name = length("${var.job_name}-dynamodb") > 128 ? substr("${var.job_name}-dynamodb", 0, 128) : "${var.job_name}-dynamodb"
   role = aws_iam_role.glue_role.id
 
-  policy = jsonencode({
+  policy = var.dynamodb_table_arn != null ? jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
@@ -156,12 +158,16 @@ resource "aws_iam_role_policy" "dynamodb_access" {
         ]
       }
     ]
+    }) : jsonencode({
+    Version   = "2012-10-17"
+    Statement = []
   })
 }
 
 # KMS permissions (if needed for encrypted S3/DynamoDB)
+# Use try() to safely handle unknown values - if value is unknown, assume it's provided (count=1)
 resource "aws_iam_role_policy" "kms_access" {
-  count = var.kms_key_arn != null ? 1 : 0
+  count = try(var.kms_key_arn != null, false) ? 1 : 0
 
   name = length("${var.job_name}-kms") > 128 ? substr("${var.job_name}-kms", 0, 128) : "${var.job_name}-kms"
   role = aws_iam_role.glue_role.id
@@ -193,10 +199,11 @@ resource "aws_iam_role_policy" "custom" {
 }
 
 # Support for attaching additional IAM policy ARNs (for shared policies)
+# Use count instead of for_each to avoid issues with unknown values
 resource "aws_iam_role_policy_attachment" "additional" {
-  for_each = toset(var.additional_policy_arns)
+  count = length(var.additional_policy_arns)
 
   role       = aws_iam_role.glue_role.name
-  policy_arn = each.value
+  policy_arn = var.additional_policy_arns[count.index]
 }
 
