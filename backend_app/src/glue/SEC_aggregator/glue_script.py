@@ -38,8 +38,15 @@ import boto3
 import requests
 
 # Configure logging
+# Glue jobs benefit from both logger and print() for visibility
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
+
+# Also use print() for critical messages - Glue shows these more reliably
+def log_print(message):
+    """Print to both logger and stdout for maximum visibility in Glue"""
+    logger.info(message)
+    print(message, file=sys.stdout, flush=True)
 
 # Initialize Spark and Glue contexts
 sc = SparkContext()
@@ -255,11 +262,11 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 )
                 
                 rows = table_row_pattern.findall(html_content)
-                logger.info(f"      📊 HTML Parsing Results:")
-                logger.info(f"         Total table rows found: {len(rows)}")
-                logger.info(f"         HTML size: {len(html_content):,} characters")
+                log_print(f"      📊 HTML Parsing Results:")
+                log_print(f"         Total table rows found: {len(rows)}")
+                log_print(f"         HTML size: {len(html_content):,} characters")
                 if rows:
-                    logger.info(f"         First row preview (first 200 chars): {rows[0][:200]}")
+                    log_print(f"         First row preview (first 200 chars): {rows[0][:200]}")
                 
                 page_forms = []
                 page_forms_before_date_filter = 0
@@ -401,9 +408,9 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 
                 # Log sample of parsed forms from this page
                 if page_forms:
-                    logger.info(f"      📋 Sample forms from page {page} (first 3):")
+                    log_print(f"      📋 Sample forms from page {page} (first 3):")
                     for idx, form in enumerate(page_forms[:3], 1):
-                        logger.info(f"         {idx}. CIK={form.get('cik', 'N/A')}, "
+                        log_print(f"         {idx}. CIK={form.get('cik', 'N/A')}, "
                                    f"Accession={form.get('accession_number', 'N/A')[:15]}..., "
                                    f"Type={form.get('form_type', 'N/A')}, "
                                    f"FilingDate={form.get('filing_date', 'N/A')}, "
@@ -532,22 +539,34 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                     file_url = f"{base_url}/{accession_dashed}.pdf"
                 
                 local_logger.info(f"      🔄 Attempting download: {ext} from {file_url}")
+                print(f"      🔄 Attempting download: {ext} from {file_url}", flush=True)
                 local_logger.info(f"         📡 Calling SEC Archives API:")
+                print(f"         📡 Calling SEC Archives API:", flush=True)
                 local_logger.info(f"            URL: {file_url}")
+                print(f"            URL: {file_url}", flush=True)
                 local_logger.info(f"            Method: GET")
+                print(f"            Method: GET", flush=True)
                 local_logger.info(f"            Headers: User-Agent={SEC_USER_AGENT_LOCAL}")
+                print(f"            Headers: User-Agent={SEC_USER_AGENT_LOCAL}", flush=True)
                 
                 download_start_time = datetime.now()
                 response = session.get(file_url, timeout=30)
                 download_duration = (datetime.now() - download_start_time).total_seconds()
                 
                 local_logger.info(f"         📥 SEC Archives API Response:")
+                print(f"         📥 SEC Archives API Response:", flush=True)
                 local_logger.info(f"            Status Code: {response.status_code}")
+                print(f"            Status Code: {response.status_code}", flush=True)
                 local_logger.info(f"            Response Headers: {dict(response.headers)}")
+                print(f"            Response Headers: {dict(response.headers)}", flush=True)
                 local_logger.info(f"            Response Size: {len(response.content):,} bytes")
+                print(f"            Response Size: {len(response.content):,} bytes", flush=True)
                 local_logger.info(f"            Response Time: {download_duration:.2f}s")
+                print(f"            Response Time: {download_duration:.2f}s", flush=True)
                 if len(response.content) > 0:
-                    local_logger.info(f"            Response Preview (first 300 chars): {response.content[:300].decode('utf-8', errors='ignore')}")
+                    preview = response.content[:300].decode('utf-8', errors='ignore')
+                    local_logger.info(f"            Response Preview (first 300 chars): {preview}")
+                    print(f"            Response Preview (first 300 chars): {preview}", flush=True)
                 
                 if response.status_code == 200:
                     file_content = response.content
@@ -1670,29 +1689,43 @@ try:
     forms = fetch_sec_forms_paginated(target_date)
     stage2_duration = (datetime.now() - stage2_start).total_seconds()
     logger.info("")
-    logger.info(f"✅ Stage 2 Complete: Fetched {len(forms)} forms in {stage2_duration:.2f} seconds")
+    stage2_msg = f"✅ Stage 2 Complete: Fetched {len(forms)} forms in {stage2_duration:.2f} seconds"
+    logger.info(stage2_msg)
+    print(stage2_msg, flush=True)
     
     # Log form type breakdown
     form_type_counts = {}
     for form in forms:
         form_type = form.get('form_type', 'unknown')
         form_type_counts[form_type] = form_type_counts.get(form_type, 0) + 1
-    logger.info(f"   Form Type Breakdown:")
+    breakdown_msg = f"   Form Type Breakdown:"
+    logger.info(breakdown_msg)
+    print(breakdown_msg, flush=True)
     for form_type, count in sorted(form_type_counts.items()):
-        logger.info(f"      - {form_type}: {count}")
+        type_msg = f"      - {form_type}: {count}"
+        logger.info(type_msg)
+        print(type_msg, flush=True)
     
     # Log preview of fetched files (first 10)
+    preview_msg = f"   📋 Preview of Fetched Files (showing first {builtins.min(10, len(forms))} of {len(forms)}):"
     logger.info("")
-    logger.info(f"   📋 Preview of Fetched Files (showing first {builtins.min(10, len(forms))} of {len(forms)}):")
+    logger.info(preview_msg)
+    print("", flush=True)
+    print(preview_msg, flush=True)
     for idx, form in enumerate(forms[:10], 1):
-        logger.info(f"      {idx}. CIK={form.get('cik', 'N/A')}, "
+        form_msg = (f"      {idx}. CIK={form.get('cik', 'N/A')}, "
                    f"Accession={form.get('accession_number', 'N/A')[:20]}, "
                    f"Type={form.get('form_type', 'N/A')}, "
                    f"FilingDate={form.get('filing_date', 'N/A')}, "
                    f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
+        logger.info(form_msg)
+        print(form_msg, flush=True)
     if len(forms) > 10:
-        logger.info(f"      ... ({len(forms) - 10} more files)")
+        more_msg = f"      ... ({len(forms) - 10} more files)"
+        logger.info(more_msg)
+        print(more_msg, flush=True)
     logger.info("=" * 80)
+    print("=" * 80, flush=True)
     
     # Step 3: Process forms in parallel using Spark
     logger.info("")
@@ -1754,11 +1787,31 @@ try:
             result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, dynamodb_table_local)
             
             if result.get('success'):
-                local_logger.info(f"✅ Form completed: CIK={cik}, TradeId={result.get('tradeId', 'N/A')}, PoliticianMatch={result.get('politicianMatch', False)}")
+                msg = f"✅ Form completed: CIK={cik}, TradeId={result.get('tradeId', 'N/A')}, PoliticianMatch={result.get('politicianMatch', False)}"
+                local_logger.info(msg)
+                print(msg, flush=True)
             elif result.get('skipped'):
-                local_logger.info(f"⏭️ Form skipped: CIK={cik}, Reason={result.get('reason', 'unknown')}")
+                reason = result.get('reason', 'unknown')
+                msg = f"⏭️ Form skipped: CIK={cik}, Accession={accession}, Reason={reason}"
+                local_logger.info(msg)
+                print(msg, flush=True)
+                if reason == 'date_mismatch':
+                    detail = f"   Details: Filing date doesn't match target date"
+                    local_logger.warning(detail)
+                    print(detail, flush=True)
+                elif reason == 'download_failed':
+                    detail = f"   Details: Could not download form from SEC website"
+                    local_logger.warning(detail)
+                    print(detail, flush=True)
+                elif reason == 'unsupported_file_type':
+                    detail = f"   Details: File type not supported (only HTML supported currently)"
+                    local_logger.warning(detail)
+                    print(detail, flush=True)
             else:
-                local_logger.warning(f"⚠️ Form failed: CIK={cik}, Error={result.get('error', 'unknown')}")
+                error_msg = result.get('error', 'unknown')
+                msg = f"❌ Form failed: CIK={cik}, Accession={accession}, Error={error_msg}"
+                local_logger.warning(msg)
+                print(msg, flush=True)
             
             return result
         except Exception as e:
@@ -1844,14 +1897,38 @@ try:
         logger.info(f"      This is normal if the filing date in the form doesn't match the target date")
     
     if successful_stored == 0:
+        warning_header = "   ⚠️ CRITICAL WARNING: No forms were successfully stored!"
         logger.warning("")
-        logger.warning(f"   ⚠️ CRITICAL WARNING: No forms were successfully stored!")
-        logger.warning(f"      This could indicate:")
-        logger.warning(f"      - Download failures for all forms (check network/SEC website)")
-        logger.warning(f"      - Parsing failures for all forms (check HTML structure)")
-        logger.warning(f"      - Date mismatches for all forms (check target date)")
-        logger.warning(f"      - DynamoDB write failures (check permissions/table)")
-        logger.warning(f"      Review the detailed logs above for specific error messages")
+        logger.warning(warning_header)
+        print("", flush=True)
+        print(warning_header, flush=True)
+        
+        detail_msg = "      This could indicate:"
+        logger.warning(detail_msg)
+        print(detail_msg, flush=True)
+        
+        for detail in [
+            "- Download failures for all forms (check network/SEC website)",
+            "- Parsing failures for all forms (check HTML structure)",
+            "- Date mismatches for all forms (check target date)",
+            "- DynamoDB write failures (check permissions/table)"
+        ]:
+            logger.warning(f"      {detail}")
+            print(f"      {detail}", flush=True)
+        
+        review_msg = "      Review the detailed logs above for specific error messages"
+        logger.warning(review_msg)
+        print(review_msg, flush=True)
+        
+        # Log detailed breakdown of what happened
+        print("", flush=True)
+        print("   🔍 DETAILED BREAKDOWN:", flush=True)
+        print(f"      Total forms fetched: {total_forms_processed}", flush=True)
+        print(f"      Successfully stored: {successful_stored}", flush=True)
+        print(f"      Failed to store: {failed_stored}", flush=True)
+        print(f"      Skipped (date mismatch): {skipped_date_mismatch}", flush=True)
+        print(f"      Skipped (download failed): {skipped_download_failed}", flush=True)
+        print(f"      Skipped (unsupported file type): {skipped_unsupported_type}", flush=True)
     elif successful_stored < total_forms_processed * 0.5:
         logger.warning("")
         logger.warning(f"   ⚠️ WARNING: Less than 50% of forms were successfully stored!")
