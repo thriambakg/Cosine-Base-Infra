@@ -47,13 +47,13 @@ spark = glueContext.spark_session
 job = Job(glueContext)
 
 # Get job parameters
+# Note: getResolvedOptions requires ALL listed arguments to be provided
+# Only include required arguments here
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
     'date',  # Target date in YYYY-MM-DD format
     's3_bucket',
-    'dynamodb_table',
-    'start_date',  # Optional: for date ranges
-    'end_date'     # Optional: for date ranges
+    'dynamodb_table'
 ])
 
 job.init(args['JOB_NAME'], args)
@@ -62,8 +62,19 @@ job.init(args['JOB_NAME'], args)
 target_date = args.get('date')
 s3_bucket = args.get('s3_bucket')
 dynamodb_table = args.get('dynamodb_table')
-start_date = args.get('start_date')
-end_date = args.get('end_date')
+
+# Default to yesterday if date is not provided, is null, empty string, or the string "null"
+# Step Functions may pass null as the string "null" or as an empty string
+if not target_date or target_date.strip() == '' or target_date.lower() == 'null':
+    yesterday = datetime.now() - timedelta(days=1)
+    target_date = yesterday.strftime('%Y-%m-%d')
+    logger.info(f"⚠️ No date provided (or date was null/empty), defaulting to yesterday: {target_date}")
+else:
+    logger.info(f"📅 Processing SEC forms for date: {target_date}")
+
+# Optional date range parameters (not currently used, but can be added via --additional-python-modules or custom parsing if needed)
+# start_date = args.get('start_date')  # Not currently used
+# end_date = args.get('end_date')       # Not currently used
 
 # AWS clients
 s3_client = boto3.client('s3')

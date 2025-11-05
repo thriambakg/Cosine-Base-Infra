@@ -1918,8 +1918,21 @@ module "politician_trades_state_machine" {
   # Step Functions definition with 4 steps (parallel downloads)
   definition = jsonencode({
     Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
-    StartAt = "FetchFormMetadata"
+    StartAt = "NormalizeInput"
     States = {
+      # Step 0: Normalize input - ensure 'date' field exists (default to yesterday if not provided)
+      NormalizeInput = {
+        Type    = "Pass"
+        Comment = "Ensure date field exists. If not provided, Lambda/Glue will default to yesterday. Pass through input."
+        Parameters = {
+          "date.$"      = "$.date"
+          "source.$"    = "$.source"
+          "timestamp.$" = "$.timestamp"
+        }
+        # If date is missing, it will be null, and Lambdas/Glue will default to yesterday
+        ResultPath = "$"
+        Next       = "FetchFormMetadata"
+      }
       # Step 1: Fetch Senate PTR metadata only (SEC handled by Glue job independently)
       FetchFormMetadata = {
         Type       = "Task"
@@ -1972,7 +1985,7 @@ module "politician_trades_state_machine" {
                 Parameters = {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
-                    "--date.$"         = "$.date" # Get date from top-level input (same as fetcher)
+                    "--date.$"         = "$.date" # Get date from top-level input (may be null/empty - Glue will default to yesterday)
                     "--s3_bucket"      = module.politician_trades_s3.bucket_id
                     "--dynamodb_table" = module.politician_trades_table.table_name
                     "--JOB_NAME"       = module.politician_trades_sec_glue_job.job_name
