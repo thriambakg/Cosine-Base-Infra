@@ -2032,27 +2032,27 @@ module "politician_trades_state_machine" {
   state_machine_name = "${var.project_name}-politician-trades-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition - two independent parallel pipelines
+  # Step Functions definition - two independent parallel branches
   definition = jsonencode({
-    Comment = "Daily politician trades aggregation - two independent parallel pipelines: (1) Senate PTRs via Lambda (fetch/download/match/save), (2) SEC filings via Glue ETL (fetch/download/match/save). Both receive date input and save directly to DynamoDB/S3. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
-    StartAt = "ParallelPipelines"
+    Comment = "Daily politician trades aggregation - two independent parallel pipelines: (1) Senate PTRs via Lambda (fetch/download/match/save), (2) SEC filings via Glue ETL (async, writes directly to DynamoDB). Both receive initial input. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
+    StartAt = "ParallelBranches"
     States = {
-      # Parallel execution: Two independent pipelines that both save directly to DynamoDB
-      # - Senate PTR pipeline: Fetcher → Download → Match → Save (Lambda-based)
-      # - SEC pipeline: Glue Job (async - starts and runs independently, writes directly to DynamoDB)
-      ParallelPipelines = {
+      # Two completely independent parallel branches
+      # Both receive the same initial input (date or empty)
+      # Both write directly to DynamoDB - no aggregation needed
+      ParallelBranches = {
         Type    = "Parallel"
-        Comment = "Two independent parallel pipelines: (1) Senate PTRs via Lambda, (2) SEC filings via Glue ETL. Both receive date input and save directly to DynamoDB/S3."
+        Comment = "Two independent parallel pipelines: (1) Senate PTRs via Lambda, (2) SEC filings via Glue ETL (async). Both start from initial input and write directly to DynamoDB."
         Branches = [
           {
-            # Senate PTR Pipeline (Lambda-based)
+            # Branch 1: Senate PTR Pipeline (Lambda-based)
             StartAt = "FetchSenatePTRs"
             States = {
               FetchSenatePTRs = {
                 Type       = "Task"
                 Resource   = module.politician_trades_fetcher.function_arn
-                Comment    = "Fetch Senate PTR metadata only. Returns URLs/metadata - defaults to yesterday if date not provided."
-                InputPath  = "$" # Pass through entire input - Lambda will extract 'date' or default
+                Comment    = "Fetch Senate PTR metadata only. Receives initial input (date or empty). Lambda defaults to yesterday if date not provided."
+                InputPath  = "$"
                 ResultPath = "$.fetchResults"
                 Next       = "TransformSenate"
                 Retry = [
@@ -2232,18 +2232,55 @@ module "politician_trades_state_machine" {
             }
           },
           {
-            # SEC Pipeline - Glue Job (async, standalone ETL)
-            StartAt = "StartSECGlueJob"
+            # Branch 2: SEC Pipeline - Glue Job (async, standalone ETL)
+            StartAt = "CheckDateForSEC"
             States = {
-              StartSECGlueJob = {
+              CheckDateForSEC = {
+                Type    = "Choice"
+                Comment = "Check if date exists in input - route to appropriate Glue job start"
+                Choices = [
+                  {
+                    Variable  = "$.date"
+                    IsPresent = true
+                    Next      = "StartSECGlueJobWithDate"
+                  }
+                ]
+                Default = "StartSECGlueJobWithoutDate"
+              }
+              StartSECGlueJobWithDate = {
                 Type     = "Task"
-                Comment  = "Start Glue ETL job for SEC filings (async) - job handles fetch/download/match/save independently. Passes date from input (or Glue job will default to yesterday)."
+                Comment  = "Start Glue ETL job with date parameter - job handles fetch/download/match/save independently. Writes directly to DynamoDB."
                 Resource = "arn:aws:states:::glue:startJobRun"
                 Parameters = {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
                     "--date.$" = "$.date"
                   }
+                }
+                Retry = [
+                  {
+                    ErrorEquals     = ["Glue.ConcurrentRunsExceededException", "Glue.ServiceException"]
+                    IntervalSeconds = 60
+                    MaxAttempts     = 3
+                    BackoffRate     = 2.0
+                  }
+                ]
+                Catch = [
+                  {
+                    ErrorEquals = ["States.ALL"]
+                    ResultPath  = "$.error"
+                    Next        = "SECGlueJobFailed"
+                  }
+                ]
+                End = true
+              }
+              StartSECGlueJobWithoutDate = {
+                Type     = "Task"
+                Comment  = "Start Glue ETL job without date parameter - job will default to yesterday. Writes directly to DynamoDB."
+                Resource = "arn:aws:states:::glue:startJobRun"
+                Parameters = {
+                  JobName   = module.politician_trades_sec_glue_job.job_name
+                  Arguments = {}
                 }
                 Retry = [
                   {
