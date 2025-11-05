@@ -47,8 +47,9 @@ def download_and_store_sec_form(form_data: Dict[str, Any], target_date: str) -> 
         filename = form_data.get('filename')
         
         if not all([cik, accession]):
-            logger.warning(f"⚠️ Missing required fields (CIK/accession) for form download: {form_data}")
-            return None
+            error_msg = f"Missing required fields (CIK/accession) for form download: {form_data}"
+            logger.error(f"❌ {error_msg}")
+            raise ValueError(error_msg)
         
         # Construct accession number with dashes (format: 0001234567-12-345678)
         # Accession numbers are 18 digits, formatted as 10-2-6
@@ -443,8 +444,9 @@ def download_and_store_ptr(ptr_data: Dict[str, Any], target_date: str) -> Option
         form_type = ptr_data.get('formType') or ptr_data.get('form_type', 'house_ptr' if source == 'house' else 'senate_ptr')
         
         if not url:
-            logger.error(f"❌ Missing URL for PTR download: {ptr_data}")
-            return None
+            error_msg = f"Missing URL for PTR download: {ptr_data}"
+            logger.error(f"❌ {error_msg}")
+            raise ValueError(error_msg)
         
         # Construct S3 key - always use YYYY-MM-DD format for target_date
         # target_date is already normalized to YYYY-MM-DD format in lambda_handler
