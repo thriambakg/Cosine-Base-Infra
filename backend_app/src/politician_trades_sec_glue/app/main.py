@@ -49,13 +49,15 @@ def main():
     )
     
     # Parse optional date argument (default: yesterday)
+    # Date can come from Step Functions as --date=YYYY-MM-DD
     date_arg = None
     for arg in sys.argv:
         if arg.startswith('--date='):
-            date_arg = arg.split('=')[1]
+            date_arg = arg.split('=', 1)[1]
             break
     
     if not date_arg:
+        # Default to yesterday
         yesterday = datetime.now() - timedelta(days=1)
         date_arg = yesterday.strftime('%Y-%m-%d')
     
