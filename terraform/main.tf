@@ -1757,69 +1757,78 @@ module "sec_filings_table" {
 
   attributes = [
     { name = "tradeId", type = "S" },
-    { name = "politicianName", type = "S" },
-    { name = "party", type = "S" },
-    { name = "position", type = "S" },
-    { name = "securitySymbol", type = "S" },
     { name = "formType", type = "S" },
-    { name = "transactionType", type = "S" },
-    { name = "transactionDate", type = "N" },
-    { name = "amountMin", type = "N" }
+    { name = "name", type = "S" },
+    { name = "address", type = "S" },
+    { name = "eventDate", type = "S" },
+    { name = "reportingDate", type = "S" },
+    { name = "issuerName", type = "S" },
+    { name = "tickerSymbol", type = "S" },
+    { name = "relationship", type = "S" },
+    { name = "politician", type = "N" }
   ]
 
   global_secondary_indexes = [
     {
-      name            = "PoliticianTradeDateIndex"
-      hash_key        = "politicianName"
-      range_key       = "transactionDate"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "PositionTradeDateIndex"
-      hash_key        = "position"
-      range_key       = "transactionDate"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "PartyTradeDateIndex"
-      hash_key        = "party"
-      range_key       = "transactionDate"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "SecurityTradeDateIndex"
-      hash_key        = "securitySymbol"
-      range_key       = "transactionDate"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "FormTypeTradeDateIndex"
+      name            = "FormTypeReportingDateIndex"
       hash_key        = "formType"
-      range_key       = "transactionDate"
+      range_key       = "reportingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "TransactionTypeTradeDateIndex"
-      hash_key        = "transactionType"
-      range_key       = "transactionDate"
+      name            = "NameReportingDateIndex"
+      hash_key        = "name"
+      range_key       = "reportingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "AmountRangeTradeDateIndex"
-      hash_key        = "amountMin"
-      range_key       = "transactionDate"
+      name            = "AddressReportingDateIndex"
+      hash_key        = "address"
+      range_key       = "reportingDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "EventDateIndex"
+      hash_key        = "eventDate"
+      range_key       = "reportingDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "IssuerNameReportingDateIndex"
+      hash_key        = "issuerName"
+      range_key       = "reportingDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "TickerSymbolReportingDateIndex"
+      hash_key        = "tickerSymbol"
+      range_key       = "reportingDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "RelationshipReportingDateIndex"
+      hash_key        = "relationship"
+      range_key       = "reportingDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PoliticianReportingDateIndex"
+      hash_key        = "politician"
+      range_key       = "reportingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
