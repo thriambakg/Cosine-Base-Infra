@@ -372,19 +372,11 @@ def lambda_handler(event, context):
     logger.info("🚀 Politician Trades Aggregator Lambda started")
     
     # Get match results from parallel processing
-    # Support both old format (single matchResults array) and new format (separate arrays)
-    sec_match_results = event.get('secMatchResults', [])
-    house_match_results = event.get('houseMatchResults', [])
+    # SEC results come from S3 (written by Glue job), Senate/House from Lambda outputs
+    sec_glue_output = event.get('secGlueOutput', {})
     senate_match_results = event.get('senateMatchResults', [])
-    
-    # Backward compatibility: if old format, use matchResults
-    if not sec_match_results and not house_match_results and not senate_match_results:
-        match_results = event.get('matchResults', [])
-        sec_match_results = match_results
-        logger.info("📋 Using legacy matchResults format (SEC forms only)")
-    
-    # Combine all match results
-    all_match_results = sec_match_results + house_match_results + senate_match_results
+    house_match_results = event.get('houseMatchResults', [])
+    s3_bucket = event.get('s3Bucket', S3_BUCKET)
     
     date = event.get('date') or event.get('fetchResults', {}).get('date')
     
@@ -392,22 +384,55 @@ def lambda_handler(event, context):
         raise ValueError("Date not provided in event")
     
     logger.info(f"📅 Aggregating results for date: {date}")
-    logger.info(f"📋 Processing {len(sec_match_results)} SEC, {len(house_match_results)} House, {len(senate_match_results)} Senate results")
-    logger.info(f"📊 Total: {len(all_match_results)} match results")
+    
+    # Load SEC results from S3 (written by Glue job)
+    sec_matched_trades = []
+    sec_unmatched_count = 0
+    sec_forms_fetched = 0
+    
+    try:
+        sec_summary_key = f"temp/sec-results-{date}.json"
+        logger.info(f"📋 Reading SEC summary from S3: s3://{s3_bucket}/{sec_summary_key}")
+        
+        try:
+            response = s3_client.get_object(Bucket=s3_bucket, Key=sec_summary_key)
+            sec_summary = json.loads(response['Body'].read().decode('utf-8'))
+            
+            sec_matched_trades = sec_summary.get('matchedTrades', [])
+            sec_unmatched_count = sec_summary.get('unmatchedCount', 0)
+            sec_forms_fetched = sec_summary.get('secFormsFetched', 0)
+            
+            logger.info(f"✅ Loaded SEC results: {len(sec_matched_trades)} matched trades, {sec_unmatched_count} unmatched, {sec_forms_fetched} forms fetched")
+        except s3_client.exceptions.NoSuchKey:
+            logger.warning(f"⚠️ SEC summary not found in S3: {sec_summary_key}. Glue job may have failed or not completed yet.")
+        except Exception as e:
+            logger.error(f"❌ Error reading SEC summary from S3: {e}")
+    except Exception as e:
+        logger.error(f"❌ Error loading SEC results: {e}")
+    
+    # Get Senate results from Lambda outputs
+    logger.info(f"📋 Processing {len(senate_match_results)} Senate results")
     
     # Filter out failed downloads (success: false)
-    valid_results = [r for r in all_match_results if r.get('success') is not False]
+    valid_senate_results = [r for r in senate_match_results if r.get('success') is not False]
     
-    # Aggregate all matched trades and count unmatched
-    all_matched_trades = []
-    total_unmatched = 0
+    # Aggregate Senate matched trades and count unmatched
+    senate_matched_trades = []
+    senate_unmatched_count = 0
     
-    for result in valid_results:
+    for result in valid_senate_results:
         matched_trades = result.get('matchedTrades', [])
         unmatched_count = result.get('unmatchedCount', 0)
         
-        all_matched_trades.extend(matched_trades)
-        total_unmatched += unmatched_count
+        senate_matched_trades.extend(matched_trades)
+        senate_unmatched_count += unmatched_count
+    
+    # Combine all results
+    all_matched_trades = sec_matched_trades + senate_matched_trades
+    total_unmatched = sec_unmatched_count + senate_unmatched_count
+    
+    logger.info(f"📊 Total: {len(all_matched_trades)} matched trades ({len(sec_matched_trades)} SEC, {len(senate_matched_trades)} Senate)")
+    logger.info(f"⚠️ {total_unmatched} files/trades could not be matched ({sec_unmatched_count} SEC, {senate_unmatched_count} Senate)")
     
     logger.info(f"✅ Aggregated {len(all_matched_trades)} matched trades")
     logger.info(f"⚠️ {total_unmatched} files/trades could not be matched")

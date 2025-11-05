@@ -86,6 +86,36 @@ resource "aws_iam_role_policy" "step_functions_lambda" {
   })
 }
 
+# IAM Policy for Step Functions to invoke Glue jobs
+resource "aws_iam_role_policy" "step_functions_glue" {
+  count = length(var.glue_job_names) > 0 ? 1 : 0
+
+  name = "${var.state_machine_name}-glue-policy"
+  role = aws_iam_role.step_functions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "glue:StartJobRun",
+          "glue:GetJobRun",
+          "glue:GetJobRuns",
+          "glue:BatchStopJobRun"
+        ]
+        Resource = [
+          for job_name in var.glue_job_names : "arn:aws:glue:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:job/${job_name}"
+        ]
+      }
+    ]
+  })
+}
+
+# Data sources for Glue job ARN construction
+data "aws_region" "current" {}
+data "aws_caller_identity" "current" {}
+
 # IAM Policy for Step Functions CloudWatch Logging
 resource "aws_iam_role_policy" "step_functions_logging" {
   name = "${var.state_machine_name}-logging-policy"

@@ -14,6 +14,12 @@ variable "lambda_function_arns" {
   default     = []
 }
 
+variable "glue_job_names" {
+  description = "List of Glue job names that the state machine can invoke"
+  type        = list(string)
+  default     = []
+}
+
 variable "additional_policy_arns" {
   description = "Additional IAM policy ARNs to attach to the Step Functions role"
   type        = list(string)

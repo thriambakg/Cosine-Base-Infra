@@ -616,22 +616,11 @@ def lambda_handler(event, context):
         for date_index, target_date in enumerate(target_dates, 1):
             logger.info(f"📅 Processing date {date_index}/{len(target_dates)}: {target_date}")
             
-            # Step 1: Fetch SEC Forms (3, 4, 5) - only metadata, no downloads
-            logger.info(f"📋 Fetching SEC Forms 3, 4, 5 for {target_date}...")
-            sec_forms = fetch_sec_forms(target_date)
-            
-            # Return metadata for parallel downloading (done by separate Lambda)
-            for form_data in sec_forms:
-                aggregate_results['secForms'].append({
-                    'formType': form_data.get('form_type'),
-                    'cik': form_data.get('cik'),
-                    'accessionNumber': form_data.get('accession_number'),
-                    'filename': form_data.get('filename'),
-                    'filingDate': target_date
-                })
-                aggregate_results['secFormsFetched'] += 1
-            
-            logger.info(f"✅ Found {len(sec_forms)} SEC forms for {target_date} (total so far: {aggregate_results['secFormsFetched']})")
+            # Step 1: SEC Forms are now handled by Glue job (not fetched here)
+            # SEC pipeline is handled entirely by Glue job in Step Functions
+            logger.info("📋 SEC Forms fetching skipped - handled by Glue job in Step Functions")
+            aggregate_results['secForms'] = []  # Empty - Glue handles SEC
+            aggregate_results['secFormsFetched'] = 0
             
             # Step 2: Fetch House PTRs
             # NOTE: House PTRs are in XML format (annual filings), not individual PTR PDFs
