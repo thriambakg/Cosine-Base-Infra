@@ -1972,7 +1972,7 @@ module "politician_trades_state_machine" {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
                     "--date.$"         = "$.fetchResults.date"
-                    "--s3_bucket"      = module.politician_trades_s3.bucket_name
+                    "--s3_bucket"      = module.politician_trades_s3.bucket_id
                     "--dynamodb_table" = module.politician_trades_table.table_name
                     "--JOB_NAME"       = module.politician_trades_sec_glue_job.job_name
                   }
