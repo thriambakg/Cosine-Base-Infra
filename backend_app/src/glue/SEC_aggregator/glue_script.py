@@ -277,14 +277,79 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                         else:
                             accession_clean = accession_clean[:18].zfill(18)
                     
-                    # Extract filing date from row
-                    # Look for date pattern MM/DD/YYYY in the row
-                    date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row)
+                    # Extract dates from row
+                    # SEC HTML table structure: 
+                    # Columns: Form | Formats | Description | Accepted | Filing Date | File/Film No
+                    # Accepted is column 4 (index 3), Filing Date is column 5 (index 4)
                     filing_date_str = None
-                    if date_match:
-                        filing_date_str = date_match.group(1)
+                    accepted_date_str = None
+                    
+                    # Pattern 1: Look for dates in table cells (extract <td> content)
+                    td_pattern = re.compile(r'<td[^>]*>(.*?)</td>', re.DOTALL | re.IGNORECASE)
+                    cells = td_pattern.findall(row)
+                    
+                    # Column 4 (index 3) is the Accepted column
+                    # Format: YYYY-MM-DD<br>HH:MM:SS (e.g., "2025-11-04<br>21:50:26")
+                    if len(cells) >= 4:
+                        accepted_cell = cells[3]
+                        # Replace <br> tags with space to preserve structure
+                        accepted_html = re.sub(r'<br[^>]*>', ' ', accepted_cell, flags=re.IGNORECASE)
+                        # Remove all other HTML tags
+                        accepted_text = re.sub(r'<[^>]+>', '', accepted_html).strip()
+                        # Clean up multiple spaces
+                        accepted_text = re.sub(r'\s+', ' ', accepted_text)
+                        
+                        # Extract full timestamp: YYYY-MM-DD HH:MM:SS
+                        timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})', accepted_text)
+                        if timestamp_match:
+                            date_part = timestamp_match.group(1)
+                            time_part = timestamp_match.group(2)
+                            accepted_date_str = f"{date_part} {time_part}"  # Full timestamp: "2025-11-04 21:50:26"
+                        else:
+                            # Fallback: try without space separator (in case text was collapsed)
+                            timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2})(\d{2}:\d{2}:\d{2})', accepted_text)
+                            if timestamp_match:
+                                date_part = timestamp_match.group(1)
+                                time_part = timestamp_match.group(2)
+                                accepted_date_str = f"{date_part} {time_part}"
+                    
+                    # Column 5 (index 4) is the Filing Date column
+                    # Format: YYYY-MM-DD (e.g., "2025-11-04")
+                    if len(cells) >= 5:
+                        filing_date_cell = cells[4]
+                        # Clean HTML tags from cell
+                        cell_text = re.sub(r'<[^>]+>', '', filing_date_cell).strip()
+                        # Look for YYYY-MM-DD pattern (SEC standard format)
+                        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', cell_text)
+                        if date_match:
+                            filing_date_str = date_match.group(1)
+                        else:
+                            # Fallback: try MM/DD/YYYY pattern
+                            date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', cell_text)
+                            if date_match:
+                                filing_date_str = date_match.group(1)
+                    
+                    # Pattern 2: Fallback - search entire row for YYYY-MM-DD (SEC format)
+                    if not filing_date_str:
+                        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', row)
+                        if date_match:
+                            filing_date_str = date_match.group(1)
+                        else:
+                            # Fallback: MM/DD/YYYY
+                            date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row)
+                            if date_match:
+                                filing_date_str = date_match.group(1)
+                    
+                    # Parse and filter by target date
+                    if filing_date_str:
                         try:
-                            filing_date_obj = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
+                            # Try YYYY-MM-DD format first (SEC standard)
+                            try:
+                                filing_date_obj = datetime.strptime(filing_date_str, '%Y-%m-%d').date()
+                            except ValueError:
+                                # Fallback to MM/DD/YYYY
+                                filing_date_obj = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
+                            
                             # Only include if matches target date
                             if filing_date_obj != target_date_obj:
                                 continue
@@ -293,33 +358,82 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                             pass
                     else:
                         # No date found in row - include anyway (will verify during download)
+                        # This is important because some forms might not have dates in the table
                         pass
                     
                     form_data = {
                         'cik': cik,
                         'accession_number': accession_clean,
                         'form_type': f'form{form_type}',
-                        'filing_date': filing_date_str or target_date
+                        'filing_date': filing_date_str or target_date,
+                        'accepted_date': accepted_date_str
                     }
                     
                     page_forms.append(form_data)
                 
                 logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
                 
-                # If no forms found on this page, we've reached the end
-                if not page_forms and page_forms_before_date_filter == 0:
-                    logger.info(f"   No forms found on page {page}, stopping pagination")
-                    break
+                # Track dates found on this page to determine if we should continue
+                # SEC returns forms in reverse chronological order (newest first)
+                dates_found = []
+                for row in rows:
+                    # Try YYYY-MM-DD format first (SEC standard)
+                    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', row)
+                    if date_match:
+                        try:
+                            date_str = date_match.group(1)
+                            date_obj = datetime.strptime(date_str, '%Y-%m-%d').date()
+                            dates_found.append(date_obj)
+                        except:
+                            pass
+                    else:
+                        # Fallback to MM/DD/YYYY
+                        date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row)
+                        if date_match:
+                            try:
+                                date_str = date_match.group(1)
+                                date_obj = datetime.strptime(date_str, '%m/%d/%Y').date()
+                                dates_found.append(date_obj)
+                            except:
+                                pass
+                
+                # Check if we found dates that don't match our target
+                # Since SEC returns newest first, we should continue until we see dates BEFORE our target
+                dates_before_target = [d for d in dates_found if d < target_date_obj]
+                dates_after_target = [d for d in dates_found if d > target_date_obj]
+                dates_matching_target = [d for d in dates_found if d == target_date_obj]
+                
+                logger.info(f"   Page {page}: Dates analysis - Target: {target_date_obj}, "
+                          f"Matching: {len(dates_matching_target)}, "
+                          f"Before: {len(dates_before_target)}, "
+                          f"After: {len(dates_after_target)}, "
+                          f"Forms matching date: {len(page_forms)}")
                 
                 # Add forms from this page
                 forms_for_type.extend(page_forms)
                 
-                # Check if we should continue
-                # If we got fewer than count forms on the page, we're likely at the end
-                # But we also need to check if we're getting dates beyond our target
-                if page_forms_before_date_filter < count:
-                    logger.info(f"   Reached last page (got {page_forms_before_date_filter} < {count} forms on page)")
+                # Stop conditions (in order of priority):
+                # 1. No rows found at all (empty page)
+                if page_forms_before_date_filter == 0:
+                    logger.info(f"   No forms found on page {page}, stopping pagination")
                     break
+                
+                # 2. We're seeing dates that are BEFORE our target date (we've gone too far back)
+                # Since SEC returns newest first, seeing dates before target means we've passed it
+                if dates_before_target and not dates_matching_target and not dates_after_target:
+                    logger.info(f"   All dates on page are before target date {target_date_obj}, "
+                              f"stopping pagination (found dates: {sorted(set(dates_before_target))[:3]})")
+                    break
+                
+                # 3. We got fewer forms than requested AND all dates are before target
+                # This means we've definitely passed the date range
+                if page_forms_before_date_filter < count and dates_before_target and not dates_matching_target:
+                    logger.info(f"   Reached end (got {page_forms_before_date_filter} < {count} forms, "
+                              f"and all dates are before target: {sorted(set(dates_before_target))[:3]})")
+                    break
+                
+                # 4. Continue if we still have matching dates or dates after target
+                # (we might have more pages with our target date)
                 
                 # Move to next page
                 start += count

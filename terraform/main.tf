@@ -1545,6 +1545,49 @@ module "politician_trades_s3" {
   tags = var.common_tags
 }
 
+# S3 Bucket for SEC Filings (separate from politician trades for scalability)
+module "sec_filings_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-sec-filings-${var.environment}"
+  environment = var.environment
+  purpose     = "SECFilingsData"
+
+  # Enable lifecycle transitions to Glacier for cost optimization
+  enable_lifecycle_transitions = true
+  transition_to_ia_days        = 30
+  transition_to_glacier_days   = 90
+
+  # Enable expiration after 2 years (keep raw forms for compliance/audit)
+  enable_expiration = true
+  expiration_days   = 730 # 2 years
+
+  # Abort incomplete multipart uploads after 7 days
+  abort_incomplete_multipart_upload_days = 7
+
+  # Noncurrent version expiration
+  noncurrent_version_expiration_days = 30
+
+  kms_key_arn = module.kms.main_key_arn
+
+  # Upload static files (legislators CSV - same file as politician trades)
+  # Note: Keep this file updated by running: scripts/update-legislators-csv.ps1
+  static_files = [
+    {
+      source_path  = "${path.module}/../static-files/lists/congress-legislators.csv"
+      s3_key       = "congress-legislators.csv"
+      content_type = "text/csv"
+    }
+  ]
+
+  tags = var.common_tags
+}
+
 # IAM Policy for Lambda to access S3 politician trades bucket
 resource "aws_iam_policy" "lambda_politician_trades_s3_policy" {
   name        = "${var.project_name}-lambda-politician-trades-s3-access-${var.environment}"
@@ -1695,6 +1738,108 @@ module "politician_trades_table" {
 
   table_type    = "TradeData"
   table_purpose = "PoliticianTrades"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# SEC Filings DynamoDB Table (separate from politician trades for scalability)
+module "sec_filings_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "sec-filings"
+
+  hash_key  = "tradeId"
+  range_key = null
+
+  attributes = [
+    { name = "tradeId", type = "S" },
+    { name = "politicianName", type = "S" },
+    { name = "party", type = "S" },
+    { name = "position", type = "S" },
+    { name = "securitySymbol", type = "S" },
+    { name = "formType", type = "S" },
+    { name = "transactionType", type = "S" },
+    { name = "transactionDate", type = "N" },
+    { name = "amountMin", type = "N" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "PoliticianTradeDateIndex"
+      hash_key        = "politicianName"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PositionTradeDateIndex"
+      hash_key        = "position"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PartyTradeDateIndex"
+      hash_key        = "party"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "SecurityTradeDateIndex"
+      hash_key        = "securitySymbol"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FormTypeTradeDateIndex"
+      hash_key        = "formType"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "TransactionTypeTradeDateIndex"
+      hash_key        = "transactionType"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "AmountRangeTradeDateIndex"
+      hash_key        = "amountMin"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = var.dynamodb_ttl_enabled
+  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "TradeData"
+  table_purpose = "SECFilings"
 
   tags = var.common_tags
 
@@ -1920,14 +2065,13 @@ module "politician_trades_state_machine" {
     Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
     StartAt = "NormalizeInput"
     States = {
-      # Step 0: Normalize input - ensure 'date' field exists (default to yesterday if not provided)
+      # Step 0: Normalize input - ensure 'date' and 'source' fields exist (default to yesterday if not provided)
       NormalizeInput = {
         Type    = "Pass"
-        Comment = "Ensure date field exists. If not provided, Lambda/Glue will default to yesterday. Pass through input."
+        Comment = "Ensure date and source fields exist. If date not provided, Lambda/Glue will default to yesterday. Pass through input."
         Parameters = {
-          "date.$"      = "$.date"
-          "source.$"    = "$.source"
-          "timestamp.$" = "$.timestamp"
+          "date.$"   = "$.date"
+          "source.$" = "$.source"
         }
         # If date is missing, it will be null, and Lambdas/Glue will default to yesterday
         ResultPath = "$"
@@ -1951,8 +2095,8 @@ module "politician_trades_state_machine" {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
                     "--date.$"         = "$.date" # Get date from top-level input (may be null/empty - Glue will default to yesterday)
-                    "--s3_bucket"      = module.politician_trades_s3.bucket_id
-                    "--dynamodb_table" = module.politician_trades_table.table_name
+                    "--s3_bucket"      = module.sec_filings_s3.bucket_id
+                    "--dynamodb_table" = module.sec_filings_table.table_name
                     "--JOB_NAME"       = module.politician_trades_sec_glue_job.job_name
                   }
                 }
@@ -2273,8 +2417,8 @@ module "politician_trades_scheduler" {
   target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
 
   target_input = jsonencode({
-    source    = "scheduler-daily"
-    timestamp = "{{.Timestamp}}"
+    date   = null # Will default to yesterday in Lambda/Glue
+    source = "scheduler-daily"
   })
 
   purpose     = "PoliticianTradesAggregation"
@@ -2284,9 +2428,36 @@ module "politician_trades_scheduler" {
   depends_on = [module.politician_trades_state_machine]
 }
 
-# Upload Glue script to S3
+# IAM Policy for Glue to access SEC filings S3 bucket
+resource "aws_iam_policy" "glue_sec_filings_s3_policy" {
+  name        = "${var.project_name}-glue-sec-filings-s3-access-${var.environment}"
+  description = "Allows Glue job to read/write to SEC filings S3 bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          module.sec_filings_s3.bucket_arn,
+          "${module.sec_filings_s3.bucket_arn}/*"
+        ]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# Upload Glue script to S3 (SEC filings bucket)
 resource "aws_s3_object" "sec_glue_script" {
-  bucket = module.politician_trades_s3.bucket_id
+  bucket = module.sec_filings_s3.bucket_id
   key    = "glue-scripts/politician-trades-sec-etl.py"
   source = "${path.module}/../backend_app/src/glue/SEC_aggregator/glue_script.py"
   etag   = filemd5("${path.module}/../backend_app/src/glue/SEC_aggregator/glue_script.py")
@@ -2299,7 +2470,7 @@ module "politician_trades_sec_glue_job" {
   source = "./modules/glue-job"
 
   job_name        = "${var.project_name}-politician-trades-sec-etl-${var.environment}"
-  script_location = "s3://${module.politician_trades_s3.bucket_id}/glue-scripts/politician-trades-sec-etl.py"
+  script_location = "s3://${module.sec_filings_s3.bucket_id}/glue-scripts/politician-trades-sec-etl.py"
   python_version  = "3"
   glue_version    = "4.0"
   max_retries     = 1
@@ -2316,23 +2487,27 @@ module "politician_trades_sec_glue_job" {
 
   job_bookmark_option = "job-bookmark-disable"
 
-  s3_bucket_arn     = module.politician_trades_s3.bucket_arn
-  spark_logs_bucket = module.politician_trades_s3.bucket_id
-  temp_bucket       = module.politician_trades_s3.bucket_id
+  s3_bucket_arn     = module.sec_filings_s3.bucket_arn
+  spark_logs_bucket = module.sec_filings_s3.bucket_id
+  temp_bucket       = module.sec_filings_s3.bucket_id
 
-  dynamodb_table_arn = module.politician_trades_table.table_arn
+  dynamodb_table_arn = module.sec_filings_table.table_arn
   kms_key_arn        = module.kms.main_key_arn
+
+  additional_policy_arns = [
+    aws_iam_policy.glue_sec_filings_s3_policy.arn
+  ]
 
   default_arguments = {
     "--enable-spark-ui"                  = "true"
-    "--spark-event-logs-path"            = "s3://${module.politician_trades_s3.bucket_id}/glue-logs/"
+    "--spark-event-logs-path"            = "s3://${module.sec_filings_s3.bucket_id}/glue-logs/"
     "--enable-continuous-cloudwatch-log" = "true"
     "--enable-metrics"                   = "true"
-    "--TempDir"                          = "s3://${module.politician_trades_s3.bucket_id}/glue-temp/"
+    "--TempDir"                          = "s3://${module.sec_filings_s3.bucket_id}/glue-temp/"
     "--enable-glue-datacatalog"          = "false"
   }
 
   tags = var.common_tags
 
-  depends_on = [aws_s3_object.sec_glue_script]
+  depends_on = [aws_s3_object.sec_glue_script, module.sec_filings_s3, module.sec_filings_table]
 }
