@@ -23,6 +23,7 @@ from html import unescape
 from difflib import SequenceMatcher
 import csv
 from io import StringIO
+import builtins  # Import builtins to access Python's built-in sum() function
 
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -1621,13 +1622,14 @@ try:
     stage3_duration = (datetime.now() - stage3_start).total_seconds()
     
     # Calculate final statistics
+    # Use builtins.sum to avoid conflict with PySpark's sum() function
     total_forms_processed = len(forms)
-    successful_stored = sum(1 for r in results if r.get('success'))
-    failed_stored = sum(1 for r in results if not r.get('success') and not r.get('skipped'))
-    skipped_date_mismatch = sum(1 for r in results if r.get('skipped') and r.get('reason') == 'date_mismatch')
-    skipped_download_failed = sum(1 for r in results if r.get('skipped') and r.get('reason') == 'download_failed')
-    skipped_unsupported_type = sum(1 for r in results if r.get('skipped') and r.get('reason') == 'unsupported_file_type')
-    politician_matches = sum(1 for r in results if r.get('politicianMatch'))
+    successful_stored = builtins.sum(1 for r in results if r.get('success'))
+    failed_stored = builtins.sum(1 for r in results if not r.get('success') and not r.get('skipped'))
+    skipped_date_mismatch = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'date_mismatch')
+    skipped_download_failed = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'download_failed')
+    skipped_unsupported_type = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'unsupported_file_type')
+    politician_matches = builtins.sum(1 for r in results if r.get('politicianMatch'))
     no_politician_matches = successful_stored - politician_matches
     
     logger.info("")
