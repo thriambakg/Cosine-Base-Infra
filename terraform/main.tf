@@ -2072,23 +2072,8 @@ module "politician_trades_state_machine" {
   # Step Functions definition with 4 steps (parallel downloads)
   definition = jsonencode({
     Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
-    StartAt = "NormalizeInput"
+    StartAt = "ParallelPipelines"
     States = {
-      # Step 0: Normalize input - ensure 'date', 'startDate', 'endDate', and 'source' fields exist
-      NormalizeInput = {
-        Type    = "Pass"
-        Comment = "Ensure date, startDate, endDate, and source fields exist. If date not provided, Lambda/Glue will default to yesterday. Pass through input."
-        Parameters = {
-          "date.$"      = "$.date"
-          "startDate.$" = "$.startDate"
-          "endDate.$"   = "$.endDate"
-          "source.$"    = "$.source"
-        }
-        # If date is missing, it will be null, and Lambdas/Glue will default to yesterday
-        ResultPath = "$"
-        Next       = "ParallelPipelines"
-      }
-
       # Top-level parallel: SEC (Glue) and Congressional PTRs (Fetcher → nested parallel Senate/House)
       ParallelPipelines = {
         Type    = "Parallel"
