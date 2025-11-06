@@ -581,6 +581,229 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                 logger.error(f"   Traceback: {traceback.format_exc()}")
                 break
         
+        else:
+            # Single date mode: simpler pagination - fetch until first file doesn't match target date
+            logger.info(f"   🔍 Single date mode: Fetching forms for {target_date}...")
+            
+            while page <= max_pages:
+                try:
+                    # Build paginated URL (matches user's CURL example)
+                    url = f"{SEC_BROWSE_EDGAR_URL}?action=getcurrent&datea=&dateb=&company=&type={form_type}&SIC=&State=&Country=&CIK=&owner=only&accno=&start={start}&count={count}"
+                
+                    logger.info(f"   📡 Calling SEC browse-edgar API:")
+                    logger.info(f"      URL: {url}")
+                    logger.info(f"      Method: GET")
+                    logger.info(f"      Parameters: start={start}, count={count}, type={form_type}")
+                    logger.info(f"      Headers: User-Agent={SEC_USER_AGENT}")
+                    
+                    api_call_start = datetime.now()
+                    response = session.get(url, timeout=30)
+                    api_call_duration = (datetime.now() - api_call_start).total_seconds()
+                    
+                    logger.info(f"   📥 SEC API Response:")
+                    logger.info(f"      Status Code: {response.status_code}")
+                    logger.info(f"      Response Headers: {dict(response.headers)}")
+                    logger.info(f"      Response Size: {len(response.content):,} bytes")
+                    logger.info(f"      Response Time: {api_call_duration:.2f}s")
+                    logger.info(f"      Response Preview (first 500 chars): {response.text[:500]}")
+                    
+                    response.raise_for_status()
+                    
+                    html_content = response.text
+                    
+                    # Parse HTML table to extract filing information
+                    table_row_pattern = re.compile(
+                        r'<tr[^>]*>(.*?)</tr>',
+                        re.DOTALL | re.IGNORECASE
+                    )
+                    
+                    rows = table_row_pattern.findall(html_content)
+                    log_print(f"      📊 HTML Parsing Results:")
+                    log_print(f"         Total table rows found: {len(rows)}")
+                    log_print(f"         HTML size: {len(html_content):,} characters")
+                    if rows:
+                        log_print(f"         First row preview (first 200 chars): {rows[0][:200]}")
+                    
+                    page_forms = []
+                    page_forms_before_date_filter = 0
+                    
+                    for row in rows:
+                        # Extract CIK and accession from archive links
+                        archive_link_pattern = re.compile(
+                            r'/Archives/edgar/data/(\d+)/([^/"]+)/',
+                            re.IGNORECASE
+                        )
+                        
+                        archive_matches = archive_link_pattern.findall(row)
+                        
+                        if not archive_matches:
+                            logger.debug(f"         Row {page_forms_before_date_filter + 1}: No archive link found, skipping")
+                            continue
+                        
+                        logger.debug(f"         Row {page_forms_before_date_filter + 1}: Found archive link, extracting data...")
+                        
+                        page_forms_before_date_filter += 1
+                        
+                        # Extract CIK and accession
+                        cik, accession_raw = archive_matches[0]
+                        
+                        # Clean accession number (remove dashes, ensure 18 digits)
+                        accession_clean = accession_raw.replace('-', '').replace('/', '').strip()
+                        
+                        # Accession numbers are 18 digits
+                        if len(accession_clean) < 10:
+                            continue
+                        
+                        # If shorter than 18, pad or truncate (SEC format is 10-2-6)
+                        if len(accession_clean) != 18:
+                            # Try to reconstruct if it has dashes in original
+                            if '-' in accession_raw:
+                                parts = accession_raw.split('-')
+                                if len(parts) == 3:
+                                    accession_clean = f"{parts[0].zfill(10)}{parts[1].zfill(2)}{parts[2].zfill(6)}"
+                                else:
+                                    continue
+                            else:
+                                accession_clean = accession_clean[:18].zfill(18)
+                        
+                        # Extract dates from row
+                        filing_date_str = None
+                        accepted_date_str = None
+                        
+                        # Pattern 1: Look for dates in table cells (extract <td> content)
+                        td_pattern = re.compile(r'<td[^>]*>(.*?)</td>', re.DOTALL | re.IGNORECASE)
+                        cells = td_pattern.findall(row)
+                        
+                        # Column 4 (index 3) is the Accepted column
+                        if len(cells) >= 4:
+                            accepted_cell = cells[3]
+                            accepted_html = re.sub(r'<br[^>]*>', ' ', accepted_cell, flags=re.IGNORECASE)
+                            accepted_text = re.sub(r'<[^>]+>', '', accepted_html).strip()
+                            accepted_text = re.sub(r'\s+', ' ', accepted_text)
+                            
+                            # Extract full timestamp: YYYY-MM-DD HH:MM:SS
+                            timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})', accepted_text)
+                            if timestamp_match:
+                                date_part = timestamp_match.group(1)
+                                time_part = timestamp_match.group(2)
+                                accepted_date_str = f"{date_part} {time_part}"
+                            else:
+                                timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2})(\d{2}:\d{2}:\d{2})', accepted_text)
+                                if timestamp_match:
+                                    date_part = timestamp_match.group(1)
+                                    time_part = timestamp_match.group(2)
+                                    accepted_date_str = f"{date_part} {time_part}"
+                        
+                        # Column 5 (index 4) is the Filing Date column
+                        if len(cells) >= 5:
+                            filing_date_cell = cells[4]
+                            cell_text = re.sub(r'<[^>]+>', '', filing_date_cell).strip()
+                            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', cell_text)
+                            if date_match:
+                                filing_date_str = date_match.group(1)
+                            else:
+                                date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', cell_text)
+                                if date_match:
+                                    filing_date_str = date_match.group(1)
+                        
+                        # Pattern 2: Fallback - search entire row for YYYY-MM-DD
+                        if not filing_date_str:
+                            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', row)
+                            if date_match:
+                                filing_date_str = date_match.group(1)
+                            else:
+                                date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row)
+                                if date_match:
+                                    filing_date_str = date_match.group(1)
+                        
+                        # Parse and filter by target date
+                        if filing_date_str:
+                            try:
+                                try:
+                                    filing_date_obj = datetime.strptime(filing_date_str, '%Y-%m-%d').date()
+                                except ValueError:
+                                    filing_date_obj = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
+                                
+                                # Single date mode: include only if matches target date
+                                if filing_date_obj != target_date_obj:
+                                    continue
+                            except:
+                                # If date parsing fails, include anyway (will verify during download)
+                                pass
+                        else:
+                            # No date found in row - include anyway (will verify during download)
+                            pass
+                        
+                        form_data = {
+                            'cik': cik,
+                            'accession_number': accession_clean,
+                            'form_type': f'form{form_type}',
+                            'filing_date': filing_date_str or target_date,
+                            'accepted_date': accepted_date_str
+                        }
+                        
+                        page_forms.append(form_data)
+                    
+                    logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
+                    
+                    # Log sample of parsed forms from this page
+                    if page_forms:
+                        log_print(f"      📋 Sample forms from page {page} (first 3):")
+                        for idx, form in enumerate(page_forms[:3], 1):
+                            log_print(f"         {idx}. CIK={form.get('cik', 'N/A')}, "
+                                       f"Accession={form.get('accession_number', 'N/A')[:15]}..., "
+                                       f"Type={form.get('form_type', 'N/A')}, "
+                                       f"FilingDate={form.get('filing_date', 'N/A')}, "
+                                       f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
+                    
+                    # Check if FIRST file in batch indicates we should stop
+                    first_file_date = None
+                    if page_forms:
+                        first_form = page_forms[0]
+                        first_filing_date = first_form.get('filing_date')
+                        if first_filing_date:
+                            try:
+                                try:
+                                    first_file_date = datetime.strptime(first_filing_date, '%Y-%m-%d').date()
+                                except ValueError:
+                                    first_file_date = datetime.strptime(first_filing_date, '%m/%d/%Y').date()
+                            except:
+                                pass
+                    
+                    # Single date mode: stop if first file doesn't match target date
+                    if first_file_date and first_file_date != target_date_obj:
+                        logger.info(f"   First file in batch has date {first_file_date} (target: {target_date_obj}), "
+                                  f"stopping pagination - reached different day")
+                        break
+                    
+                    # Add forms from this page
+                    forms_for_type.extend(page_forms)
+                    
+                    logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} "
+                              f"(total so far: {len(forms_for_type)})")
+                    
+                    # Stop if no forms found (empty page)
+                    if page_forms_before_date_filter == 0:
+                        logger.info(f"   No forms found on page {page}, stopping pagination")
+                        break
+                    
+                    # Move to next page
+                    start += count
+                    page += 1
+                    
+                    # Rate limiting (SEC requires 10 requests/second max)
+                    import time
+                    time.sleep(0.2)  # 200ms delay between requests
+                    
+                except requests.exceptions.RequestException as e:
+                    logger.error(f"❌ Error fetching page {page} for Form {form_type}: {e}")
+                    break
+                except Exception as e:
+                    logger.error(f"❌ Unexpected error on page {page} for Form {form_type}: {e}")
+                    import traceback
+                    logger.error(f"   Traceback: {traceback.format_exc()}")
+                    break
+        
         form_type_duration = (datetime.now() - form_type_start).total_seconds()
         logger.info(f"   ✅ Form {form_type} Complete: Found {len(forms_for_type)} filings in {page-1} pages ({form_type_duration:.2f} seconds)")
         all_forms.extend(forms_for_type)
