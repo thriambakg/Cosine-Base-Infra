@@ -2115,9 +2115,9 @@ module "politician_trades_state_machine" {
                 Retry = [
                   {
                     ErrorEquals     = ["Glue.ConcurrentRunsExceededException"]
-                    IntervalSeconds = 120 # Wait 2 minutes for concurrent runs to complete
-                    MaxAttempts     = 10  # Retry up to 10 times (20 minutes total)
-                    BackoffRate     = 1.5 # Exponential backoff: 2min, 3min, 4.5min, etc.
+                    IntervalSeconds = 300 # Wait 5 minutes for concurrent runs to complete
+                    MaxAttempts     = 12  # Retry up to 12 times (60 minutes total with exponential backoff)
+                    BackoffRate     = 1.5 # Exponential backoff: 5min, 7.5min, 11.25min, etc.
                   },
                   {
                     ErrorEquals     = ["Glue.ServiceException"]
