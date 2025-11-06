@@ -2072,20 +2072,19 @@ module "politician_trades_state_machine" {
   # Step Functions definition with 4 steps (parallel downloads)
   definition = jsonencode({
     Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
-    StartAt = "EnsureOptionalFields"
+    StartAt = "NormalizeInput"
     States = {
-      # Ensure optional fields exist (prevents JSONPath errors for missing fields)
-      # This Pass state merges input with default null values for optional fields
-      # Using InputPath to preserve input, then Parameters to add missing fields
-      EnsureOptionalFields = {
+      # Step 0: Normalize input - handle 'backdate' or 'date' fields
+      NormalizeInput = {
         Type    = "Pass"
-        Comment = "Ensure all expected fields exist to prevent JSONPath errors. Lambda/Glue will handle null values and default to yesterday if date is missing."
+        Comment = "Normalize input: if backdate provided, set date to null and pass backdate. Otherwise pass date and source."
         Parameters = {
-          "date.$"    = "$.date"
-          "source.$"  = "$.source"
-          "startDate" = null
-          "endDate"   = null
+          "backdate.$" = "$.backdate"
+          "date.$"     = "$.date"
+          "source.$"   = "$.source"
         }
+        # Transform: if backdate exists, set date to null; otherwise keep date as is
+        # This is handled by the Pass state - both fields will be present (one may be null)
         ResultPath = "$"
         Next       = "ParallelPipelines"
       }
@@ -2106,9 +2105,8 @@ module "politician_trades_state_machine" {
                 Parameters = {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
-                    "--date.$"         = "$.date"      # Get date from top-level input (may be null/empty - Glue will default to yesterday)
-                    "--startDate.$"    = "$.startDate" # Optional: Get startDate (null if not provided)
-                    "--endDate.$"      = "$.endDate"   # Optional: Get endDate (null if not provided)
+                    "--backdate.$"     = "$.backdate" # Get backdate from top-level input (may be null/empty)
+                    "--date.$"         = "$.date"     # Get date from top-level input (may be null/empty - Glue will default to yesterday)
                     "--s3_bucket"      = module.sec_filings_s3.bucket_id
                     "--dynamodb_table" = module.sec_filings_table.table_name
                     "--JOB_NAME"       = module.politician_trades_sec_glue_job.job_name

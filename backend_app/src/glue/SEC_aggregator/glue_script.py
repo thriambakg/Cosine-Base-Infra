@@ -59,52 +59,44 @@ job = Job(glueContext)
 # Only include required arguments here
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
-    'date',  # Target date in YYYY-MM-DD format (for single date mode)
+    'backdate',  # Backdate in YYYY-MM-DD format (for backfilling - fetch all until this date)
+    'date',      # Target date in YYYY-MM-DD format (for normal daily runs)
     's3_bucket',
     'dynamodb_table'
 ])
 
-# Also check for optional date range parameters
-start_date = args.get('startDate') or args.get('start_date')
-end_date = args.get('endDate') or args.get('end_date')
-
 job.init(args['JOB_NAME'], args)
 
 # Extract parameters
+backdate = args.get('backdate')
 target_date = args.get('date')
 s3_bucket = args.get('s3_bucket')
 dynamodb_table = args.get('dynamodb_table')
 
-# Determine if we're in date range mode or single date mode
-if start_date and end_date:
-    # Date range mode
-    if not start_date or start_date.strip() == '' or start_date.lower() == 'null':
-        raise ValueError("startDate is required when endDate is provided")
-    if not end_date or end_date.strip() == '' or end_date.lower() == 'null':
-        raise ValueError("endDate is required when startDate is provided")
-    
-    try:
-        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
-        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
-        if start_date_obj > end_date_obj:
-            raise ValueError("startDate must be <= endDate")
-    except ValueError as e:
-        raise ValueError(f"Invalid date range: startDate='{start_date}', endDate='{end_date}'. Expected YYYY-MM-DD format. Error: {e}")
-    
-    logger.info(f"📅 Date range mode: {start_date} to {end_date}")
-    target_date = None  # Not used in range mode
+# Determine mode: backdate mode or normal date mode
+# If backdate is provided, use it; otherwise use date (or default to yesterday)
+if backdate and backdate.strip() != '' and backdate.lower() != 'null':
+    # Backdate mode: fetch all records until first date in batch is less than backdate
+    target_date = backdate
+    is_backdate_mode = True
+    logger.info(f"📅 BACKDATE MODE: Processing SEC forms backdating to: {backdate}")
+    print(f"📅 BACKDATE MODE: Processing SEC forms backdating to: {backdate}", flush=True)
 elif target_date and target_date.strip() != '' and target_date.lower() != 'null':
-    # Single date mode (backwards compatible)
-    logger.info(f"📅 Single date mode: {target_date}")
-    start_date = None
-    end_date = None
+    # Normal date mode: process specific date
+    is_backdate_mode = False
+    logger.info(f"📅 Processing SEC forms for date: {target_date}")
+    print(f"📅 Processing SEC forms for date: {target_date}", flush=True)
 else:
-    # Default: yesterday for scheduled runs
+    # Default to yesterday if neither provided
     yesterday = datetime.now() - timedelta(days=1)
     target_date = yesterday.strftime('%Y-%m-%d')
-    start_date = None
-    end_date = None
-    logger.info(f"⚠️ No date provided (or date was null/empty), defaulting to yesterday: {target_date}")
+    is_backdate_mode = False
+    logger.info(f"⚠️ No date/backdate provided (or was null/empty), defaulting to yesterday: {target_date}")
+    print(f"⚠️ No date/backdate provided (or was null/empty), defaulting to yesterday: {target_date}", flush=True)
+
+# Optional date range parameters (not currently used, but can be added via --additional-python-modules or custom parsing if needed)
+# start_date = args.get('start_date')  # Not currently used
+# end_date = args.get('end_date')       # Not currently used
 
 # NOTE: Do NOT create boto3 clients at module level - they contain SSLContext objects that can't be pickled
 # Create clients inside functions that need them to avoid Spark serialization issues
@@ -209,45 +201,24 @@ def load_politician_list() -> List[Dict[str, Any]]:
         raise
 
 
-def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, end_date: str = None, form_types: List[str] = ['3', '4', '5']) -> List[Dict[str, Any]]:
+def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4', '5'], is_backdate_mode: bool = False) -> List[Dict[str, Any]]:
     """
     Fetch SEC forms using paginated browse-edgar API
     
     Uses the browse-edgar endpoint with start parameter for pagination:
     https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&start=0&count=100
     
-    Supports two modes:
-    1. Single date mode: target_date provided, start_date and end_date are None
-    2. Date range mode: start_date and end_date provided, target_date is None
-    
     Args:
-        target_date: Target date in YYYY-MM-DD format (for single date mode)
-        start_date: Start date in YYYY-MM-DD format (for date range mode)
-        end_date: End date in YYYY-MM-DD format (for date range mode)
+        target_date: Target date in YYYY-MM-DD format (for normal mode) or backdate (for backdate mode)
         form_types: List of form types to fetch (default: ['3', '4', '5'])
+        is_backdate_mode: If True, fetch all records until first date in batch is less than target_date.
+                         If False, only fetch records matching target_date exactly.
     
     Returns:
         List of form metadata dicts with keys: form_type, cik, accession_number, filename, filing_date
     """
     all_forms = []
-    
-    # Determine mode
-    if start_date and end_date:
-        # Date range mode
-        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
-        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
-        target_date_obj = None
-        date_range_mode = True
-        logger.info(f"📅 Date range mode: {start_date} to {end_date}")
-    elif target_date:
-        # Single date mode
-        target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
-        start_date_obj = None
-        end_date_obj = None
-        date_range_mode = False
-        logger.info(f"📅 Single date mode: {target_date}")
-    else:
-        raise ValueError("Either target_date or (start_date and end_date) must be provided")
+    target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
     
     session = requests.Session()
     session.headers.update({
@@ -260,10 +231,7 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
     
     for form_type in form_types:
         logger.info("")
-        if date_range_mode:
-            logger.info(f"   📋 Fetching Form {form_type} filings for date range {start_date} to {end_date}...")
-        else:
-            logger.info(f"   📋 Fetching Form {form_type} filings for {target_date}...")
+        logger.info(f"   📋 Fetching Form {form_type} filings for {target_date}...")
         forms_for_type = []
         start = 0
         count = 100
@@ -271,56 +239,10 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
         max_pages = 100  # Safety limit to prevent infinite loops
         form_type_start = datetime.now()
         
-        # Date range mode: special pagination logic
-        if date_range_mode:
-            # Phase 1: Find the page where first item matches end_date
-            # Keep fetching until we find a batch where the first item's date matches end_date
-            end_date_found_page = None
-            end_date_found_start = None
-            
-            logger.info(f"   🔍 Phase 1: Finding end date boundary (end_date={end_date})...")
-            
-            # Helper function to extract first form's date from HTML
-            def extract_first_form_date(html_content):
-                """Extract the filing date of the first form in the page"""
-                table_row_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
-                rows = table_row_pattern.findall(html_content)
-                
-                for row in rows:
-                    archive_link_pattern = re.compile(r'/Archives/edgar/data/(\d+)/([^/"]+)/', re.IGNORECASE)
-                    archive_matches = archive_link_pattern.findall(row)
-                    if not archive_matches:
-                        continue
-                    
-                    # Extract filing date from row
-                    td_pattern = re.compile(r'<td[^>]*>(.*?)</td>', re.DOTALL | re.IGNORECASE)
-                    cells = td_pattern.findall(row)
-                    
-                    if len(cells) >= 5:
-                        filing_date_cell = cells[4]
-                        cell_text = re.sub(r'<[^>]+>', '', filing_date_cell).strip()
-                        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', cell_text)
-                        if date_match:
-                            return date_match.group(1)
-                        date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', cell_text)
-                        if date_match:
-                            return date_match.group(1)
-                    
-                    # Fallback: search entire row
-                    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', row)
-                    if date_match:
-                        return date_match.group(1)
-                    date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row)
-                    if date_match:
-                        return date_match.group(1)
-                
-                return None
-            
-            # Phase 1: Find end_date boundary
-            while page <= max_pages:
-                try:
-                    # Build paginated URL (matches user's CURL example)
-                    url = f"{SEC_BROWSE_EDGAR_URL}?action=getcurrent&datea=&dateb=&company=&type={form_type}&SIC=&State=&Country=&CIK=&owner=only&accno=&start={start}&count={count}"
+        while page <= max_pages:
+            try:
+                # Build paginated URL (matches user's CURL example)
+                url = f"{SEC_BROWSE_EDGAR_URL}?action=getcurrent&datea=&dateb=&company=&type={form_type}&SIC=&State=&Country=&CIK=&owner=only&accno=&start={start}&count={count}"
                 
                 logger.info(f"   📡 Calling SEC browse-edgar API:")
                 logger.info(f"      URL: {url}")
@@ -467,7 +389,7 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                             if date_match:
                                 filing_date_str = date_match.group(1)
                     
-                    # Parse and filter by date (range mode or single date mode)
+                    # Parse and filter by target date
                     if filing_date_str:
                         try:
                             # Try YYYY-MM-DD format first (SEC standard)
@@ -477,13 +399,13 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                                 # Fallback to MM/DD/YYYY
                                 filing_date_obj = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
                             
-                            # Filter by date range or single date
-                            if date_range_mode:
-                                # Date range mode: include if within range
-                                if filing_date_obj < start_date_obj or filing_date_obj > end_date_obj:
-                                    continue
+                            # Filter based on mode
+                            if is_backdate_mode:
+                                # Backdate mode: include all forms with filing date >= backdate
+                                if filing_date_obj < target_date_obj:
+                                    continue  # Skip forms before backdate
                             else:
-                                # Single date mode: include only if matches target date
+                                # Normal mode: only include if matches target date exactly
                                 if filing_date_obj != target_date_obj:
                                     continue
                         except:
@@ -498,16 +420,13 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                         'cik': cik,
                         'accession_number': accession_clean,
                         'form_type': f'form{form_type}',
-                        'filing_date': filing_date_str or (target_date if not date_range_mode else start_date),
+                        'filing_date': filing_date_str or target_date,
                         'accepted_date': accepted_date_str
                     }
                     
                     page_forms.append(form_data)
                 
-                if date_range_mode:
-                    logger.info(f"   Page {page}: Found {len(page_forms)} forms within date range (out of {page_forms_before_date_filter} total forms on page)")
-                else:
-                    logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
+                logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
                 
                 # Log sample of parsed forms from this page
                 if page_forms:
@@ -519,7 +438,8 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                                    f"FilingDate={form.get('filing_date', 'N/A')}, "
                                    f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
                 
-                # Check if FIRST file in batch indicates we should stop
+                # Check if FIRST file in batch matches target date
+                # If first file doesn't match target date, we've moved to a different day - stop fetching
                 first_file_date = None
                 if page_forms:
                     first_form = page_forms[0]
@@ -535,34 +455,37 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                         except:
                             pass
                 
-                # Stop condition based on mode
-                if date_range_mode:
-                    # Date range mode: stop if first file is before start_date
-                    if first_file_date and first_file_date < start_date_obj:
-                        logger.info(f"   First file in batch has date {first_file_date} (before start_date {start_date_obj}), "
-                                  f"stopping pagination - reached start boundary")
+                # Stop condition depends on mode
+                if is_backdate_mode:
+                    # Backdate mode: stop when first file's date is less than backdate (we've gone too far back)
+                    if first_file_date and first_file_date < target_date_obj:
+                        logger.info(f"   First file in batch has date {first_file_date} (backdate: {target_date_obj}), "
+                                  f"stopping pagination - reached date before backdate")
+                        print(f"   First file in batch has date {first_file_date} (backdate: {target_date_obj}), "
+                              f"stopping pagination - reached date before backdate", flush=True)
                         break
                 else:
-                    # Single date mode: stop if first file doesn't match target date
+                    # Normal mode: stop when first file's date doesn't match target date
                     if first_file_date and first_file_date != target_date_obj:
                         logger.info(f"   First file in batch has date {first_file_date} (target: {target_date_obj}), "
                                   f"stopping pagination - reached different day")
+                        print(f"   First file in batch has date {first_file_date} (target: {target_date_obj}), "
+                              f"stopping pagination - reached different day", flush=True)
                         break
                 
                 # Add forms from this page
                 forms_for_type.extend(page_forms)
                 
-                if date_range_mode:
-                    logger.info(f"   Page {page}: Found {len(page_forms)} forms within range "
-                              f"(total so far: {len(forms_for_type)})")
-                else:
-                    logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} "
-                              f"(total so far: {len(forms_for_type)})")
+                logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} "
+                          f"(total so far: {len(forms_for_type)})")
                 
                 # Stop if no forms found (empty page)
                 if page_forms_before_date_filter == 0:
                     logger.info(f"   No forms found on page {page}, stopping pagination")
                     break
+                
+                # 4. Continue if we still have matching dates or dates after target
+                # (we might have more pages with our target date)
                 
                 # Move to next page
                 start += count
@@ -580,229 +503,6 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                 import traceback
                 logger.error(f"   Traceback: {traceback.format_exc()}")
                 break
-        
-        else:
-            # Single date mode: simpler pagination - fetch until first file doesn't match target date
-            logger.info(f"   🔍 Single date mode: Fetching forms for {target_date}...")
-            
-            while page <= max_pages:
-                try:
-                    # Build paginated URL (matches user's CURL example)
-                    url = f"{SEC_BROWSE_EDGAR_URL}?action=getcurrent&datea=&dateb=&company=&type={form_type}&SIC=&State=&Country=&CIK=&owner=only&accno=&start={start}&count={count}"
-                
-                    logger.info(f"   📡 Calling SEC browse-edgar API:")
-                    logger.info(f"      URL: {url}")
-                    logger.info(f"      Method: GET")
-                    logger.info(f"      Parameters: start={start}, count={count}, type={form_type}")
-                    logger.info(f"      Headers: User-Agent={SEC_USER_AGENT}")
-                    
-                    api_call_start = datetime.now()
-                    response = session.get(url, timeout=30)
-                    api_call_duration = (datetime.now() - api_call_start).total_seconds()
-                    
-                    logger.info(f"   📥 SEC API Response:")
-                    logger.info(f"      Status Code: {response.status_code}")
-                    logger.info(f"      Response Headers: {dict(response.headers)}")
-                    logger.info(f"      Response Size: {len(response.content):,} bytes")
-                    logger.info(f"      Response Time: {api_call_duration:.2f}s")
-                    logger.info(f"      Response Preview (first 500 chars): {response.text[:500]}")
-                    
-                    response.raise_for_status()
-                    
-                    html_content = response.text
-                    
-                    # Parse HTML table to extract filing information
-                    table_row_pattern = re.compile(
-                        r'<tr[^>]*>(.*?)</tr>',
-                        re.DOTALL | re.IGNORECASE
-                    )
-                    
-                    rows = table_row_pattern.findall(html_content)
-                    log_print(f"      📊 HTML Parsing Results:")
-                    log_print(f"         Total table rows found: {len(rows)}")
-                    log_print(f"         HTML size: {len(html_content):,} characters")
-                    if rows:
-                        log_print(f"         First row preview (first 200 chars): {rows[0][:200]}")
-                    
-                    page_forms = []
-                    page_forms_before_date_filter = 0
-                    
-                    for row in rows:
-                        # Extract CIK and accession from archive links
-                        archive_link_pattern = re.compile(
-                            r'/Archives/edgar/data/(\d+)/([^/"]+)/',
-                            re.IGNORECASE
-                        )
-                        
-                        archive_matches = archive_link_pattern.findall(row)
-                        
-                        if not archive_matches:
-                            logger.debug(f"         Row {page_forms_before_date_filter + 1}: No archive link found, skipping")
-                            continue
-                        
-                        logger.debug(f"         Row {page_forms_before_date_filter + 1}: Found archive link, extracting data...")
-                        
-                        page_forms_before_date_filter += 1
-                        
-                        # Extract CIK and accession
-                        cik, accession_raw = archive_matches[0]
-                        
-                        # Clean accession number (remove dashes, ensure 18 digits)
-                        accession_clean = accession_raw.replace('-', '').replace('/', '').strip()
-                        
-                        # Accession numbers are 18 digits
-                        if len(accession_clean) < 10:
-                            continue
-                        
-                        # If shorter than 18, pad or truncate (SEC format is 10-2-6)
-                        if len(accession_clean) != 18:
-                            # Try to reconstruct if it has dashes in original
-                            if '-' in accession_raw:
-                                parts = accession_raw.split('-')
-                                if len(parts) == 3:
-                                    accession_clean = f"{parts[0].zfill(10)}{parts[1].zfill(2)}{parts[2].zfill(6)}"
-                                else:
-                                    continue
-                            else:
-                                accession_clean = accession_clean[:18].zfill(18)
-                        
-                        # Extract dates from row
-                        filing_date_str = None
-                        accepted_date_str = None
-                        
-                        # Pattern 1: Look for dates in table cells (extract <td> content)
-                        td_pattern = re.compile(r'<td[^>]*>(.*?)</td>', re.DOTALL | re.IGNORECASE)
-                        cells = td_pattern.findall(row)
-                        
-                        # Column 4 (index 3) is the Accepted column
-                        if len(cells) >= 4:
-                            accepted_cell = cells[3]
-                            accepted_html = re.sub(r'<br[^>]*>', ' ', accepted_cell, flags=re.IGNORECASE)
-                            accepted_text = re.sub(r'<[^>]+>', '', accepted_html).strip()
-                            accepted_text = re.sub(r'\s+', ' ', accepted_text)
-                            
-                            # Extract full timestamp: YYYY-MM-DD HH:MM:SS
-                            timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2})\s+(\d{2}:\d{2}:\d{2})', accepted_text)
-                            if timestamp_match:
-                                date_part = timestamp_match.group(1)
-                                time_part = timestamp_match.group(2)
-                                accepted_date_str = f"{date_part} {time_part}"
-                            else:
-                                timestamp_match = re.search(r'(\d{4}-\d{2}-\d{2})(\d{2}:\d{2}:\d{2})', accepted_text)
-                                if timestamp_match:
-                                    date_part = timestamp_match.group(1)
-                                    time_part = timestamp_match.group(2)
-                                    accepted_date_str = f"{date_part} {time_part}"
-                        
-                        # Column 5 (index 4) is the Filing Date column
-                        if len(cells) >= 5:
-                            filing_date_cell = cells[4]
-                            cell_text = re.sub(r'<[^>]+>', '', filing_date_cell).strip()
-                            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', cell_text)
-                            if date_match:
-                                filing_date_str = date_match.group(1)
-                            else:
-                                date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', cell_text)
-                                if date_match:
-                                    filing_date_str = date_match.group(1)
-                        
-                        # Pattern 2: Fallback - search entire row for YYYY-MM-DD
-                        if not filing_date_str:
-                            date_match = re.search(r'(\d{4}-\d{2}-\d{2})', row)
-                            if date_match:
-                                filing_date_str = date_match.group(1)
-                            else:
-                                date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row)
-                                if date_match:
-                                    filing_date_str = date_match.group(1)
-                        
-                        # Parse and filter by target date
-                        if filing_date_str:
-                            try:
-                                try:
-                                    filing_date_obj = datetime.strptime(filing_date_str, '%Y-%m-%d').date()
-                                except ValueError:
-                                    filing_date_obj = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
-                                
-                                # Single date mode: include only if matches target date
-                                if filing_date_obj != target_date_obj:
-                                    continue
-                            except:
-                                # If date parsing fails, include anyway (will verify during download)
-                                pass
-                        else:
-                            # No date found in row - include anyway (will verify during download)
-                            pass
-                        
-                        form_data = {
-                            'cik': cik,
-                            'accession_number': accession_clean,
-                            'form_type': f'form{form_type}',
-                            'filing_date': filing_date_str or target_date,
-                            'accepted_date': accepted_date_str
-                        }
-                        
-                        page_forms.append(form_data)
-                    
-                    logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
-                    
-                    # Log sample of parsed forms from this page
-                    if page_forms:
-                        log_print(f"      📋 Sample forms from page {page} (first 3):")
-                        for idx, form in enumerate(page_forms[:3], 1):
-                            log_print(f"         {idx}. CIK={form.get('cik', 'N/A')}, "
-                                       f"Accession={form.get('accession_number', 'N/A')[:15]}..., "
-                                       f"Type={form.get('form_type', 'N/A')}, "
-                                       f"FilingDate={form.get('filing_date', 'N/A')}, "
-                                       f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
-                    
-                    # Check if FIRST file in batch indicates we should stop
-                    first_file_date = None
-                    if page_forms:
-                        first_form = page_forms[0]
-                        first_filing_date = first_form.get('filing_date')
-                        if first_filing_date:
-                            try:
-                                try:
-                                    first_file_date = datetime.strptime(first_filing_date, '%Y-%m-%d').date()
-                                except ValueError:
-                                    first_file_date = datetime.strptime(first_filing_date, '%m/%d/%Y').date()
-                            except:
-                                pass
-                    
-                    # Single date mode: stop if first file doesn't match target date
-                    if first_file_date and first_file_date != target_date_obj:
-                        logger.info(f"   First file in batch has date {first_file_date} (target: {target_date_obj}), "
-                                  f"stopping pagination - reached different day")
-                        break
-                    
-                    # Add forms from this page
-                    forms_for_type.extend(page_forms)
-                    
-                    logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} "
-                              f"(total so far: {len(forms_for_type)})")
-                    
-                    # Stop if no forms found (empty page)
-                    if page_forms_before_date_filter == 0:
-                        logger.info(f"   No forms found on page {page}, stopping pagination")
-                        break
-                    
-                    # Move to next page
-                    start += count
-                    page += 1
-                    
-                    # Rate limiting (SEC requires 10 requests/second max)
-                    import time
-                    time.sleep(0.2)  # 200ms delay between requests
-                    
-                except requests.exceptions.RequestException as e:
-                    logger.error(f"❌ Error fetching page {page} for Form {form_type}: {e}")
-                    break
-                except Exception as e:
-                    logger.error(f"❌ Unexpected error on page {page} for Form {form_type}: {e}")
-                    import traceback
-                    logger.error(f"   Traceback: {traceback.format_exc()}")
-                    break
         
         form_type_duration = (datetime.now() - form_type_start).total_seconds()
         logger.info(f"   ✅ Form {form_type} Complete: Found {len(forms_for_type)} filings in {page-1} pages ({form_type_duration:.2f} seconds)")
@@ -1723,15 +1423,13 @@ def parse_explanations_and_remarks(html_content: str) -> Dict[str, Any]:
     return misc
 
 
-def process_form(form_data: Dict[str, Any], target_date: str = None, start_date: str = None, end_date: str = None, politicians: List[Dict[str, Any]] = None, s3_bucket_name: str = None, dynamodb_table_name: str = None) -> Dict[str, Any]:
+def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[Dict[str, Any]], s3_bucket_name: str, dynamodb_table_name: str) -> Dict[str, Any]:
     """
     Process a single SEC form: download, parse, check politician match, store
     
     Args:
         form_data: Form metadata
-        target_date: Target date (for single date mode)
-        start_date: Start date (for date range mode)
-        end_date: End date (for date range mode)
+        target_date: Target date
         politicians: List of politicians for matching
         s3_bucket_name: S3 bucket name
         dynamodb_table_name: DynamoDB table name
@@ -1746,13 +1444,13 @@ def process_form(form_data: Dict[str, Any], target_date: str = None, start_date:
     cik = form_data.get('cik', 'unknown')
     accession = form_data.get('accession_number', 'unknown')
     form_type = form_data.get('form_type', 'unknown')
-    filing_date_str = form_data.get('filing_date', target_date or start_date)
+    filing_date_str = form_data.get('filing_date', target_date)
     accepted_date_str = form_data.get('accepted_date')
     
     form_start_time = datetime.now()
     local_logger.info(f"📄 Processing Form: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date_str}")
     
-    # First check: Verify filing date matches target date or is within date range before downloading
+    # First check: Verify filing date matches target date before downloading
     local_logger.info(f"   🔍 Step 1/4: Validating filing date...")
     filing_date_obj = None
     if filing_date_str:
@@ -1766,31 +1464,18 @@ def process_form(form_data: Dict[str, Any], target_date: str = None, start_date:
         except:
             pass
     
-    # Check date range or single date
-    if start_date and end_date:
-        # Date range mode
-        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
-        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
-        if filing_date_obj and (filing_date_obj < start_date_obj or filing_date_obj > end_date_obj):
-            local_logger.info(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} is outside range [{start_date_obj}, {end_date_obj}]")
-            return {'skipped': True, 'reason': 'date_mismatch'}
-        local_logger.info(f"   ✅ Date validation passed: {filing_date_obj or 'unknown'} is within range [{start_date_obj}, {end_date_obj}]")
-    elif target_date:
-        # Single date mode
-        target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
-        if filing_date_obj and filing_date_obj != target_date_obj:
-            local_logger.info(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} doesn't match target {target_date_obj}")
-            return {'skipped': True, 'reason': 'date_mismatch'}
-        local_logger.info(f"   ✅ Date validation passed: {filing_date_obj or 'unknown'} matches target {target_date_obj}")
-    else:
-        local_logger.warning(f"   ⚠️ No date validation - neither target_date nor date range provided")
+    target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+    
+    if filing_date_obj and filing_date_obj != target_date_obj:
+        local_logger.info(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} doesn't match target {target_date_obj}")
+        return {'skipped': True, 'reason': 'date_mismatch'}
+    
+    local_logger.info(f"   ✅ Date validation passed: {filing_date_obj or 'unknown'} matches target {target_date_obj}")
     
     # Download form
     download_start = datetime.now()
     local_logger.info(f"   📥 Step 2/4: Downloading form...")
-    # Use target_date or start_date for S3 key organization
-    date_for_s3 = target_date if target_date else (start_date if start_date else filing_date_str)
-    downloaded = download_sec_form(form_data, date_for_s3, s3_bucket_name)
+    downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
     download_duration = (datetime.now() - download_start).total_seconds()
     
     if not downloaded:
@@ -2033,16 +1718,14 @@ try:
     logger.info("=" * 80)
     logger.info("📋 STAGE 2: FETCHING SEC FORMS")
     logger.info("=" * 80)
-    if start_date and end_date:
-        logger.info(f"🔍 Searching for Forms 3, 4, 5 filed between {start_date} and {end_date}")
+    if is_backdate_mode:
+        search_msg = f"🔍 BACKDATE MODE: Fetching all Forms 3, 4, 5 from {target_date} onwards (until first date in batch is before {target_date})"
     else:
-        logger.info(f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}")
+        search_msg = f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}"
+    logger.info(search_msg)
+    print(search_msg, flush=True)
     stage2_start = datetime.now()
-    # Call fetch_sec_forms_paginated with appropriate parameters
-    if start_date and end_date:
-        forms = fetch_sec_forms_paginated(target_date=None, start_date=start_date, end_date=end_date)
-    else:
-        forms = fetch_sec_forms_paginated(target_date=target_date, start_date=None, end_date=None)
+    forms = fetch_sec_forms_paginated(target_date, is_backdate_mode=is_backdate_mode)
     stage2_duration = (datetime.now() - stage2_start).total_seconds()
     logger.info("")
     stage2_msg = f"✅ Stage 2 Complete: Fetched {len(forms)} forms in {stage2_duration:.2f} seconds"
@@ -2096,8 +1779,6 @@ try:
     # Broadcast variables are sent once to each worker, not serialized with each task
     politicians_broadcast = sc.broadcast(politicians)
     target_date_broadcast = sc.broadcast(target_date)
-    start_date_broadcast = sc.broadcast(start_date)
-    end_date_broadcast = sc.broadcast(end_date)
     s3_bucket_broadcast = sc.broadcast(s3_bucket)
     dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
     
@@ -2131,8 +1812,6 @@ try:
             # Get broadcasted values
             politicians_local = politicians_broadcast.value
             target_date_local = target_date_broadcast.value
-            start_date_local = start_date_broadcast.value
-            end_date_local = end_date_broadcast.value
             s3_bucket_local = s3_bucket_broadcast.value
             dynamodb_table_local = dynamodb_table_broadcast.value
             
@@ -2144,7 +1823,7 @@ try:
             # Call process_form with explicit parameters from broadcast
             # Note: process_form will create its own boto3 clients inside, so no SSLContext issues
             # process_form now stores directly to DynamoDB and returns a result dict
-            result = process_form(form_data, target_date=target_date_local, start_date=start_date_local, end_date=end_date_local, politicians=politicians_local, s3_bucket_name=s3_bucket_local, dynamodb_table_name=dynamodb_table_local)
+            result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, dynamodb_table_local)
             
             if result.get('success'):
                 msg = f"✅ Form completed: CIK={cik}, TradeId={result.get('tradeId', 'N/A')}, PoliticianMatch={result.get('politicianMatch', False)}"
@@ -2189,8 +1868,6 @@ try:
     # Clean up broadcast variables
     politicians_broadcast.destroy()
     target_date_broadcast.destroy()
-    start_date_broadcast.destroy()
-    end_date_broadcast.destroy()
     s3_bucket_broadcast.destroy()
     dynamodb_table_broadcast.destroy()
     

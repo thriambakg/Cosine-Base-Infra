@@ -551,36 +551,34 @@ def lambda_handler(event, context):
     if not S3_BUCKET:
         raise ValueError("S3_BUCKET environment variable not set")
     
-    # Parse date input - support both single date and date range
+    # Parse date input - support backdate, single date, or default
     # Options:
-    # 1. Single date: {"date": "2025-10-30"}
-    # 2. Date range: {"startDate": "2025-01-01", "endDate": "2025-12-31"}
+    # 1. Backdate: {"backdate": "2025-11-05"} - fetches from today back to backdate
+    # 2. Single date: {"date": "2025-10-30"}
     # 3. Default: yesterday's date (for scheduled runs)
     target_dates = []
     
     if isinstance(event, dict):
-        if event.get('startDate') and event.get('endDate'):
-            # Date range mode - backfill historical data
-            start_date_str = event.get('startDate')
-            end_date_str = event.get('endDate')
-            
+        if event.get('backdate'):
+            # Backdate mode - fetch from today back to backdate
+            backdate_str = event.get('backdate')
             try:
-                start_date = datetime.strptime(start_date_str, '%Y-%m-%d').date()
-                end_date = datetime.strptime(end_date_str, '%Y-%m-%d').date()
+                backdate_obj = datetime.strptime(backdate_str, '%Y-%m-%d').date()
+                today = datetime.now().date()
                 
-                if start_date > end_date:
-                    raise ValueError("startDate must be <= endDate")
+                if backdate_obj > today:
+                    raise ValueError("backdate must be <= today")
                 
-                # Generate list of dates from start to end (inclusive)
-                current_date = start_date
-                while current_date <= end_date:
+                # Generate list of dates from today back to backdate (inclusive)
+                current_date = today
+                while current_date >= backdate_obj:
                     target_dates.append(current_date.strftime('%Y-%m-%d'))
-                    current_date += timedelta(days=1)
+                    current_date -= timedelta(days=1)
                 
-                logger.info(f"📅 Date range mode: {start_date_str} to {end_date_str} ({len(target_dates)} days)")
+                logger.info(f"📅 Backdate mode: {backdate_str} to {today} ({len(target_dates)} days)")
             except ValueError as e:
-                logger.error(f"❌ Invalid date format or range: {e}")
-                raise ValueError(f"Invalid date range: startDate='{start_date_str}', endDate='{end_date_str}'. Expected YYYY-MM-DD format.")
+                logger.error(f"❌ Invalid backdate format: {e}")
+                raise ValueError(f"Invalid backdate: backdate='{backdate_str}'. Expected YYYY-MM-DD format and must be <= today.")
         elif event.get('date'):
             # Single date mode (backwards compatible)
             target_dates = [event.get('date')]
