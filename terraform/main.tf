@@ -2078,24 +2078,16 @@ module "politician_trades_state_machine" {
       # This Pass state merges input with default null values for optional fields
       # Using InputPath to preserve input, then Parameters to add missing fields
       EnsureOptionalFields = {
-        Type      = "Pass"
-        Comment   = "Ensure all expected fields exist to prevent JSONPath errors. Lambda/Glue will handle null values and default to yesterday if date is missing."
-        InputPath = "$"
+        Type    = "Pass"
+        Comment = "Ensure all expected fields exist to prevent JSONPath errors. Lambda/Glue will handle null values and default to yesterday if date is missing."
         Parameters = {
-          "date.$"      = "$.date"
-          "source.$"    = "$.source"
-          "startDate.$" = "$.startDate"
-          "endDate.$"   = "$.endDate"
+          "date.$"    = "$.date"
+          "source.$"  = "$.source"
+          "startDate" = null
+          "endDate"   = null
         }
         ResultPath = "$"
         Next       = "ParallelPipelines"
-        Catch = [
-          {
-            ErrorEquals = ["States.ParameterPathFailure"]
-            ResultPath  = "$.error"
-            Next        = "ParallelPipelines"
-          }
-        ]
       }
 
       # Top-level parallel: SEC (Glue) and Congressional PTRs (Fetcher → nested parallel Senate/House)
