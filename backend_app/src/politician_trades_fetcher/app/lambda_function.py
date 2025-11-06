@@ -559,9 +559,10 @@ def lambda_handler(event, context):
     target_dates = []
     
     if isinstance(event, dict):
-        if event.get('backdate'):
+        # Handle backdate (check for None, empty string, or string "null")
+        backdate_str = event.get('backdate')
+        if backdate_str and backdate_str.strip() != '' and backdate_str.lower() != 'null':
             # Backdate mode - fetch from today back to backdate
-            backdate_str = event.get('backdate')
             try:
                 backdate_obj = datetime.strptime(backdate_str, '%Y-%m-%d').date()
                 today = datetime.now().date()
