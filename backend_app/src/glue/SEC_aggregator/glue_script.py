@@ -59,19 +59,35 @@ job = Job(glueContext)
 # Only include required arguments here
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
-    'backdate',  # Backdate in YYYY-MM-DD format (for backfilling - fetch all until this date)
-    'date',      # Target date in YYYY-MM-DD format (for normal daily runs)
+    'date',      # Target date in YYYY-MM-DD format (for normal daily runs) - may be null
     's3_bucket',
     'dynamodb_table'
 ])
 
 job.init(args['JOB_NAME'], args)
 
-# Extract parameters
-backdate = args.get('backdate')
+# Extract required parameters
 target_date = args.get('date')
 s3_bucket = args.get('s3_bucket')
 dynamodb_table = args.get('dynamodb_table')
+
+# Parse optional backdate argument manually (since getResolvedOptions requires all args)
+# Format: --backdate=2025-11-05 or --backdate 2025-11-05
+# Step Functions may pass null as --backdate=null or --backdate null
+backdate = None
+for i, arg in enumerate(sys.argv):
+    if arg == '--backdate' or arg.startswith('--backdate='):
+        if '=' in arg:
+            backdate_value = arg.split('=', 1)[1]
+        elif i + 1 < len(sys.argv):
+            backdate_value = sys.argv[i + 1]
+        else:
+            continue
+        
+        # Filter out null, empty string, or string "null"
+        if backdate_value and backdate_value.strip() != '' and backdate_value.lower() != 'null':
+            backdate = backdate_value
+        break
 
 # Determine mode: backdate mode or normal date mode
 # If backdate is provided, use it; otherwise use date (or default to yesterday)
