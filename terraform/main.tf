@@ -2072,8 +2072,32 @@ module "politician_trades_state_machine" {
   # Step Functions definition with 4 steps (parallel downloads)
   definition = jsonencode({
     Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
-    StartAt = "ParallelPipelines"
+    StartAt = "EnsureOptionalFields"
     States = {
+      # Ensure optional fields exist (prevents JSONPath errors for missing fields)
+      # This Pass state merges input with default null values for optional fields
+      # Using InputPath to preserve input, then Parameters to add missing fields
+      EnsureOptionalFields = {
+        Type      = "Pass"
+        Comment   = "Ensure all expected fields exist to prevent JSONPath errors. Lambda/Glue will handle null values and default to yesterday if date is missing."
+        InputPath = "$"
+        Parameters = {
+          "date.$"      = "$.date"
+          "source.$"    = "$.source"
+          "startDate.$" = "$.startDate"
+          "endDate.$"   = "$.endDate"
+        }
+        ResultPath = "$"
+        Next       = "ParallelPipelines"
+        Catch = [
+          {
+            ErrorEquals = ["States.ParameterPathFailure"]
+            ResultPath  = "$.error"
+            Next        = "ParallelPipelines"
+          }
+        ]
+      }
+
       # Top-level parallel: SEC (Glue) and Congressional PTRs (Fetcher → nested parallel Senate/House)
       ParallelPipelines = {
         Type    = "Parallel"
@@ -2091,8 +2115,8 @@ module "politician_trades_state_machine" {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
                     "--date.$"         = "$.date"      # Get date from top-level input (may be null/empty - Glue will default to yesterday)
-                    "--startDate.$"    = "$.startDate" # Get startDate from top-level input (for date range mode)
-                    "--endDate.$"      = "$.endDate"   # Get endDate from top-level input (for date range mode)
+                    "--startDate.$"    = "$.startDate" # Optional: Get startDate (null if not provided)
+                    "--endDate.$"      = "$.endDate"   # Optional: Get endDate (null if not provided)
                     "--s3_bucket"      = module.sec_filings_s3.bucket_id
                     "--dynamodb_table" = module.sec_filings_table.table_name
                     "--JOB_NAME"       = module.politician_trades_sec_glue_job.job_name
