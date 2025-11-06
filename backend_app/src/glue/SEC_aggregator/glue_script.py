@@ -59,10 +59,14 @@ job = Job(glueContext)
 # Only include required arguments here
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
-    'date',  # Target date in YYYY-MM-DD format
+    'date',  # Target date in YYYY-MM-DD format (for single date mode)
     's3_bucket',
     'dynamodb_table'
 ])
+
+# Also check for optional date range parameters
+start_date = args.get('startDate') or args.get('start_date')
+end_date = args.get('endDate') or args.get('end_date')
 
 job.init(args['JOB_NAME'], args)
 
@@ -71,18 +75,36 @@ target_date = args.get('date')
 s3_bucket = args.get('s3_bucket')
 dynamodb_table = args.get('dynamodb_table')
 
-# Default to yesterday if date is not provided, is null, empty string, or the string "null"
-# Step Functions may pass null as the string "null" or as an empty string
-if not target_date or target_date.strip() == '' or target_date.lower() == 'null':
+# Determine if we're in date range mode or single date mode
+if start_date and end_date:
+    # Date range mode
+    if not start_date or start_date.strip() == '' or start_date.lower() == 'null':
+        raise ValueError("startDate is required when endDate is provided")
+    if not end_date or end_date.strip() == '' or end_date.lower() == 'null':
+        raise ValueError("endDate is required when startDate is provided")
+    
+    try:
+        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+        if start_date_obj > end_date_obj:
+            raise ValueError("startDate must be <= endDate")
+    except ValueError as e:
+        raise ValueError(f"Invalid date range: startDate='{start_date}', endDate='{end_date}'. Expected YYYY-MM-DD format. Error: {e}")
+    
+    logger.info(f"📅 Date range mode: {start_date} to {end_date}")
+    target_date = None  # Not used in range mode
+elif target_date and target_date.strip() != '' and target_date.lower() != 'null':
+    # Single date mode (backwards compatible)
+    logger.info(f"📅 Single date mode: {target_date}")
+    start_date = None
+    end_date = None
+else:
+    # Default: yesterday for scheduled runs
     yesterday = datetime.now() - timedelta(days=1)
     target_date = yesterday.strftime('%Y-%m-%d')
+    start_date = None
+    end_date = None
     logger.info(f"⚠️ No date provided (or date was null/empty), defaulting to yesterday: {target_date}")
-else:
-    logger.info(f"📅 Processing SEC forms for date: {target_date}")
-
-# Optional date range parameters (not currently used, but can be added via --additional-python-modules or custom parsing if needed)
-# start_date = args.get('start_date')  # Not currently used
-# end_date = args.get('end_date')       # Not currently used
 
 # NOTE: Do NOT create boto3 clients at module level - they contain SSLContext objects that can't be pickled
 # Create clients inside functions that need them to avoid Spark serialization issues
@@ -187,22 +209,45 @@ def load_politician_list() -> List[Dict[str, Any]]:
         raise
 
 
-def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4', '5']) -> List[Dict[str, Any]]:
+def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, end_date: str = None, form_types: List[str] = ['3', '4', '5']) -> List[Dict[str, Any]]:
     """
     Fetch SEC forms using paginated browse-edgar API
     
     Uses the browse-edgar endpoint with start parameter for pagination:
     https://www.sec.gov/cgi-bin/browse-edgar?action=getcurrent&type=4&owner=only&start=0&count=100
     
+    Supports two modes:
+    1. Single date mode: target_date provided, start_date and end_date are None
+    2. Date range mode: start_date and end_date provided, target_date is None
+    
     Args:
-        target_date: Target date in YYYY-MM-DD format
+        target_date: Target date in YYYY-MM-DD format (for single date mode)
+        start_date: Start date in YYYY-MM-DD format (for date range mode)
+        end_date: End date in YYYY-MM-DD format (for date range mode)
         form_types: List of form types to fetch (default: ['3', '4', '5'])
     
     Returns:
         List of form metadata dicts with keys: form_type, cik, accession_number, filename, filing_date
     """
     all_forms = []
-    target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+    
+    # Determine mode
+    if start_date and end_date:
+        # Date range mode
+        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+        target_date_obj = None
+        date_range_mode = True
+        logger.info(f"📅 Date range mode: {start_date} to {end_date}")
+    elif target_date:
+        # Single date mode
+        target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+        start_date_obj = None
+        end_date_obj = None
+        date_range_mode = False
+        logger.info(f"📅 Single date mode: {target_date}")
+    else:
+        raise ValueError("Either target_date or (start_date and end_date) must be provided")
     
     session = requests.Session()
     session.headers.update({
@@ -215,7 +260,10 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     
     for form_type in form_types:
         logger.info("")
-        logger.info(f"   📋 Fetching Form {form_type} filings for {target_date}...")
+        if date_range_mode:
+            logger.info(f"   📋 Fetching Form {form_type} filings for date range {start_date} to {end_date}...")
+        else:
+            logger.info(f"   📋 Fetching Form {form_type} filings for {target_date}...")
         forms_for_type = []
         start = 0
         count = 100
@@ -223,10 +271,56 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
         max_pages = 100  # Safety limit to prevent infinite loops
         form_type_start = datetime.now()
         
-        while page <= max_pages:
-            try:
-                # Build paginated URL (matches user's CURL example)
-                url = f"{SEC_BROWSE_EDGAR_URL}?action=getcurrent&datea=&dateb=&company=&type={form_type}&SIC=&State=&Country=&CIK=&owner=only&accno=&start={start}&count={count}"
+        # Date range mode: special pagination logic
+        if date_range_mode:
+            # Phase 1: Find the page where first item matches end_date
+            # Keep fetching until we find a batch where the first item's date matches end_date
+            end_date_found_page = None
+            end_date_found_start = None
+            
+            logger.info(f"   🔍 Phase 1: Finding end date boundary (end_date={end_date})...")
+            
+            # Helper function to extract first form's date from HTML
+            def extract_first_form_date(html_content):
+                """Extract the filing date of the first form in the page"""
+                table_row_pattern = re.compile(r'<tr[^>]*>(.*?)</tr>', re.DOTALL | re.IGNORECASE)
+                rows = table_row_pattern.findall(html_content)
+                
+                for row in rows:
+                    archive_link_pattern = re.compile(r'/Archives/edgar/data/(\d+)/([^/"]+)/', re.IGNORECASE)
+                    archive_matches = archive_link_pattern.findall(row)
+                    if not archive_matches:
+                        continue
+                    
+                    # Extract filing date from row
+                    td_pattern = re.compile(r'<td[^>]*>(.*?)</td>', re.DOTALL | re.IGNORECASE)
+                    cells = td_pattern.findall(row)
+                    
+                    if len(cells) >= 5:
+                        filing_date_cell = cells[4]
+                        cell_text = re.sub(r'<[^>]+>', '', filing_date_cell).strip()
+                        date_match = re.search(r'(\d{4}-\d{2}-\d{2})', cell_text)
+                        if date_match:
+                            return date_match.group(1)
+                        date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', cell_text)
+                        if date_match:
+                            return date_match.group(1)
+                    
+                    # Fallback: search entire row
+                    date_match = re.search(r'(\d{4}-\d{2}-\d{2})', row)
+                    if date_match:
+                        return date_match.group(1)
+                    date_match = re.search(r'(\d{1,2}/\d{1,2}/\d{4})', row)
+                    if date_match:
+                        return date_match.group(1)
+                
+                return None
+            
+            # Phase 1: Find end_date boundary
+            while page <= max_pages:
+                try:
+                    # Build paginated URL (matches user's CURL example)
+                    url = f"{SEC_BROWSE_EDGAR_URL}?action=getcurrent&datea=&dateb=&company=&type={form_type}&SIC=&State=&Country=&CIK=&owner=only&accno=&start={start}&count={count}"
                 
                 logger.info(f"   📡 Calling SEC browse-edgar API:")
                 logger.info(f"      URL: {url}")
@@ -1389,13 +1483,15 @@ def parse_explanations_and_remarks(html_content: str) -> Dict[str, Any]:
     return misc
 
 
-def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[Dict[str, Any]], s3_bucket_name: str, dynamodb_table_name: str) -> Dict[str, Any]:
+def process_form(form_data: Dict[str, Any], target_date: str = None, start_date: str = None, end_date: str = None, politicians: List[Dict[str, Any]] = None, s3_bucket_name: str = None, dynamodb_table_name: str = None) -> Dict[str, Any]:
     """
     Process a single SEC form: download, parse, check politician match, store
     
     Args:
         form_data: Form metadata
-        target_date: Target date
+        target_date: Target date (for single date mode)
+        start_date: Start date (for date range mode)
+        end_date: End date (for date range mode)
         politicians: List of politicians for matching
         s3_bucket_name: S3 bucket name
         dynamodb_table_name: DynamoDB table name
@@ -1410,13 +1506,13 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     cik = form_data.get('cik', 'unknown')
     accession = form_data.get('accession_number', 'unknown')
     form_type = form_data.get('form_type', 'unknown')
-    filing_date_str = form_data.get('filing_date', target_date)
+    filing_date_str = form_data.get('filing_date', target_date or start_date)
     accepted_date_str = form_data.get('accepted_date')
     
     form_start_time = datetime.now()
     local_logger.info(f"📄 Processing Form: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date_str}")
     
-    # First check: Verify filing date matches target date before downloading
+    # First check: Verify filing date matches target date or is within date range before downloading
     local_logger.info(f"   🔍 Step 1/4: Validating filing date...")
     filing_date_obj = None
     if filing_date_str:
@@ -1430,18 +1526,31 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         except:
             pass
     
-    target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
-    
-    if filing_date_obj and filing_date_obj != target_date_obj:
-        local_logger.info(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} doesn't match target {target_date_obj}")
-        return {'skipped': True, 'reason': 'date_mismatch'}
-    
-    local_logger.info(f"   ✅ Date validation passed: {filing_date_obj or 'unknown'} matches target {target_date_obj}")
+    # Check date range or single date
+    if start_date and end_date:
+        # Date range mode
+        start_date_obj = datetime.strptime(start_date, '%Y-%m-%d').date()
+        end_date_obj = datetime.strptime(end_date, '%Y-%m-%d').date()
+        if filing_date_obj and (filing_date_obj < start_date_obj or filing_date_obj > end_date_obj):
+            local_logger.info(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} is outside range [{start_date_obj}, {end_date_obj}]")
+            return {'skipped': True, 'reason': 'date_mismatch'}
+        local_logger.info(f"   ✅ Date validation passed: {filing_date_obj or 'unknown'} is within range [{start_date_obj}, {end_date_obj}]")
+    elif target_date:
+        # Single date mode
+        target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+        if filing_date_obj and filing_date_obj != target_date_obj:
+            local_logger.info(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} doesn't match target {target_date_obj}")
+            return {'skipped': True, 'reason': 'date_mismatch'}
+        local_logger.info(f"   ✅ Date validation passed: {filing_date_obj or 'unknown'} matches target {target_date_obj}")
+    else:
+        local_logger.warning(f"   ⚠️ No date validation - neither target_date nor date range provided")
     
     # Download form
     download_start = datetime.now()
     local_logger.info(f"   📥 Step 2/4: Downloading form...")
-    downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
+    # Use target_date or start_date for S3 key organization
+    date_for_s3 = target_date if target_date else (start_date if start_date else filing_date_str)
+    downloaded = download_sec_form(form_data, date_for_s3, s3_bucket_name)
     download_duration = (datetime.now() - download_start).total_seconds()
     
     if not downloaded:
@@ -1684,9 +1793,16 @@ try:
     logger.info("=" * 80)
     logger.info("📋 STAGE 2: FETCHING SEC FORMS")
     logger.info("=" * 80)
-    logger.info(f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}")
+    if start_date and end_date:
+        logger.info(f"🔍 Searching for Forms 3, 4, 5 filed between {start_date} and {end_date}")
+    else:
+        logger.info(f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}")
     stage2_start = datetime.now()
-    forms = fetch_sec_forms_paginated(target_date)
+    # Call fetch_sec_forms_paginated with appropriate parameters
+    if start_date and end_date:
+        forms = fetch_sec_forms_paginated(target_date=None, start_date=start_date, end_date=end_date)
+    else:
+        forms = fetch_sec_forms_paginated(target_date=target_date, start_date=None, end_date=None)
     stage2_duration = (datetime.now() - stage2_start).total_seconds()
     logger.info("")
     stage2_msg = f"✅ Stage 2 Complete: Fetched {len(forms)} forms in {stage2_duration:.2f} seconds"
@@ -1740,6 +1856,8 @@ try:
     # Broadcast variables are sent once to each worker, not serialized with each task
     politicians_broadcast = sc.broadcast(politicians)
     target_date_broadcast = sc.broadcast(target_date)
+    start_date_broadcast = sc.broadcast(start_date)
+    end_date_broadcast = sc.broadcast(end_date)
     s3_bucket_broadcast = sc.broadcast(s3_bucket)
     dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
     
@@ -1773,6 +1891,8 @@ try:
             # Get broadcasted values
             politicians_local = politicians_broadcast.value
             target_date_local = target_date_broadcast.value
+            start_date_local = start_date_broadcast.value
+            end_date_local = end_date_broadcast.value
             s3_bucket_local = s3_bucket_broadcast.value
             dynamodb_table_local = dynamodb_table_broadcast.value
             
@@ -1784,7 +1904,7 @@ try:
             # Call process_form with explicit parameters from broadcast
             # Note: process_form will create its own boto3 clients inside, so no SSLContext issues
             # process_form now stores directly to DynamoDB and returns a result dict
-            result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, dynamodb_table_local)
+            result = process_form(form_data, target_date=target_date_local, start_date=start_date_local, end_date=end_date_local, politicians=politicians_local, s3_bucket_name=s3_bucket_local, dynamodb_table_name=dynamodb_table_local)
             
             if result.get('success'):
                 msg = f"✅ Form completed: CIK={cik}, TradeId={result.get('tradeId', 'N/A')}, PoliticianMatch={result.get('politicianMatch', False)}"
@@ -1829,6 +1949,8 @@ try:
     # Clean up broadcast variables
     politicians_broadcast.destroy()
     target_date_broadcast.destroy()
+    start_date_broadcast.destroy()
+    end_date_broadcast.destroy()
     s3_bucket_broadcast.destroy()
     dynamodb_table_broadcast.destroy()
     

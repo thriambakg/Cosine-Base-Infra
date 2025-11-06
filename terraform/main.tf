@@ -2074,13 +2074,15 @@ module "politician_trades_state_machine" {
     Comment = "Daily politician trades aggregation - fetch metadata, download forms in parallel, match trades, save to database. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
     StartAt = "NormalizeInput"
     States = {
-      # Step 0: Normalize input - ensure 'date' and 'source' fields exist (default to yesterday if not provided)
+      # Step 0: Normalize input - ensure 'date', 'startDate', 'endDate', and 'source' fields exist
       NormalizeInput = {
         Type    = "Pass"
-        Comment = "Ensure date and source fields exist. If date not provided, Lambda/Glue will default to yesterday. Pass through input."
+        Comment = "Ensure date, startDate, endDate, and source fields exist. If date not provided, Lambda/Glue will default to yesterday. Pass through input."
         Parameters = {
-          "date.$"   = "$.date"
-          "source.$" = "$.source"
+          "date.$"      = "$.date"
+          "startDate.$" = "$.startDate"
+          "endDate.$"   = "$.endDate"
+          "source.$"    = "$.source"
         }
         # If date is missing, it will be null, and Lambdas/Glue will default to yesterday
         ResultPath = "$"
@@ -2103,7 +2105,9 @@ module "politician_trades_state_machine" {
                 Parameters = {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
-                    "--date.$"         = "$.date" # Get date from top-level input (may be null/empty - Glue will default to yesterday)
+                    "--date.$"         = "$.date"      # Get date from top-level input (may be null/empty - Glue will default to yesterday)
+                    "--startDate.$"    = "$.startDate" # Get startDate from top-level input (for date range mode)
+                    "--endDate.$"      = "$.endDate"   # Get endDate from top-level input (for date range mode)
                     "--s3_bucket"      = module.sec_filings_s3.bucket_id
                     "--dynamodb_table" = module.sec_filings_table.table_name
                     "--JOB_NAME"       = module.politician_trades_sec_glue_job.job_name
