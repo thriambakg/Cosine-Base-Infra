@@ -467,7 +467,7 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                             if date_match:
                                 filing_date_str = date_match.group(1)
                     
-                    # Parse and filter by target date
+                    # Parse and filter by date (range mode or single date mode)
                     if filing_date_str:
                         try:
                             # Try YYYY-MM-DD format first (SEC standard)
@@ -477,9 +477,15 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                                 # Fallback to MM/DD/YYYY
                                 filing_date_obj = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
                             
-                            # Only include if matches target date
-                            if filing_date_obj != target_date_obj:
-                                continue
+                            # Filter by date range or single date
+                            if date_range_mode:
+                                # Date range mode: include if within range
+                                if filing_date_obj < start_date_obj or filing_date_obj > end_date_obj:
+                                    continue
+                            else:
+                                # Single date mode: include only if matches target date
+                                if filing_date_obj != target_date_obj:
+                                    continue
                         except:
                             # If date parsing fails, include anyway (will verify during download)
                             pass
@@ -492,13 +498,16 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                         'cik': cik,
                         'accession_number': accession_clean,
                         'form_type': f'form{form_type}',
-                        'filing_date': filing_date_str or target_date,
+                        'filing_date': filing_date_str or (target_date if not date_range_mode else start_date),
                         'accepted_date': accepted_date_str
                     }
                     
                     page_forms.append(form_data)
                 
-                logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
+                if date_range_mode:
+                    logger.info(f"   Page {page}: Found {len(page_forms)} forms within date range (out of {page_forms_before_date_filter} total forms on page)")
+                else:
+                    logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
                 
                 # Log sample of parsed forms from this page
                 if page_forms:
@@ -510,8 +519,7 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                                    f"FilingDate={form.get('filing_date', 'N/A')}, "
                                    f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
                 
-                # Check if FIRST file in batch matches target date
-                # If first file doesn't match target date, we've moved to a different day - stop fetching
+                # Check if FIRST file in batch indicates we should stop
                 first_file_date = None
                 if page_forms:
                     first_form = page_forms[0]
@@ -527,25 +535,34 @@ def fetch_sec_forms_paginated(target_date: str = None, start_date: str = None, e
                         except:
                             pass
                 
-                # If first file's date doesn't match target date, stop fetching
-                if first_file_date and first_file_date != target_date_obj:
-                    logger.info(f"   First file in batch has date {first_file_date} (target: {target_date_obj}), "
-                              f"stopping pagination - reached different day")
-                    break
+                # Stop condition based on mode
+                if date_range_mode:
+                    # Date range mode: stop if first file is before start_date
+                    if first_file_date and first_file_date < start_date_obj:
+                        logger.info(f"   First file in batch has date {first_file_date} (before start_date {start_date_obj}), "
+                                  f"stopping pagination - reached start boundary")
+                        break
+                else:
+                    # Single date mode: stop if first file doesn't match target date
+                    if first_file_date and first_file_date != target_date_obj:
+                        logger.info(f"   First file in batch has date {first_file_date} (target: {target_date_obj}), "
+                                  f"stopping pagination - reached different day")
+                        break
                 
                 # Add forms from this page
                 forms_for_type.extend(page_forms)
                 
-                logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} "
-                          f"(total so far: {len(forms_for_type)})")
+                if date_range_mode:
+                    logger.info(f"   Page {page}: Found {len(page_forms)} forms within range "
+                              f"(total so far: {len(forms_for_type)})")
+                else:
+                    logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} "
+                              f"(total so far: {len(forms_for_type)})")
                 
                 # Stop if no forms found (empty page)
                 if page_forms_before_date_filter == 0:
                     logger.info(f"   No forms found on page {page}, stopping pagination")
                     break
-                
-                # 4. Continue if we still have matching dates or dates after target
-                # (we might have more pages with our target date)
                 
                 # Move to next page
                 start += count
