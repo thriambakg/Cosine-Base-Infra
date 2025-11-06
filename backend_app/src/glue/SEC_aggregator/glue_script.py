@@ -237,12 +237,21 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
     
     session = requests.Session()
+    # SEC requires proper headers to avoid 403 Forbidden errors
+    # Use a browser-like User-Agent and include all standard browser headers
     session.headers.update({
-        'User-Agent': SEC_USER_AGENT,
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+        'Upgrade-Insecure-Requests': '1',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'none',
+        'Sec-Fetch-User': '?1',
         'Cache-Control': 'max-age=0',
-        'Upgrade-Insecure-Requests': '1'
+        'Referer': 'https://www.sec.gov/edgar/searchedgar/companysearch.html'
     })
     
     for form_type in form_types:
@@ -264,11 +273,21 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 logger.info(f"      URL: {url}")
                 logger.info(f"      Method: GET")
                 logger.info(f"      Parameters: start={start}, count={count}, type={form_type}")
-                logger.info(f"      Headers: User-Agent={SEC_USER_AGENT}")
+                user_agent_preview = session.headers.get('User-Agent', 'N/A')[:50]
+                logger.info(f"      Headers: User-Agent={user_agent_preview}...")
                 
                 api_call_start = datetime.now()
+                # Add small delay before request to be respectful of SEC rate limits
+                import time
+                time.sleep(0.5)  # 500ms delay
                 response = session.get(url, timeout=30)
                 api_call_duration = (datetime.now() - api_call_start).total_seconds()
+                
+                # If we get 403, log detailed error and retry once with longer delay
+                if response.status_code == 403:
+                    logger.warning(f"   ⚠️ Got 403 Forbidden, waiting 2 seconds and retrying...")
+                    time.sleep(2)
+                    response = session.get(url, timeout=30)
                 
                 logger.info(f"   📥 SEC API Response:")
                 logger.info(f"      Status Code: {response.status_code}")
@@ -565,13 +584,21 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         
         # Use constants directly (strings are safe to serialize)
         SEC_BASE_URL_LOCAL = "https://www.sec.gov"
-        SEC_USER_AGENT_LOCAL = "Cosine Financial Platform contact@cosine.financial"
         
         base_url = f"{SEC_BASE_URL_LOCAL}/Archives/edgar/data/{cik}/{accession_dashed}"
         
         # Create session inside function - each worker gets its own
+        # Use browser-like headers to avoid 403 Forbidden errors from SEC
         session = requests.Session()
-        session.headers.update({'User-Agent': SEC_USER_AGENT_LOCAL})
+        session.headers.update({
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+            'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
+            'Connection': 'keep-alive',
+            'Upgrade-Insecure-Requests': '1',
+            'Referer': 'https://www.sec.gov/edgar/searchedgar/companysearch.html'
+        })
         
         # Try to download the file
         file_extensions = ['.xml', '.txt', '.pdf']
@@ -596,8 +623,9 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                 print(f"            URL: {file_url}", flush=True)
                 local_logger.info(f"            Method: GET")
                 print(f"            Method: GET", flush=True)
-                local_logger.info(f"            Headers: User-Agent={SEC_USER_AGENT_LOCAL}")
-                print(f"            Headers: User-Agent={SEC_USER_AGENT_LOCAL}", flush=True)
+                user_agent = session.headers.get('User-Agent', 'N/A')
+                local_logger.info(f"            Headers: User-Agent={user_agent[:50]}...")
+                print(f"            Headers: User-Agent={user_agent[:50]}...", flush=True)
                 
                 download_start_time = datetime.now()
                 response = session.get(file_url, timeout=30)
