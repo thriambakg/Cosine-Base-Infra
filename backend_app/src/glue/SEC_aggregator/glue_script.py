@@ -2059,10 +2059,14 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     except Exception as e:
         store_duration = (datetime.now() - store_start).total_seconds()
         total_duration = (datetime.now() - form_start_time).total_seconds()
-        local_logger.error(f"   ❌ STORAGE ERROR: Failed to store to DynamoDB after {store_duration:.2f}s (Total: {total_duration:.2f}s): {e}")
+        error_msg = f"   ❌ STORAGE ERROR: Failed to store to DynamoDB after {store_duration:.2f}s (Total: {total_duration:.2f}s): {e}"
+        local_logger.error(error_msg)
+        print(error_msg, flush=True)
         import traceback
-        local_logger.error(f"      Traceback: {traceback.format_exc()}")
-        return {'success': False, 'error': str(e)}
+        traceback_str = traceback.format_exc()
+        local_logger.error(f"      Traceback: {traceback_str}")
+        print(f"      Traceback: {traceback_str}", flush=True)
+        return {'success': False, 'error': str(e), 'traceback': traceback_str}
 
 
 def write_to_dynamodb(trades: List[Dict[str, Any]], dynamodb_table_name: str):
@@ -2331,9 +2335,17 @@ try:
     if failed_stored > 0:
         logger.info("")
         logger.info(f"   📋 Sample of Failed Forms (first 5):")
+        print("", flush=True)
+        print(f"   📋 Sample of Failed Forms (first 5):", flush=True)
         failed_samples = [r for r in results if not r.get('success') and not r.get('skipped')][:5]
         for idx, failed in enumerate(failed_samples, 1):
-            logger.info(f"      {idx}. Error: {failed.get('error', 'Unknown error')}")
+            error_info = f"      {idx}. Error: {failed.get('error', 'Unknown error')}"
+            logger.info(error_info)
+            print(error_info, flush=True)
+            if failed.get('traceback'):
+                traceback_preview = failed.get('traceback', '')[:500]  # First 500 chars
+                logger.info(f"         Traceback (preview): {traceback_preview}")
+                print(f"         Traceback (preview): {traceback_preview}", flush=True)
     
     if skipped_download_failed > 0:
         logger.info("")
