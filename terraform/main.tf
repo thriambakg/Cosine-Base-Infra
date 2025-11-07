@@ -2534,18 +2534,44 @@ module "politician_trades_sec_glue_job" {
   ]
 }
 
-# Grant Glue job role explicit KMS access (after both are created to avoid circular dependency)
-# This adds the Glue role to the KMS key policy for explicit access
-resource "aws_kms_grant" "glue_role_kms_access" {
-  name              = "${var.project_name}-glue-role-kms-grant-${var.environment}"
-  key_id            = module.kms.main_key_id
-  grantee_principal = module.politician_trades_sec_glue_job.role_arn
-  operations = [
-    "Decrypt",
-    "Encrypt",
-    "GenerateDataKey",
-    "DescribeKey"
-  ]
+# Data sources to get current KMS key policies
+data "aws_kms_key" "main_key" {
+  key_id = module.kms.main_key_id
+}
+
+data "aws_kms_key" "dynamodb_key" {
+  key_id = module.kms.dynamodb_key_id
+}
+
+# Update KMS key policies to include Glue role ARN (after both are created to avoid circular dependency)
+# We use aws_kms_key_policy to update the policy with the Glue role added
+resource "aws_kms_key_policy" "main_key_with_glue_role" {
+  key_id = module.kms.main_key_id
+
+  # Get the existing policy and add the Glue role statement
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      jsondecode(data.aws_kms_key.main_key.policy).Statement,
+      [
+        {
+          Sid    = "AllowGlueRole"
+          Effect = "Allow"
+          Principal = {
+            AWS = module.politician_trades_sec_glue_job.role_arn
+          }
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ]
+          Resource = "*"
+        }
+      ]
+    )
+  })
 
   depends_on = [
     module.politician_trades_sec_glue_job,
@@ -2553,17 +2579,34 @@ resource "aws_kms_grant" "glue_role_kms_access" {
   ]
 }
 
-# Also grant access to DynamoDB KMS key
-resource "aws_kms_grant" "glue_role_dynamodb_kms_access" {
-  name              = "${var.project_name}-glue-role-dynamodb-kms-grant-${var.environment}"
-  key_id            = module.kms.dynamodb_key_id
-  grantee_principal = module.politician_trades_sec_glue_job.role_arn
-  operations = [
-    "Decrypt",
-    "Encrypt",
-    "GenerateDataKey",
-    "DescribeKey"
-  ]
+# Also update DynamoDB KMS key policy
+resource "aws_kms_key_policy" "dynamodb_key_with_glue_role" {
+  key_id = module.kms.dynamodb_key_id
+
+  # Get the existing policy and add the Glue role statement
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      jsondecode(data.aws_kms_key.dynamodb_key.policy).Statement,
+      [
+        {
+          Sid    = "AllowGlueRole"
+          Effect = "Allow"
+          Principal = {
+            AWS = module.politician_trades_sec_glue_job.role_arn
+          }
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ]
+          Resource = "*"
+        }
+      ]
+    )
+  })
 
   depends_on = [
     module.politician_trades_sec_glue_job,
