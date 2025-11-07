@@ -549,8 +549,16 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
     cik = form_data.get('cik', 'unknown')
     accession = form_data.get('accession_number', 'unknown')
     form_type = form_data.get('form_type', 'unknown')
+    filing_date = form_data.get('filing_date', 'unknown')
     
-    local_logger.info(f"      🔍 DOWNLOAD DETAILS: CIK={cik}, Accession={accession}, Type={form_type}")
+    local_logger.info(f"")
+    local_logger.info(f"      " + "="*70)
+    local_logger.info(f"      📥 DOWNLOAD START: CIK={cik}, Accession={accession}, Type={form_type}")
+    local_logger.info(f"      📅 Filing Date: {filing_date}")
+    print(f"", flush=True)
+    print(f"      " + "="*70, flush=True)
+    print(f"      📥 DOWNLOAD START: CIK={cik}, Accession={accession}, Type={form_type}", flush=True)
+    print(f"      📅 Filing Date: {filing_date}", flush=True)
     
     try:
         form_type = form_data.get('form_type')
@@ -569,6 +577,11 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         SEC_BASE_URL_LOCAL = "https://www.sec.gov"
         
         base_url = f"{SEC_BASE_URL_LOCAL}/Archives/edgar/data/{cik}/{accession_dashed}"
+        
+        local_logger.info(f"      🔗 SEC Archive Base URL: {base_url}")
+        local_logger.info(f"      📂 Will store to S3: trades/{target_date}/sec/{form_type}-{cik}-{target_date}.{{ext}}")
+        print(f"      🔗 SEC Archive Base URL: {base_url}", flush=True)
+        print(f"      📂 Will store to S3: trades/{target_date}/sec/{form_type}-{cik}-{target_date}.{{ext}}", flush=True)
         
         # Create session inside function - each worker gets its own
         # Use the same headers as the working test_pagination.py script
@@ -621,17 +634,35 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         content_type = None
         failed_attempts = []
         
+        local_logger.info(f"      📋 Will try {len(urls_to_try)} URL patterns:")
+        print(f"      📋 Will try {len(urls_to_try)} URL patterns:", flush=True)
+        for idx, (url, name) in enumerate(urls_to_try[:5], 1):  # Show first 5
+            local_logger.info(f"         {idx}. {name} -> {url}")
+            print(f"         {idx}. {name} -> {url}", flush=True)
+        if len(urls_to_try) > 5:
+            local_logger.info(f"         ... and {len(urls_to_try) - 5} more")
+            print(f"         ... and {len(urls_to_try) - 5} more", flush=True)
+        
         for file_url, file_name in urls_to_try:
             try:
-                local_logger.info(f"      🔄 Attempting download: {file_name} from {file_url}")
-                print(f"      🔄 Attempting download: {file_name} from {file_url}", flush=True)
+                local_logger.info(f"")
+                local_logger.info(f"      🔄 ATTEMPTING: {file_name}")
+                local_logger.info(f"      🔗 URL: {file_url}")
+                print(f"", flush=True)
+                print(f"      🔄 ATTEMPTING: {file_name}", flush=True)
+                print(f"      🔗 URL: {file_url}", flush=True)
                 
                 download_start_time = datetime.now()
                 response = session.get(file_url, timeout=30)
                 download_duration = (datetime.now() - download_start_time).total_seconds()
                 
-                local_logger.info(f"         📥 Response: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s")
-                print(f"         📥 Response: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s", flush=True)
+                local_logger.info(f"      📥 RESPONSE: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s")
+                print(f"      📥 RESPONSE: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s", flush=True)
+                
+                if len(response.content) > 0:
+                    content_preview = response.content[:200].decode('utf-8', errors='ignore')
+                    local_logger.info(f"      📄 Content Preview (first 200 chars): {content_preview}")
+                    print(f"      📄 Content Preview (first 200 chars): {content_preview}", flush=True)
                 
                 if response.status_code == 200:
                     file_content = response.content
@@ -912,16 +943,39 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                 continue
         
         if not file_content:
+            local_logger.error(f"")
             local_logger.error(f"      ❌ DOWNLOAD FAILED: CIK={cik}, Accession={accession_dashed}")
-            local_logger.error(f"         Attempted URLs: {[url for url, _ in urls_to_try]}")
-            local_logger.error(f"         Failed attempts: {failed_attempts}")
+            local_logger.error(f"      📋 Attempted {len(urls_to_try)} URLs:")
+            print(f"", flush=True)
             print(f"      ❌ DOWNLOAD FAILED: CIK={cik}, Accession={accession_dashed}", flush=True)
-            print(f"         Attempted URLs: {[url for url, _ in urls_to_try]}", flush=True)
-            print(f"         Failed attempts: {failed_attempts}", flush=True)
+            print(f"      📋 Attempted {len(urls_to_try)} URLs:", flush=True)
+            for idx, (url, name) in enumerate(urls_to_try, 1):
+                local_logger.error(f"         {idx}. {name}: {url}")
+                print(f"         {idx}. {name}: {url}", flush=True)
+            local_logger.error(f"      ❌ All attempts failed:")
+            print(f"      ❌ All attempts failed:", flush=True)
+            for attempt in failed_attempts:
+                local_logger.error(f"         - {attempt}")
+                print(f"         - {attempt}", flush=True)
+            local_logger.error(f"      " + "="*70)
+            print(f"      " + "="*70, flush=True)
             return None
         
         # Generate S3 key
         s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{target_date}.{file_ext}"
+        
+        local_logger.info(f"")
+        local_logger.info(f"      💾 UPLOADING TO S3:")
+        local_logger.info(f"         Bucket: {s3_bucket_name}")
+        local_logger.info(f"         Key: {s3_key}")
+        local_logger.info(f"         Size: {len(file_content):,} bytes")
+        local_logger.info(f"         Content-Type: {content_type}")
+        print(f"", flush=True)
+        print(f"      💾 UPLOADING TO S3:", flush=True)
+        print(f"         Bucket: {s3_bucket_name}", flush=True)
+        print(f"         Key: {s3_key}", flush=True)
+        print(f"         Size: {len(file_content):,} bytes", flush=True)
+        print(f"         Content-Type: {content_type}", flush=True)
         
         # Create S3 client locally to avoid Spark serialization issues
         s3_client_local = boto3.client('s3')
@@ -933,8 +987,12 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
         )
         
-        local_logger.info(f"      ✅ S3 UPLOAD SUCCESS: S3Key={s3_key}, Bucket={s3_bucket_name}, Size={len(file_content)} bytes")
-        local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing (ext: {file_ext}, size: {len(file_content):,} bytes)")
+        local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
+        local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
+        local_logger.info(f"      " + "="*70)
+        print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
+        print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
+        print(f"      " + "="*70, flush=True)
         
         return {
             's3_key': s3_key,
@@ -2062,6 +2120,13 @@ try:
     target_date_broadcast = sc.broadcast(target_date)
     s3_bucket_broadcast = sc.broadcast(s3_bucket)
     dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
+    
+    # Limit to first 10 forms for testing
+    test_limit = 10
+    if len(forms) > test_limit:
+        logger.info(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)")
+        print(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)", flush=True)
+        forms = forms[:test_limit]
     
     # Create RDD from forms list
     forms_rdd = sc.parallelize(forms)
