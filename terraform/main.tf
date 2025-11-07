@@ -45,6 +45,10 @@ module "kms" {
   deletion_window_in_days = var.kms_deletion_window_in_days
   key_administrators      = var.kms_key_administrators
   allowed_services        = var.kms_allowed_services
+  # Add Glue role ARN for KMS access
+  additional_role_arns = [
+    module.politician_trades_sec_glue_job.role_arn
+  ]
 }
 
 # Secrets Manager for OAuth credentials

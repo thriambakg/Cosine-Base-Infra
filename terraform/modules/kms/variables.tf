@@ -48,6 +48,13 @@ variable "allowed_services" {
     "dynamodb.amazonaws.com",
     "logs.amazonaws.com",
     "s3.amazonaws.com",
-    "cloudfront.amazonaws.com"
+    "cloudfront.amazonaws.com",
+    "glue.amazonaws.com"
   ]
+}
+
+variable "additional_role_arns" {
+  description = "List of additional IAM role ARNs that need KMS access (e.g., Glue job roles)"
+  type        = list(string)
+  default     = []
 }

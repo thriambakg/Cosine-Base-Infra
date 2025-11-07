@@ -53,6 +53,21 @@ resource "aws_kms_key" "main" {
           "kms:CancelKeyDeletion"
         ]
         Resource = "*"
+      }] : [],
+      length(var.additional_role_arns) > 0 ? [{
+        Sid    = "AllowAdditionalRoles"
+        Effect = "Allow"
+        Principal = {
+          AWS = var.additional_role_arns
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
+        ]
+        Resource = "*"
         }] : [], [
         {
           Sid    = "AllowServiceUsage"
@@ -130,6 +145,21 @@ resource "aws_kms_key" "dynamodb" {
           "kms:UntagResource",
           "kms:ScheduleKeyDeletion",
           "kms:CancelKeyDeletion"
+        ]
+        Resource = "*"
+      }] : [],
+      length(var.additional_role_arns) > 0 ? [{
+        Sid    = "AllowAdditionalRoles"
+        Effect = "Allow"
+        Principal = {
+          AWS = var.additional_role_arns
+        }
+        Action = [
+          "kms:Encrypt",
+          "kms:Decrypt",
+          "kms:ReEncrypt*",
+          "kms:GenerateDataKey*",
+          "kms:DescribeKey"
         ]
         Resource = "*"
         }] : [], [
