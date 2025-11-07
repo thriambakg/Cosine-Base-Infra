@@ -544,27 +544,37 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
     """
     # Import inside function to avoid serialization issues
     import logging
+    import sys
     local_logger = logging.getLogger()
     
-    cik = form_data.get('cik', 'unknown')
-    accession = form_data.get('accession_number', 'unknown')
-    form_type = form_data.get('form_type', 'unknown')
-    filing_date = form_data.get('filing_date', 'unknown')
-    
-    local_logger.info(f"")
-    local_logger.info(f"      " + "="*70)
-    local_logger.info(f"      📥 DOWNLOAD START: CIK={cik}, Accession={accession}, Type={form_type}")
-    local_logger.info(f"      📅 Filing Date: {filing_date}")
-    print(f"", flush=True)
-    print(f"      " + "="*70, flush=True)
-    print(f"      📥 DOWNLOAD START: CIK={cik}, Accession={accession}, Type={form_type}", flush=True)
-    print(f"      📅 Filing Date: {filing_date}", flush=True)
+    # Force immediate logging with print statements
+    print("="*80, flush=True)
+    print("🔵 download_sec_form CALLED", flush=True)
+    print(f"   form_data keys: {list(form_data.keys()) if form_data else 'None'}", flush=True)
+    print(f"   target_date: {target_date}", flush=True)
+    print(f"   s3_bucket_name: {s3_bucket_name}", flush=True)
     
     try:
-        form_type = form_data.get('form_type')
+        cik = form_data.get('cik', 'unknown')
+        accession = form_data.get('accession_number', 'unknown')
+        form_type = form_data.get('form_type', 'unknown')
+        filing_date = form_data.get('filing_date', 'unknown')
         
-        if not all([cik, accession]):
-            local_logger.warning(f"   ⚠️ Missing CIK/accession: CIK={cik}, Accession={accession}")
+        print(f"   Extracted: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date}", flush=True)
+        
+        local_logger.info(f"")
+        local_logger.info(f"      " + "="*70)
+        local_logger.info(f"      📥 DOWNLOAD START: CIK={cik}, Accession={accession}, Type={form_type}")
+        local_logger.info(f"      📅 Filing Date: {filing_date}")
+        print(f"", flush=True)
+        print(f"      " + "="*70, flush=True)
+        print(f"      📥 DOWNLOAD START: CIK={cik}, Accession={accession}, Type={form_type}", flush=True)
+        print(f"      📅 Filing Date: {filing_date}", flush=True)
+        
+        if not all([cik, accession]) or cik == 'unknown' or accession == 'unknown':
+            error_msg = f"   ⚠️ Missing CIK/accession: CIK={cik}, Accession={accession}"
+            local_logger.warning(error_msg)
+            print(error_msg, flush=True)
             return None
         
         # Format accession number
@@ -982,10 +992,25 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         }
         
     except Exception as e:
-        local_logger.error(f"      ❌ DOWNLOAD EXCEPTION: CIK={cik}, Accession={accession}, Error={e}")
-        local_logger.error(f"         Error type: {type(e).__name__}")
+        error_type = type(e).__name__
+        error_msg = str(e)
         import traceback
-        local_logger.error(f"         Traceback: {traceback.format_exc()}")
+        error_traceback = traceback.format_exc()
+        
+        local_logger.error(f"      ❌ DOWNLOAD EXCEPTION: CIK={cik}, Accession={accession}, Error={e}")
+        local_logger.error(f"         Error type: {error_type}")
+        local_logger.error(f"         Traceback: {error_traceback}")
+        
+        print("="*80, flush=True)
+        print(f"❌ DOWNLOAD EXCEPTION CAUGHT", flush=True)
+        print(f"   CIK: {cik}", flush=True)
+        print(f"   Accession: {accession}", flush=True)
+        print(f"   Error Type: {error_type}", flush=True)
+        print(f"   Error Message: {error_msg}", flush=True)
+        print(f"   Traceback:", flush=True)
+        print(error_traceback, flush=True)
+        print("="*80, flush=True)
+        
         return None
 
 
