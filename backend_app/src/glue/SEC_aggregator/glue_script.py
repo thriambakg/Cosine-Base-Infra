@@ -604,16 +604,8 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         index_url = f"{base_url}/index.htm"
         urls_to_try.append((index_url, "index.htm"))
         
-        # Priority 2: Try known document file patterns (prefer HTML, then XML)
+        # Priority 2: Try known document file patterns (matching downloader Lambda - XML patterns)
         doc_urls = [
-            # Try HTML versions first
-            f"{accession_dashed}-primary-document.html",
-            f"{accession_dashed}-primarydoc.html",
-            "primary-document.html",
-            "doc4.html",  # Common for Form 4
-            "doc1.html",
-            f"{accession_dashed}.html",
-            # Then try XML versions
             f"{accession_dashed}-primary-document.xml",
             f"{accession_dashed}-primarydoc.xml",
             "primary-document.xml",
@@ -679,25 +671,17 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                             
                             doc_links = []
                             
-                            # Strategy 1: Find all .html/.htm file links (highest priority - prefer HTML)
-                            html_pattern = r'href="([^"]*\.html?[^"]*)"'
-                            html_matches = re.findall(html_pattern, html_text, re.IGNORECASE)
-                            doc_links.extend(html_matches)
-                            
-                            # Strategy 2: Find all .xml file links (fallback if no HTML)
+                            # Strategy 1: Find all .xml file links (prioritize these over .txt) - matching downloader Lambda
                             xml_pattern = r'href="([^"]*\.xml[^"]*)"'
                             xml_matches = re.findall(xml_pattern, html_text, re.IGNORECASE)
                             doc_links.extend(xml_matches)
                             
-                            # Strategy 3: Look for primary document patterns (prioritize HTML, then XML)
+                            # Strategy 2: Look for primary document patterns (highest priority) - matching downloader Lambda
                             primary_patterns = [
-                                r'href="([^"]*primary[_-]?document[^"]*\.html?[^"]*)"',
-                                r'href="([^"]*primarydoc[^"]*\.html?[^"]*)"',
-                                r'href="([^"]*document[^"]*\.html?[^"]*)"',
-                                r'href="([^"]*doc\d+\.html?[^"]*)"',
                                 r'href="([^"]*primary[_-]?document[^"]*\.xml[^"]*)"',
                                 r'href="([^"]*primarydoc[^"]*\.xml[^"]*)"',
                                 r'href="([^"]*document[^"]*\.xml[^"]*)"',
+                                # Common SEC naming: doc4.xml for Form 4
                                 r'href="([^"]*doc\d+\.xml[^"]*)"',
                             ]
                             primary_links = []
@@ -707,7 +691,7 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                             # Prepend primary links to prioritize them
                             doc_links = primary_links + [link for link in doc_links if link not in primary_links]
                             
-                            # Strategy 4: If no HTML/XML found, look for .txt files
+                            # Strategy 3: If no XML found, look for .txt files (last resort, contains SGML+XML) - matching downloader Lambda
                             if not doc_links:
                                 txt_pattern = r'href="([^"]*\.txt[^"]*)"'
                                 txt_matches = re.findall(txt_pattern, html_text, re.IGNORECASE)
@@ -727,19 +711,16 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                                     seen.add(link)
                                     unique_doc_links.append(link)
                             
-                            # Sort: HTML files first, then XML, then others
+                            # Sort: XML files first, then others (matching downloader Lambda)
                             def link_priority(link):
-                                link_lower = link.lower()
-                                if link_lower.endswith('.html') or link_lower.endswith('.htm'):
-                                    return 0  # Highest priority for HTML
-                                elif link_lower.endswith('.xml'):
+                                if link.endswith('.xml'):
+                                    return 0  # Highest priority
+                                elif 'primary' in link.lower() or 'document' in link.lower():
                                     return 1
-                                elif 'primary' in link_lower or 'document' in link_lower:
+                                elif 'doc' in link.lower():
                                     return 2
-                                elif 'doc' in link_lower:
-                                    return 3
                                 else:
-                                    return 4
+                                    return 3
                             
                             sorted_links = sorted(unique_doc_links, key=link_priority)
                             
@@ -778,15 +759,18 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                                                  b'<document>' in doc_content or 
                                                  b'<edgarDocument' in doc_content)
                                         
-                                        # Prefer HTML over XML
+                                        # Accept either HTML or XML - we can parse both (matching downloader Lambda)
+                                        # But prefer HTML if both are detected (user requested HTML files)
                                         if is_html:
+                                            # HTML rendering - accept it, matcher will parse it
                                             file_content = doc_content
                                             file_ext = 'html'
                                             content_type = 'text/html'
-                                            local_logger.info(f"      ✅ Found HTML document: {doc_link}")
-                                            print(f"      ✅ Found HTML document: {doc_link}", flush=True)
+                                            local_logger.info(f"      ✅ Found HTML document (will parse): {doc_link}")
+                                            print(f"      ✅ Found HTML document (will parse): {doc_link}", flush=True)
                                             break
                                         elif is_xml and not is_html:
+                                            # Pure XML content
                                             file_content = doc_content
                                             file_ext = 'xml'
                                             content_type = 'application/xml'
@@ -825,20 +809,10 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                             print(f"      ⚠️ Downloaded file is an SGML header, looking for actual document...", flush=True)
                             
                             doc_candidates = [
-                                # Try HTML versions first
-                                f"{accession_dashed}-primary-document.html",
-                                f"{accession_dashed}-primarydoc.html",
-                                "primary-document.html",
-                                "doc4.html",
-                                "doc1.html",
-                                "doc2.html",
-                                "doc3.html",
-                                f"{accession_dashed}.html",
-                                # Then try XML versions
                                 f"{accession_dashed}-primary-document.xml",
                                 f"{accession_dashed}-primarydoc.xml",
                                 "primary-document.xml",
-                                "doc4.xml",
+                                "doc4.xml",  # Common document file
                                 "doc1.xml",
                                 "doc2.xml",
                                 "doc3.xml",
@@ -853,21 +827,24 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                                     doc_response = session.get(doc_url, timeout=30)
                                     if doc_response.status_code == 200:
                                         doc_content = doc_response.content
+                                        # Accept any content type - let matcher handle detection (matching downloader Lambda)
                                         content_sample = doc_content[:100].lower()
                                         is_html = b'<html' in content_sample or b'<!doctype html' in content_sample
                                         is_xml = doc_content.startswith(b'<?xml') or b'<ownershipDocument' in doc_content or b'<document>' in doc_content
                                         
-                                        # Prefer HTML over XML
+                                        # Prefer HTML if both detected, otherwise accept XML (matching downloader Lambda logic)
                                         if is_html:
                                             file_content = doc_content
                                             file_ext = 'html'
                                             content_type = 'text/html'
+                                            local_logger.info(f"      ✅ Found HTML document file: {doc_url}")
                                             found_doc = True
                                             break
                                         elif is_xml:
                                             file_content = doc_content
                                             file_ext = 'xml'
                                             content_type = 'application/xml'
+                                            local_logger.info(f"      ✅ Found XML document file: {doc_url}")
                                             found_doc = True
                                             break
                                         else:
