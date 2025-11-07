@@ -581,87 +581,343 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             'Upgrade-Insecure-Requests': '1'
         })
         
-        # Try to download the file
-        file_extensions = ['.xml', '.txt', '.pdf']
+        # Build list of URLs to try (matching downloader Lambda logic)
+        # Priority 1: Download index.htm to find actual document links
+        # Priority 2: Try known document file patterns
+        # Priority 3: Try .txt file
+        urls_to_try = []
+        
+        # Priority 1: Download index.htm to find actual document links
+        index_url = f"{base_url}/index.htm"
+        urls_to_try.append((index_url, "index.htm"))
+        
+        # Priority 2: Try known document file patterns (prefer HTML, then XML)
+        doc_urls = [
+            # Try HTML versions first
+            f"{accession_dashed}-primary-document.html",
+            f"{accession_dashed}-primarydoc.html",
+            "primary-document.html",
+            "doc4.html",  # Common for Form 4
+            "doc1.html",
+            f"{accession_dashed}.html",
+            # Then try XML versions
+            f"{accession_dashed}-primary-document.xml",
+            f"{accession_dashed}-primarydoc.xml",
+            "primary-document.xml",
+            "doc4.xml",  # Common for Form 4
+            "doc1.xml",
+            f"{accession_dashed}.xml",
+        ]
+        for doc_name in doc_urls:
+            doc_url = f"{base_url}/{doc_name}"
+            urls_to_try.append((doc_url, doc_name))
+        
+        # Priority 3: Try .txt file
+        txt_url = f"{base_url}/{accession_dashed}.txt"
+        urls_to_try.append((txt_url, f"{accession_dashed}.txt"))
+        
         file_content = None
         file_ext = None
-        successful_url = None
+        content_type = None
+        failed_attempts = []
         
-        for ext in file_extensions:
+        for file_url, file_name in urls_to_try:
             try:
-                if ext == '.xml':
-                    file_url = f"{base_url}/{accession_dashed}-primary-document.xml"
-                elif ext == '.txt':
-                    file_url = f"{base_url}/{accession_dashed}.txt"
-                else:
-                    file_url = f"{base_url}/{accession_dashed}.pdf"
-                
-                local_logger.info(f"      🔄 Attempting download: {ext} from {file_url}")
-                print(f"      🔄 Attempting download: {ext} from {file_url}", flush=True)
-                local_logger.info(f"         📡 Calling SEC Archives API:")
-                print(f"         📡 Calling SEC Archives API:", flush=True)
-                local_logger.info(f"            URL: {file_url}")
-                print(f"            URL: {file_url}", flush=True)
-                local_logger.info(f"            Method: GET")
-                print(f"            Method: GET", flush=True)
-                user_agent = session.headers.get('User-Agent', 'N/A')
-                local_logger.info(f"            Headers: User-Agent={user_agent[:50]}...")
-                print(f"            Headers: User-Agent={user_agent[:50]}...", flush=True)
+                local_logger.info(f"      🔄 Attempting download: {file_name} from {file_url}")
+                print(f"      🔄 Attempting download: {file_name} from {file_url}", flush=True)
                 
                 download_start_time = datetime.now()
                 response = session.get(file_url, timeout=30)
                 download_duration = (datetime.now() - download_start_time).total_seconds()
                 
-                local_logger.info(f"         📥 SEC Archives API Response:")
-                print(f"         📥 SEC Archives API Response:", flush=True)
-                local_logger.info(f"            Status Code: {response.status_code}")
-                print(f"            Status Code: {response.status_code}", flush=True)
-                local_logger.info(f"            Response Headers: {dict(response.headers)}")
-                print(f"            Response Headers: {dict(response.headers)}", flush=True)
-                local_logger.info(f"            Response Size: {len(response.content):,} bytes")
-                print(f"            Response Size: {len(response.content):,} bytes", flush=True)
-                local_logger.info(f"            Response Time: {download_duration:.2f}s")
-                print(f"            Response Time: {download_duration:.2f}s", flush=True)
-                if len(response.content) > 0:
-                    preview = response.content[:300].decode('utf-8', errors='ignore')
-                    local_logger.info(f"            Response Preview (first 300 chars): {preview}")
-                    print(f"            Response Preview (first 300 chars): {preview}", flush=True)
+                local_logger.info(f"         📥 Response: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s")
+                print(f"         📥 Response: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s", flush=True)
                 
                 if response.status_code == 200:
                     file_content = response.content
-                    file_ext = ext[1:]  # Remove dot
-                    successful_url = file_url
                     
-                    # For .txt files, check if it's XML
-                    if ext == '.txt' and file_content.startswith(b'<?xml'):
-                        file_ext = 'xml'
-                        local_logger.info(f"      ℹ️ Detected XML content in .txt file")
+                    # Determine file extension and content type (matching downloader Lambda logic)
+                    if file_name.endswith('.htm') or file_name.endswith('.html'):
+                        # For HTML files, try to find the primary document link
+                        file_ext = 'html'
+                        content_type = 'text/html'
+                        
+                        # Check if HTML contains document links we should follow
+                        try:
+                            html_text = file_content.decode('utf-8', errors='ignore')
+                            
+                            doc_links = []
+                            
+                            # Strategy 1: Find all .html/.htm file links (highest priority - prefer HTML)
+                            html_pattern = r'href="([^"]*\.html?[^"]*)"'
+                            html_matches = re.findall(html_pattern, html_text, re.IGNORECASE)
+                            doc_links.extend(html_matches)
+                            
+                            # Strategy 2: Find all .xml file links (fallback if no HTML)
+                            xml_pattern = r'href="([^"]*\.xml[^"]*)"'
+                            xml_matches = re.findall(xml_pattern, html_text, re.IGNORECASE)
+                            doc_links.extend(xml_matches)
+                            
+                            # Strategy 3: Look for primary document patterns (prioritize HTML, then XML)
+                            primary_patterns = [
+                                r'href="([^"]*primary[_-]?document[^"]*\.html?[^"]*)"',
+                                r'href="([^"]*primarydoc[^"]*\.html?[^"]*)"',
+                                r'href="([^"]*document[^"]*\.html?[^"]*)"',
+                                r'href="([^"]*doc\d+\.html?[^"]*)"',
+                                r'href="([^"]*primary[_-]?document[^"]*\.xml[^"]*)"',
+                                r'href="([^"]*primarydoc[^"]*\.xml[^"]*)"',
+                                r'href="([^"]*document[^"]*\.xml[^"]*)"',
+                                r'href="([^"]*doc\d+\.xml[^"]*)"',
+                            ]
+                            primary_links = []
+                            for pattern in primary_patterns:
+                                matches = re.findall(pattern, html_text, re.IGNORECASE)
+                                primary_links.extend(matches)
+                            # Prepend primary links to prioritize them
+                            doc_links = primary_links + [link for link in doc_links if link not in primary_links]
+                            
+                            # Strategy 4: If no HTML/XML found, look for .txt files
+                            if not doc_links:
+                                txt_pattern = r'href="([^"]*\.txt[^"]*)"'
+                                txt_matches = re.findall(txt_pattern, html_text, re.IGNORECASE)
+                                doc_links.extend(txt_matches)
+                            
+                            # Strategy 4: Look for links with accession number
+                            if not doc_links:
+                                acc_pattern = rf'href="([^"]*{re.escape(accession_dashed)}[^"]*)"'
+                                acc_matches = re.findall(acc_pattern, html_text, re.IGNORECASE)
+                                doc_links.extend(acc_matches)
+                            
+                            # Remove duplicates
+                            seen = set()
+                            unique_doc_links = []
+                            for link in doc_links:
+                                if link not in seen:
+                                    seen.add(link)
+                                    unique_doc_links.append(link)
+                            
+                            # Sort: HTML files first, then XML, then others
+                            def link_priority(link):
+                                link_lower = link.lower()
+                                if link_lower.endswith('.html') or link_lower.endswith('.htm'):
+                                    return 0  # Highest priority for HTML
+                                elif link_lower.endswith('.xml'):
+                                    return 1
+                                elif 'primary' in link_lower or 'document' in link_lower:
+                                    return 2
+                                elif 'doc' in link_lower:
+                                    return 3
+                                else:
+                                    return 4
+                            
+                            sorted_links = sorted(unique_doc_links, key=link_priority)
+                            
+                            # Try each found link
+                            for doc_link in sorted_links[:10]:
+                                # Handle relative URLs
+                                if doc_link.startswith('/'):
+                                    doc_link = f"https://www.sec.gov{doc_link}"
+                                elif not doc_link.startswith('http'):
+                                    doc_link = f"{base_url}/{doc_link}"
+                                
+                                if doc_link == file_url:
+                                    continue
+                                
+                                local_logger.info(f"      🔗 Found document link in HTML, trying: {doc_link}")
+                                print(f"      🔗 Found document link in HTML, trying: {doc_link}", flush=True)
+                                try:
+                                    doc_response = session.get(doc_link, timeout=30)
+                                    if doc_response.status_code == 200:
+                                        doc_content = doc_response.content
+                                        content_start = doc_content[:1000].lower()
+                                        
+                                        # Check for HTML indicators
+                                        is_html = any(indicator in content_start for indicator in [
+                                            b'<!doctype html',
+                                            b'<html',
+                                            b'<head>',
+                                            b'<body>',
+                                            b'<style',
+                                            b'sec form 4',
+                                        ])
+                                        
+                                        # Check for XML indicators
+                                        is_xml = (doc_content.startswith(b'<?xml') or 
+                                                 b'<ownershipDocument' in doc_content or 
+                                                 b'<document>' in doc_content or 
+                                                 b'<edgarDocument' in doc_content)
+                                        
+                                        # Prefer HTML over XML
+                                        if is_html:
+                                            file_content = doc_content
+                                            file_ext = 'html'
+                                            content_type = 'text/html'
+                                            local_logger.info(f"      ✅ Found HTML document: {doc_link}")
+                                            print(f"      ✅ Found HTML document: {doc_link}", flush=True)
+                                            break
+                                        elif is_xml and not is_html:
+                                            file_content = doc_content
+                                            file_ext = 'xml'
+                                            content_type = 'application/xml'
+                                            local_logger.info(f"      ✅ Found XML document: {doc_link}")
+                                            print(f"      ✅ Found XML document: {doc_link}", flush=True)
+                                            break
+                                        elif b'<sec-header' in content_start:
+                                            file_content = doc_content
+                                            file_ext = 'txt'
+                                            content_type = 'text/plain'
+                                            local_logger.info(f"      ✅ Found SGML header: {doc_link}")
+                                            print(f"      ✅ Found SGML header: {doc_link}", flush=True)
+                                            break
+                                        else:
+                                            file_content = doc_content
+                                            file_ext = 'txt'
+                                            content_type = 'text/plain'
+                                            local_logger.info(f"      ✅ Found file (format unclear): {doc_link}")
+                                            print(f"      ✅ Found file (format unclear): {doc_link}", flush=True)
+                                            break
+                                except Exception as doc_error:
+                                    local_logger.warning(f"      ⚠️ Could not download document link {doc_link}: {doc_error}")
+                                    continue
+                                    
+                        except Exception as html_parse_error:
+                            local_logger.warning(f"      ⚠️ Could not parse HTML for document links: {html_parse_error}")
+                            # If HTML parsing fails, we'll store the HTML
                     
-                    # Check if it's HTML (for parsing)
-                    if file_content.startswith(b'<!DOCTYPE') or file_content.startswith(b'<html'):
-                        if file_ext != 'html':
+                    elif file_name.endswith('.txt'):
+                        content_lower = file_content.lower()
+                        
+                        # Check if it's an SGML header file
+                        if b'<sec-header' in content_lower or b'<acceptance-datetime' in content_lower or b'.hdr.sgml' in file_content:
+                            # This is an SGML header, try to find the actual document
+                            local_logger.warning(f"      ⚠️ Downloaded file is an SGML header, looking for actual document...")
+                            print(f"      ⚠️ Downloaded file is an SGML header, looking for actual document...", flush=True)
+                            
+                            doc_candidates = [
+                                # Try HTML versions first
+                                f"{accession_dashed}-primary-document.html",
+                                f"{accession_dashed}-primarydoc.html",
+                                "primary-document.html",
+                                "doc4.html",
+                                "doc1.html",
+                                "doc2.html",
+                                "doc3.html",
+                                f"{accession_dashed}.html",
+                                # Then try XML versions
+                                f"{accession_dashed}-primary-document.xml",
+                                f"{accession_dashed}-primarydoc.xml",
+                                "primary-document.xml",
+                                "doc4.xml",
+                                "doc1.xml",
+                                "doc2.xml",
+                                "doc3.xml",
+                                f"{accession_dashed}.xml",
+                            ]
+                            
+                            found_doc = False
+                            for doc_candidate in doc_candidates:
+                                doc_url = f"{base_url}/{doc_candidate}"
+                                try:
+                                    local_logger.info(f"      🔍 Trying document candidate: {doc_url}")
+                                    doc_response = session.get(doc_url, timeout=30)
+                                    if doc_response.status_code == 200:
+                                        doc_content = doc_response.content
+                                        content_sample = doc_content[:100].lower()
+                                        is_html = b'<html' in content_sample or b'<!doctype html' in content_sample
+                                        is_xml = doc_content.startswith(b'<?xml') or b'<ownershipDocument' in doc_content or b'<document>' in doc_content
+                                        
+                                        # Prefer HTML over XML
+                                        if is_html:
+                                            file_content = doc_content
+                                            file_ext = 'html'
+                                            content_type = 'text/html'
+                                            found_doc = True
+                                            break
+                                        elif is_xml:
+                                            file_content = doc_content
+                                            file_ext = 'xml'
+                                            content_type = 'application/xml'
+                                            found_doc = True
+                                            break
+                                        else:
+                                            file_content = doc_content
+                                            file_ext = 'txt'
+                                            content_type = 'text/plain'
+                                            found_doc = True
+                                            break
+                                except Exception as doc_error:
+                                    continue
+                            
+                            if not found_doc:
+                                local_logger.info(f"      📄 No separate document file found, accepting SGML header")
+                                file_ext = 'txt'
+                                content_type = 'text/plain'
+                        
+                        elif file_content.startswith(b'<?xml'):
+                            file_ext = 'xml'
+                            content_type = 'application/xml'
+                        elif b'<ownershipDocument' in file_content or b'<document>' in file_content or b'<XBRL>' in file_content:
+                            file_ext = 'xml'
+                            content_type = 'application/xml'
+                        elif b'<html' in content_lower or b'<!doctype html' in content_lower:
+                            file_ext = 'txt'
+                            content_type = 'text/html'
+                        else:
+                            file_ext = 'txt'
+                            content_type = 'text/plain'
+                    
+                    elif file_name.endswith('.xml'):
+                        content_sample = file_content[:100].lower()
+                        if b'<html' in content_sample or b'<!doctype html' in content_sample:
                             file_ext = 'html'
-                            local_logger.info(f"      ℹ️ Detected HTML content, changed extension to html")
+                            content_type = 'text/html'
+                        elif file_content.startswith(b'<?xml') or b'<ownershipDocument' in file_content or b'<document>' in file_content:
+                            file_ext = 'xml'
+                            content_type = 'application/xml'
+                        else:
+                            file_ext = 'txt'
+                            content_type = 'text/plain'
                     
-                    local_logger.info(f"      ✅ DOWNLOAD SUCCESS: CIK={cik}, Accession={accession}, URL={file_url}, Size={len(file_content):,} bytes, Ext={file_ext}")
-                    local_logger.info(f"      📄 File Content Preview (first 200 chars): {file_content[:200].decode('utf-8', errors='ignore')}")
-                    break
+                    elif file_name.endswith('.pdf'):
+                        file_ext = 'pdf'
+                        content_type = 'application/pdf'
+                    else:
+                        # Try to determine from content
+                        if file_content.startswith(b'<?xml') or b'<ownershipDocument' in file_content or b'<document>' in file_content:
+                            file_ext = 'xml'
+                            content_type = 'application/xml'
+                        elif b'<html' in file_content.lower():
+                            file_ext = 'html'
+                            content_type = 'text/html'
+                        else:
+                            file_ext = 'txt'
+                            content_type = 'text/plain'
+                    
+                    # Accept whatever content we got
+                    if file_content:
+                        local_logger.info(f"      ✅ DOWNLOAD SUCCESS: CIK={cik}, Accession={accession}, URL={file_url}, Size={len(file_content):,} bytes, Ext={file_ext}")
+                        print(f"      ✅ DOWNLOAD SUCCESS: CIK={cik}, Accession={accession}, URL={file_url}, Size={len(file_content):,} bytes, Ext={file_ext}", flush=True)
+                        break
                 else:
-                    local_logger.warning(f"      ⚠️ Attempted {ext}: Status {response.status_code}, Response preview: {response.text[:200]}")
+                    failed_attempts.append(f"{file_url} (HTTP {response.status_code})")
+                    local_logger.warning(f"      ⚠️ HTTP {response.status_code} for {file_url}, trying next option...")
+                    
+            except requests.exceptions.Timeout as e:
+                failed_attempts.append(f"{file_url} (Timeout)")
+                local_logger.warning(f"      ⚠️ Timeout downloading {file_url}: {e}")
+                continue
             except Exception as e:
-                local_logger.warning(f"      ⚠️ Attempted {ext}: Exception - {type(e).__name__}: {str(e)[:200]}")
-                import traceback
-                local_logger.debug(f"         Traceback: {traceback.format_exc()[:500]}")
+                failed_attempts.append(f"{file_url} (Error: {str(e)})")
+                local_logger.warning(f"      ⚠️ Could not download {file_url}: {e}")
                 continue
         
         if not file_content:
             local_logger.error(f"      ❌ DOWNLOAD FAILED: CIK={cik}, Accession={accession_dashed}")
-            local_logger.error(f"         Tried all file extensions: .xml, .txt, .pdf")
-            local_logger.error(f"         Base URL: {base_url}")
-            local_logger.error(f"         Tried URLs:")
-            local_logger.error(f"            - {base_url}/{accession_dashed}-primary-document.xml")
-            local_logger.error(f"            - {base_url}/{accession_dashed}.txt")
-            local_logger.error(f"            - {base_url}/{accession_dashed}.pdf")
+            local_logger.error(f"         Attempted URLs: {[url for url, _ in urls_to_try]}")
+            local_logger.error(f"         Failed attempts: {failed_attempts}")
+            print(f"      ❌ DOWNLOAD FAILED: CIK={cik}, Accession={accession_dashed}", flush=True)
+            print(f"         Attempted URLs: {[url for url, _ in urls_to_try]}", flush=True)
+            print(f"         Failed attempts: {failed_attempts}", flush=True)
             return None
         
         # Generate S3 key
@@ -669,12 +925,12 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         
         # Create S3 client locally to avoid Spark serialization issues
         s3_client_local = boto3.client('s3')
-        # Upload to S3
+        # Upload to S3 with correct content type
         s3_client_local.put_object(
             Bucket=s3_bucket_name,
             Key=s3_key,
             Body=file_content,
-            ContentType='application/xml' if file_ext == 'xml' else 'application/pdf'
+            ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
         )
         
         local_logger.info(f"      ✅ S3 UPLOAD SUCCESS: S3Key={s3_key}, Bucket={s3_bucket_name}, Size={len(file_content)} bytes")
