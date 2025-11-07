@@ -45,10 +45,8 @@ module "kms" {
   deletion_window_in_days = var.kms_deletion_window_in_days
   key_administrators      = var.kms_key_administrators
   allowed_services        = var.kms_allowed_services
-  # Add Glue role ARN for KMS access
-  additional_role_arns = [
-    module.politician_trades_sec_glue_job.role_arn
-  ]
+  # Note: Glue role ARN will be added via separate aws_kms_key_policy resource to avoid circular dependency
+  additional_role_arns = []
 }
 
 # Secrets Manager for OAuth credentials
@@ -2533,5 +2531,42 @@ module "politician_trades_sec_glue_job" {
     module.sec_filings_s3,
     module.sec_filings_table,
     aws_iam_policy.glue_sec_filings_s3_policy
+  ]
+}
+
+# Grant Glue job role explicit KMS access (after both are created to avoid circular dependency)
+# This adds the Glue role to the KMS key policy for explicit access
+resource "aws_kms_grant" "glue_role_kms_access" {
+  name              = "${var.project_name}-glue-role-kms-grant-${var.environment}"
+  key_id            = module.kms.main_key_id
+  grantee_principal = module.politician_trades_sec_glue_job.role_arn
+  operations = [
+    "Decrypt",
+    "Encrypt",
+    "GenerateDataKey",
+    "DescribeKey"
+  ]
+
+  depends_on = [
+    module.politician_trades_sec_glue_job,
+    module.kms
+  ]
+}
+
+# Also grant access to DynamoDB KMS key
+resource "aws_kms_grant" "glue_role_dynamodb_kms_access" {
+  name              = "${var.project_name}-glue-role-dynamodb-kms-grant-${var.environment}"
+  key_id            = module.kms.dynamodb_key_id
+  grantee_principal = module.politician_trades_sec_glue_job.role_arn
+  operations = [
+    "Decrypt",
+    "Encrypt",
+    "GenerateDataKey",
+    "DescribeKey"
+  ]
+
+  depends_on = [
+    module.politician_trades_sec_glue_job,
+    module.kms
   ]
 }
