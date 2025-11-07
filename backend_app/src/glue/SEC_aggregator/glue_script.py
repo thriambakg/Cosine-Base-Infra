@@ -555,10 +555,11 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
     print(f"   s3_bucket_name: {s3_bucket_name}", flush=True)
     
     try:
+        # Support both field name variations (from fetcher: accession_number, from Lambda: accessionNumber)
         cik = form_data.get('cik', 'unknown')
-        accession = form_data.get('accession_number', 'unknown')
-        form_type = form_data.get('form_type', 'unknown')
-        filing_date = form_data.get('filing_date', 'unknown')
+        accession = form_data.get('accession_number') or form_data.get('accessionNumber') or form_data.get('accession', 'unknown')
+        form_type = form_data.get('form_type') or form_data.get('formType', 'unknown')
+        filing_date = form_data.get('filing_date') or form_data.get('filingDate', 'unknown')
         
         print(f"   Extracted: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date}", flush=True)
         
@@ -577,15 +578,24 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             print(error_msg, flush=True)
             return None
         
-        # Format accession number
-        if len(accession) == 18:
-            accession_dashed = f"{accession[:10]}-{accession[10:12]}-{accession[12:]}"
+        # Construct accession number with dashes (format: 0001234567-12-345678)
+        # IMPORTANT: Based on working Lambda logs, SEC uses accession WITH dashes in the directory path
+        # The index file is at: {accession-with-dashes}/{accession-with-dashes}-index.htm
+        # Example: /Archives/edgar/data/1509282/0001509282-25-000007/0001509282-25-000007-index.htm
+        
+        # Remove any dashes first to get clean number
+        accession_clean = accession.replace('-', '').strip()
+        
+        # For URL path: use accession WITH dashes (matching working Lambda behavior)
+        if len(accession_clean) == 18:
+            accession_dashed = f"{accession_clean[:10]}-{accession_clean[10:12]}-{accession_clean[12:]}"
         else:
-            accession_dashed = accession
+            accession_dashed = accession_clean
         
         # Use constants directly (strings are safe to serialize)
         SEC_BASE_URL_LOCAL = "https://www.sec.gov"
         
+        # Build base URL - use accession WITH dashes in path (matching working Lambda)
         base_url = f"{SEC_BASE_URL_LOCAL}/Archives/edgar/data/{cik}/{accession_dashed}"
         
         local_logger.info(f"      🔗 SEC Archive Base URL: {base_url}")
@@ -604,15 +614,19 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             'Upgrade-Insecure-Requests': '1'
         })
         
-        # Build list of URLs to try (matching downloader Lambda logic)
+        # Build list of URLs to try (matching downloader Lambda logic exactly)
         # Priority 1: Download index.htm to find actual document links
         # Priority 2: Try known document file patterns
         # Priority 3: Try .txt file
         urls_to_try = []
         
         # Priority 1: Download index.htm to find actual document links
-        index_url = f"{base_url}/index.htm"
-        urls_to_try.append((index_url, "index.htm"))
+        # Based on working Lambda: index file is at {accession-with-dashes}-index.htm
+        index_url = f"{base_url}/{accession_dashed}-index.htm"
+        urls_to_try.append((index_url, f"{accession_dashed}-index.htm"))
+        # Also try plain index.htm as fallback
+        index_url_fallback = f"{base_url}/index.htm"
+        urls_to_try.append((index_url_fallback, "index.htm"))
         
         # Priority 2: Try known document file patterns (matching downloader Lambda - XML patterns)
         doc_urls = [
@@ -670,23 +684,35 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                     file_content = response.content
                     
                     # Determine file extension and content type (matching downloader Lambda logic)
-                    if file_name.endswith('.htm') or file_name.endswith('.html'):
-                        # For HTML files, try to find the primary document link
+                    if file_name.endswith('.htm') or file_name.endswith('.html') or 'index' in file_name.lower():
+                        # For HTML files (including index pages), try to find the primary document link
                         file_ext = 'html'
                         content_type = 'text/html'
                         
                         # Check if HTML contains document links we should follow
+                        # This is the SEC index page that lists available document formats
                         try:
                             html_text = file_content.decode('utf-8', errors='ignore')
                             
+                            local_logger.info(f"      🔍 Parsing index page for document links...")
+                            print(f"      🔍 Parsing index page for document links...", flush=True)
+                            
+                            # Parse the SEC index page table to find document links
+                            # The table has rows with links like:
+                            # <a href="/Archives/edgar/data/1641631/000149315225021146/xslF345X05/ownership.xml">ownership.html</a>
+                            # <a href="/Archives/edgar/data/1641631/000149315225021146/ownership.xml">ownership.xml</a>
+                            
                             doc_links = []
                             
-                            # Strategy 1: Find all .xml file links (prioritize these over .txt) - matching downloader Lambda
+                            # Match Lambda's exact strategy for finding document links
+                            # Strategy 1: Find all .xml file links (prioritize these over .txt)
                             xml_pattern = r'href="([^"]*\.xml[^"]*)"'
                             xml_matches = re.findall(xml_pattern, html_text, re.IGNORECASE)
                             doc_links.extend(xml_matches)
+                            local_logger.info(f"      🔍 Found {len(xml_matches)} XML links in page")
+                            print(f"      🔍 Found {len(xml_matches)} XML links in page", flush=True)
                             
-                            # Strategy 2: Look for primary document patterns (highest priority) - matching downloader Lambda
+                            # Strategy 2: Look for primary document patterns (highest priority)
                             primary_patterns = [
                                 r'href="([^"]*primary[_-]?document[^"]*\.xml[^"]*)"',
                                 r'href="([^"]*primarydoc[^"]*\.xml[^"]*)"',
@@ -701,19 +727,23 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                             # Prepend primary links to prioritize them
                             doc_links = primary_links + [link for link in doc_links if link not in primary_links]
                             
-                            # Strategy 3: If no XML found, look for .txt files (last resort, contains SGML+XML) - matching downloader Lambda
+                            # Strategy 3: If no XML found, look for .txt files (last resort, contains SGML+XML)
                             if not doc_links:
                                 txt_pattern = r'href="([^"]*\.txt[^"]*)"'
                                 txt_matches = re.findall(txt_pattern, html_text, re.IGNORECASE)
                                 doc_links.extend(txt_matches)
+                                local_logger.info(f"      🔍 Found {len(txt_matches)} TXT links (fallback)")
+                                print(f"      🔍 Found {len(txt_matches)} TXT links (fallback)", flush=True)
                             
                             # Strategy 4: Look for links with accession number
                             if not doc_links:
                                 acc_pattern = rf'href="([^"]*{re.escape(accession_dashed)}[^"]*)"'
                                 acc_matches = re.findall(acc_pattern, html_text, re.IGNORECASE)
                                 doc_links.extend(acc_matches)
+                                local_logger.info(f"      🔍 Found {len(acc_matches)} links with accession number")
+                                print(f"      🔍 Found {len(acc_matches)} links with accession number", flush=True)
                             
-                            # Remove duplicates
+                            # Remove duplicates while preserving order
                             seen = set()
                             unique_doc_links = []
                             for link in doc_links:
@@ -721,7 +751,7 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                                     seen.add(link)
                                     unique_doc_links.append(link)
                             
-                            # Sort: XML files first, then others (matching downloader Lambda)
+                            # Sort: XML files first, then others (matching Lambda logic)
                             def link_priority(link):
                                 if link.endswith('.xml'):
                                     return 0  # Highest priority
@@ -734,19 +764,23 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                             
                             sorted_links = sorted(unique_doc_links, key=link_priority)
                             
-                            # Try each found link
+                            local_logger.info(f"      📋 Found {len(sorted_links)} document links, will try XML first...")
+                            print(f"      📋 Found {len(sorted_links)} document links, will try XML first...", flush=True)
+                            
+                            # Try each found link (matching Lambda: try up to 10 links)
                             for doc_link in sorted_links[:10]:
-                                # Handle relative URLs
+                                # Handle relative URLs (matching Lambda logic exactly)
                                 if doc_link.startswith('/'):
                                     doc_link = f"https://www.sec.gov{doc_link}"
                                 elif not doc_link.startswith('http'):
                                     doc_link = f"{base_url}/{doc_link}"
                                 
+                                # Skip if it's the same URL we just tried
                                 if doc_link == file_url:
                                     continue
                                 
-                                local_logger.info(f"      🔗 Found document link in HTML, trying: {doc_link}")
-                                print(f"      🔗 Found document link in HTML, trying: {doc_link}", flush=True)
+                                local_logger.info(f"      🔗 Trying link: {doc_link}")
+                                print(f"      🔗 Trying link: {doc_link}", flush=True)
                                 try:
                                     doc_response = session.get(doc_link, timeout=30)
                                     if doc_response.status_code == 200:
@@ -761,6 +795,11 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                                             b'<body>',
                                             b'<style',
                                             b'sec form 4',
+                                            b'sec form 3',
+                                            b'sec form 5',
+                                            b'form 4',
+                                            b'form 3',
+                                            b'form 5',
                                         ])
                                         
                                         # Check for XML indicators
@@ -803,10 +842,14 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                                             break
                                 except Exception as doc_error:
                                     local_logger.warning(f"      ⚠️ Could not download document link {doc_link}: {doc_error}")
+                                    print(f"      ⚠️ Could not download document link {doc_link}: {doc_error}", flush=True)
                                     continue
                                     
                         except Exception as html_parse_error:
                             local_logger.warning(f"      ⚠️ Could not parse HTML for document links: {html_parse_error}")
+                            print(f"      ⚠️ Could not parse HTML for document links: {html_parse_error}", flush=True)
+                            import traceback
+                            local_logger.warning(f"      Traceback: {traceback.format_exc()}")
                             # If HTML parsing fails, we'll store the HTML
                     
                     elif file_name.endswith('.txt'):
