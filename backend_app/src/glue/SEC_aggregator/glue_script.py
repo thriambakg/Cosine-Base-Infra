@@ -1782,14 +1782,25 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     import logging
     local_logger = logging.getLogger()
     
+    # CRITICAL: Use print statements for Glue console visibility
+    print("="*80, flush=True)
+    print("🟢 process_form CALLED", flush=True)
+    print(f"   form_data keys: {list(form_data.keys()) if form_data else 'None'}", flush=True)
+    print(f"   target_date: {target_date}", flush=True)
+    print(f"   s3_bucket_name: {s3_bucket_name}", flush=True)
+    print(f"   dynamodb_table_name: {dynamodb_table_name}", flush=True)
+    
     cik = form_data.get('cik', 'unknown')
     accession = form_data.get('accession_number', 'unknown')
     form_type = form_data.get('form_type', 'unknown')
     filing_date_str = form_data.get('filing_date', target_date)
     accepted_date_str = form_data.get('accepted_date')
     
+    print(f"   Extracted: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date_str}", flush=True)
+    
     form_start_time = datetime.now()
     local_logger.info(f"📄 Processing Form: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date_str}")
+    print(f"📄 Processing Form: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date_str}", flush=True)
     
     # First check: Verify filing date matches target date before downloading
     local_logger.info(f"   🔍 Step 1/4: Validating filing date...")
@@ -1816,11 +1827,21 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     # Download form
     download_start = datetime.now()
     local_logger.info(f"   📥 Step 2/4: Downloading form...")
+    print(f"   📥 Step 2/4: Downloading form...", flush=True)
+    print(f"   🔵 About to call download_sec_form...", flush=True)
     downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
     download_duration = (datetime.now() - download_start).total_seconds()
     
+    print(f"   🔵 download_sec_form returned: {type(downloaded).__name__}", flush=True)
+    if downloaded:
+        print(f"   🔵 download_sec_form returned dict with keys: {list(downloaded.keys()) if isinstance(downloaded, dict) else 'N/A'}", flush=True)
+    else:
+        print(f"   🔵 download_sec_form returned None or False", flush=True)
+    
     if not downloaded:
-        local_logger.warning(f"   ❌ FAILED: Could not download form (CIK={cik}, Accession={accession}) after {download_duration:.2f}s")
+        error_msg = f"   ❌ FAILED: Could not download form (CIK={cik}, Accession={accession}) after {download_duration:.2f}s"
+        local_logger.warning(error_msg)
+        print(error_msg, flush=True)
         return {'skipped': True, 'reason': 'download_failed'}
     
     s3_key = downloaded.get('s3_key', 'unknown')
