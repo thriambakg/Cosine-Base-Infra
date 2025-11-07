@@ -2511,8 +2511,10 @@ module "politician_trades_sec_glue_job" {
 
   # Note: We pass the policy ARN directly, but it will be resolved at apply time
   # The count-based approach in the module handles unknown values correctly
+  # Match Lambda permissions: S3 access + KMS access (same as downloader Lambda)
   additional_policy_arns = [
-    aws_iam_policy.glue_sec_filings_s3_policy.arn
+    aws_iam_policy.glue_sec_filings_s3_policy.arn,
+    module.kms.kms_access_policy_arn
   ]
 
   default_arguments = {
@@ -2534,25 +2536,50 @@ module "politician_trades_sec_glue_job" {
   ]
 }
 
-# Data sources to get current KMS key policies
-data "aws_kms_key" "main_key" {
-  key_id = module.kms.main_key_id
-}
+# Data source for account ID (needed for KMS key policy)
+data "aws_caller_identity" "current" {}
 
-data "aws_kms_key" "dynamodb_key" {
-  key_id = module.kms.dynamodb_key_id
-}
+# Add Glue role to KMS key policies (after both are created to avoid circular dependency)
+# We reconstruct the policy based on the KMS module's structure and add the Glue role
+locals {
+  # Get account ID for root access statement
+  account_id = data.aws_caller_identity.current.account_id
 
-# Update KMS key policies to include Glue role ARN (after both are created to avoid circular dependency)
-# We use aws_kms_key_policy to update the policy with the Glue role added
-resource "aws_kms_key_policy" "main_key_with_glue_role" {
-  key_id = module.kms.main_key_id
-
-  # Get the existing policy and add the Glue role statement
-  policy = jsonencode({
+  # Reconstruct main KMS key policy with Glue role added
+  main_key_policy_with_glue = jsonencode({
     Version = "2012-10-17"
     Statement = concat(
-      jsondecode(data.aws_kms_key.main_key.policy).Statement,
+      # Root access (from KMS module)
+      [
+        {
+          Sid    = "EnableRootAccess"
+          Effect = "Allow"
+          Principal = {
+            AWS = "arn:aws:iam::${local.account_id}:root"
+          }
+          Action   = "kms:*"
+          Resource = "*"
+        }
+      ],
+      # Service usage (from KMS module)
+      [
+        {
+          Sid    = "AllowServiceUsage"
+          Effect = "Allow"
+          Principal = {
+            Service = var.kms_allowed_services
+          }
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ]
+          Resource = "*"
+        }
+      ],
+      # Glue role access (added here)
       [
         {
           Sid    = "AllowGlueRole"
@@ -2572,6 +2599,67 @@ resource "aws_kms_key_policy" "main_key_with_glue_role" {
       ]
     )
   })
+
+  # Reconstruct DynamoDB KMS key policy with Glue role added
+  dynamodb_key_policy_with_glue = jsonencode({
+    Version = "2012-10-17"
+    Statement = concat(
+      # Root access (from KMS module)
+      [
+        {
+          Sid    = "EnableRootAccess"
+          Effect = "Allow"
+          Principal = {
+            AWS = "arn:aws:iam::${local.account_id}:root"
+          }
+          Action   = "kms:*"
+          Resource = "*"
+        }
+      ],
+      # DynamoDB service (from KMS module)
+      [
+        {
+          Sid    = "AllowDynamoDBService"
+          Effect = "Allow"
+          Principal = {
+            Service = "dynamodb.amazonaws.com"
+          }
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ]
+          Resource = "*"
+        }
+      ],
+      # Glue role access (added here)
+      [
+        {
+          Sid    = "AllowGlueRole"
+          Effect = "Allow"
+          Principal = {
+            AWS = module.politician_trades_sec_glue_job.role_arn
+          }
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:DescribeKey"
+          ]
+          Resource = "*"
+        }
+      ]
+    )
+  })
+}
+
+# Update KMS key policies to include Glue role ARN (after both are created to avoid circular dependency)
+resource "aws_kms_key_policy" "main_key_with_glue_role" {
+  key_id = module.kms.main_key_id
+  policy = local.main_key_policy_with_glue
 
   depends_on = [
     module.politician_trades_sec_glue_job,
@@ -2582,31 +2670,7 @@ resource "aws_kms_key_policy" "main_key_with_glue_role" {
 # Also update DynamoDB KMS key policy
 resource "aws_kms_key_policy" "dynamodb_key_with_glue_role" {
   key_id = module.kms.dynamodb_key_id
-
-  # Get the existing policy and add the Glue role statement
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = concat(
-      jsondecode(data.aws_kms_key.dynamodb_key.policy).Statement,
-      [
-        {
-          Sid    = "AllowGlueRole"
-          Effect = "Allow"
-          Principal = {
-            AWS = module.politician_trades_sec_glue_job.role_arn
-          }
-          Action = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey"
-          ]
-          Resource = "*"
-        }
-      ]
-    )
-  })
+  policy = local.dynamodb_key_policy_with_glue
 
   depends_on = [
     module.politician_trades_sec_glue_job,
