@@ -202,9 +202,12 @@ resource "aws_iam_role_policy" "kms_access" {
         Action = [
           "kms:Decrypt",
           "kms:Encrypt",
-          "kms:GenerateDataKey"
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
         ]
-        Resource = var.kms_key_arn
+        Resource = [
+          var.kms_key_arn
+        ]
       }
     ]
     }) : jsonencode({
