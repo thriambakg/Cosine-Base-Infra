@@ -1812,10 +1812,15 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         
         # Parse explanations first (needed for table parsing)
         explanations_dict = parse_explanations(html_content)
+        print(f"   📝 Parsed {len(explanations_dict)} explanations: {list(explanations_dict.keys())}")
         local_logger.info(f"   📝 Parsed {len(explanations_dict)} explanations: {list(explanations_dict.keys())}")
         if explanations_dict:
             for num, text in list(explanations_dict.items())[:2]:  # Log first 2
+                print(f"      Explanation {num}: {text[:100]}...")
                 local_logger.info(f"      Explanation {num}: {text[:100]}...")
+        else:
+            print(f"   ⚠️ No explanations found in document")
+            local_logger.warning(f"   ⚠️ No explanations found in document")
         
         # Parse Table I - Non-Derivative Securities (pass explanations for footnote embedding)
         table1_data = parse_table_i(html_content, is_form3, is_form4, is_form5, explanations_dict)
@@ -2008,6 +2013,9 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                 explanation_text = ""
                 if explanations_dict:
                     explanation_text = explanations_dict.get(str(footnote_num), "")
+                    if not explanation_text:
+                        # Debug: log when explanation is missing
+                        print(f"   ⚠️ Footnote {footnote_num} found in Table II cell but no explanation in dict. Available keys: {list(explanations_dict.keys())}")
                 
                 footnote_obj = {
                     "value": value,
@@ -2092,6 +2100,8 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
     """
     # Import inside function to avoid serialization issues
     from html import unescape
+    import logging
+    local_logger = logging.getLogger()
     
     explanations = {}
     
@@ -2106,38 +2116,65 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
         
         if explanation_section:
             explanation_text = explanation_section.group(1)
+            print(f"   🔍 Found Explanation section, length: {len(explanation_text)} chars")
+            local_logger.info(f"   🔍 Found Explanation section, length: {len(explanation_text)} chars")
             
             # Extract numbered explanations from FootnoteData cells
             # Pattern: Look for <td> with FootnoteData class containing numbered explanations
             # Format: <tr><td class="FootnoteData">1. ...</td></tr>
             # Note: Text may contain HTML tags, so we capture everything until </td>
+            # Make pattern more flexible to handle whitespace variations
             footnote_rows = re.findall(
-                r'<tr><td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>(\d+)\.\s+(.*?)</td></tr>',
+                r'<tr>\s*<td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>\s*(\d+)\.\s+(.*?)</td>\s*</tr>',
                 explanation_text,
                 re.IGNORECASE | re.DOTALL
             )
+            
+            # If primary pattern fails, try without strict whitespace
+            if not footnote_rows:
+                footnote_rows = re.findall(
+                    r'<td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>(\d+)\.\s+(.*?)</td>',
+                    explanation_text,
+                    re.IGNORECASE | re.DOTALL
+                )
+            
+            print(f"   🔍 Found {len(footnote_rows)} footnote rows using primary pattern")
+            local_logger.info(f"   🔍 Found {len(footnote_rows)} footnote rows using primary pattern")
             
             for num, text in footnote_rows:
                 cleaned_text = re.sub(r'<[^>]+>', '', text)  # Remove any remaining HTML tags
                 cleaned_text = unescape(cleaned_text).strip()
                 if cleaned_text:
                     explanations[num] = cleaned_text
+                    print(f"   ✅ Parsed explanation {num}: {cleaned_text[:80]}...")
+                    local_logger.info(f"   ✅ Parsed explanation {num}: {cleaned_text[:80]}...")
             
             # Fallback: If no footnote rows found, try the original pattern
             if not explanations:
+                print(f"   ⚠️ Primary pattern failed, trying fallback pattern")
+                local_logger.warning(f"   ⚠️ Primary pattern failed, trying fallback pattern")
                 explanation_pattern = r'(\d+)\.\s+([^<\d]+?)(?=\d+\.|$)'
                 explanation_matches = re.findall(explanation_pattern, explanation_text, re.DOTALL)
+                
+                print(f"   🔍 Fallback pattern found {len(explanation_matches)} matches")
+                local_logger.info(f"   🔍 Fallback pattern found {len(explanation_matches)} matches")
                 
                 for num, text in explanation_matches:
                     cleaned_text = re.sub(r'<[^>]+>', '', text)
                     cleaned_text = unescape(cleaned_text).strip()
                     if cleaned_text:
                         explanations[num] = cleaned_text
+                        print(f"   ✅ Parsed explanation {num} (fallback): {cleaned_text[:80]}...")
+                        local_logger.info(f"   ✅ Parsed explanation {num} (fallback): {cleaned_text[:80]}...")
+        else:
+            print(f"   ⚠️ Could not find 'Explanation of Responses' section in HTML")
+            local_logger.warning(f"   ⚠️ Could not find 'Explanation of Responses' section in HTML")
     
     except Exception as e:
-        import logging
-        local_logger = logging.getLogger()
-        local_logger.error(f"❌ Error parsing explanations: {e}")
+        import traceback
+        error_msg = f"❌ Error parsing explanations: {e}\n{traceback.format_exc()}"
+        print(error_msg)
+        local_logger.error(error_msg)
     
     return explanations
 
@@ -2762,16 +2799,27 @@ try:
         logger.info(f"   ⚠️ Note: {skipped_date_mismatch} forms were skipped due to date mismatch")
         logger.info(f"      This is normal if the filing date in the form doesn't match the target date")
     
-    if successful_stored == 0:
-        warning_header = "   ⚠️ CRITICAL WARNING: No forms were successfully stored!"
-        logger.warning("")
-        logger.warning(warning_header)
+    # Check for critical failures that should cause job to fail
+    if total_forms_processed == 0:
+        error_msg = "❌ CRITICAL ERROR: No forms were fetched from SEC API!"
+        logger.error("")
+        logger.error(error_msg)
         print("", flush=True)
-        print(warning_header, flush=True)
-        
-        detail_msg = "      This could indicate:"
-        logger.warning(detail_msg)
-        print(detail_msg, flush=True)
+        print(error_msg, flush=True)
+        print("   This could indicate:", flush=True)
+        print("      - SEC API is blocking requests (403 Forbidden)", flush=True)
+        print("      - Network connectivity issues", flush=True)
+        print("      - Invalid date parameter", flush=True)
+        print("      - No forms filed on the target date", flush=True)
+        raise Exception("No forms were fetched from SEC API. Check SEC API access, network connectivity, and date parameters.")
+    
+    if successful_stored == 0:
+        error_msg = "❌ CRITICAL ERROR: No forms were successfully stored!"
+        logger.error("")
+        logger.error(error_msg)
+        print("", flush=True)
+        print(error_msg, flush=True)
+        print("   This could indicate:", flush=True)
         
         for detail in [
             "- Download failures for all forms (check network/SEC website)",
@@ -2779,11 +2827,11 @@ try:
             "- Date mismatches for all forms (check target date)",
             "- DynamoDB write failures (check permissions/table)"
         ]:
-            logger.warning(f"      {detail}")
+            logger.error(f"      {detail}")
             print(f"      {detail}", flush=True)
         
         review_msg = "      Review the detailed logs above for specific error messages"
-        logger.warning(review_msg)
+        logger.error(review_msg)
         print(review_msg, flush=True)
         
         # Log detailed breakdown of what happened
@@ -2795,6 +2843,8 @@ try:
         print(f"      Skipped (date mismatch): {skipped_date_mismatch}", flush=True)
         print(f"      Skipped (download failed): {skipped_download_failed}", flush=True)
         print(f"      Skipped (unsupported file type): {skipped_unsupported_type}", flush=True)
+        
+        raise Exception(f"No forms were successfully stored. {total_forms_processed} forms were fetched but none were stored. Check logs for details.")
     elif successful_stored < total_forms_processed * 0.5:
         logger.warning("")
         logger.warning(f"   ⚠️ WARNING: Less than 50% of forms were successfully stored!")
