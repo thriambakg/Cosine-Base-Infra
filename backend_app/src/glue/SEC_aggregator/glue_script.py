@@ -1643,17 +1643,23 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
             result['name'] = unescape(name_match.group(1)).strip()
         
         # Extract address (Street, City, State, Zip)
+        # HTML structure: 
+        # 1. Street: <table><tr><td><span class="FormData">STREET</span></td></tr></table>
+        # 2. Then <hr> and (Street) label
+        # 3. City/State/Zip: <table><tr><td><span>MIAMI</span></td><td><span>FL</span></td><td><span>33137</span></td></tr></table>
         address_parts = []
         
-        # Street
-        street_match = re.search(r'\(Street\)[^<]*<span[^>]*class="FormData"[^>]*>([^<]+)</span>', html_content, re.IGNORECASE | re.DOTALL)
+        # Street - look in the table before the (Street) label
+        # Pattern: <table><tr><td><span class="FormData">STREET</span></td></tr></table> ... <hr> ... (Street)
+        street_match = re.search(r'<table[^>]*border="0"[^>]*>.*?<tr><td><span[^>]*class="FormData"[^>]*>([^<]+)</span></td></tr></table>[^<]*(?:<hr|\(Street\))', html_content, re.IGNORECASE | re.DOTALL)
         if street_match:
             street = unescape(street_match.group(1)).strip()
             if street:
                 address_parts.append(street)
         
-        # City, State, Zip
-        city_state_zip_pattern = r'\(City\)[^<]*<span[^>]*class="FormData"[^>]*>([^<]+)</span>[^<]*<span[^>]*class="FormData"[^>]*>([^<]+)</span>[^<]*<span[^>]*class="FormData"[^>]*>([^<]+)</span>'
+        # City, State, Zip - they're in a table row after (City) (State) (Zip) labels
+        # Pattern: (City) ... (State) ... (Zip) ... <table><tr><td><span>MIAMI</span></td><td><span>FL</span></td><td><span>33137</span></td></tr></table>
+        city_state_zip_pattern = r'\(City\)[^<]*\(State\)[^<]*\(Zip\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>'
         csv_match = re.search(city_state_zip_pattern, html_content, re.IGNORECASE | re.DOTALL)
         if csv_match:
             city = unescape(csv_match.group(1)).strip()
@@ -1668,8 +1674,9 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         # Extract event date
         # Forms 3/4: "Date of Event Requiring Statement"
         # Form 5: "Statement for Issuer's Fiscal Year Ended"
+        # Note: There may be <br> tags between the label and the date
         if is_form3 or is_form4:
-            event_date_match = re.search(r'Date of Event Requiring Statement[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+            event_date_match = re.search(r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
             if event_date_match:
                 try:
                     date_str = event_date_match.group(1)
@@ -1704,8 +1711,12 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
                     pass
         
         # Extract issuer name and ticker symbol
-        # Pattern: Issuer Name <a href="...">Name</a> [ <span>TICKER</span> ]
-        issuer_match = re.search(r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE)
+        # Pattern: Issuer Name <b>and</b> Ticker... <a href="...">Name</a> [ <span>TICKER</span> ]
+        # Note: There may be <b>and</b> tags between "Issuer Name" and the link
+        issuer_match = re.search(r'Issuer Name[^<]*<b>and</b>[^<]*Ticker[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE | re.DOTALL)
+        if not issuer_match:
+            # Fallback: try without the "and Ticker" part
+            issuer_match = re.search(r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE | re.DOTALL)
         if issuer_match:
             result['issuerName'] = unescape(issuer_match.group(1)).strip()
         
@@ -1713,35 +1724,38 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         if ticker_match:
             result['tickerSymbol'] = ticker_match.group(1)
         
-        # Extract relationship (5. Relationship of Reporting Person(s) to Issuer)
+        # Extract relationship (4. Relationship of Reporting Person(s) to Issuer)
+        # HTML structure: <td align="center"><span class="FormData">X</span></td><td>Director</td>
+        # The X comes BEFORE the relationship type text
         relationship_types = []
         relationship_additional = None
         
-        # Check for Director
-        director_match = re.search(r'Director[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span>', html_content, re.IGNORECASE | re.DOTALL)
+        # Pattern: Look for <td> with "X" followed by <td> with relationship type
+        # Director: <td><span>X</span></td><td>Director</td>
+        director_match = re.search(r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Director</td>', html_content, re.IGNORECASE | re.DOTALL)
         if director_match:
             relationship_types.append('Director')
         
-        # Check for Officer
-        officer_match = re.search(r'Officer[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span>', html_content, re.IGNORECASE | re.DOTALL)
+        # Officer: <td><span>X</span></td><td>Officer</td>
+        officer_match = re.search(r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Officer', html_content, re.IGNORECASE | re.DOTALL)
         if officer_match:
             relationship_types.append('Officer')
-            # Extract additional text (title below)
-            officer_text_match = re.search(r'Officer[^<]*<td[^>]*style="color: blue"[^>]*>([^<]+)</td>', html_content, re.IGNORECASE | re.DOTALL)
+            # Extract additional text (title below) - look for the next row with blue text
+            officer_text_match = re.search(r'Officer[^<]*</td>[^<]*</tr>[^<]*<tr>[^<]*<td[^>]*style="color: blue"[^>]*>([^<]+)</td>', html_content, re.IGNORECASE | re.DOTALL)
             if officer_text_match:
                 relationship_additional = unescape(officer_text_match.group(1)).strip()
         
-        # Check for 10% Owner
-        owner_match = re.search(r'10% Owner[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span>', html_content, re.IGNORECASE | re.DOTALL)
+        # 10% Owner: <td><span>X</span></td><td>10% Owner</td>
+        owner_match = re.search(r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>10% Owner</td>', html_content, re.IGNORECASE | re.DOTALL)
         if owner_match:
             relationship_types.append('10% Owner')
         
-        # Check for Other
-        other_match = re.search(r'Other[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span>', html_content, re.IGNORECASE | re.DOTALL)
+        # Other: <td><span>X</span></td><td>Other</td>
+        other_match = re.search(r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Other', html_content, re.IGNORECASE | re.DOTALL)
         if other_match:
             relationship_types.append('Other')
-            # Extract additional text
-            other_text_match = re.search(r'Other[^<]*<td[^>]*style="color: blue"[^>]*>([^<]+)</td>', html_content, re.IGNORECASE | re.DOTALL)
+            # Extract additional text - look for the next row with blue text
+            other_text_match = re.search(r'Other[^<]*</td>[^<]*</tr>[^<]*<tr>[^<]*<td[^>]*style="color: blue"[^>]*>([^<]+)</td>', html_content, re.IGNORECASE | re.DOTALL)
             if other_text_match:
                 other_text = unescape(other_text_match.group(1)).strip()
                 if other_text:
@@ -1857,10 +1871,19 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
     
     try:
         # Find Table II tbody
-        table2_pattern = r'Table II[^<]*<tbody>(.*?)</tbody>'
+        # Pattern needs to handle whitespace/newlines between "Table II" and <tbody>
+        table2_pattern = r'Table II[^<]*?<tbody>(.*?)</tbody>'
         table2_match = re.search(table2_pattern, html_content, re.IGNORECASE | re.DOTALL)
         
         if not table2_match:
+            # Try alternative pattern in case tbody is on a different line
+            table2_pattern_alt = r'Table II.*?<tbody[^>]*>(.*?)</tbody>'
+            table2_match = re.search(table2_pattern_alt, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if not table2_match:
+            import logging
+            local_logger = logging.getLogger()
+            local_logger.warning(f"⚠️ Table II tbody not found in HTML")
             return table_data
         
         tbody_content = table2_match.group(1)
@@ -1876,6 +1899,7 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
             
             if is_form3 and len(cells) >= 6:
                 # Form 3: Title | Date Exercisable | Expiration Date | Title | Amount | Conversion Price | Ownership | Nature
+                # Note: Form 3 has 8 columns, but we need at least 6 to parse basic info
                 row_data = {
                     'titleOfDerivativeSecurity': clean_cell(cells[0]) if len(cells) > 0 else '',
                     'dateExercisable': clean_cell(cells[1]) if len(cells) > 1 else '',
@@ -1886,7 +1910,9 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                     'ownershipForm': clean_cell(cells[6]) if len(cells) > 6 else '',
                     'natureOfIndirectBeneficialOwnership': clean_cell(cells[7]) if len(cells) > 7 else ''
                 }
-                table_data.append(row_data)
+                # Only add if we have at least the title
+                if row_data['titleOfDerivativeSecurity']:
+                    table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 10:
                 # Form 4/5: Title | Conversion Price | Transaction Date | ... | (A) | (D) | Date Exercisable | Expiration | Title | Amount | Price | ...
                 row_data = {
@@ -1930,21 +1956,42 @@ def parse_explanations_and_remarks(html_content: str) -> Dict[str, Any]:
     
     try:
         # Find "Explanation of Responses" section
-        explanation_section = re.search(r'Explanation of Responses[^<]*</td>[^<]*</tr>(.*?)(?=<table|<tr><td[^>]*><b>Remarks)', html_content, re.IGNORECASE | re.DOTALL)
+        # Pattern: Look for the header, then capture all following rows until we hit another section
+        explanation_section = re.search(
+            r'Explanation of Responses[^<]*</td>[^<]*</tr>(.*?)(?=<table|<tr><td[^>]*><b>Remarks|</body>)',
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
         
         if explanation_section:
             explanation_text = explanation_section.group(1)
             
-            # Extract numbered explanations (e.g., "1. ...", "2. ...")
-            # Pattern: number followed by period and space, then text until next number or end
-            explanation_pattern = r'(\d+)\.\s+([^<\d]+?)(?=\d+\.|$)'
-            explanations = re.findall(explanation_pattern, explanation_text, re.DOTALL)
+            # Extract numbered explanations from FootnoteData cells
+            # Pattern: Look for <td> with FootnoteData class containing numbered explanations
+            # Format: <tr><td class="FootnoteData">1. ...</td></tr>
+            # Note: Text may contain HTML tags, so we capture everything until </td>
+            footnote_rows = re.findall(
+                r'<tr><td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>(\d+)\.\s+(.*?)</td></tr>',
+                explanation_text,
+                re.IGNORECASE | re.DOTALL
+            )
             
-            for num, text in explanations:
-                cleaned_text = re.sub(r'<[^>]+>', '', text)
+            for num, text in footnote_rows:
+                cleaned_text = re.sub(r'<[^>]+>', '', text)  # Remove any remaining HTML tags
                 cleaned_text = unescape(cleaned_text).strip()
                 if cleaned_text:
                     misc[num] = cleaned_text
+            
+            # Fallback: If no footnote rows found, try the original pattern
+            if not misc:
+                explanation_pattern = r'(\d+)\.\s+([^<\d]+?)(?=\d+\.|$)'
+                explanations = re.findall(explanation_pattern, explanation_text, re.DOTALL)
+                
+                for num, text in explanations:
+                    cleaned_text = re.sub(r'<[^>]+>', '', text)
+                    cleaned_text = unescape(cleaned_text).strip()
+                    if cleaned_text:
+                        misc[num] = cleaned_text
         
         # Find "Remarks" section
         remarks_match = re.search(r'<b>Remarks:</b>[^<]*</td>[^<]*</tr>[^<]*<tr><td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>([^<]+)</td>', html_content, re.IGNORECASE | re.DOTALL)
@@ -2062,36 +2109,56 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"      📊 PARSED DATA SUMMARY:")
     local_logger.info(f"         - Form Type: {parsed_data.get('formType', 'N/A')}")
     local_logger.info(f"         - Name: {parsed_data.get('name', 'N/A')}")
-    local_logger.info(f"         - Address: {parsed_data.get('address', 'N/A')}")
-    local_logger.info(f"         - Issuer: {parsed_data.get('issuerName', 'N/A')}")
+    local_logger.info(f"         - Address: {parsed_data.get('address', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('address') else '✅'}")
+    local_logger.info(f"         - Issuer: {parsed_data.get('issuerName', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('issuerName') else '✅'}")
     local_logger.info(f"         - Ticker: {parsed_data.get('tickerSymbol', 'N/A')}")
-    local_logger.info(f"         - Relationship: {parsed_data.get('relationship', 'N/A')}")
+    local_logger.info(f"         - Relationship: {parsed_data.get('relationship', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('relationship') else '✅'}")
     local_logger.info(f"         - Relationship Additional: {parsed_data.get('relationshipAdditionalText', 'N/A')}")
-    local_logger.info(f"         - Event Date: {parsed_data.get('eventDate', 'N/A')}")
+    local_logger.info(f"         - Event Date: {parsed_data.get('eventDate', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('eventDate') else '✅'}")
     local_logger.info(f"         - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
     local_logger.info(f"         - Signature Name: {parsed_data.get('signatureName', 'N/A')}")
     local_logger.info(f"         - Amendment: {parsed_data.get('amendment', False)}")
     local_logger.info(f"         - Table I rows (Non-Derivative): {len(parsed_data.get('nonDerivativeSecurities', []))}")
     if parsed_data.get('nonDerivativeSecurities'):
         local_logger.info(f"            First row: {json.dumps(parsed_data['nonDerivativeSecurities'][0], default=str)[:200]}")
-    local_logger.info(f"         - Table II rows (Derivative): {len(parsed_data.get('derivativeSecurities', []))}")
+    local_logger.info(f"         - Table II rows (Derivative): {len(parsed_data.get('derivativeSecurities', []))} {'⚠️ MISSING' if len(parsed_data.get('derivativeSecurities', [])) == 0 else '✅'}")
     if parsed_data.get('derivativeSecurities'):
         local_logger.info(f"            First row: {json.dumps(parsed_data['derivativeSecurities'][0], default=str)[:200]}")
-    local_logger.info(f"         - Misc/Explanations: {len(parsed_data.get('misc', {}))} entries")
+    local_logger.info(f"         - Misc/Explanations: {len(parsed_data.get('misc', {}))} entries {'⚠️ MISSING' if len(parsed_data.get('misc', {})) == 0 else '✅'}")
     if parsed_data.get('misc'):
         misc_preview = {k: str(v)[:100] for k, v in list(parsed_data['misc'].items())[:3]}
         local_logger.info(f"            Preview: {json.dumps(misc_preview, default=str)[:300]}")
     
-    # Check for critical missing fields
+    # Print critical missing fields to console for immediate visibility
+    print(f"   ✅ Parsing complete in {parse_duration:.2f}s:", flush=True)
     missing_fields = []
-    if not parsed_data.get('name'):
-        missing_fields.append('name')
-    if not parsed_data.get('formType'):
-        missing_fields.append('formType')
-    if not parsed_data.get('reportingDate'):
-        missing_fields.append('reportingDate')
+    if not parsed_data.get('address'):
+        missing_fields.append('address')
+    if not parsed_data.get('issuerName'):
+        missing_fields.append('issuerName')
+    if not parsed_data.get('relationship'):
+        missing_fields.append('relationship')
+    if not parsed_data.get('eventDate'):
+        missing_fields.append('eventDate')
+    if len(parsed_data.get('derivativeSecurities', [])) == 0:
+        missing_fields.append('derivativeSecurities')
+    if len(parsed_data.get('misc', {})) == 0:
+        missing_fields.append('misc')
     if missing_fields:
-        local_logger.warning(f"      ⚠️ WARNING: Missing critical fields: {', '.join(missing_fields)}")
+        print(f"      ⚠️ MISSING FIELDS: {', '.join(missing_fields)}", flush=True)
+    else:
+        print(f"      ✅ All critical fields extracted successfully", flush=True)
+    
+    # Check for critical missing fields (for validation)
+    critical_missing = []
+    if not parsed_data.get('name'):
+        critical_missing.append('name')
+    if not parsed_data.get('formType'):
+        critical_missing.append('formType')
+    if not parsed_data.get('reportingDate'):
+        critical_missing.append('reportingDate')
+    if critical_missing:
+        local_logger.warning(f"      ⚠️ WARNING: Missing critical fields: {', '.join(critical_missing)}")
     
     # Check politician match
     match_start = datetime.now()
@@ -2142,9 +2209,22 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0}
         
         for key, value in parsed_data.items():
-            if value is None or value == '':
+            # Skip None, empty strings, empty lists, and empty dicts
+            if value is None:
                 conversion_stats['skipped'] += 1
-                local_logger.debug(f"         Skipping {key}: None or empty")
+                local_logger.debug(f"         Skipping {key}: None")
+                continue
+            if value == '':
+                conversion_stats['skipped'] += 1
+                local_logger.debug(f"         Skipping {key}: Empty string")
+                continue
+            if isinstance(value, list) and len(value) == 0:
+                conversion_stats['skipped'] += 1
+                local_logger.debug(f"         Skipping {key}: Empty list")
+                continue
+            if isinstance(value, dict) and len(value) == 0:
+                conversion_stats['skipped'] += 1
+                local_logger.debug(f"         Skipping {key}: Empty dict")
                 continue
             try:
                 if isinstance(value, (int, float)):
