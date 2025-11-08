@@ -1524,27 +1524,34 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         result['formType'] = f'form{form_number}' if form_number else 'form4'
         
         # Extract reporting person name (1. Name and Address of Reporting Person)
-        name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
+        # Pattern: <a href="...cgi-bin/browse-edgar...CIK=...">Name</a>
+        # Handle both relative and absolute URLs
+        name_match = re.search(r'<a[^>]*href="[^"]*cgi-bin/browse-edgar[^"]*CIK=\d+[^"]*">([^<]+)</a>', html_content, re.IGNORECASE)
         if name_match:
             result['name'] = unescape(name_match.group(1)).strip().lower()
         
         # Extract address (Street, City, State, Zip)
         # HTML structure: 
-        # 1. Street: <table><tr><td><span class="FormData">STREET</span></td></tr></table>
+        # 1. Street lines: <table><tr><td><span class="FormData">LINE1</span></td></tr><tr><td><span class="FormData">LINE2</span></td></tr></table>
         # 2. Then <hr> and (Street) label
-        # 3. City/State/Zip: <table><tr><td><span>MIAMI</span></td><td><span>FL</span></td><td><span>33137</span></td></tr></table>
+        # 3. City/State/Zip: <table><tr><td><span>SIOUX FALLS</span></td><td><span>SD</span></td><td><span>57104</span></td></tr></table>
         address_parts = []
         
-        # Street - look in the table before the (Street) label
-        # Pattern: <table><tr><td><span class="FormData">STREET</span></td></tr></table> ... <hr> ... (Street)
-        street_match = re.search(r'<table[^>]*border="0"[^>]*>.*?<tr><td><span[^>]*class="FormData"[^>]*>([^<]+)</span></td></tr></table>[^<]*(?:<hr|\(Street\))', html_content, re.IGNORECASE | re.DOTALL)
-        if street_match:
-            street = unescape(street_match.group(1)).strip()
-            if street:
-                address_parts.append(street)
+        # Extract all street lines from the table before (Street) label
+        # Pattern: Find the table before (Street) label, extract all FormData spans
+        street_table_pattern = r'<table[^>]*border="0"[^>]*width="100%"[^>]*>(.*?)</table>[^<]*(?:<hr|\(Street\))'
+        street_table_match = re.search(street_table_pattern, html_content, re.IGNORECASE | re.DOTALL)
+        if street_table_match:
+            street_table_content = street_table_match.group(1)
+            # Extract all street lines (each in a <tr><td><span class="FormData">...</span></td></tr>)
+            street_lines = re.findall(r'<tr><td><span[^>]*class="FormData"[^>]*>([^<]+)</span></td></tr>', street_table_content, re.IGNORECASE | re.DOTALL)
+            for street_line in street_lines:
+                street = unescape(street_line).strip()
+                if street:
+                    address_parts.append(street)
         
         # City, State, Zip - they're in a table row after (City) (State) (Zip) labels
-        # Pattern: (City) ... (State) ... (Zip) ... <table><tr><td><span>MIAMI</span></td><td><span>FL</span></td><td><span>33137</span></td></tr></table>
+        # Pattern: (City) ... (State) ... (Zip) ... <table><tr><td><span>SIOUX FALLS</span></td><td><span>SD</span></td><td><span>57104</span></td></tr></table>
         city_state_zip_pattern = r'\(City\)[^<]*\(State\)[^<]*\(Zip\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>'
         csv_match = re.search(city_state_zip_pattern, html_content, re.IGNORECASE | re.DOTALL)
         if csv_match:
@@ -1558,11 +1565,22 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         result['address'] = ', '.join(address_parts) if address_parts else None
         
         # Extract event date
-        # Forms 3/4: "Date of Event Requiring Statement"
+        # Form 3: "Date of Event Requiring Statement"
+        # Form 4: "Date of Earliest Transaction"
         # Form 5: "Statement for Issuer's Fiscal Year Ended"
         # Note: There may be <br> tags between the label and the date
-        if is_form3 or is_form4:
+        if is_form3:
             event_date_match = re.search(r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
+            if event_date_match:
+                try:
+                    date_str = event_date_match.group(1)
+                    date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                    result['eventDate'] = date_obj.strftime('%Y-%m-%d')
+                except:
+                    pass
+        elif is_form4:
+            # Form 4 uses "Date of Earliest Transaction"
+            event_date_match = re.search(r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
             if event_date_match:
                 try:
                     date_str = event_date_match.group(1)
@@ -1643,19 +1661,19 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
             result['tickerSymbol'] = ticker_match.group(1)
         
         # Extract relationship (4. Relationship of Reporting Person(s) to Issuer)
-        # HTML structure: <td align="center"><span class="FormData">X</span></td><td>Director</td>
-        # The X comes BEFORE the relationship type text
+        # HTML structure: <td>Director</td><td align="center"><span class="FormData">X</span></td>
+        # The X comes AFTER the relationship type text
         relationship_types = []
         relationship_additional = None
         
-        # Pattern: Look for <td> with "X" followed by <td> with relationship type
-        # Director: <td><span>X</span></td><td>Director</td>
-        director_match = re.search(r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Director</td>', html_content, re.IGNORECASE | re.DOTALL)
+        # Pattern: Look for relationship type text followed by <td> with "X"
+        # Director: <td>Director</td><td><span>X</span></td>
+        director_match = re.search(r'<td[^>]*class="MedSmallFormText"[^>]*>Director</td>[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>', html_content, re.IGNORECASE | re.DOTALL)
         if director_match:
             relationship_types.append('Director')
         
-        # Officer: <td><span>X</span></td><td>Officer</td>
-        officer_match = re.search(r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Officer', html_content, re.IGNORECASE | re.DOTALL)
+        # Officer: <td>Officer</td><td><span>X</span></td>
+        officer_match = re.search(r'<td[^>]*class="MedSmallFormText"[^>]*>Officer[^<]*</td>[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>', html_content, re.IGNORECASE | re.DOTALL)
         if officer_match:
             relationship_types.append('Officer')
             # Extract additional text (title below) - look for the next row with blue text
@@ -1663,13 +1681,13 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
             if officer_text_match:
                 relationship_additional = unescape(officer_text_match.group(1)).strip()
         
-        # 10% Owner: <td><span>X</span></td><td>10% Owner</td>
-        owner_match = re.search(r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>10% Owner</td>', html_content, re.IGNORECASE | re.DOTALL)
+        # 10% Owner: <td>10% Owner</td><td><span>X</span></td>
+        owner_match = re.search(r'<td[^>]*class="MedSmallFormText"[^>]*>10% Owner</td>[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>', html_content, re.IGNORECASE | re.DOTALL)
         if owner_match:
             relationship_types.append('10% Owner')
         
-        # Other: <td><span>X</span></td><td>Other</td>
-        other_match = re.search(r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Other', html_content, re.IGNORECASE | re.DOTALL)
+        # Other: <td>Other</td><td><span>X</span></td>
+        other_match = re.search(r'<td[^>]*class="MedSmallFormText"[^>]*>Other[^<]*</td>[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>', html_content, re.IGNORECASE | re.DOTALL)
         if other_match:
             relationship_types.append('Other')
             # Extract additional text - look for the next row with blue text
@@ -1683,12 +1701,21 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         result['relationshipAdditionalText'] = relationship_additional if relationship_additional else None
         
         # Extract signature name
+        # Pattern: <u><span class="FormData">Signature text</span></u> or "See Exhibit 99.1 for Signature"
         signature_match = re.search(r'<u><span[^>]*class="FormData"[^>]*>(/s/|s/)?\s*([^<]+)</span></u>', html_content, re.IGNORECASE)
         if signature_match:
             signature_name = unescape(signature_match.group(2)).strip()
             # Remove /s/ or s/ prefix if present
             signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
             result['signatureName'] = signature_name.lower()
+        else:
+            # Fallback: try to find signature in the signature section
+            # Pattern: ** Signature of Reporting Person ... <u><span>text</span></u>
+            signature_fallback = re.search(r'\*\* Signature[^<]*<u><span[^>]*class="FormData"[^>]*>([^<]+)</span></u>', html_content, re.IGNORECASE | re.DOTALL)
+            if signature_fallback:
+                signature_name = unescape(signature_fallback.group(1)).strip()
+                signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
+                result['signatureName'] = signature_name.lower()
         
         # Check for amendment
         # Forms 3/4/5: "4. If Amendment, Date of Original Filed"
@@ -2356,53 +2383,82 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"      ✅ DynamoDB client created, accessing table: {dynamodb_table_name}")
         
         # Convert to DynamoDB format
+        # Store all fields, including None/empty values, so columns are visible in the table
         local_logger.info(f"      🔄 Converting to DynamoDB format...")
         dynamodb_item = {}
-        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0}
+        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0, 'null_fields': 0}
         
         for key, value in parsed_data.items():
-            # Skip None, empty strings, empty lists, and empty dicts
-            if value is None:
-                conversion_stats['skipped'] += 1
-                local_logger.debug(f"         Skipping {key}: None")
-                continue
-            if value == '':
-                conversion_stats['skipped'] += 1
-                local_logger.debug(f"         Skipping {key}: Empty string")
-                continue
-            if isinstance(value, list) and len(value) == 0:
-                conversion_stats['skipped'] += 1
-                local_logger.debug(f"         Skipping {key}: Empty list")
-                continue
-            if isinstance(value, dict) and len(value) == 0:
-                conversion_stats['skipped'] += 1
-                local_logger.debug(f"         Skipping {key}: Empty dict")
-                continue
             try:
+                # Handle None values - store as null (DynamoDB supports null)
+                if value is None:
+                    dynamodb_item[key] = None
+                    conversion_stats['null_fields'] += 1
+                    local_logger.debug(f"         {key}: null")
+                    continue
+                
+                # Handle empty strings - store as null for consistency
+                if value == '':
+                    dynamodb_item[key] = None
+                    conversion_stats['null_fields'] += 1
+                    local_logger.debug(f"         {key}: null (was empty string)")
+                    continue
+                
+                # Handle empty lists - store as empty JSON array string
+                if isinstance(value, list) and len(value) == 0:
+                    dynamodb_item[key] = '[]'  # Store as empty JSON array string
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: [] (empty list)")
+                    continue
+                
+                # Handle empty dicts - store as empty JSON object string
+                if isinstance(value, dict) and len(value) == 0:
+                    dynamodb_item[key] = '{}'  # Store as empty JSON object string
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: {{}} (empty dict)")
+                    continue
+                
+                # Handle numeric values
                 if isinstance(value, (int, float)):
                     if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
-                        conversion_stats['skipped'] += 1
-                        local_logger.warning(f"         Skipping {key}: Invalid float value {value}")
+                        # Invalid float - store as null
+                        dynamodb_item[key] = None
+                        conversion_stats['null_fields'] += 1
+                        local_logger.warning(f"         {key}: null (invalid float value {value})")
                         continue
                     dynamodb_item[key] = Decimal(str(value))
                     conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: Decimal ({value})")
+                
+                # Handle lists (non-empty) - store as JSON string
                 elif isinstance(value, list):
-                    # Lists of dicts (JSON arrays) - store as JSON string
                     dynamodb_item[key] = json.dumps(value)
                     conversion_stats['converted'] += 1
                     local_logger.debug(f"         {key}: JSON array ({len(value)} items)")
+                
+                # Handle dicts (non-empty) - store as JSON string
                 elif isinstance(value, dict):
-                    # Dicts (JSON objects) - store as JSON string
                     dynamodb_item[key] = json.dumps(value)
                     conversion_stats['converted'] += 1
                     local_logger.debug(f"         {key}: JSON object ({len(value)} keys)")
+                
+                # Handle boolean values
+                elif isinstance(value, bool):
+                    dynamodb_item[key] = value  # DynamoDB supports boolean
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: Boolean ({value})")
+                
+                # Handle strings and other types
                 else:
                     dynamodb_item[key] = str(value)
                     conversion_stats['converted'] += 1
                     local_logger.debug(f"         {key}: String ({len(str(value))} chars)")
+                    
             except Exception as e:
                 conversion_stats['errors'] += 1
                 local_logger.error(f"         Error converting {key}: {e}")
+                # Store as null on error
+                dynamodb_item[key] = None
         
         local_logger.info(f"      ✅ Conversion complete: {conversion_stats['converted']} converted, {conversion_stats['skipped']} skipped, {conversion_stats['errors']} errors")
         
