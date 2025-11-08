@@ -120,7 +120,9 @@ else:
 
 # SEC API configuration
 SEC_BASE_URL = "https://www.sec.gov"
-SEC_USER_AGENT = "Cosine Financial Platform contact@cosine.financial"
+# SEC requires a browser-like User-Agent to avoid 403 Forbidden errors
+# Format: Browser User-Agent with contact info appended
+SEC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 (Cosine Financial Platform; contact@cosine.financial)"
 SEC_BROWSE_EDGAR_URL = f"{SEC_BASE_URL}/cgi-bin/browse-edgar"
 
 # Name matching threshold
