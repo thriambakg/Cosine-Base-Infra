@@ -1713,10 +1713,26 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         # Extract issuer name and ticker symbol
         # Pattern: Issuer Name <b>and</b> Ticker... <a href="...">Name</a> [ <span>TICKER</span> ]
         # Note: There may be <b>and</b> tags between "Issuer Name" and the link
-        issuer_match = re.search(r'Issuer Name[^<]*<b>and</b>[^<]*Ticker[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE | re.DOTALL)
+        # The structure is: "3. Issuer Name <b>and</b> Ticker or Trading Symbol" <br> <a>Name</a> [ <span>TICKER</span> ]
+        issuer_match = re.search(
+            r'Issuer Name[^<]*<b>and</b>[^<]*Ticker[^<]*<br[^>]*>[^<]*<a[^>]*>([^<]+)</a>',
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
         if not issuer_match:
-            # Fallback: try without the "and Ticker" part
-            issuer_match = re.search(r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE | re.DOTALL)
+            # Fallback: try without the "and Ticker" part but still look for <br> before <a>
+            issuer_match = re.search(
+                r'Issuer Name[^<]*<br[^>]*>[^<]*<a[^>]*>([^<]+)</a>',
+                html_content,
+                re.IGNORECASE | re.DOTALL
+            )
+        if not issuer_match:
+            # Final fallback: try without <br> requirement
+            issuer_match = re.search(
+                r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>',
+                html_content,
+                re.IGNORECASE | re.DOTALL
+            )
         if issuer_match:
             result['issuerName'] = unescape(issuer_match.group(1)).strip()
         
@@ -1778,16 +1794,19 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         if amendment_date_match:
             result['amendment'] = True
         
-        # Parse Table I - Non-Derivative Securities
-        table1_data = parse_table_i(html_content, is_form3, is_form4, is_form5)
+        # Parse explanations first (needed for table parsing)
+        explanations_dict = parse_explanations(html_content)
+        
+        # Parse Table I - Non-Derivative Securities (pass explanations for footnote embedding)
+        table1_data = parse_table_i(html_content, is_form3, is_form4, is_form5, explanations_dict)
         result['nonDerivativeSecurities'] = table1_data
         
-        # Parse Table II - Derivative Securities
-        table2_data = parse_table_ii(html_content, is_form3, is_form4, is_form5)
+        # Parse Table II - Derivative Securities (pass explanations for footnote embedding)
+        table2_data = parse_table_ii(html_content, is_form3, is_form4, is_form5, explanations_dict)
         result['derivativeSecurities'] = table2_data
         
-        # Parse explanations and remarks
-        misc_data = parse_explanations_and_remarks(html_content)
+        # Parse remarks only (explanations are now embedded in table rows)
+        misc_data = parse_remarks(html_content)
         result['misc'] = misc_data
         
     except Exception as e:
@@ -1798,7 +1817,7 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
     return result
 
 
-def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: bool) -> List[Dict[str, Any]]:
+def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: bool, explanations_dict: Dict[str, str] = None) -> List[Dict[str, Any]]:
     """Parse Table I - Non-Derivative Securities"""
     # Import inside function to avoid serialization issues
     from html import unescape
@@ -1816,10 +1835,40 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
         tbody_content = table1_match.group(1)
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
         
+        def extract_footnote(cell):
+            """Extract footnote number from a cell (e.g., <sup>(1)</sup> -> 1, or None if no footnote)"""
+            # Pattern: <sup>(1)</sup> or <sup>(2)</sup> etc.
+            footnote_match = re.search(r'<sup>\((\d+)\)</sup>', cell, re.IGNORECASE)
+            if footnote_match:
+                try:
+                    return int(footnote_match.group(1))
+                except:
+                    pass
+            return None
+        
         def clean_cell(cell):
             text = re.sub(r'<[^>]+>', '', cell)
             text = unescape(text)
             return text.strip()
+        
+        def create_field_value(cell, explanations_dict):
+            """Create field value - either string or object with value, footnote number, and explanation"""
+            footnote_num = extract_footnote(cell)
+            value = clean_cell(cell)
+            
+            if footnote_num is not None:
+                # Field has a footnote - create object structure
+                footnote_obj = {
+                    "value": value,
+                    "footnote": {
+                        "number": footnote_num,
+                        "explanation": explanations_dict.get(str(footnote_num), "") if explanations_dict else ""
+                    }
+                }
+                return footnote_obj
+            else:
+                # No footnote - just return the string value
+                return value
         
         for row in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
@@ -1827,31 +1876,31 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
             if is_form3 and len(cells) >= 4:
                 # Form 3: Title | Amount | Ownership Form | Nature of Indirect
                 row_data = {
-                    'titleOfSecurity': clean_cell(cells[0]) if len(cells) > 0 else '',
-                    'amountOfSecurities': clean_cell(cells[1]) if len(cells) > 1 else '',
-                    'ownershipForm': clean_cell(cells[2]) if len(cells) > 2 else '',
-                    'natureOfIndirectBeneficialOwnership': clean_cell(cells[3]) if len(cells) > 3 else ''
+                    'titleOfSecurity': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',
+                    'amountOfSecurities': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
+                    'ownershipForm': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
+                    'natureOfIndirectBeneficialOwnership': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else ''
                 }
                 table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 8:
                 # Form 4/5: Title | Transaction Date | ... | Amount | (A) or (D) | Price | ...
                 row_data = {
-                    'titleOfSecurity': clean_cell(cells[0]) if len(cells) > 0 else '',
-                    'transactionDate': clean_cell(cells[1]) if len(cells) > 1 else '',
-                    'deemedExecutionDate': clean_cell(cells[2]) if len(cells) > 2 else '',
-                    'transactionCode': clean_cell(cells[3]) if len(cells) > 3 else '',
-                    'transactionCodeV': clean_cell(cells[4]) if len(cells) > 4 else '',
-                    'amount': clean_cell(cells[5]) if len(cells) > 5 else '',
-                    'acquiredOrDisposed': clean_cell(cells[6]) if len(cells) > 6 else '',
-                    'price': clean_cell(cells[7]) if len(cells) > 7 else ''
+                    'titleOfSecurity': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',
+                    'transactionDate': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
+                    'deemedExecutionDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
+                    'transactionCode': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',
+                    'transactionCodeV': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',
+                    'amount': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',
+                    'acquiredOrDisposed': create_field_value(cells[6], explanations_dict) if len(cells) > 6 else '',
+                    'price': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''
                 }
                 # Add remaining columns if present
                 if len(cells) > 8:
-                    row_data['amountOfSecuritiesBeneficiallyOwned'] = clean_cell(cells[8])
+                    row_data['amountOfSecuritiesBeneficiallyOwned'] = create_field_value(cells[8], explanations_dict)
                 if len(cells) > 9:
-                    row_data['ownershipForm'] = clean_cell(cells[9])
+                    row_data['ownershipForm'] = create_field_value(cells[9], explanations_dict)
                 if len(cells) > 10:
-                    row_data['natureOfIndirectBeneficialOwnership'] = clean_cell(cells[10])
+                    row_data['natureOfIndirectBeneficialOwnership'] = create_field_value(cells[10], explanations_dict)
                 table_data.append(row_data)
     
     except Exception as e:
@@ -1862,7 +1911,7 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
     return table_data
 
 
-def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: bool) -> List[Dict[str, Any]]:
+def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: bool, explanations_dict: Dict[str, str] = None) -> List[Dict[str, Any]]:
     """Parse Table II - Derivative Securities"""
     # Import inside function to avoid serialization issues
     from html import unescape
@@ -1889,10 +1938,40 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
         tbody_content = table2_match.group(1)
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
         
+        def extract_footnote(cell):
+            """Extract footnote number from a cell (e.g., <sup>(1)</sup> -> 1, or None if no footnote)"""
+            # Pattern: <sup>(1)</sup> or <sup>(2)</sup> etc.
+            footnote_match = re.search(r'<sup>\((\d+)\)</sup>', cell, re.IGNORECASE)
+            if footnote_match:
+                try:
+                    return int(footnote_match.group(1))
+                except:
+                    pass
+            return None
+        
         def clean_cell(cell):
             text = re.sub(r'<[^>]+>', '', cell)
             text = unescape(text)
             return text.strip()
+        
+        def create_field_value(cell, explanations_dict):
+            """Create field value - either string or object with value, footnote number, and explanation"""
+            footnote_num = extract_footnote(cell)
+            value = clean_cell(cell)
+            
+            if footnote_num is not None:
+                # Field has a footnote - create object structure
+                footnote_obj = {
+                    "value": value,
+                    "footnote": {
+                        "number": footnote_num,
+                        "explanation": explanations_dict.get(str(footnote_num), "") if explanations_dict else ""
+                    }
+                }
+                return footnote_obj
+            else:
+                # No footnote - just return the string value
+                return value
         
         for row in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
@@ -1901,42 +1980,47 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                 # Form 3: Title | Date Exercisable | Expiration Date | Title | Amount | Conversion Price | Ownership | Nature
                 # Note: Form 3 has 8 columns, but we need at least 6 to parse basic info
                 row_data = {
-                    'titleOfDerivativeSecurity': clean_cell(cells[0]) if len(cells) > 0 else '',
-                    'dateExercisable': clean_cell(cells[1]) if len(cells) > 1 else '',
-                    'expirationDate': clean_cell(cells[2]) if len(cells) > 2 else '',
-                    'titleOfUnderlyingSecurity': clean_cell(cells[3]) if len(cells) > 3 else '',
-                    'amountOrNumberOfShares': clean_cell(cells[4]) if len(cells) > 4 else '',
-                    'conversionOrExercisePrice': clean_cell(cells[5]) if len(cells) > 5 else '',
-                    'ownershipForm': clean_cell(cells[6]) if len(cells) > 6 else '',
-                    'natureOfIndirectBeneficialOwnership': clean_cell(cells[7]) if len(cells) > 7 else ''
+                    'titleOfDerivativeSecurity': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',
+                    'dateExercisable': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
+                    'expirationDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
+                    'titleOfUnderlyingSecurity': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',
+                    'amountOrNumberOfShares': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',
+                    'conversionOrExercisePrice': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',
+                    'ownershipForm': create_field_value(cells[6], explanations_dict) if len(cells) > 6 else '',
+                    'natureOfIndirectBeneficialOwnership': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''
                 }
-                # Only add if we have at least the title
-                if row_data['titleOfDerivativeSecurity']:
+                # Only add if we have at least the title (check if it's a dict or string)
+                title_value = row_data['titleOfDerivativeSecurity']
+                if isinstance(title_value, dict):
+                    title_str = title_value.get('value', '')
+                else:
+                    title_str = str(title_value)
+                if title_str:
                     table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 10:
                 # Form 4/5: Title | Conversion Price | Transaction Date | ... | (A) | (D) | Date Exercisable | Expiration | Title | Amount | Price | ...
                 row_data = {
-                    'titleOfDerivativeSecurity': clean_cell(cells[0]) if len(cells) > 0 else '',
-                    'conversionOrExercisePrice': clean_cell(cells[1]) if len(cells) > 1 else '',
-                    'transactionDate': clean_cell(cells[2]) if len(cells) > 2 else '',
-                    'deemedExecutionDate': clean_cell(cells[3]) if len(cells) > 3 else '',
-                    'transactionCode': clean_cell(cells[4]) if len(cells) > 4 else '',
-                    'transactionCodeV': clean_cell(cells[5]) if len(cells) > 5 else '',
-                    'acquired': clean_cell(cells[6]) if len(cells) > 6 else '',
-                    'disposed': clean_cell(cells[7]) if len(cells) > 7 else '',
-                    'dateExercisable': clean_cell(cells[8]) if len(cells) > 8 else '',
-                    'expirationDate': clean_cell(cells[9]) if len(cells) > 9 else '',
-                    'titleOfUnderlyingSecurity': clean_cell(cells[10]) if len(cells) > 10 else '',
-                    'amountOrNumberOfShares': clean_cell(cells[11]) if len(cells) > 11 else '',
-                    'priceOfDerivativeSecurity': clean_cell(cells[12]) if len(cells) > 12 else ''
+                    'titleOfDerivativeSecurity': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',
+                    'conversionOrExercisePrice': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
+                    'transactionDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
+                    'deemedExecutionDate': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',
+                    'transactionCode': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',
+                    'transactionCodeV': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',
+                    'acquired': create_field_value(cells[6], explanations_dict) if len(cells) > 6 else '',
+                    'disposed': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else '',
+                    'dateExercisable': create_field_value(cells[8], explanations_dict) if len(cells) > 8 else '',
+                    'expirationDate': create_field_value(cells[9], explanations_dict) if len(cells) > 9 else '',
+                    'titleOfUnderlyingSecurity': create_field_value(cells[10], explanations_dict) if len(cells) > 10 else '',
+                    'amountOrNumberOfShares': create_field_value(cells[11], explanations_dict) if len(cells) > 11 else '',
+                    'priceOfDerivativeSecurity': create_field_value(cells[12], explanations_dict) if len(cells) > 12 else ''
                 }
                 # Add remaining columns if present
                 if len(cells) > 13:
-                    row_data['numberOfDerivativeSecuritiesBeneficiallyOwned'] = clean_cell(cells[13])
+                    row_data['numberOfDerivativeSecuritiesBeneficiallyOwned'] = create_field_value(cells[13], explanations_dict)
                 if len(cells) > 14:
-                    row_data['ownershipForm'] = clean_cell(cells[14])
+                    row_data['ownershipForm'] = create_field_value(cells[14], explanations_dict)
                 if len(cells) > 15:
-                    row_data['natureOfIndirectBeneficialOwnership'] = clean_cell(cells[15])
+                    row_data['natureOfIndirectBeneficialOwnership'] = create_field_value(cells[15], explanations_dict)
                 table_data.append(row_data)
     
     except Exception as e:
@@ -1947,12 +2031,21 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
     return table_data
 
 
-def parse_explanations_and_remarks(html_content: str) -> Dict[str, Any]:
-    """Parse explanations and remarks into JSON object"""
+def parse_explanations(html_content: str) -> Dict[str, str]:
+    """
+    Parse numbered explanations from "Explanation of Responses" section.
+    
+    Returns:
+        Dict with numbered explanation keys (e.g., "1", "2") mapping to explanation text.
+        Example: {"1": "Explanation text for footnote (1)", "2": "Explanation text for footnote (2)"}
+    
+    Note: These explanations are embedded directly in table row fields that have footnotes.
+          This function is separate from parse_remarks() to allow explanations to be passed to table parsers.
+    """
     # Import inside function to avoid serialization issues
     from html import unescape
     
-    misc = {}
+    explanations = {}
     
     try:
         # Find "Explanation of Responses" section
@@ -1980,30 +2073,58 @@ def parse_explanations_and_remarks(html_content: str) -> Dict[str, Any]:
                 cleaned_text = re.sub(r'<[^>]+>', '', text)  # Remove any remaining HTML tags
                 cleaned_text = unescape(cleaned_text).strip()
                 if cleaned_text:
-                    misc[num] = cleaned_text
+                    explanations[num] = cleaned_text
             
             # Fallback: If no footnote rows found, try the original pattern
-            if not misc:
+            if not explanations:
                 explanation_pattern = r'(\d+)\.\s+([^<\d]+?)(?=\d+\.|$)'
-                explanations = re.findall(explanation_pattern, explanation_text, re.DOTALL)
+                explanation_matches = re.findall(explanation_pattern, explanation_text, re.DOTALL)
                 
-                for num, text in explanations:
+                for num, text in explanation_matches:
                     cleaned_text = re.sub(r'<[^>]+>', '', text)
                     cleaned_text = unescape(cleaned_text).strip()
                     if cleaned_text:
-                        misc[num] = cleaned_text
-        
+                        explanations[num] = cleaned_text
+    
+    except Exception as e:
+        import logging
+        local_logger = logging.getLogger()
+        local_logger.error(f"❌ Error parsing explanations: {e}")
+    
+    return explanations
+
+
+def parse_remarks(html_content: str) -> Dict[str, Any]:
+    """
+    Parse remarks section only (explanations are now embedded in table rows).
+    
+    Returns:
+        Dict with optional "remarks" key containing remarks text.
+        Example: {"remarks": "Exhibit 99.1 (Signatures and Joint Filer Information) is incorporated herein by reference."}
+    """
+    # Import inside function to avoid serialization issues
+    from html import unescape
+    
+    misc = {}
+    
+    try:
         # Find "Remarks" section
-        remarks_match = re.search(r'<b>Remarks:</b>[^<]*</td>[^<]*</tr>[^<]*<tr><td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>([^<]+)</td>', html_content, re.IGNORECASE | re.DOTALL)
+        # Pattern: <b>Remarks:</b> ... <td class="FootnoteData">...</td>
+        remarks_match = re.search(
+            r'<b>Remarks:</b>[^<]*</td>[^<]*</tr>[^<]*<tr><td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>(.*?)</td>',
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
         if remarks_match:
-            remarks_text = unescape(remarks_match.group(1)).strip()
+            remarks_text = re.sub(r'<[^>]+>', '', remarks_match.group(1))  # Remove HTML tags
+            remarks_text = unescape(remarks_text).strip()
             if remarks_text:
                 misc['remarks'] = remarks_text
     
     except Exception as e:
         import logging
         local_logger = logging.getLogger()
-        local_logger.error(f"❌ Error parsing explanations/remarks: {e}")
+        local_logger.error(f"❌ Error parsing remarks: {e}")
     
     return misc
 
