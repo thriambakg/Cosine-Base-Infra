@@ -2,16 +2,13 @@
 Politician Trades Fetcher Lambda
 Fetches Congressional PTRs (House/Senate) metadata
 
-Note: SEC forms (3, 4, 5) are now handled by a separate Glue job in the Step Functions workflow.
-This Lambda only handles Senate and House PTR fetching.
-
 This is Step 1 of the politician trades aggregation workflow.
+Note: SEC forms are now handled by a separate Glue job in Step Functions.
 """
 
 import json
 import os
 import logging
-import boto3
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
 import time
@@ -27,9 +24,6 @@ except ImportError as e:
     logger.error(f"❌ Failed to import webscraper: {e}")
     raise
 
-# AWS clients
-s3_client = boto3.client('s3')
-
 # Environment variables
 S3_BUCKET = os.environ.get('S3_BUCKET')
 
@@ -40,9 +34,7 @@ def get_yesterday_date() -> str:
 
 def lambda_handler(event, context):
     """
-    Lambda handler for fetching Congressional PTRs (House/Senate)
-    
-    Note: SEC forms are handled by a separate Glue job in the Step Functions workflow.
+    Lambda handler for fetching Congressional PTRs metadata
     
     Supports three input modes:
     
@@ -78,6 +70,7 @@ def lambda_handler(event, context):
         "senatePTRs": [...]
     }
     
+    Note: SEC forms are now handled by a separate Glue job in Step Functions.
     Note: For large date ranges, consider breaking into smaller chunks to avoid Lambda timeout.
     Recommended: Process 30-90 days at a time for optimal performance.
     """
@@ -196,7 +189,7 @@ def lambda_handler(event, context):
         aggregate_results['date'] = target_dates[0]
         
         # Log the return value for debugging
-        logger.info(f"📤 Returning results: {json.dumps({k: v if k != 'senatePTRs' and k != 'housePTRs' else f'[{len(v)} items]' for k, v in aggregate_results.items()}, default=str)}")
+        logger.info(f"📤 Returning results: {json.dumps({k: v if k != 'senatePTRs' else f'[{len(v)} items]' for k, v in aggregate_results.items()}, default=str)}")
         
         # Return dict directly for Step Functions (not wrapped in statusCode/body)
         # Step Functions expects a JSON-serializable dict

@@ -1036,31 +1036,19 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         # Create S3 client locally to avoid Spark serialization issues
         s3_client_local = boto3.client('s3')
         # Upload to S3 with correct content type
-        try:
-            local_logger.info(f"      📤 Attempting S3 upload...")
-            print(f"      📤 Attempting S3 upload to {s3_bucket_name}/{s3_key}...", flush=True)
-            s3_client_local.put_object(
-                Bucket=s3_bucket_name,
-                Key=s3_key,
-                Body=file_content,
-                ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
-            )
-            local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
-            local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
-            local_logger.info(f"      " + "="*70)
-            print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
-            print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
-            print(f"      " + "="*70, flush=True)
-        except Exception as s3_error:
-            error_type = type(s3_error).__name__
-            error_msg = str(s3_error)
-            local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
-            print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
-            import traceback
-            local_logger.error(f"      Traceback: {traceback.format_exc()}")
-            print(f"      Traceback: {traceback.format_exc()}", flush=True)
-            # Re-raise to prevent storing form if S3 upload fails
-            raise ValueError(f"S3 upload failed for {s3_key}: {error_msg}") from s3_error
+        s3_client_local.put_object(
+            Bucket=s3_bucket_name,
+            Key=s3_key,
+            Body=file_content,
+            ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
+        )
+        
+        local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
+        local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
+        local_logger.info(f"      " + "="*70)
+        print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
+        print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
+        print(f"      " + "="*70, flush=True)
         
         return {
             's3_key': s3_key,
@@ -1522,16 +1510,9 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         result['formType'] = f'form{form_number}' if form_number else 'form4'
         
         # Extract reporting person name (1. Name and Address of Reporting Person)
-        # IMPORTANT: Get the FIRST occurrence which is the primary reporting person
-        # The form may have multiple reporting persons (joint filings), but we want the primary one
-        name_match = re.search(r'1\.\s*Name and Address of Reporting Person[^<]*<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE | re.DOTALL)
+        name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
         if name_match:
             result['name'] = unescape(name_match.group(1)).strip()
-        else:
-            # Fallback: try to find any reporting person link near the top of the form
-            name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
-            if name_match:
-                result['name'] = unescape(name_match.group(1)).strip()
         
         # Extract address (Street, City, State, Zip)
         address_parts = []
@@ -1694,33 +1675,9 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
         
         def clean_cell(cell):
-            # Remove HTML tags but preserve text content
-            # First, extract text from span.FormData and span.SmallFormData (these contain the actual data)
-            # Then remove all remaining HTML tags
-            text = cell
-            
-            # Extract text from FormData spans (these contain the actual values)
-            form_data_matches = re.findall(r'<span[^>]*class="FormData"[^>]*>([^<]+)</span>', text, re.IGNORECASE)
-            if form_data_matches:
-                text = ' '.join(form_data_matches)
-            else:
-                # Fallback: extract text from SmallFormData spans
-                small_form_data_matches = re.findall(r'<span[^>]*class="SmallFormData"[^>]*>([^<]+)</span>', text, re.IGNORECASE)
-                if small_form_data_matches:
-                    text = ' '.join(small_form_data_matches)
-                else:
-                    # Last resort: strip all HTML tags
-                    text = re.sub(r'<[^>]+>', '', text)
-            
+            text = re.sub(r'<[^>]+>', '', cell)
             text = unescape(text)
             return text.strip()
-        
-        def extract_footnotes(cell):
-            """Extract footnote references like (1), (2) from a cell"""
-            # Look for <sup>(1)</sup> or <sup>(2)</sup> patterns
-            footnote_pattern = r'<sup>\((\d+)\)</sup>'
-            footnotes = re.findall(footnote_pattern, cell, re.IGNORECASE)
-            return [int(fn) for fn in footnotes] if footnotes else []
         
         for row in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
@@ -1733,26 +1690,6 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
                     'ownershipForm': clean_cell(cells[2]) if len(cells) > 2 else '',
                     'natureOfIndirectBeneficialOwnership': clean_cell(cells[3]) if len(cells) > 3 else ''
                 }
-                
-                # Extract footnotes from each cell
-                footnotes = {}
-                if len(cells) > 1:
-                    amount_footnotes = extract_footnotes(cells[1])
-                    if amount_footnotes:
-                        footnotes['amountOfSecurities'] = amount_footnotes
-                if len(cells) > 2:
-                    ownership_footnotes = extract_footnotes(cells[2])
-                    if ownership_footnotes:
-                        footnotes['ownershipForm'] = ownership_footnotes
-                if len(cells) > 3:
-                    nature_footnotes = extract_footnotes(cells[3])
-                    if nature_footnotes:
-                        footnotes['natureOfIndirectBeneficialOwnership'] = nature_footnotes
-                
-                # Add footnotes to row_data if any were found
-                if footnotes:
-                    row_data['footnotes'] = footnotes
-                
                 table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 8:
                 # Form 4/5: Title | Transaction Date | ... | Amount | (A) or (D) | Price | ...
@@ -1802,47 +1739,15 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
         
         def clean_cell(cell):
-            # Remove HTML tags but preserve text content
-            # First, extract text from span.FormData and span.SmallFormData (these contain the actual data)
-            # Then remove all remaining HTML tags
-            text = cell
-            
-            # Extract text from FormData spans (these contain the actual values)
-            form_data_matches = re.findall(r'<span[^>]*class="FormData"[^>]*>([^<]+)</span>', text, re.IGNORECASE)
-            if form_data_matches:
-                text = ' '.join(form_data_matches)
-            else:
-                # Fallback: extract text from SmallFormData spans
-                small_form_data_matches = re.findall(r'<span[^>]*class="SmallFormData"[^>]*>([^<]+)</span>', text, re.IGNORECASE)
-                if small_form_data_matches:
-                    text = ' '.join(small_form_data_matches)
-                else:
-                    # Last resort: strip all HTML tags
-                    text = re.sub(r'<[^>]+>', '', text)
-            
+            text = re.sub(r'<[^>]+>', '', cell)
             text = unescape(text)
             return text.strip()
-        
-        def extract_footnotes(cell):
-            """Extract footnote references like (1), (2) from a cell"""
-            # Look for <sup>(1)</sup> or <sup>(2)</sup> patterns
-            footnote_pattern = r'<sup>\((\d+)\)</sup>'
-            footnotes = re.findall(footnote_pattern, cell, re.IGNORECASE)
-            return [int(fn) for fn in footnotes] if footnotes else []
         
         for row in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
             
             if is_form3 and len(cells) >= 6:
-                # Form 3 Table II structure (8 columns):
-                # 0: Title of Derivative Security
-                # 1: Date Exercisable (may be empty with footnote)
-                # 2: Expiration Date (may be empty with footnote)
-                # 3: Title of Underlying Security
-                # 4: Amount or Number of Shares
-                # 5: Conversion or Exercise Price (may be empty with footnote)
-                # 6: Ownership Form (D or I, may have footnote)
-                # 7: Nature of Indirect Beneficial Ownership
+                # Form 3: Title | Date Exercisable | Expiration Date | Title | Amount | Conversion Price | Ownership | Nature
                 row_data = {
                     'titleOfDerivativeSecurity': clean_cell(cells[0]) if len(cells) > 0 else '',
                     'dateExercisable': clean_cell(cells[1]) if len(cells) > 1 else '',
@@ -1853,33 +1758,7 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                     'ownershipForm': clean_cell(cells[6]) if len(cells) > 6 else '',
                     'natureOfIndirectBeneficialOwnership': clean_cell(cells[7]) if len(cells) > 7 else ''
                 }
-                
-                # Extract footnotes from each cell
-                footnotes = {}
-                if len(cells) > 1:
-                    date_ex_footnotes = extract_footnotes(cells[1])
-                    if date_ex_footnotes:
-                        footnotes['dateExercisable'] = date_ex_footnotes
-                if len(cells) > 2:
-                    exp_date_footnotes = extract_footnotes(cells[2])
-                    if exp_date_footnotes:
-                        footnotes['expirationDate'] = exp_date_footnotes
-                if len(cells) > 5:
-                    conv_price_footnotes = extract_footnotes(cells[5])
-                    if conv_price_footnotes:
-                        footnotes['conversionOrExercisePrice'] = conv_price_footnotes
-                if len(cells) > 6:
-                    ownership_footnotes = extract_footnotes(cells[6])
-                    if ownership_footnotes:
-                        footnotes['ownershipForm'] = ownership_footnotes
-                
-                # Add footnotes to row_data if any were found
-                if footnotes:
-                    row_data['footnotes'] = footnotes
-                
-                # Only add row if it has meaningful data (at least title or amount)
-                if row_data.get('titleOfDerivativeSecurity') or row_data.get('amountOrNumberOfShares'):
-                    table_data.append(row_data)
+                table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 10:
                 # Form 4/5: Title | Conversion Price | Transaction Date | ... | (A) | (D) | Date Exercisable | Expiration | Title | Amount | Price | ...
                 row_data = {
@@ -2023,18 +1902,14 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     print(f"   🔵 Target date: {target_date}, S3 bucket: {s3_bucket_name}", flush=True)
     
     try:
-        print(f"   🔵 CALLING download_sec_form for CIK={cik}, Accession={accession}", flush=True)
         downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
         download_duration = (datetime.now() - download_start).total_seconds()
         
-        print(f"   🔵 download_sec_form returned: {type(downloaded).__name__} after {download_duration:.2f}s", flush=True)
+        print(f"   🔵 download_sec_form returned: {type(downloaded).__name__}", flush=True)
         if downloaded:
             print(f"   🔵 download_sec_form returned dict with keys: {list(downloaded.keys()) if isinstance(downloaded, dict) else 'N/A'}", flush=True)
-            if isinstance(downloaded, dict):
-                print(f"   🔵 S3 Key from download: {downloaded.get('s3_key', 'NOT SET')}", flush=True)
-                print(f"   🔵 File size: {len(downloaded.get('content', b''))} bytes", flush=True)
         else:
-            print(f"   🔵 download_sec_form returned None or False - DOWNLOAD FAILED", flush=True)
+            print(f"   🔵 download_sec_form returned None or False", flush=True)
     except Exception as download_exception:
         download_duration = (datetime.now() - download_start).total_seconds()
         error_type = type(download_exception).__name__
@@ -2125,18 +2000,10 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     match_duration = (datetime.now() - match_start).total_seconds()
     local_logger.info(f"   ✅ Matching complete in {match_duration:.2f}s")
     
-    # Generate trade ID (includes CIK to ensure uniqueness even for joint filings with same accession)
-    # Note: After deduplication, each accession should only be processed once, but tradeId still includes CIK
-    # for historical consistency and to handle edge cases
+    # Generate trade ID
     trade_id = f"sec_{form_data.get('form_type', 'form4')}_{cik}_{accession}_{target_date.replace('-', '')}"
     parsed_data['tradeId'] = trade_id
     parsed_data['formS3Key'] = s3_key
-    
-    # Log tradeId and S3 key for debugging
-    local_logger.info(f"   📋 Generated TradeId: {trade_id}")
-    local_logger.info(f"   📋 S3 Key: {s3_key}")
-    print(f"   📋 Generated TradeId: {trade_id}", flush=True)
-    print(f"   📋 S3 Key: {s3_key}", flush=True)
     
     # Handle amendment logic (will be implemented later when we can query existing records)
     # For now, just mark if it's an amendment
@@ -2370,7 +2237,7 @@ try:
     test_limit = 10
     if len(forms) > test_limit:
         logger.info(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)")
-        # print(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)", flush=True)
+        print(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)", flush=True)
         forms = forms[:test_limit]
     
     # Create RDD from forms list
