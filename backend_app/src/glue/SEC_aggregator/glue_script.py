@@ -1036,19 +1036,31 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         # Create S3 client locally to avoid Spark serialization issues
         s3_client_local = boto3.client('s3')
         # Upload to S3 with correct content type
-        s3_client_local.put_object(
-            Bucket=s3_bucket_name,
-            Key=s3_key,
-            Body=file_content,
-            ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
-        )
-        
-        local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
-        local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
-        local_logger.info(f"      " + "="*70)
-        print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
-        print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
-        print(f"      " + "="*70, flush=True)
+        try:
+            local_logger.info(f"      📤 Attempting S3 upload...")
+            print(f"      📤 Attempting S3 upload to {s3_bucket_name}/{s3_key}...", flush=True)
+            s3_client_local.put_object(
+                Bucket=s3_bucket_name,
+                Key=s3_key,
+                Body=file_content,
+                ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
+            )
+            local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
+            local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
+            local_logger.info(f"      " + "="*70)
+            print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
+            print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
+            print(f"      " + "="*70, flush=True)
+        except Exception as s3_error:
+            error_type = type(s3_error).__name__
+            error_msg = str(s3_error)
+            local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
+            print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
+            import traceback
+            local_logger.error(f"      Traceback: {traceback.format_exc()}")
+            print(f"      Traceback: {traceback.format_exc()}", flush=True)
+            # Re-raise to prevent storing form if S3 upload fails
+            raise ValueError(f"S3 upload failed for {s3_key}: {error_msg}") from s3_error
         
         return {
             's3_key': s3_key,
@@ -2109,10 +2121,18 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     match_duration = (datetime.now() - match_start).total_seconds()
     local_logger.info(f"   ✅ Matching complete in {match_duration:.2f}s")
     
-    # Generate trade ID
+    # Generate trade ID (includes CIK to ensure uniqueness even for joint filings with same accession)
+    # Note: After deduplication, each accession should only be processed once, but tradeId still includes CIK
+    # for historical consistency and to handle edge cases
     trade_id = f"sec_{form_data.get('form_type', 'form4')}_{cik}_{accession}_{target_date.replace('-', '')}"
     parsed_data['tradeId'] = trade_id
     parsed_data['formS3Key'] = s3_key
+    
+    # Log tradeId and S3 key for debugging
+    local_logger.info(f"   📋 Generated TradeId: {trade_id}")
+    local_logger.info(f"   📋 S3 Key: {s3_key}")
+    print(f"   📋 Generated TradeId: {trade_id}", flush=True)
+    print(f"   📋 S3 Key: {s3_key}", flush=True)
     
     # Handle amendment logic (will be implemented later when we can query existing records)
     # For now, just mark if it's an amendment
