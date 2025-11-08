@@ -562,11 +562,13 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         filing_date = form_data.get('filing_date') or form_data.get('filingDate', 'unknown')
         
         print(f"   Extracted: CIK={cik}, Accession={accession}, Type={form_type}, FilingDate={filing_date}", flush=True)
+        print(f"   Full form_data: {json.dumps(form_data, default=str)}", flush=True)
         
         local_logger.info(f"")
         local_logger.info(f"      " + "="*70)
         local_logger.info(f"      📥 DOWNLOAD START: CIK={cik}, Accession={accession}, Type={form_type}")
         local_logger.info(f"      📅 Filing Date: {filing_date}")
+        local_logger.info(f"      📋 Full form_data: {json.dumps(form_data, default=str)}")
         print(f"", flush=True)
         print(f"      " + "="*70, flush=True)
         print(f"      📥 DOWNLOAD START: CIK={cik}, Accession={accession}, Type={form_type}", flush=True)
@@ -576,6 +578,8 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             error_msg = f"   ⚠️ Missing CIK/accession: CIK={cik}, Accession={accession}"
             local_logger.warning(error_msg)
             print(error_msg, flush=True)
+            print(f"   ⚠️ Form data keys: {list(form_data.keys())}", flush=True)
+            print(f"   ⚠️ Form data values: {form_data}", flush=True)
             return None
         
         # Construct accession number with dashes (format: 0001234567-12-345678)
@@ -669,16 +673,29 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                 print(f"      🔗 URL: {file_url}", flush=True)
                 
                 download_start_time = datetime.now()
-                response = session.get(file_url, timeout=30)
-                download_duration = (datetime.now() - download_start_time).total_seconds()
-                
-                local_logger.info(f"      📥 RESPONSE: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s")
-                print(f"      📥 RESPONSE: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s", flush=True)
+                try:
+                    response = session.get(file_url, timeout=30)
+                    download_duration = (datetime.now() - download_start_time).total_seconds()
+                    
+                    local_logger.info(f"      📥 RESPONSE: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s")
+                    print(f"      📥 RESPONSE: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s", flush=True)
+                except Exception as get_error:
+                    download_duration = (datetime.now() - download_start_time).total_seconds()
+                    error_type = type(get_error).__name__
+                    error_msg = str(get_error)
+                    local_logger.error(f"      ❌ HTTP GET FAILED: {error_type}: {error_msg}")
+                    print(f"      ❌ HTTP GET FAILED: {error_type}: {error_msg}", flush=True)
+                    failed_attempts.append(f"{file_url} ({error_type}: {error_msg})")
+                    continue
                 
                 if len(response.content) > 0:
                     content_preview = response.content[:200].decode('utf-8', errors='ignore')
                     local_logger.info(f"      📄 Content Preview (first 200 chars): {content_preview}")
                     print(f"      📄 Content Preview (first 200 chars): {content_preview}", flush=True)
+                
+                # Log response details for debugging
+                local_logger.info(f"      📊 Response Details: Status={response.status_code}, Headers={dict(response.headers)}")
+                print(f"      📊 Response Details: Status={response.status_code}", flush=True)
                 
                 if response.status_code == 200:
                     file_content = response.content
@@ -960,8 +977,13 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                         print(f"      ✅ DOWNLOAD SUCCESS: CIK={cik}, Accession={accession}, URL={file_url}, Size={len(file_content):,} bytes, Ext={file_ext}", flush=True)
                         break
                 else:
+                    # Log non-200 responses with more detail
+                    response_text_preview = response.text[:500] if hasattr(response, 'text') else 'N/A'
                     failed_attempts.append(f"{file_url} (HTTP {response.status_code})")
                     local_logger.warning(f"      ⚠️ HTTP {response.status_code} for {file_url}, trying next option...")
+                    local_logger.warning(f"      📄 Response preview: {response_text_preview}")
+                    print(f"      ⚠️ HTTP {response.status_code} for {file_url}, trying next option...", flush=True)
+                    print(f"      📄 Response preview: {response_text_preview}", flush=True)
                     
             except requests.exceptions.Timeout as e:
                 failed_attempts.append(f"{file_url} (Timeout)")
@@ -984,9 +1006,13 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                 print(f"         {idx}. {name}: {url}", flush=True)
             local_logger.error(f"      ❌ All attempts failed:")
             print(f"      ❌ All attempts failed:", flush=True)
-            for attempt in failed_attempts:
-                local_logger.error(f"         - {attempt}")
-                print(f"         - {attempt}", flush=True)
+            if failed_attempts:
+                for attempt in failed_attempts:
+                    local_logger.error(f"         - {attempt}")
+                    print(f"         - {attempt}", flush=True)
+            else:
+                local_logger.error(f"         ⚠️ No specific error details captured - all requests may have returned non-200 status codes")
+                print(f"         ⚠️ No specific error details captured - all requests may have returned non-200 status codes", flush=True)
             local_logger.error(f"      " + "="*70)
             print(f"      " + "="*70, flush=True)
             return None
@@ -1872,14 +1898,30 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"   📥 Step 2/4: Downloading form...")
     print(f"   📥 Step 2/4: Downloading form...", flush=True)
     print(f"   🔵 About to call download_sec_form...", flush=True)
-    downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
-    download_duration = (datetime.now() - download_start).total_seconds()
+    print(f"   🔵 Form data being passed: {json.dumps(form_data, default=str)}", flush=True)
+    print(f"   🔵 Target date: {target_date}, S3 bucket: {s3_bucket_name}", flush=True)
     
-    print(f"   🔵 download_sec_form returned: {type(downloaded).__name__}", flush=True)
-    if downloaded:
-        print(f"   🔵 download_sec_form returned dict with keys: {list(downloaded.keys()) if isinstance(downloaded, dict) else 'N/A'}", flush=True)
-    else:
-        print(f"   🔵 download_sec_form returned None or False", flush=True)
+    try:
+        downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
+        download_duration = (datetime.now() - download_start).total_seconds()
+        
+        print(f"   🔵 download_sec_form returned: {type(downloaded).__name__}", flush=True)
+        if downloaded:
+            print(f"   🔵 download_sec_form returned dict with keys: {list(downloaded.keys()) if isinstance(downloaded, dict) else 'N/A'}", flush=True)
+        else:
+            print(f"   🔵 download_sec_form returned None or False", flush=True)
+    except Exception as download_exception:
+        download_duration = (datetime.now() - download_start).total_seconds()
+        error_type = type(download_exception).__name__
+        error_msg = str(download_exception)
+        import traceback
+        error_traceback = traceback.format_exc()
+        
+        local_logger.error(f"   ❌ EXCEPTION calling download_sec_form: {error_type}: {error_msg}")
+        local_logger.error(f"      Traceback: {error_traceback}")
+        print(f"   ❌ EXCEPTION calling download_sec_form: {error_type}: {error_msg}", flush=True)
+        print(f"      Traceback: {error_traceback}", flush=True)
+        downloaded = None
     
     if not downloaded:
         error_msg = f"   ❌ FAILED: Could not download form (CIK={cik}, Accession={accession}) after {download_duration:.2f}s"
