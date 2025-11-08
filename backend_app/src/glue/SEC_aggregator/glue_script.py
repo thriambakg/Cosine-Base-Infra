@@ -2619,12 +2619,14 @@ try:
         search_msg = f"🔍 BACKDATE MODE: Fetching all Forms 3, 4, 5 from {target_date} onwards (until first date in batch is before {target_date})"
     else:
         search_msg = f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}"
-    log_print(search_msg)
+    logger.info(search_msg)
+    print(search_msg, flush=True)
     stage2_start = datetime.now()
     forms = fetch_sec_forms_paginated(target_date, is_backdate_mode=is_backdate_mode)
     stage2_duration = (datetime.now() - stage2_start).total_seconds()
     stage2_msg = f"✅ Stage 2 Complete: Fetched {len(forms)} forms in {stage2_duration:.2f} seconds"
-    log_print(stage2_msg)
+    logger.info(stage2_msg)
+    print(stage2_msg, flush=True)
     
     # Log form type breakdown
     form_type_counts = {}
@@ -2632,15 +2634,19 @@ try:
         form_type = form.get('form_type', 'unknown')
         form_type_counts[form_type] = form_type_counts.get(form_type, 0) + 1
     
-    log_print("Form Type Breakdown:")
+    breakdown_header = "Form Type Breakdown:"
+    logger.info(breakdown_header)
+    print(breakdown_header, flush=True)
+    
     for form_type, count in sorted(form_type_counts.items()):
         type_msg = f"   - {form_type}: {count}"
-        log_print(type_msg)
+        logger.info(type_msg)
+        print(type_msg, flush=True)
     
     # Log preview of fetched files (first 10)
-    log_print("")
     preview_header = f"📋 Preview of Fetched Files (showing first {builtins.min(10, len(forms))} of {len(forms)}):"
-    log_print(preview_header)
+    logger.info(preview_header)
+    print(preview_header, flush=True)
     
     for idx, form in enumerate(forms[:10], 1):
         form_msg = (f"   {idx}. CIK={form.get('cik', 'N/A')}, "
@@ -2648,13 +2654,17 @@ try:
                    f"Type={form.get('form_type', 'N/A')}, "
                    f"FilingDate={form.get('filing_date', 'N/A')}, "
                    f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
-        log_print(form_msg)
+        logger.info(form_msg)
+        print(form_msg, flush=True)
     
     if len(forms) > 10:
         more_msg = f"   ... ({len(forms) - 10} more files)"
-        log_print(more_msg)
+        logger.info(more_msg)
+        print(more_msg, flush=True)
     
-    log_print("=" * 80)
+    separator = "=" * 80
+    logger.info(separator)
+    print(separator, flush=True)
     
     # Step 3: Process forms in parallel using Spark
     logger.info("")
