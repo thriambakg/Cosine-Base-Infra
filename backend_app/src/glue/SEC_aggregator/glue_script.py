@@ -1640,7 +1640,7 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         # Extract reporting person name (1. Name and Address of Reporting Person)
         name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
         if name_match:
-            result['name'] = unescape(name_match.group(1)).strip()
+            result['name'] = unescape(name_match.group(1)).strip().lower()
         
         # Extract address (Street, City, State, Zip)
         # HTML structure: 
@@ -1711,16 +1711,29 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
                     pass
         
         # Extract issuer name and ticker symbol
-        # Pattern: Issuer Name <b>and</b> Ticker... <a href="...">Name</a> [ <span>TICKER</span> ]
-        # Note: There may be <b>and</b> tags between "Issuer Name" and the link
-        # The structure is: "3. Issuer Name <b>and</b> Ticker or Trading Symbol" <br> <a>Name</a> [ <span>TICKER</span> ]
+        # HTML structure: "3. Issuer Name <b>and</b> Ticker or Trading Symbol</span><br><a>Name</a>"
+        # Pattern: Look for Issuer Name, then </span>, then <br>, then <a>Name</a>
         issuer_match = re.search(
-            r'Issuer Name[^<]*<b>and</b>[^<]*Ticker[^<]*<br[^>]*>[^<]*<a[^>]*>([^<]+)</a>',
+            r'Issuer Name[^<]*<b>and</b>[^<]*Ticker[^<]*</span>[^<]*<br[^>]*>[^<]*<a[^>]*>([^<]+)</a>',
             html_content,
             re.IGNORECASE | re.DOTALL
         )
         if not issuer_match:
-            # Fallback: try without the "and Ticker" part but still look for <br> before <a>
+            # Fallback: try without </span> requirement
+            issuer_match = re.search(
+                r'Issuer Name[^<]*<b>and</b>[^<]*Ticker[^<]*<br[^>]*>[^<]*<a[^>]*>([^<]+)</a>',
+                html_content,
+                re.IGNORECASE | re.DOTALL
+            )
+        if not issuer_match:
+            # Fallback: try without the "and Ticker" part but with </span>
+            issuer_match = re.search(
+                r'Issuer Name[^<]*</span>[^<]*<br[^>]*>[^<]*<a[^>]*>([^<]+)</a>',
+                html_content,
+                re.IGNORECASE | re.DOTALL
+            )
+        if not issuer_match:
+            # Fallback: try without </span> and "and Ticker" but still look for <br> before <a>
             issuer_match = re.search(
                 r'Issuer Name[^<]*<br[^>]*>[^<]*<a[^>]*>([^<]+)</a>',
                 html_content,
@@ -1734,7 +1747,10 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
                 re.IGNORECASE | re.DOTALL
             )
         if issuer_match:
-            result['issuerName'] = unescape(issuer_match.group(1)).strip()
+            result['issuerName'] = unescape(issuer_match.group(1)).strip().lower()
+            local_logger.info(f"   ✅ Extracted issuerName: {result['issuerName']}")
+        else:
+            local_logger.warning(f"   ⚠️ Could not extract issuerName from HTML")
         
         ticker_match = re.search(r'\[ <span[^>]*class="FormData"[^>]*>([A-Z0-9]+)</span> \]', html_content)
         if ticker_match:
@@ -1786,7 +1802,7 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
             signature_name = unescape(signature_match.group(2)).strip()
             # Remove /s/ or s/ prefix if present
             signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
-            result['signatureName'] = signature_name
+            result['signatureName'] = signature_name.lower()
         
         # Check for amendment
         # Forms 3/4/5: "4. If Amendment, Date of Original Filed"
@@ -1796,6 +1812,10 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         
         # Parse explanations first (needed for table parsing)
         explanations_dict = parse_explanations(html_content)
+        local_logger.info(f"   📝 Parsed {len(explanations_dict)} explanations: {list(explanations_dict.keys())}")
+        if explanations_dict:
+            for num, text in list(explanations_dict.items())[:2]:  # Log first 2
+                local_logger.info(f"      Explanation {num}: {text[:100]}...")
         
         # Parse Table I - Non-Derivative Securities (pass explanations for footnote embedding)
         table1_data = parse_table_i(html_content, is_form3, is_form4, is_form5, explanations_dict)
@@ -1846,7 +1866,16 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
                     pass
             return None
         
-        def clean_cell(cell):
+        def clean_cell(cell, remove_footnote=True):
+            """Clean cell text, optionally removing footnote HTML first"""
+            # Remove footnote HTML before cleaning to avoid including "(1)" in the value
+            if remove_footnote:
+                # Remove entire FootnoteData spans (may contain nested <sup> tags)
+                # Pattern: <span class="FootnoteData">...<sup>(1)</sup>...</span>
+                cell = re.sub(r'<span[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>.*?</span>', '', cell, flags=re.IGNORECASE | re.DOTALL)
+                # Also remove standalone <sup>(1)</sup> tags that might not be in FootnoteData spans
+                cell = re.sub(r'<sup>\(\d+\)</sup>', '', cell, flags=re.IGNORECASE)
+            # Now remove all remaining HTML tags
             text = re.sub(r'<[^>]+>', '', cell)
             text = unescape(text)
             return text.strip()
@@ -1854,15 +1883,20 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
         def create_field_value(cell, explanations_dict):
             """Create field value - either string or object with value, footnote number, and explanation"""
             footnote_num = extract_footnote(cell)
-            value = clean_cell(cell)
+            # Clean cell and remove footnote HTML so value doesn't include "(1)" text
+            value = clean_cell(cell, remove_footnote=True)
             
             if footnote_num is not None:
                 # Field has a footnote - create object structure
+                explanation_text = ""
+                if explanations_dict:
+                    explanation_text = explanations_dict.get(str(footnote_num), "")
+                
                 footnote_obj = {
                     "value": value,
                     "footnote": {
                         "number": footnote_num,
-                        "explanation": explanations_dict.get(str(footnote_num), "") if explanations_dict else ""
+                        "explanation": explanation_text
                     }
                 }
                 return footnote_obj
@@ -1949,7 +1983,16 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                     pass
             return None
         
-        def clean_cell(cell):
+        def clean_cell(cell, remove_footnote=True):
+            """Clean cell text, optionally removing footnote HTML first"""
+            # Remove footnote HTML before cleaning to avoid including "(1)" in the value
+            if remove_footnote:
+                # Remove entire FootnoteData spans (may contain nested <sup> tags)
+                # Pattern: <span class="FootnoteData">...<sup>(1)</sup>...</span>
+                cell = re.sub(r'<span[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>.*?</span>', '', cell, flags=re.IGNORECASE | re.DOTALL)
+                # Also remove standalone <sup>(1)</sup> tags that might not be in FootnoteData spans
+                cell = re.sub(r'<sup>\(\d+\)</sup>', '', cell, flags=re.IGNORECASE)
+            # Now remove all remaining HTML tags
             text = re.sub(r'<[^>]+>', '', cell)
             text = unescape(text)
             return text.strip()
@@ -1957,15 +2000,20 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
         def create_field_value(cell, explanations_dict):
             """Create field value - either string or object with value, footnote number, and explanation"""
             footnote_num = extract_footnote(cell)
-            value = clean_cell(cell)
+            # Clean cell and remove footnote HTML so value doesn't include "(1)" text
+            value = clean_cell(cell, remove_footnote=True)
             
             if footnote_num is not None:
                 # Field has a footnote - create object structure
+                explanation_text = ""
+                if explanations_dict:
+                    explanation_text = explanations_dict.get(str(footnote_num), "")
+                
                 footnote_obj = {
                     "value": value,
                     "footnote": {
                         "number": footnote_num,
-                        "explanation": explanations_dict.get(str(footnote_num), "") if explanations_dict else ""
+                        "explanation": explanation_text
                     }
                 }
                 return footnote_obj
