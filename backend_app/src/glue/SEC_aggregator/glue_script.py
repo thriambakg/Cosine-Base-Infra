@@ -1767,14 +1767,23 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
     
     try:
         # Find Table I tbody
-        table1_pattern = r'Table I[^<]*<tbody>(.*?)</tbody>'
+        # Pattern must allow HTML tags between "Table I" and <tbody> (e.g., <thead> section)
+        table1_pattern = r'Table I.*?<tbody>(.*?)</tbody>'
         table1_match = re.search(table1_pattern, html_content, re.IGNORECASE | re.DOTALL)
         
         if not table1_match:
+            import logging
+            local_logger = logging.getLogger()
+            local_logger.warning(f"⚠️ Table I tbody not found in HTML")
             return table_data
         
         tbody_content = table1_match.group(1)
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
+        
+        import logging
+        local_logger = logging.getLogger()
+        local_logger.info(f"   📊 Table I: Found {len(rows)} rows in tbody")
+        print(f"   📊 Table I: Found {len(rows)} rows in tbody", flush=True)
         
         def extract_footnote(cell):
             """Extract footnote number from a cell (e.g., <sup>(1)</sup> -> 1, or None if no footnote)"""
@@ -1897,14 +1906,9 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
     
     try:
         # Find Table II tbody
-        # Pattern needs to handle whitespace/newlines between "Table II" and <tbody>
-        table2_pattern = r'Table II[^<]*?<tbody>(.*?)</tbody>'
+        # Pattern must allow HTML tags between "Table II" and <tbody> (e.g., <thead> section)
+        table2_pattern = r'Table II.*?<tbody>(.*?)</tbody>'
         table2_match = re.search(table2_pattern, html_content, re.IGNORECASE | re.DOTALL)
-        
-        if not table2_match:
-            # Try alternative pattern in case tbody is on a different line
-            table2_pattern_alt = r'Table II.*?<tbody[^>]*>(.*?)</tbody>'
-            table2_match = re.search(table2_pattern_alt, html_content, re.IGNORECASE | re.DOTALL)
         
         if not table2_match:
             import logging
@@ -1914,6 +1918,11 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
         
         tbody_content = table2_match.group(1)
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
+        
+        import logging
+        local_logger = logging.getLogger()
+        local_logger.info(f"   📊 Table II: Found {len(rows)} rows in tbody")
+        print(f"   📊 Table II: Found {len(rows)} rows in tbody", flush=True)
         
         def extract_footnote(cell):
             """Extract footnote number from a cell (e.g., <sup>(1)</sup> -> 1, or None if no footnote)"""
