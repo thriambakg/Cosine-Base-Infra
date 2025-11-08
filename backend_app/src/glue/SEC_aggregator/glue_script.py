@@ -1832,15 +1832,18 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         
         # Parse explanations first (needed for table parsing)
         explanations_dict = parse_explanations(html_content)
-        print(f"   📝 Parsed {len(explanations_dict)} explanations: {list(explanations_dict.keys())}")
-        local_logger.info(f"   📝 Parsed {len(explanations_dict)} explanations: {list(explanations_dict.keys())}")
+        explanations_msg = f"📝 Parsed {len(explanations_dict)} explanations: {list(explanations_dict.keys())}"
+        logger.info(explanations_msg)
+        print(explanations_msg, flush=True)
         if explanations_dict:
             for num, text in list(explanations_dict.items())[:2]:  # Log first 2
-                print(f"      Explanation {num}: {text[:100]}...")
-                local_logger.info(f"      Explanation {num}: {text[:100]}...")
+                explanation_preview = f"   Explanation {num}: {text[:100]}..."
+                logger.info(explanation_preview)
+                print(explanation_preview, flush=True)
         else:
-            print(f"   ⚠️ No explanations found in document")
-            local_logger.warning(f"   ⚠️ No explanations found in document")
+            no_explanations_msg = "⚠️ No explanations found in document"
+            logger.warning(no_explanations_msg)
+            print(no_explanations_msg, flush=True)
         
         # Parse Table I - Non-Derivative Securities (pass explanations for footnote embedding)
         table1_data = parse_table_i(html_content, is_form3, is_form4, is_form5, explanations_dict)
@@ -1919,15 +1922,25 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
                     explanation_text = explanations_dict.get(str(footnote_num), "") or explanations_dict.get(int(footnote_num), "")
                     if not explanation_text:
                         # Debug: log when explanation is missing
-                        print(f"   ⚠️ Footnote {footnote_num} found in Table I cell but no explanation in dict.")
-                        print(f"      Footnote num type: {type(footnote_num)}, value: {footnote_num}")
-                        print(f"      Available keys: {list(explanations_dict.keys())}")
-                        print(f"      Key types: {[type(k) for k in explanations_dict.keys()]}")
-                        print(f"      Looking for: str({footnote_num})={str(footnote_num)}, int({footnote_num})={int(footnote_num)}")
-                        local_logger.warning(f"   ⚠️ Footnote {footnote_num} found in Table I cell but no explanation in dict. Available keys: {list(explanations_dict.keys())}")
+                        missing_msg = f"⚠️ Footnote {footnote_num} found in Table I cell but no explanation in dict."
+                        local_logger.warning(missing_msg)
+                        print(missing_msg, flush=True)
+                        detail_msg = f"   Footnote num type: {type(footnote_num)}, value: {footnote_num}"
+                        local_logger.warning(detail_msg)
+                        print(detail_msg, flush=True)
+                        keys_msg = f"   Available keys: {list(explanations_dict.keys())}"
+                        local_logger.warning(keys_msg)
+                        print(keys_msg, flush=True)
+                        key_types_msg = f"   Key types: {[type(k) for k in explanations_dict.keys()]}"
+                        local_logger.warning(key_types_msg)
+                        print(key_types_msg, flush=True)
+                        lookup_msg = f"   Looking for: str({footnote_num})={str(footnote_num)}, int({footnote_num})={int(footnote_num)}"
+                        local_logger.warning(lookup_msg)
+                        print(lookup_msg, flush=True)
                 else:
-                    print(f"   ⚠️ Footnote {footnote_num} found but explanations_dict is None or empty")
-                    local_logger.warning(f"   ⚠️ Footnote {footnote_num} found but explanations_dict is None or empty")
+                    empty_dict_msg = f"⚠️ Footnote {footnote_num} found but explanations_dict is None or empty"
+                    local_logger.warning(empty_dict_msg)
+                    print(empty_dict_msg, flush=True)
                 
                 footnote_obj = {
                     "value": value,
@@ -2048,15 +2061,25 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                     explanation_text = explanations_dict.get(str(footnote_num), "") or explanations_dict.get(int(footnote_num), "")
                     if not explanation_text:
                         # Debug: log when explanation is missing
-                        print(f"   ⚠️ Footnote {footnote_num} found in Table II cell but no explanation in dict.")
-                        print(f"      Footnote num type: {type(footnote_num)}, value: {footnote_num}")
-                        print(f"      Available keys: {list(explanations_dict.keys())}")
-                        print(f"      Key types: {[type(k) for k in explanations_dict.keys()]}")
-                        print(f"      Looking for: str({footnote_num})={str(footnote_num)}, int({footnote_num})={int(footnote_num)}")
-                        local_logger.warning(f"   ⚠️ Footnote {footnote_num} found in Table II cell but no explanation in dict. Available keys: {list(explanations_dict.keys())}")
+                        missing_msg = f"⚠️ Footnote {footnote_num} found in Table II cell but no explanation in dict."
+                        local_logger.warning(missing_msg)
+                        print(missing_msg, flush=True)
+                        detail_msg = f"   Footnote num type: {type(footnote_num)}, value: {footnote_num}"
+                        local_logger.warning(detail_msg)
+                        print(detail_msg, flush=True)
+                        keys_msg = f"   Available keys: {list(explanations_dict.keys())}"
+                        local_logger.warning(keys_msg)
+                        print(keys_msg, flush=True)
+                        key_types_msg = f"   Key types: {[type(k) for k in explanations_dict.keys()]}"
+                        local_logger.warning(key_types_msg)
+                        print(key_types_msg, flush=True)
+                        lookup_msg = f"   Looking for: str({footnote_num})={str(footnote_num)}, int({footnote_num})={int(footnote_num)}"
+                        local_logger.warning(lookup_msg)
+                        print(lookup_msg, flush=True)
                 else:
-                    print(f"   ⚠️ Footnote {footnote_num} found but explanations_dict is None or empty")
-                    local_logger.warning(f"   ⚠️ Footnote {footnote_num} found but explanations_dict is None or empty")
+                    empty_dict_msg = f"⚠️ Footnote {footnote_num} found but explanations_dict is None or empty"
+                    local_logger.warning(empty_dict_msg)
+                    print(empty_dict_msg, flush=True)
                 
                 footnote_obj = {
                     "value": value,
@@ -2157,8 +2180,9 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
         
         if explanation_section:
             explanation_text = explanation_section.group(1)
-            print(f"   🔍 Found Explanation section, length: {len(explanation_text)} chars")
-            local_logger.info(f"   🔍 Found Explanation section, length: {len(explanation_text)} chars")
+            section_found_msg = f"🔍 Found Explanation section, length: {len(explanation_text)} chars"
+            local_logger.info(section_found_msg)
+            print(section_found_msg, flush=True)
             
             # Extract numbered explanations from FootnoteData cells
             # Pattern: Look for <td> with FootnoteData class containing numbered explanations
@@ -2179,50 +2203,58 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
                     re.IGNORECASE | re.DOTALL
                 )
             
-            print(f"   🔍 Found {len(footnote_rows)} footnote rows using primary pattern")
-            local_logger.info(f"   🔍 Found {len(footnote_rows)} footnote rows using primary pattern")
+            rows_found_msg = f"🔍 Found {len(footnote_rows)} footnote rows using primary pattern"
+            local_logger.info(rows_found_msg)
+            print(rows_found_msg, flush=True)
             
             for num, text in footnote_rows:
                 cleaned_text = re.sub(r'<[^>]+>', '', text)  # Remove any remaining HTML tags
                 cleaned_text = unescape(cleaned_text).strip()
                 if cleaned_text:
                     explanations[num] = cleaned_text
-                    print(f"   ✅ Parsed explanation {num}: {cleaned_text[:80]}...")
-                    local_logger.info(f"   ✅ Parsed explanation {num}: {cleaned_text[:80]}...")
+                    parsed_msg = f"✅ Parsed explanation {num}: {cleaned_text[:80]}..."
+                    local_logger.info(parsed_msg)
+                    print(parsed_msg, flush=True)
                 else:
-                    print(f"   ⚠️ Explanation {num} was empty after cleaning")
-                    local_logger.warning(f"   ⚠️ Explanation {num} was empty after cleaning")
+                    empty_msg = f"⚠️ Explanation {num} was empty after cleaning"
+                    local_logger.warning(empty_msg)
+                    print(empty_msg, flush=True)
             
             # Debug: Print the final explanations dict
-            print(f"   📝 Final explanations dict: {explanations}")
-            local_logger.info(f"   📝 Final explanations dict: {explanations}")
+            final_dict_msg = f"📝 Final explanations dict: {explanations}"
+            local_logger.info(final_dict_msg)
+            print(final_dict_msg, flush=True)
             
             # Fallback: If no footnote rows found, try the original pattern
             if not explanations:
-                print(f"   ⚠️ Primary pattern failed, trying fallback pattern")
-                local_logger.warning(f"   ⚠️ Primary pattern failed, trying fallback pattern")
+                fallback_msg = "⚠️ Primary pattern failed, trying fallback pattern"
+                local_logger.warning(fallback_msg)
+                print(fallback_msg, flush=True)
                 explanation_pattern = r'(\d+)\.\s+([^<\d]+?)(?=\d+\.|$)'
                 explanation_matches = re.findall(explanation_pattern, explanation_text, re.DOTALL)
                 
-                print(f"   🔍 Fallback pattern found {len(explanation_matches)} matches")
-                local_logger.info(f"   🔍 Fallback pattern found {len(explanation_matches)} matches")
+                fallback_found_msg = f"🔍 Fallback pattern found {len(explanation_matches)} matches"
+                local_logger.info(fallback_found_msg)
+                print(fallback_found_msg, flush=True)
                 
                 for num, text in explanation_matches:
                     cleaned_text = re.sub(r'<[^>]+>', '', text)
                     cleaned_text = unescape(cleaned_text).strip()
                     if cleaned_text:
                         explanations[num] = cleaned_text
-                        print(f"   ✅ Parsed explanation {num} (fallback): {cleaned_text[:80]}...")
-                        local_logger.info(f"   ✅ Parsed explanation {num} (fallback): {cleaned_text[:80]}...")
+                        fallback_parsed_msg = f"✅ Parsed explanation {num} (fallback): {cleaned_text[:80]}..."
+                        local_logger.info(fallback_parsed_msg)
+                        print(fallback_parsed_msg, flush=True)
         else:
-            print(f"   ⚠️ Could not find 'Explanation of Responses' section in HTML")
-            local_logger.warning(f"   ⚠️ Could not find 'Explanation of Responses' section in HTML")
+            not_found_msg = "⚠️ Could not find 'Explanation of Responses' section in HTML"
+            local_logger.warning(not_found_msg)
+            print(not_found_msg, flush=True)
     
     except Exception as e:
         import traceback
         error_msg = f"❌ Error parsing explanations: {e}\n{traceback.format_exc()}"
-        print(error_msg)
         local_logger.error(error_msg)
+        print(error_msg, flush=True)
     
     return explanations
 
