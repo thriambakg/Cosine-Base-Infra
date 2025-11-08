@@ -2384,23 +2384,23 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         
         # Convert to DynamoDB format
         # Store all fields, including None/empty values, so columns are visible in the table
-        # IMPORTANT: GSI keys cannot be NULL - they must be strings (or numbers)
+        # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
         # GSI key fields: formType, name, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
         gsi_key_fields = {'formType', 'name', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
         
         local_logger.info(f"      🔄 Converting to DynamoDB format...")
         dynamodb_item = {}
-        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0, 'null_fields': 0, 'gsi_empty_strings': 0}
+        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0, 'null_fields': 0, 'gsi_omitted': 0}
         
         for key, value in parsed_data.items():
             try:
                 # Handle None values
                 if value is None:
-                    # GSI keys cannot be NULL - use empty string instead
+                    # GSI keys cannot be NULL or empty - omit them from the item
                     if key in gsi_key_fields:
-                        dynamodb_item[key] = ""
-                        conversion_stats['gsi_empty_strings'] += 1
-                        local_logger.debug(f"         {key}: \"\" (GSI key, cannot be null)")
+                        conversion_stats['gsi_omitted'] += 1
+                        local_logger.debug(f"         {key}: omitted (GSI key, cannot be null/empty)")
+                        continue  # Skip this field - don't include it in the item
                     else:
                         dynamodb_item[key] = None
                         conversion_stats['null_fields'] += 1
@@ -2409,11 +2409,11 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                 
                 # Handle empty strings
                 if value == '':
-                    # GSI keys: keep as empty string (already correct)
+                    # GSI keys: omit empty strings (cannot be in GSI)
                     if key in gsi_key_fields:
-                        dynamodb_item[key] = ""
-                        conversion_stats['converted'] += 1
-                        local_logger.debug(f"         {key}: \"\" (GSI key)")
+                        conversion_stats['gsi_omitted'] += 1
+                        local_logger.debug(f"         {key}: omitted (GSI key, empty string not allowed)")
+                        continue  # Skip this field - don't include it in the item
                     else:
                         dynamodb_item[key] = None
                         conversion_stats['null_fields'] += 1
