@@ -1129,8 +1129,10 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             print(f"      " + "="*70, flush=True)
             return None
         
-        # Generate S3 key
-        s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{target_date}.{file_ext}"
+        # Generate S3 key - include accession number to ensure uniqueness
+        # Format: trades/{date}/sec/{form_type}-{cik}-{accession}-{date}.{ext}
+        # Accession is already in dashed format (e.g., 0001140361-25-040858)
+        s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{accession_dashed}-{target_date}.{file_ext}"
         
         local_logger.info(f"")
         local_logger.info(f"      💾 UPLOADING TO S3:")
@@ -1147,20 +1149,34 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         
         # Create S3 client locally to avoid Spark serialization issues
         s3_client_local = boto3.client('s3')
-        # Upload to S3 with correct content type
-        s3_client_local.put_object(
-            Bucket=s3_bucket_name,
-            Key=s3_key,
-            Body=file_content,
-            ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
-        )
         
-        local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
-        local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
-        local_logger.info(f"      " + "="*70)
-        print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
-        print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
-        print(f"      " + "="*70, flush=True)
+        # Upload to S3 with correct content type
+        try:
+            s3_client_local.put_object(
+                Bucket=s3_bucket_name,
+                Key=s3_key,
+                Body=file_content,
+                ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
+            )
+            
+            local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
+            local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
+            local_logger.info(f"      " + "="*70)
+            print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
+            print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
+            print(f"      " + "="*70, flush=True)
+        except Exception as s3_error:
+            error_type = type(s3_error).__name__
+            error_msg = str(s3_error)
+            local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
+            local_logger.error(f"         Bucket: {s3_bucket_name}")
+            local_logger.error(f"         Key: {s3_key}")
+            local_logger.error(f"         Size: {len(file_content):,} bytes")
+            print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
+            print(f"         Bucket: {s3_bucket_name}", flush=True)
+            print(f"         Key: {s3_key}", flush=True)
+            print(f"         Size: {len(file_content):,} bytes", flush=True)
+            raise  # Re-raise to be caught by outer exception handler
         
         return {
             's3_key': s3_key,
