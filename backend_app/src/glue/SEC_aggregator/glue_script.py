@@ -1510,9 +1510,16 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         result['formType'] = f'form{form_number}' if form_number else 'form4'
         
         # Extract reporting person name (1. Name and Address of Reporting Person)
-        name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
+        # IMPORTANT: Get the FIRST occurrence which is the primary reporting person
+        # The form may have multiple reporting persons (joint filings), but we want the primary one
+        name_match = re.search(r'1\.\s*Name and Address of Reporting Person[^<]*<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE | re.DOTALL)
         if name_match:
             result['name'] = unescape(name_match.group(1)).strip()
+        else:
+            # Fallback: try to find any reporting person link near the top of the form
+            name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
+            if name_match:
+                result['name'] = unescape(name_match.group(1)).strip()
         
         # Extract address (Street, City, State, Zip)
         address_parts = []
@@ -1675,9 +1682,33 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
         
         def clean_cell(cell):
-            text = re.sub(r'<[^>]+>', '', cell)
+            # Remove HTML tags but preserve text content
+            # First, extract text from span.FormData and span.SmallFormData (these contain the actual data)
+            # Then remove all remaining HTML tags
+            text = cell
+            
+            # Extract text from FormData spans (these contain the actual values)
+            form_data_matches = re.findall(r'<span[^>]*class="FormData"[^>]*>([^<]+)</span>', text, re.IGNORECASE)
+            if form_data_matches:
+                text = ' '.join(form_data_matches)
+            else:
+                # Fallback: extract text from SmallFormData spans
+                small_form_data_matches = re.findall(r'<span[^>]*class="SmallFormData"[^>]*>([^<]+)</span>', text, re.IGNORECASE)
+                if small_form_data_matches:
+                    text = ' '.join(small_form_data_matches)
+                else:
+                    # Last resort: strip all HTML tags
+                    text = re.sub(r'<[^>]+>', '', text)
+            
             text = unescape(text)
             return text.strip()
+        
+        def extract_footnotes(cell):
+            """Extract footnote references like (1), (2) from a cell"""
+            # Look for <sup>(1)</sup> or <sup>(2)</sup> patterns
+            footnote_pattern = r'<sup>\((\d+)\)</sup>'
+            footnotes = re.findall(footnote_pattern, cell, re.IGNORECASE)
+            return [int(fn) for fn in footnotes] if footnotes else []
         
         for row in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
@@ -1690,6 +1721,26 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
                     'ownershipForm': clean_cell(cells[2]) if len(cells) > 2 else '',
                     'natureOfIndirectBeneficialOwnership': clean_cell(cells[3]) if len(cells) > 3 else ''
                 }
+                
+                # Extract footnotes from each cell
+                footnotes = {}
+                if len(cells) > 1:
+                    amount_footnotes = extract_footnotes(cells[1])
+                    if amount_footnotes:
+                        footnotes['amountOfSecurities'] = amount_footnotes
+                if len(cells) > 2:
+                    ownership_footnotes = extract_footnotes(cells[2])
+                    if ownership_footnotes:
+                        footnotes['ownershipForm'] = ownership_footnotes
+                if len(cells) > 3:
+                    nature_footnotes = extract_footnotes(cells[3])
+                    if nature_footnotes:
+                        footnotes['natureOfIndirectBeneficialOwnership'] = nature_footnotes
+                
+                # Add footnotes to row_data if any were found
+                if footnotes:
+                    row_data['footnotes'] = footnotes
+                
                 table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 8:
                 # Form 4/5: Title | Transaction Date | ... | Amount | (A) or (D) | Price | ...
@@ -1739,15 +1790,47 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
         rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
         
         def clean_cell(cell):
-            text = re.sub(r'<[^>]+>', '', cell)
+            # Remove HTML tags but preserve text content
+            # First, extract text from span.FormData and span.SmallFormData (these contain the actual data)
+            # Then remove all remaining HTML tags
+            text = cell
+            
+            # Extract text from FormData spans (these contain the actual values)
+            form_data_matches = re.findall(r'<span[^>]*class="FormData"[^>]*>([^<]+)</span>', text, re.IGNORECASE)
+            if form_data_matches:
+                text = ' '.join(form_data_matches)
+            else:
+                # Fallback: extract text from SmallFormData spans
+                small_form_data_matches = re.findall(r'<span[^>]*class="SmallFormData"[^>]*>([^<]+)</span>', text, re.IGNORECASE)
+                if small_form_data_matches:
+                    text = ' '.join(small_form_data_matches)
+                else:
+                    # Last resort: strip all HTML tags
+                    text = re.sub(r'<[^>]+>', '', text)
+            
             text = unescape(text)
             return text.strip()
+        
+        def extract_footnotes(cell):
+            """Extract footnote references like (1), (2) from a cell"""
+            # Look for <sup>(1)</sup> or <sup>(2)</sup> patterns
+            footnote_pattern = r'<sup>\((\d+)\)</sup>'
+            footnotes = re.findall(footnote_pattern, cell, re.IGNORECASE)
+            return [int(fn) for fn in footnotes] if footnotes else []
         
         for row in rows:
             cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
             
             if is_form3 and len(cells) >= 6:
-                # Form 3: Title | Date Exercisable | Expiration Date | Title | Amount | Conversion Price | Ownership | Nature
+                # Form 3 Table II structure (8 columns):
+                # 0: Title of Derivative Security
+                # 1: Date Exercisable (may be empty with footnote)
+                # 2: Expiration Date (may be empty with footnote)
+                # 3: Title of Underlying Security
+                # 4: Amount or Number of Shares
+                # 5: Conversion or Exercise Price (may be empty with footnote)
+                # 6: Ownership Form (D or I, may have footnote)
+                # 7: Nature of Indirect Beneficial Ownership
                 row_data = {
                     'titleOfDerivativeSecurity': clean_cell(cells[0]) if len(cells) > 0 else '',
                     'dateExercisable': clean_cell(cells[1]) if len(cells) > 1 else '',
@@ -1758,7 +1841,33 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                     'ownershipForm': clean_cell(cells[6]) if len(cells) > 6 else '',
                     'natureOfIndirectBeneficialOwnership': clean_cell(cells[7]) if len(cells) > 7 else ''
                 }
-                table_data.append(row_data)
+                
+                # Extract footnotes from each cell
+                footnotes = {}
+                if len(cells) > 1:
+                    date_ex_footnotes = extract_footnotes(cells[1])
+                    if date_ex_footnotes:
+                        footnotes['dateExercisable'] = date_ex_footnotes
+                if len(cells) > 2:
+                    exp_date_footnotes = extract_footnotes(cells[2])
+                    if exp_date_footnotes:
+                        footnotes['expirationDate'] = exp_date_footnotes
+                if len(cells) > 5:
+                    conv_price_footnotes = extract_footnotes(cells[5])
+                    if conv_price_footnotes:
+                        footnotes['conversionOrExercisePrice'] = conv_price_footnotes
+                if len(cells) > 6:
+                    ownership_footnotes = extract_footnotes(cells[6])
+                    if ownership_footnotes:
+                        footnotes['ownershipForm'] = ownership_footnotes
+                
+                # Add footnotes to row_data if any were found
+                if footnotes:
+                    row_data['footnotes'] = footnotes
+                
+                # Only add row if it has meaningful data (at least title or amount)
+                if row_data.get('titleOfDerivativeSecurity') or row_data.get('amountOrNumberOfShares'):
+                    table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 10:
                 # Form 4/5: Title | Conversion Price | Transaction Date | ... | (A) | (D) | Date Exercisable | Expiration | Title | Amount | Price | ...
                 row_data = {
