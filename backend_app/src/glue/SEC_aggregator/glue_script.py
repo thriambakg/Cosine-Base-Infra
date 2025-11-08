@@ -401,7 +401,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
         print(f"- {form_type}: {count}", flush=True)
     
     # Preview of fetched files
-    preview_count = min(10, len(all_forms))
+    preview_count = builtins.min(10, len(all_forms))
     logger.info(f"📋 Preview of Fetched Files (showing first {preview_count} of {len(all_forms)}):")
     print(f"📋 Preview of Fetched Files (showing first {preview_count} of {len(all_forms)}):", flush=True)
     for idx, form in enumerate(all_forms[:preview_count], 1):
