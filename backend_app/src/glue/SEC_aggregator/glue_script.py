@@ -2023,14 +2023,18 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     print(f"   🔵 Target date: {target_date}, S3 bucket: {s3_bucket_name}", flush=True)
     
     try:
+        print(f"   🔵 CALLING download_sec_form for CIK={cik}, Accession={accession}", flush=True)
         downloaded = download_sec_form(form_data, target_date, s3_bucket_name)
         download_duration = (datetime.now() - download_start).total_seconds()
         
-        print(f"   🔵 download_sec_form returned: {type(downloaded).__name__}", flush=True)
+        print(f"   🔵 download_sec_form returned: {type(downloaded).__name__} after {download_duration:.2f}s", flush=True)
         if downloaded:
             print(f"   🔵 download_sec_form returned dict with keys: {list(downloaded.keys()) if isinstance(downloaded, dict) else 'N/A'}", flush=True)
+            if isinstance(downloaded, dict):
+                print(f"   🔵 S3 Key from download: {downloaded.get('s3_key', 'NOT SET')}", flush=True)
+                print(f"   🔵 File size: {len(downloaded.get('content', b''))} bytes", flush=True)
         else:
-            print(f"   🔵 download_sec_form returned None or False", flush=True)
+            print(f"   🔵 download_sec_form returned None or False - DOWNLOAD FAILED", flush=True)
     except Exception as download_exception:
         download_duration = (datetime.now() - download_start).total_seconds()
         error_type = type(download_exception).__name__
