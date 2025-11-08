@@ -2384,24 +2384,40 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         
         # Convert to DynamoDB format
         # Store all fields, including None/empty values, so columns are visible in the table
+        # IMPORTANT: GSI keys cannot be NULL - they must be strings (or numbers)
+        # GSI key fields: formType, name, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
+        gsi_key_fields = {'formType', 'name', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
+        
         local_logger.info(f"      🔄 Converting to DynamoDB format...")
         dynamodb_item = {}
-        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0, 'null_fields': 0}
+        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0, 'null_fields': 0, 'gsi_empty_strings': 0}
         
         for key, value in parsed_data.items():
             try:
-                # Handle None values - store as null (DynamoDB supports null)
+                # Handle None values
                 if value is None:
-                    dynamodb_item[key] = None
-                    conversion_stats['null_fields'] += 1
-                    local_logger.debug(f"         {key}: null")
+                    # GSI keys cannot be NULL - use empty string instead
+                    if key in gsi_key_fields:
+                        dynamodb_item[key] = ""
+                        conversion_stats['gsi_empty_strings'] += 1
+                        local_logger.debug(f"         {key}: \"\" (GSI key, cannot be null)")
+                    else:
+                        dynamodb_item[key] = None
+                        conversion_stats['null_fields'] += 1
+                        local_logger.debug(f"         {key}: null")
                     continue
                 
-                # Handle empty strings - store as null for consistency
+                # Handle empty strings
                 if value == '':
-                    dynamodb_item[key] = None
-                    conversion_stats['null_fields'] += 1
-                    local_logger.debug(f"         {key}: null (was empty string)")
+                    # GSI keys: keep as empty string (already correct)
+                    if key in gsi_key_fields:
+                        dynamodb_item[key] = ""
+                        conversion_stats['converted'] += 1
+                        local_logger.debug(f"         {key}: \"\" (GSI key)")
+                    else:
+                        dynamodb_item[key] = None
+                        conversion_stats['null_fields'] += 1
+                        local_logger.debug(f"         {key}: null (was empty string)")
                     continue
                 
                 # Handle empty lists - store as empty JSON array string
