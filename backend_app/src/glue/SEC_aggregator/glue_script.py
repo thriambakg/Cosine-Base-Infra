@@ -15,6 +15,7 @@ import sys
 import json
 import re
 import logging
+import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
@@ -237,13 +238,21 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
     
     session = requests.Session()
-    # Use the same headers as the working test_pagination.py script
+    # Use browser-like headers to avoid 403 Forbidden errors (matching downloader Lambda pattern)
+    # SEC requires proper User-Agent and may block requests without proper headers
     session.headers.update({
         'User-Agent': SEC_USER_AGENT,
         'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
         'Accept-Language': 'en-US,en;q=0.9',
+        'Accept-Encoding': 'gzip, deflate, br',
         'Cache-Control': 'max-age=0',
-        'Upgrade-Insecure-Requests': '1'
+        'Upgrade-Insecure-Requests': '1',
+        'Referer': 'https://www.sec.gov/',
+        'Connection': 'keep-alive',
+        'Sec-Fetch-Dest': 'document',
+        'Sec-Fetch-Mode': 'navigate',
+        'Sec-Fetch-Site': 'same-origin',
+        'Sec-Fetch-User': '?1'
     })
     
     for form_type in form_types:
@@ -258,6 +267,12 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
         
         while page <= max_pages:
             try:
+                # Add delay before request to avoid rate limiting (especially for first request)
+                if page == 1:
+                    time.sleep(0.5)  # 500ms delay before first request
+                else:
+                    time.sleep(0.2)  # 200ms delay between subsequent requests
+                
                 # Build paginated URL (matches user's CURL example)
                 url = f"{SEC_BROWSE_EDGAR_URL}?action=getcurrent&datea=&dateb=&company=&type={form_type}&SIC=&State=&Country=&CIK=&owner=only&accno=&start={start}&count={count}"
                 
@@ -269,7 +284,34 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 logger.info(f"      Headers: User-Agent={user_agent_preview}...")
                 
                 api_call_start = datetime.now()
-                response = session.get(url, timeout=30)
+                
+                # Retry logic for 403 errors (SEC may temporarily block)
+                max_retries = 3
+                retry_delay = 2  # seconds
+                response = None
+                
+                for attempt in range(max_retries):
+                    try:
+                        response = session.get(url, timeout=30)
+                        if response.status_code == 403:
+                            if attempt < max_retries - 1:
+                                logger.warning(f"   ⚠️ Got 403 Forbidden (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s before retry...")
+                                time.sleep(retry_delay)
+                                retry_delay *= 2  # Exponential backoff
+                                continue
+                            else:
+                                logger.error(f"   ❌ Got 403 Forbidden after {max_retries} attempts")
+                                response.raise_for_status()
+                        else:
+                            break  # Success or non-403 error
+                    except requests.exceptions.RequestException as e:
+                        if attempt < max_retries - 1:
+                            logger.warning(f"   ⚠️ Request error (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                        else:
+                            raise
+                
                 api_call_duration = (datetime.now() - api_call_start).total_seconds()
                 
                 logger.info(f"   📥 SEC API Response:")
@@ -509,9 +551,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 start += count
                 page += 1
                 
-                # Rate limiting (SEC requires 10 requests/second max)
-                import time
-                time.sleep(0.2)  # 200ms delay between requests
+                # Delay already added before request, no need to add here
                 
             except requests.exceptions.RequestException as e:
                 logger.error(f"❌ Error fetching page {page} for Form {form_type}: {e}")
@@ -604,14 +644,21 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         print(f"      📂 Will store to S3: trades/{target_date}/sec/{form_type}-{cik}-{target_date}.{{ext}}", flush=True)
         
         # Create session inside function - each worker gets its own
-        # Use the same headers as the working test_pagination.py script
+        # Use browser-like headers to avoid 403 Forbidden errors (matching fetch function)
         session = requests.Session()
         session.headers.update({
             'User-Agent': SEC_USER_AGENT,
             'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
             'Accept-Language': 'en-US,en;q=0.9',
+            'Accept-Encoding': 'gzip, deflate, br',
             'Cache-Control': 'max-age=0',
-            'Upgrade-Insecure-Requests': '1'
+            'Upgrade-Insecure-Requests': '1',
+            'Referer': 'https://www.sec.gov/',
+            'Connection': 'keep-alive',
+            'Sec-Fetch-Dest': 'document',
+            'Sec-Fetch-Mode': 'navigate',
+            'Sec-Fetch-Site': 'same-origin',
+            'Sec-Fetch-User': '?1'
         })
         
         # Build list of URLs to try (matching downloader Lambda logic exactly)
@@ -661,6 +708,9 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         
         for file_url, file_name in urls_to_try:
             try:
+                # Add small delay before download to avoid rate limiting
+                time.sleep(0.1)  # 100ms delay
+                
                 local_logger.info(f"")
                 local_logger.info(f"      🔄 ATTEMPTING: {file_name}")
                 local_logger.info(f"      🔗 URL: {file_url}")
@@ -669,7 +719,37 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                 print(f"      🔗 URL: {file_url}", flush=True)
                 
                 download_start_time = datetime.now()
-                response = session.get(file_url, timeout=30)
+                
+                # Retry logic for 403 errors
+                max_retries = 2
+                retry_delay = 1  # seconds
+                response = None
+                
+                for attempt in range(max_retries):
+                    try:
+                        response = session.get(file_url, timeout=30)
+                        if response.status_code == 403:
+                            if attempt < max_retries - 1:
+                                local_logger.warning(f"      ⚠️ Got 403 Forbidden (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s...")
+                                print(f"      ⚠️ Got 403 Forbidden (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s...", flush=True)
+                                time.sleep(retry_delay)
+                                retry_delay *= 2
+                                continue
+                            else:
+                                local_logger.error(f"      ❌ Got 403 Forbidden after {max_retries} attempts")
+                                print(f"      ❌ Got 403 Forbidden after {max_retries} attempts", flush=True)
+                                response.raise_for_status()
+                        else:
+                            break
+                    except requests.exceptions.RequestException as e:
+                        if attempt < max_retries - 1:
+                            local_logger.warning(f"      ⚠️ Request error (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                            print(f"      ⚠️ Request error (attempt {attempt + 1}/{max_retries}): {e}, retrying...", flush=True)
+                            time.sleep(retry_delay)
+                            retry_delay *= 2
+                        else:
+                            raise
+                
                 download_duration = (datetime.now() - download_start_time).total_seconds()
                 
                 local_logger.info(f"      📥 RESPONSE: Status={response.status_code}, Size={len(response.content):,} bytes, Time={download_duration:.2f}s")
@@ -782,7 +862,36 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                                 local_logger.info(f"      🔗 Trying link: {doc_link}")
                                 print(f"      🔗 Trying link: {doc_link}", flush=True)
                                 try:
-                                    doc_response = session.get(doc_link, timeout=30)
+                                    # Small delay before download
+                                    time.sleep(0.1)
+                                    
+                                    # Retry logic for 403 errors
+                                    max_retries = 2
+                                    retry_delay = 1
+                                    doc_response = None
+                                    
+                                    for attempt in range(max_retries):
+                                        try:
+                                            doc_response = session.get(doc_link, timeout=30)
+                                            if doc_response.status_code == 403:
+                                                if attempt < max_retries - 1:
+                                                    local_logger.warning(f"      ⚠️ Got 403 Forbidden (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s...")
+                                                    time.sleep(retry_delay)
+                                                    retry_delay *= 2
+                                                    continue
+                                                else:
+                                                    local_logger.error(f"      ❌ Got 403 Forbidden after {max_retries} attempts")
+                                                    doc_response.raise_for_status()
+                                            else:
+                                                break
+                                        except requests.exceptions.RequestException as e:
+                                            if attempt < max_retries - 1:
+                                                local_logger.warning(f"      ⚠️ Request error (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                                                time.sleep(retry_delay)
+                                                retry_delay *= 2
+                                            else:
+                                                raise
+                                    
                                     if doc_response.status_code == 200:
                                         doc_content = doc_response.content
                                         content_start = doc_content[:1000].lower()
@@ -877,7 +986,36 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                                 doc_url = f"{base_url}/{doc_candidate}"
                                 try:
                                     local_logger.info(f"      🔍 Trying document candidate: {doc_url}")
-                                    doc_response = session.get(doc_url, timeout=30)
+                                    # Small delay before download
+                                    time.sleep(0.1)
+                                    
+                                    # Retry logic for 403 errors
+                                    max_retries = 2
+                                    retry_delay = 1
+                                    doc_response = None
+                                    
+                                    for attempt in range(max_retries):
+                                        try:
+                                            doc_response = session.get(doc_url, timeout=30)
+                                            if doc_response.status_code == 403:
+                                                if attempt < max_retries - 1:
+                                                    local_logger.warning(f"      ⚠️ Got 403 Forbidden (attempt {attempt + 1}/{max_retries}), waiting {retry_delay}s...")
+                                                    time.sleep(retry_delay)
+                                                    retry_delay *= 2
+                                                    continue
+                                                else:
+                                                    local_logger.error(f"      ❌ Got 403 Forbidden after {max_retries} attempts")
+                                                    doc_response.raise_for_status()
+                                            else:
+                                                break
+                                        except requests.exceptions.RequestException as e:
+                                            if attempt < max_retries - 1:
+                                                local_logger.warning(f"      ⚠️ Request error (attempt {attempt + 1}/{max_retries}): {e}, retrying...")
+                                                time.sleep(retry_delay)
+                                                retry_delay *= 2
+                                            else:
+                                                raise
+                                    
                                     if doc_response.status_code == 200:
                                         doc_content = doc_response.content
                                         # Accept any content type - let matcher handle detection (matching downloader Lambda)
