@@ -2073,12 +2073,22 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
     
     try:
         # Find "Explanation of Responses" section
-        # Pattern: Look for the header, then capture all following rows until we hit another section
+        # Pattern: Look for the header row, then capture all following rows until we hit Remarks or end of table
+        # The section ends when we hit <b>Remarks:</b> or </table> or </body>
+        # More flexible pattern that handles various HTML structures
         explanation_section = re.search(
-            r'Explanation of Responses[^<]*</td>[^<]*</tr>(.*?)(?=<table|<tr><td[^>]*><b>Remarks|</body>)',
+            r'Explanation of Responses[^<]*</td>[^<]*</tr>(.*?)(?=<tr><td[^>]*><b>Remarks|</table>|</body>)',
             html_content,
             re.IGNORECASE | re.DOTALL
         )
+        
+        # If that doesn't work, try a simpler pattern
+        if not explanation_section:
+            explanation_section = re.search(
+                r'Explanation of Responses.*?</tr>(.*?)(?=<b>Remarks|</table>|</body>)',
+                html_content,
+                re.IGNORECASE | re.DOTALL
+            )
         
         if explanation_section:
             explanation_text = explanation_section.group(1)
@@ -2087,20 +2097,30 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
             print(section_found_msg, flush=True)
             
             # Extract numbered explanations from FootnoteData cells
-            # Pattern: Look for <td> with FootnoteData class containing numbered explanations
-            # Format: <tr><td class="FootnoteData">1. ...</td></tr>
-            # Note: Text may contain HTML tags, so we capture everything until </td>
-            # Make pattern more flexible to handle whitespace variations
+            # Pattern: Look for <tr><td class="FootnoteData">1. ...</td></tr>
+            # The text can be very long, so we need to capture everything until </td>
+            # Use a more robust pattern that handles the full cell content
+            # First try: Match with <tr> wrapper
             footnote_rows = re.findall(
                 r'<tr>\s*<td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>\s*(\d+)\.\s+(.*?)</td>\s*</tr>',
                 explanation_text,
                 re.IGNORECASE | re.DOTALL
             )
             
-            # If primary pattern fails, try without strict whitespace
+            # If primary pattern fails, try without requiring <tr> wrapper
             if not footnote_rows:
                 footnote_rows = re.findall(
-                    r'<td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>(\d+)\.\s+(.*?)</td>',
+                    r'<td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>\s*(\d+)\.\s+(.*?)</td>',
+                    explanation_text,
+                    re.IGNORECASE | re.DOTALL
+                )
+            
+            # If still no matches, try matching the entire explanation section more flexibly
+            if not footnote_rows:
+                # Pattern: Look for "1. " or "2. " followed by text until next number or </td> or </tr>
+                # This pattern captures text that may span multiple lines
+                footnote_rows = re.findall(
+                    r'(\d+)\.\s+((?:(?!\d+\.)[^<])+?)(?=\d+\.|</td>|</tr>|$)',
                     explanation_text,
                     re.IGNORECASE | re.DOTALL
                 )
@@ -2898,4 +2918,5 @@ except Exception as e:
     import traceback
     logger.error(f"Traceback: {traceback.format_exc()}")
     raise
+
 
