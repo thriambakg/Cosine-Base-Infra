@@ -2144,10 +2144,10 @@ module "politician_trades_state_machine" {
                 End = true
               }
               SECProcessingFailed = {
-                Type    = "Pass"
-                Comment = "SEC Glue job failed - no output needed (job saves directly to DB)"
-                Result  = { "status" : "failed", "error" : "SEC Glue job failed" }
-                End     = true
+                Type    = "Fail"
+                Comment = "SEC Glue job failed - execution should fail"
+                Error   = "SECGlueJobFailed"
+                Cause   = "SEC Glue job execution failed. Check Glue job logs for details."
               }
             }
           },

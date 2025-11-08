@@ -338,11 +338,6 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 )
                 
                 rows = table_row_pattern.findall(html_content)
-                log_print(f"      📊 HTML Parsing Results:")
-                log_print(f"         Total table rows found: {len(rows)}")
-                log_print(f"         HTML size: {len(html_content):,} characters")
-                if rows:
-                    log_print(f"         First row preview (first 200 chars): {rows[0][:200]}")
                 
                 page_forms = []
                 page_forms_before_date_filter = 0
@@ -488,15 +483,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 
                 logger.info(f"   Page {page}: Found {len(page_forms)} forms matching date {target_date} (out of {page_forms_before_date_filter} total forms on page)")
                 
-                # Log sample of parsed forms from this page
-                if page_forms:
-                    log_print(f"      📋 Sample forms from page {page} (first 3):")
-                    for idx, form in enumerate(page_forms[:3], 1):
-                        log_print(f"         {idx}. CIK={form.get('cik', 'N/A')}, "
-                                   f"Accession={form.get('accession_number', 'N/A')[:15]}..., "
-                                   f"Type={form.get('form_type', 'N/A')}, "
-                                   f"FilingDate={form.get('filing_date', 'N/A')}, "
-                                   f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
+                # No verbose logging per page - only summary at end
                 
                 # Check if FIRST file in batch matches target date
                 # If first file doesn't match target date, we've moved to a different day - stop fetching
@@ -1128,6 +1115,39 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             local_logger.error(f"      " + "="*70)
             print(f"      " + "="*70, flush=True)
             return None
+        
+        # Convert relative URLs to absolute URLs in HTML files
+        # This ensures links work when viewing the file locally or from S3
+        if file_ext == 'html' and file_content:
+            try:
+                html_text = file_content.decode('utf-8', errors='ignore')
+                
+                # Convert relative URLs to absolute URLs (only if not already absolute)
+                # Pattern: href="/..." -> href="https://www.sec.gov/..." (but not if already https://)
+                # This handles all relative URLs starting with "/"
+                def convert_relative_url(match):
+                    url = match.group(1)
+                    # Only convert if it's a relative URL (starts with /) and not already absolute
+                    if url.startswith('/') and not url.startswith('http'):
+                        return f'href="https://www.sec.gov{url}"'
+                    return match.group(0)  # Return original if already absolute
+                
+                html_text = re.sub(
+                    r'href="([^"]*)"',
+                    convert_relative_url,
+                    html_text,
+                    flags=re.IGNORECASE
+                )
+                
+                # Re-encode to bytes
+                file_content = html_text.encode('utf-8')
+                
+                local_logger.info(f"      🔗 Converted relative URLs to absolute URLs in HTML")
+                print(f"      🔗 Converted relative URLs to absolute URLs in HTML", flush=True)
+            except Exception as url_error:
+                local_logger.warning(f"      ⚠️ Could not convert URLs in HTML: {url_error}")
+                print(f"      ⚠️ Could not convert URLs in HTML: {url_error}", flush=True)
+                # Continue with original content if conversion fails
         
         # Generate S3 key - include accession number to ensure uniqueness
         # Format: trades/{date}/sec/{form_type}-{cik}-{accession}-{date}.{ext}
@@ -1895,7 +1915,19 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
                 # Field has a footnote - create object structure
                 explanation_text = ""
                 if explanations_dict:
-                    explanation_text = explanations_dict.get(str(footnote_num), "")
+                    # Try both string and int keys
+                    explanation_text = explanations_dict.get(str(footnote_num), "") or explanations_dict.get(int(footnote_num), "")
+                    if not explanation_text:
+                        # Debug: log when explanation is missing
+                        print(f"   ⚠️ Footnote {footnote_num} found in Table I cell but no explanation in dict.")
+                        print(f"      Footnote num type: {type(footnote_num)}, value: {footnote_num}")
+                        print(f"      Available keys: {list(explanations_dict.keys())}")
+                        print(f"      Key types: {[type(k) for k in explanations_dict.keys()]}")
+                        print(f"      Looking for: str({footnote_num})={str(footnote_num)}, int({footnote_num})={int(footnote_num)}")
+                        local_logger.warning(f"   ⚠️ Footnote {footnote_num} found in Table I cell but no explanation in dict. Available keys: {list(explanations_dict.keys())}")
+                else:
+                    print(f"   ⚠️ Footnote {footnote_num} found but explanations_dict is None or empty")
+                    local_logger.warning(f"   ⚠️ Footnote {footnote_num} found but explanations_dict is None or empty")
                 
                 footnote_obj = {
                     "value": value,
@@ -2012,10 +2044,19 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                 # Field has a footnote - create object structure
                 explanation_text = ""
                 if explanations_dict:
-                    explanation_text = explanations_dict.get(str(footnote_num), "")
+                    # Try both string and int keys
+                    explanation_text = explanations_dict.get(str(footnote_num), "") or explanations_dict.get(int(footnote_num), "")
                     if not explanation_text:
                         # Debug: log when explanation is missing
-                        print(f"   ⚠️ Footnote {footnote_num} found in Table II cell but no explanation in dict. Available keys: {list(explanations_dict.keys())}")
+                        print(f"   ⚠️ Footnote {footnote_num} found in Table II cell but no explanation in dict.")
+                        print(f"      Footnote num type: {type(footnote_num)}, value: {footnote_num}")
+                        print(f"      Available keys: {list(explanations_dict.keys())}")
+                        print(f"      Key types: {[type(k) for k in explanations_dict.keys()]}")
+                        print(f"      Looking for: str({footnote_num})={str(footnote_num)}, int({footnote_num})={int(footnote_num)}")
+                        local_logger.warning(f"   ⚠️ Footnote {footnote_num} found in Table II cell but no explanation in dict. Available keys: {list(explanations_dict.keys())}")
+                else:
+                    print(f"   ⚠️ Footnote {footnote_num} found but explanations_dict is None or empty")
+                    local_logger.warning(f"   ⚠️ Footnote {footnote_num} found but explanations_dict is None or empty")
                 
                 footnote_obj = {
                     "value": value,
@@ -2148,6 +2189,13 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
                     explanations[num] = cleaned_text
                     print(f"   ✅ Parsed explanation {num}: {cleaned_text[:80]}...")
                     local_logger.info(f"   ✅ Parsed explanation {num}: {cleaned_text[:80]}...")
+                else:
+                    print(f"   ⚠️ Explanation {num} was empty after cleaning")
+                    local_logger.warning(f"   ⚠️ Explanation {num} was empty after cleaning")
+            
+            # Debug: Print the final explanations dict
+            print(f"   📝 Final explanations dict: {explanations}")
+            local_logger.info(f"   📝 Final explanations dict: {explanations}")
             
             # Fallback: If no footnote rows found, try the original pattern
             if not explanations:
