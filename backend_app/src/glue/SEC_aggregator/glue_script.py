@@ -1152,6 +1152,10 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
 
 def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     """Fuzzy match filer name to politician name"""
+    # Handle None or empty filer_name
+    if not filer_name:
+        return 0.0
+    
     politician_name = politician.get('name', '')
     
     # Try exact match first
@@ -1177,6 +1181,9 @@ def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
 
 def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Find best matching politician for a filer name"""
+    # Handle None or empty filer_name
+    if not filer_name:
+        return None
     # Import inside function to avoid serialization issues
     import logging
     local_logger = logging.getLogger()
@@ -2296,6 +2303,12 @@ try:
     stage2_duration = (datetime.now() - stage2_start).total_seconds()
     logger.info(f"✅ Stage 2 Complete: Found {len(forms)} forms in {stage2_duration:.2f} seconds")
     logger.info("=" * 80)
+    
+    # Limit to 10 test files for testing (remove this limit in production)
+    if len(forms) > 10:
+        logger.info(f"⚠️ Limiting to 10 test files (found {len(forms)} total)")
+        print(f"⚠️ Limiting to 10 test files (found {len(forms)} total)", flush=True)
+        forms = forms[:10]
     
     # Step 3: Process forms
     logger.info("")
