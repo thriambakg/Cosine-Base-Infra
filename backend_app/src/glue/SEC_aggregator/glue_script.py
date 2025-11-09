@@ -38,6 +38,55 @@ from pyspark.sql.types import *
 import boto3
 import requests
 
+# ============================================================================
+# Helper Functions for Human-Readable Code Mappings
+# ============================================================================
+
+def get_transaction_code_meaning(code: str) -> str:
+    """
+    Map SEC transaction codes to human-readable meanings.
+    Based on SEC Form 4/5 instruction 8.
+    """
+    code_meanings = {
+        'A': 'Grant, award or other acquisition',
+        'C': 'Conversion of derivative security',
+        'D': 'Disposition to the issuer of issuer equity securities',
+        'E': 'Expiration of short derivative position',
+        'F': 'Payment of exercise price or tax liability by delivering or withholding securities',
+        'G': 'Bona fide gift',
+        'H': 'Expiration (or cancellation) of long derivative position with value received',
+        'I': 'Discretionary transaction in accordance with Rule 10b5-1',
+        'J': 'Other acquisition or disposition',
+        'L': 'Small acquisition under Rule 16a-6',
+        'M': 'Exercise or conversion of derivative security',
+        'O': 'Transaction in equity swap or instrument with similar characteristics',
+        'P': 'Open market or private purchase of non-derivative or derivative security',
+        'S': 'Open market or private sale of non-derivative or derivative security',
+        'U': 'Disposition pursuant to a tender of shares in a change of control transaction',
+        'V': 'Transaction voluntarily reported earlier than required',
+        'W': 'Acquisition or disposition by will or the laws of descent and distribution',
+        'X': 'Exercise of out-of-the-money derivative security',
+        'Z': 'Deposit into or withdrawal from voting trust'
+    }
+    return code_meanings.get(code.upper(), f'Transaction code {code} (meaning not specified)')
+
+def get_ownership_type_meaning(code: str) -> str:
+    """Map ownership form codes to human-readable meanings."""
+    meanings = {
+        'D': 'Direct',
+        'I': 'Indirect'
+    }
+    return meanings.get(code.upper(), code)
+
+def get_transaction_direction_meaning(code: str) -> str:
+    """Map A/D values to human-readable meanings."""
+    meanings = {
+        'A': 'Acquired',
+        'D': 'Disposed'
+    }
+    return meanings.get(code.upper(), code)
+
+# ============================================================================
 # Configure logging
 # Glue jobs benefit from both logger and print() for visibility
 logger = logging.getLogger()
@@ -1018,20 +1067,7 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         # Generate S3 key - include accession number to ensure uniqueness
         # Format: trades/{date}/sec/{form_type}-{cik}-{accession}-{date}.{ext}
         # Accession is already in dashed format (e.g., 0001140361-25-040858)
-        # CRITICAL: Accession must be included to prevent S3 key collisions
-        if not accession_dashed or accession_dashed == 'unknown':
-            error_msg = f"   ⚠️ Cannot generate S3 key: accession_dashed is invalid ({accession_dashed})"
-            local_logger.error(error_msg)
-            print(error_msg, flush=True)
-            raise ValueError(f"Invalid accession_dashed: {accession_dashed}")
-        
         s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{accession_dashed}-{target_date}.{file_ext}"
-        
-        # Log S3 key generation for debugging
-        local_logger.info(f"      🔑 Generated S3 Key: {s3_key}")
-        local_logger.info(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}, ext={file_ext}")
-        print(f"      🔑 Generated S3 Key: {s3_key}", flush=True)
-        print(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}, ext={file_ext}", flush=True)
         
         local_logger.info(f"")
         local_logger.info(f"      💾 UPLOADING TO S3:")
@@ -1050,47 +1086,31 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         s3_client_local = boto3.client('s3')
         
         # Upload to S3 with correct content type
-        # CRITICAL: S3 upload must succeed before we return success
-        # If S3 upload fails, we cannot proceed with DynamoDB storage
         try:
-            s3_upload_response = s3_client_local.put_object(
+            s3_client_local.put_object(
                 Bucket=s3_bucket_name,
                 Key=s3_key,
                 Body=file_content,
                 ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
             )
             
-            # Verify upload succeeded by checking response
-            if s3_upload_response.get('ResponseMetadata', {}).get('HTTPStatusCode') != 200:
-                raise Exception(f"S3 upload returned non-200 status: {s3_upload_response.get('ResponseMetadata', {}).get('HTTPStatusCode')}")
-            
             local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
-            local_logger.info(f"         HTTP Status: {s3_upload_response.get('ResponseMetadata', {}).get('HTTPStatusCode', 'N/A')}")
-            local_logger.info(f"         ETag: {s3_upload_response.get('ETag', 'N/A')}")
             local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
             local_logger.info(f"      " + "="*70)
             print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
-            print(f"         HTTP Status: {s3_upload_response.get('ResponseMetadata', {}).get('HTTPStatusCode', 'N/A')}", flush=True)
-            print(f"         ETag: {s3_upload_response.get('ETag', 'N/A')}", flush=True)
             print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
             print(f"      " + "="*70, flush=True)
         except Exception as s3_error:
             error_type = type(s3_error).__name__
             error_msg = str(s3_error)
-            import traceback
-            s3_traceback = traceback.format_exc()
             local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
             local_logger.error(f"         Bucket: {s3_bucket_name}")
             local_logger.error(f"         Key: {s3_key}")
             local_logger.error(f"         Size: {len(file_content):,} bytes")
-            local_logger.error(f"         Traceback: {s3_traceback}")
             print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
             print(f"         Bucket: {s3_bucket_name}", flush=True)
             print(f"         Key: {s3_key}", flush=True)
             print(f"         Size: {len(file_content):,} bytes", flush=True)
-            print(f"         Traceback: {s3_traceback}", flush=True)
-            # CRITICAL: Re-raise to ensure download_sec_form returns None
-            # This prevents DynamoDB storage when S3 upload fails
             raise  # Re-raise to be caught by outer exception handler
         
         return {
@@ -1517,7 +1537,7 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
     
     result = {
         'formType': form_data.get('form_type', 'unknown'),
-        'name': None,
+        'reportingPersonName': None,  # Changed from 'name' for clarity
         'address': None,
         'eventDate': None,
         'reportingDate': None,
@@ -1557,7 +1577,7 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         # Handle both relative and absolute URLs
         name_match = re.search(r'<a[^>]*href="[^"]*cgi-bin/browse-edgar[^"]*CIK=\d+[^"]*">([^<]+)</a>', html_content, re.IGNORECASE)
         if name_match:
-            result['name'] = unescape(name_match.group(1)).strip().lower()
+            result['reportingPersonName'] = unescape(name_match.group(1)).strip().lower()
         
         # Extract address (Street, City, State, Zip)
         # HTML structure: 
@@ -1890,32 +1910,49 @@ def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: b
             
             if is_form3 and len(cells) >= 4:
                 # Form 3: Title | Amount | Ownership Form | Nature of Indirect
+                ownership_form_raw = create_field_value(cells[2], explanations_dict) if len(cells) > 2 else ''
+                ownership_form = ownership_form_raw.get('value', ownership_form_raw) if isinstance(ownership_form_raw, dict) else ownership_form_raw
+                
                 row_data = {
-                    'titleOfSecurity': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',
-                    'amountOfSecurities': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
-                    'ownershipForm': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
-                    'natureOfIndirectBeneficialOwnership': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else ''
+                    'securityName': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',  # Renamed from titleOfSecurity
+                    'shares': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',  # Renamed from amountOfSecurities
+                    'ownershipType': get_ownership_type_meaning(ownership_form) if ownership_form else None,  # Renamed from ownershipForm, add human-readable
+                    'ownershipTypeCode': ownership_form,  # Keep code for filtering
+                    'indirectOwnershipNature': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else ''  # Renamed from natureOfIndirectBeneficialOwnership
                 }
                 table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 8:
                 # Form 4/5: Title | Transaction Date | ... | Amount | (A) or (D) | Price | ...
+                # Extract raw values first
+                transaction_code_raw = create_field_value(cells[3], explanations_dict) if len(cells) > 3 else ''
+                transaction_code = transaction_code_raw.get('value', transaction_code_raw) if isinstance(transaction_code_raw, dict) else transaction_code_raw
+                
+                acquired_or_disposed_raw = create_field_value(cells[6], explanations_dict) if len(cells) > 6 else ''
+                acquired_or_disposed = acquired_or_disposed_raw.get('value', acquired_or_disposed_raw) if isinstance(acquired_or_disposed_raw, dict) else acquired_or_disposed_raw
+                
+                ownership_form_raw = create_field_value(cells[9], explanations_dict) if len(cells) > 9 else ''
+                ownership_form = ownership_form_raw.get('value', ownership_form_raw) if isinstance(ownership_form_raw, dict) else ownership_form_raw
+                
                 row_data = {
-                    'titleOfSecurity': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',
+                    'securityName': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',  # Renamed from titleOfSecurity
                     'transactionDate': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
                     'deemedExecutionDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
-                    'transactionCode': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',
+                    'transactionCode': transaction_code,  # Keep code for filtering
+                    'transactionType': get_transaction_code_meaning(transaction_code) if transaction_code else None,  # Add human-readable
                     'transactionCodeV': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',
-                    'amount': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',
-                    'acquiredOrDisposed': create_field_value(cells[6], explanations_dict) if len(cells) > 6 else '',
-                    'price': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''
+                    'shares': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',  # Renamed from amount
+                    'transactionDirection': acquired_or_disposed,  # Renamed from acquiredOrDisposed
+                    'transactionDirectionText': get_transaction_direction_meaning(acquired_or_disposed) if acquired_or_disposed else None,  # Add human-readable
+                    'pricePerShare': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''  # Renamed from price
                 }
                 # Add remaining columns if present
                 if len(cells) > 8:
-                    row_data['amountOfSecuritiesBeneficiallyOwned'] = create_field_value(cells[8], explanations_dict)
+                    row_data['totalOwnedAfterTransaction'] = create_field_value(cells[8], explanations_dict)  # Renamed from amountOfSecuritiesBeneficiallyOwned
                 if len(cells) > 9:
-                    row_data['ownershipForm'] = create_field_value(cells[9], explanations_dict)
+                    row_data['ownershipType'] = get_ownership_type_meaning(ownership_form) if ownership_form else None  # Renamed from ownershipForm, add human-readable
+                    row_data['ownershipTypeCode'] = ownership_form  # Keep code for filtering
                 if len(cells) > 10:
-                    row_data['natureOfIndirectBeneficialOwnership'] = create_field_value(cells[10], explanations_dict)
+                    row_data['indirectOwnershipNature'] = create_field_value(cells[10], explanations_dict)  # Renamed from natureOfIndirectBeneficialOwnership
                 table_data.append(row_data)
     
     except Exception as e:
@@ -2030,18 +2067,22 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
             if is_form3 and len(cells) >= 6:
                 # Form 3: Title | Date Exercisable | Expiration Date | Title | Amount | Conversion Price | Ownership | Nature
                 # Note: Form 3 has 8 columns, but we need at least 6 to parse basic info
+                ownership_form_raw = create_field_value(cells[6], explanations_dict) if len(cells) > 6 else ''
+                ownership_form = ownership_form_raw.get('value', ownership_form_raw) if isinstance(ownership_form_raw, dict) else ownership_form_raw
+                
                 row_data = {
-                    'titleOfDerivativeSecurity': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',
+                    'derivativeSecurityName': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',  # Renamed from titleOfDerivativeSecurity
                     'dateExercisable': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
                     'expirationDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
-                    'titleOfUnderlyingSecurity': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',
-                    'amountOrNumberOfShares': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',
-                    'conversionOrExercisePrice': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',
-                    'ownershipForm': create_field_value(cells[6], explanations_dict) if len(cells) > 6 else '',
-                    'natureOfIndirectBeneficialOwnership': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''
+                    'underlyingSecurityName': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',  # Renamed from titleOfUnderlyingSecurity
+                    'underlyingShares': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',  # Renamed from amountOrNumberOfShares
+                    'exercisePrice': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',  # Renamed from conversionOrExercisePrice
+                    'ownershipType': get_ownership_type_meaning(ownership_form) if ownership_form else None,  # Renamed from ownershipForm, add human-readable
+                    'ownershipTypeCode': ownership_form,  # Keep code for filtering
+                    'indirectOwnershipNature': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''  # Renamed from natureOfIndirectBeneficialOwnership
                 }
                 # Only add if we have at least the title (check if it's a dict or string)
-                title_value = row_data['titleOfDerivativeSecurity']
+                title_value = row_data['derivativeSecurityName']
                 if isinstance(title_value, dict):
                     title_str = title_value.get('value', '')
                 else:
@@ -2050,28 +2091,60 @@ def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: 
                     table_data.append(row_data)
             elif (is_form4 or is_form5) and len(cells) >= 10:
                 # Form 4/5: Title | Conversion Price | Transaction Date | ... | (A) | (D) | Date Exercisable | Expiration | Title | Amount | Price | ...
+                # Extract raw values first
+                transaction_code_raw = create_field_value(cells[4], explanations_dict) if len(cells) > 4 else ''
+                transaction_code = transaction_code_raw.get('value', transaction_code_raw) if isinstance(transaction_code_raw, dict) else transaction_code_raw
+                
+                acquired_raw = create_field_value(cells[6], explanations_dict) if len(cells) > 6 else ''
+                acquired = acquired_raw.get('value', acquired_raw) if isinstance(acquired_raw, dict) else acquired_raw
+                
+                disposed_raw = create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''
+                disposed = disposed_raw.get('value', disposed_raw) if isinstance(disposed_raw, dict) else disposed_raw
+                
+                # Determine transaction direction and shares (positive=acquired, negative=disposed)
+                shares_value = None
+                transaction_direction = None
+                if acquired and acquired.strip():
+                    try:
+                        shares_value = float(acquired.replace(',', ''))
+                        transaction_direction = 'A'
+                    except:
+                        pass
+                elif disposed and disposed.strip():
+                    try:
+                        shares_value = -float(disposed.replace(',', ''))
+                        transaction_direction = 'D'
+                    except:
+                        pass
+                
+                ownership_form_raw = create_field_value(cells[14], explanations_dict) if len(cells) > 14 else ''
+                ownership_form = ownership_form_raw.get('value', ownership_form_raw) if isinstance(ownership_form_raw, dict) else ownership_form_raw
+                
                 row_data = {
-                    'titleOfDerivativeSecurity': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',
-                    'conversionOrExercisePrice': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
+                    'derivativeSecurityName': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',  # Renamed from titleOfDerivativeSecurity
+                    'exercisePrice': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',  # Renamed from conversionOrExercisePrice
                     'transactionDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
                     'deemedExecutionDate': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',
-                    'transactionCode': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',
+                    'transactionCode': transaction_code,  # Keep code for filtering
+                    'transactionType': get_transaction_code_meaning(transaction_code) if transaction_code else None,  # Add human-readable
                     'transactionCodeV': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',
-                    'acquired': create_field_value(cells[6], explanations_dict) if len(cells) > 6 else '',
-                    'disposed': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else '',
+                    'shares': shares_value,  # Combined acquired/disposed (positive=acquired, negative=disposed)
+                    'transactionDirection': transaction_direction,  # 'A' or 'D'
+                    'transactionDirectionText': get_transaction_direction_meaning(transaction_direction) if transaction_direction else None,  # Add human-readable
                     'dateExercisable': create_field_value(cells[8], explanations_dict) if len(cells) > 8 else '',
                     'expirationDate': create_field_value(cells[9], explanations_dict) if len(cells) > 9 else '',
-                    'titleOfUnderlyingSecurity': create_field_value(cells[10], explanations_dict) if len(cells) > 10 else '',
-                    'amountOrNumberOfShares': create_field_value(cells[11], explanations_dict) if len(cells) > 11 else '',
-                    'priceOfDerivativeSecurity': create_field_value(cells[12], explanations_dict) if len(cells) > 12 else ''
+                    'underlyingSecurityName': create_field_value(cells[10], explanations_dict) if len(cells) > 10 else '',  # Renamed from titleOfUnderlyingSecurity
+                    'underlyingShares': create_field_value(cells[11], explanations_dict) if len(cells) > 11 else '',  # Renamed from amountOrNumberOfShares
+                    'pricePerShare': create_field_value(cells[12], explanations_dict) if len(cells) > 12 else ''  # Renamed from priceOfDerivativeSecurity
                 }
                 # Add remaining columns if present
                 if len(cells) > 13:
-                    row_data['numberOfDerivativeSecuritiesBeneficiallyOwned'] = create_field_value(cells[13], explanations_dict)
+                    row_data['totalOwnedAfterTransaction'] = create_field_value(cells[13], explanations_dict)  # Renamed from numberOfDerivativeSecuritiesBeneficiallyOwned
                 if len(cells) > 14:
-                    row_data['ownershipForm'] = create_field_value(cells[14], explanations_dict)
+                    row_data['ownershipType'] = get_ownership_type_meaning(ownership_form) if ownership_form else None  # Renamed from ownershipForm, add human-readable
+                    row_data['ownershipTypeCode'] = ownership_form  # Keep code for filtering
                 if len(cells) > 15:
-                    row_data['natureOfIndirectBeneficialOwnership'] = create_field_value(cells[15], explanations_dict)
+                    row_data['indirectOwnershipNature'] = create_field_value(cells[15], explanations_dict)  # Renamed from natureOfIndirectBeneficialOwnership
                 table_data.append(row_data)
     
     except Exception as e:
@@ -2210,234 +2283,6 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
     return explanations
 
 
-def get_transaction_code_meaning(code: str) -> str:
-    """
-    Map SEC transaction codes to human-readable meanings for AI agents.
-    Based on SEC Form 4/5 instruction 8.
-    """
-    code_meanings = {
-        'A': 'Grant, award or other acquisition',
-        'C': 'Conversion of derivative security',
-        'D': 'Disposition to the issuer of issuer equity securities',
-        'E': 'Expiration of short derivative position',
-        'F': 'Payment of exercise price or tax liability by delivering or withholding securities',
-        'G': 'Bona fide gift',
-        'H': 'Expiration (or cancellation) of long derivative position with value received',
-        'I': 'Discretionary transaction in accordance with Rule 10b5-1',
-        'J': 'Other acquisition or disposition',
-        'L': 'Small acquisition under Rule 16a-6',
-        'M': 'Exercise or conversion of derivative security',
-        'O': 'Transaction in equity swap or instrument with similar characteristics',
-        'P': 'Open market or private purchase of non-derivative or derivative security',
-        'S': 'Open market or private sale of non-derivative or derivative security',
-        'U': 'Disposition pursuant to a tender of shares in a change of control transaction',
-        'V': 'Transaction voluntarily reported earlier than required',
-        'W': 'Acquisition or disposition by will or the laws of descent and distribution',
-        'X': 'Exercise of out-of-the-money derivative security',
-        'Z': 'Deposit into or withdrawal from voting trust'
-    }
-    return code_meanings.get(code.upper(), f'Transaction code {code} (meaning not specified)')
-
-def get_acquisition_disposition_meaning(value: str) -> str:
-    """Map A/D values to human-readable meanings."""
-    meanings = {
-        'A': 'Acquired',
-        'D': 'Disposed'
-    }
-    return meanings.get(value.upper(), value)
-
-def transform_to_semantic_structure(parsed_data: Dict[str, Any], form_data: Dict[str, Any], s3_key: str) -> Dict[str, Any]:
-    """
-    Transform parsed SEC form data into AI-friendly semantic structure.
-    
-    This creates a self-describing, contextually complete data structure that
-    AI agents can reason over without needing external ontologies or cross-references.
-    """
-    # Extract CIK from form_data
-    cik = form_data.get('cik', 'unknown')
-    accession = form_data.get('accession_number', 'unknown')
-    
-    # Build issuer object
-    issuer = {
-        'name': parsed_data.get('issuerName', '').title() if parsed_data.get('issuerName') else None,
-        'ticker': parsed_data.get('tickerSymbol'),
-        'cik': cik
-    }
-    
-    # Build reporting person object
-    reporting_person = {
-        'name': parsed_data.get('name', '').title() if parsed_data.get('name') else None,
-        'cik': None,  # Could extract from HTML if needed
-        'title': parsed_data.get('relationshipAdditionalText'),
-        'relationship_types': parsed_data.get('relationship', '').split(', ') if parsed_data.get('relationship') else []
-    }
-    
-    # Transform non-derivative securities into semantic transactions
-    transactions = []
-    
-    # Process non-derivative securities
-    for row in parsed_data.get('nonDerivativeSecurities', []):
-        transaction = {
-            'date': row.get('transactionDate'),
-            'code': row.get('transactionCode'),
-            'code_meaning': get_transaction_code_meaning(row.get('transactionCode', '')),
-            'acquisition_or_disposition': row.get('acquiredOrDisposed'),
-            'acquisition_or_disposition_meaning': get_acquisition_disposition_meaning(row.get('acquiredOrDisposed', '')),
-            'shares': row.get('amount'),
-            'price': row.get('price'),
-            'ownership_type': 'Direct' if row.get('ownershipForm') == 'D' else 'Indirect' if row.get('ownershipForm') == 'I' else row.get('ownershipForm'),
-            'is_derivative': False,
-            'security_title': row.get('titleOfSecurity'),
-            'security_type': 'Equity',
-            'footnote': None
-        }
-        
-        # Extract footnote and clean field values
-        # Check price field first (most common location for footnotes)
-        price_field = row.get('price')
-        if isinstance(price_field, dict) and 'footnote' in price_field:
-            footnote_obj = price_field.get('footnote', {})
-            transaction['footnote'] = {
-                'number': footnote_obj.get('number'),
-                'text': footnote_obj.get('explanation', '')
-            }
-            transaction['price'] = price_field.get('value', '')
-        elif isinstance(price_field, dict) and 'value' in price_field:
-            transaction['price'] = price_field.get('value', '')
-        elif not isinstance(price_field, dict):
-            transaction['price'] = price_field
-        
-        # Check other fields for footnotes
-        for field_name in ['titleOfSecurity', 'amount', 'transactionCode']:
-            field_value = row.get(field_name)
-            if isinstance(field_value, dict) and 'footnote' in field_value:
-                if not transaction['footnote']:  # Only set if not already set
-                    footnote_obj = field_value.get('footnote', {})
-                    transaction['footnote'] = {
-                        'number': footnote_obj.get('number'),
-                        'text': footnote_obj.get('explanation', '')
-                    }
-                # Clean the field value
-                if field_name == 'titleOfSecurity':
-                    transaction['security_title'] = field_value.get('value', '')
-                elif field_name == 'amount':
-                    transaction['shares'] = field_value.get('value', '')
-                elif field_name == 'transactionCode':
-                    transaction['code'] = field_value.get('value', '')
-            elif isinstance(field_value, dict) and 'value' in field_value:
-                # Field has value but no footnote
-                if field_name == 'titleOfSecurity':
-                    transaction['security_title'] = field_value.get('value', '')
-                elif field_name == 'amount':
-                    transaction['shares'] = field_value.get('value', '')
-                elif field_name == 'transactionCode':
-                    transaction['code'] = field_value.get('value', '')
-        
-        transactions.append(transaction)
-    
-    # Process derivative securities
-    for row in parsed_data.get('derivativeSecurities', []):
-        transaction = {
-            'date': row.get('transactionDate'),
-            'code': row.get('transactionCode'),
-            'code_meaning': get_transaction_code_meaning(row.get('transactionCode', '')),
-            'acquisition_or_disposition': 'A' if row.get('acquired') else 'D' if row.get('disposed') else None,
-            'acquisition_or_disposition_meaning': get_acquisition_disposition_meaning('A' if row.get('acquired') else 'D' if row.get('disposed') else ''),
-            'shares': row.get('acquired') or row.get('disposed'),
-            'price': row.get('priceOfDerivativeSecurity'),
-            'ownership_type': 'Direct' if row.get('ownershipForm') == 'D' else 'Indirect' if row.get('ownershipForm') == 'I' else row.get('ownershipForm'),
-            'is_derivative': True,
-            'security_title': row.get('titleOfDerivativeSecurity'),
-            'security_type': 'Derivative',
-            'underlying_security': row.get('titleOfUnderlyingSecurity'),
-            'underlying_shares': row.get('amountOrNumberOfShares'),
-            'exercise_price': row.get('conversionOrExercisePrice'),
-            'date_exercisable': row.get('dateExercisable'),
-            'expiration_date': row.get('expirationDate'),
-            'footnote': None
-        }
-        
-        # Extract footnote from various fields and clean values
-        for field_name in ['conversionOrExercisePrice', 'dateExercisable', 'expirationDate', 'priceOfDerivativeSecurity', 'titleOfDerivativeSecurity']:
-            field_value = row.get(field_name)
-            if isinstance(field_value, dict) and 'footnote' in field_value:
-                if not transaction['footnote']:  # Only set if not already set
-                    footnote_obj = field_value.get('footnote', {})
-                    transaction['footnote'] = {
-                        'number': footnote_obj.get('number'),
-                        'text': footnote_obj.get('explanation', '')
-                    }
-                # Clean the field value
-                clean_value = field_value.get('value', '')
-                if field_name == 'conversionOrExercisePrice':
-                    transaction['exercise_price'] = clean_value
-                elif field_name == 'dateExercisable':
-                    transaction['date_exercisable'] = clean_value
-                elif field_name == 'expirationDate':
-                    transaction['expiration_date'] = clean_value
-                elif field_name == 'priceOfDerivativeSecurity':
-                    transaction['price'] = clean_value
-                elif field_name == 'titleOfDerivativeSecurity':
-                    transaction['security_title'] = clean_value
-            elif isinstance(field_value, dict) and 'value' in field_value:
-                # Field has value but no footnote
-                clean_value = field_value.get('value', '')
-                if field_name == 'conversionOrExercisePrice':
-                    transaction['exercise_price'] = clean_value
-                elif field_name == 'dateExercisable':
-                    transaction['date_exercisable'] = clean_value
-                elif field_name == 'expirationDate':
-                    transaction['expiration_date'] = clean_value
-                elif field_name == 'priceOfDerivativeSecurity':
-                    transaction['price'] = clean_value
-                elif field_name == 'titleOfDerivativeSecurity':
-                    transaction['security_title'] = clean_value
-        
-        transactions.append(transaction)
-    
-    # Build the semantic structure
-    semantic_data = {
-        # Keep GSI fields at top level for queryability (with original names for backward compatibility)
-        'tradeId': parsed_data.get('tradeId'),
-        'formType': parsed_data.get('formType'),  # GSI
-        'name': parsed_data.get('name'),  # GSI
-        'eventDate': parsed_data.get('eventDate'),  # GSI
-        'reportingDate': parsed_data.get('reportingDate'),  # GSI
-        'issuerName': parsed_data.get('issuerName'),  # GSI
-        'tickerSymbol': parsed_data.get('tickerSymbol'),  # GSI
-        'relationship': parsed_data.get('relationship'),  # GSI
-        'politician': parsed_data.get('politician', False),
-        
-        # Semantic structure for AI readability
-        'filing_id': f"{cik}-{accession}",
-        'filing_date': parsed_data.get('reportingDate'),
-        'form_type': parsed_data.get('formType'),
-        'form_s3_key': s3_key,
-        'source_url': f"https://www.sec.gov/cgi-bin/viewer?action=view&cik={cik}&accession_number={accession}&xbrl_type=v",
-        
-        # Nested objects for context
-        'issuer': issuer,
-        'reporting_person': reporting_person,
-        
-        # Transactions as atomic units
-        'transactions': transactions,
-        
-        # Additional metadata
-        'address': parsed_data.get('address'),
-        'signature_name': parsed_data.get('signatureName'),
-        'amended': parsed_data.get('amended', False),
-        'amendment': parsed_data.get('amendment', False),
-        'amended_trade_id': parsed_data.get('amendedTradeId'),
-        'misc': parsed_data.get('misc', {}),
-        
-        # Keep raw table data for reference (optional - can be removed if not needed)
-        'raw_non_derivative_securities': parsed_data.get('nonDerivativeSecurities', []),
-        'raw_derivative_securities': parsed_data.get('derivativeSecurities', [])
-    }
-    
-    return semantic_data
-
-
 def parse_remarks(html_content: str) -> Dict[str, Any]:
     """
     Parse remarks section only (explanations are now embedded in table rows).
@@ -2553,82 +2398,10 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         print(error_msg, flush=True)
         return {'skipped': True, 'reason': 'download_failed'}
     
-    # CRITICAL: Verify that downloaded dict contains required keys
-    # If S3 upload failed, download_sec_form should return None, not a partial dict
-    required_keys = ['s3_key', 'content', 'file_ext']
-    missing_keys = [key for key in required_keys if key not in downloaded]
-    if missing_keys:
-        error_msg = f"   ❌ FAILED: Downloaded dict missing required keys: {missing_keys} (CIK={cik}, Accession={accession})"
-        local_logger.error(error_msg)
-        print(error_msg, flush=True)
-        return {'skipped': True, 'reason': 'download_failed'}
-    
     s3_key = downloaded.get('s3_key', 'unknown')
     file_ext = downloaded.get('file_ext', 'unknown')
     file_size = len(downloaded.get('content', b''))
-    
-    # CRITICAL: Verify S3 key is not a placeholder
-    if s3_key == 'unknown' or not s3_key or file_size == 0:
-        error_msg = f"   ❌ FAILED: Invalid download result - S3Key={s3_key}, Size={file_size} (CIK={cik}, Accession={accession})"
-        local_logger.error(error_msg)
-        print(error_msg, flush=True)
-        return {'skipped': True, 'reason': 'download_failed'}
-    
     local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext}, size: {file_size:,} bytes) in {download_duration:.2f}s")
-    
-    # CRITICAL: Verify S3 file actually exists before proceeding
-    # This ensures we don't store to DynamoDB if S3 upload silently failed
-    # Note: We use the s3_bucket_name passed to process_form, not a module-level variable
-    # IMPORTANT: If S3 upload succeeded in download_sec_form, this should pass
-    # If it fails, it means the S3 upload actually failed (even if no exception was raised)
-    # 
-    # TEMPORARY: Making this a warning instead of a hard failure to diagnose the issue
-    # If S3 verification fails, we'll log a warning but still proceed (to see if it's a timing issue)
-    try:
-        from botocore.exceptions import ClientError
-        s3_client_verify = boto3.client('s3')
-        
-        # Add a small delay to allow S3 eventual consistency (though it's usually immediate)
-        time.sleep(0.2)  # Increased delay
-        
-        local_logger.info(f"   🔍 Verifying S3 file exists: Bucket={s3_bucket_name}, Key={s3_key}")
-        print(f"   🔍 Verifying S3 file exists: Bucket={s3_bucket_name}, Key={s3_key}", flush=True)
-        
-        s3_verify_response = s3_client_verify.head_object(Bucket=s3_bucket_name, Key=s3_key)
-        s3_file_size = s3_verify_response.get('ContentLength', 0)
-        local_logger.info(f"   ✅ S3 File Verification: File exists in S3, size={s3_file_size:,} bytes")
-        print(f"   ✅ S3 File Verification: File exists in S3, size={s3_file_size:,} bytes", flush=True)
-        
-        # Allow small size differences (e.g., due to encoding) but flag significant mismatches
-        size_diff = abs(s3_file_size - file_size)
-        if size_diff > 100:  # More than 100 bytes difference
-            warning_msg = f"   ⚠️ S3 FILE SIZE MISMATCH: Expected {file_size:,} bytes, found {s3_file_size:,} bytes (diff={size_diff:,}) (CIK={cik}, Accession={accession})"
-            local_logger.warning(warning_msg)
-            print(warning_msg, flush=True)
-            # Continue anyway - might be encoding difference
-    except ClientError as s3_verify_error:
-        error_code = s3_verify_error.response.get('Error', {}).get('Code', 'Unknown')
-        if error_code == '404' or error_code == 'NoSuchKey':
-            warning_msg = f"   ⚠️ S3 FILE NOT FOUND: File does not exist in S3 (CIK={cik}, Accession={accession}, S3Key={s3_key}, Bucket={s3_bucket_name})"
-            warning_msg += f"   This suggests the S3 upload in download_sec_form may have failed silently."
-            local_logger.warning(warning_msg)
-            print(warning_msg, flush=True)
-            # TEMPORARY: Continue anyway to see if this is a timing/consistency issue
-            # If files appear later, we know it's a timing issue. If they never appear, upload is failing.
-        else:
-            error_type = type(s3_verify_error).__name__
-            error_msg = str(s3_verify_error)
-            warning_msg = f"   ⚠️ S3 FILE VERIFICATION ERROR: {error_type}: {error_msg} (CIK={cik}, Accession={accession}, S3Key={s3_key}, Bucket={s3_bucket_name})"
-            local_logger.warning(warning_msg)
-            print(warning_msg, flush=True)
-            # Continue anyway - might be permissions issue that doesn't affect actual upload
-    except Exception as s3_verify_error:
-        error_type = type(s3_verify_error).__name__
-        error_msg = str(s3_verify_error)
-        warning_msg = f"   ⚠️ S3 FILE VERIFICATION EXCEPTION: {error_type}: {error_msg} (CIK={cik}, Accession={accession}, S3Key={s3_key}, Bucket={s3_bucket_name})"
-        local_logger.warning(warning_msg)
-        print(warning_msg, flush=True)
-        # Continue anyway - verification failed but upload might have succeeded
     
     # Parse form metadata
     parse_start = datetime.now()
@@ -2645,7 +2418,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"   ✅ Parsing complete in {parse_duration:.2f}s:")
     local_logger.info(f"      📊 PARSED DATA SUMMARY:")
     local_logger.info(f"         - Form Type: {parsed_data.get('formType', 'N/A')}")
-    local_logger.info(f"         - Name: {parsed_data.get('name', 'N/A')}")
+    local_logger.info(f"         - ReportingPersonName: {parsed_data.get('reportingPersonName', 'N/A')}")
     local_logger.info(f"         - Address: {parsed_data.get('address', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('address') else '✅'}")
     local_logger.info(f"         - Issuer: {parsed_data.get('issuerName', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('issuerName') else '✅'}")
     local_logger.info(f"         - Ticker: {parsed_data.get('tickerSymbol', 'N/A')}")
@@ -2688,8 +2461,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     
     # Check for critical missing fields (for validation)
     critical_missing = []
-    if not parsed_data.get('name'):
-        critical_missing.append('name')
+    if not parsed_data.get('reportingPersonName'):
+        critical_missing.append('reportingPersonName')
     if not parsed_data.get('formType'):
         critical_missing.append('formType')
     if not parsed_data.get('reportingDate'):
@@ -2699,15 +2472,15 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     
     # Check politician match
     match_start = datetime.now()
-    local_logger.info(f"   🔍 Step 4/4: Checking politician match for name='{parsed_data.get('name', 'N/A')}'...")
+    local_logger.info(f"   🔍 Step 4/4: Checking politician match for name='{parsed_data.get('reportingPersonName', 'N/A')}'...")
     politician_match = None
-    if parsed_data.get('name'):
-        politician_match = find_matching_politician(parsed_data['name'], politicians)
+    if parsed_data.get('reportingPersonName'):
+        politician_match = find_matching_politician(parsed_data['reportingPersonName'], politicians)
         if politician_match:
-            local_logger.info(f"   ✅ POLITICIAN MATCH: Name='{parsed_data['name']}' → Politician='{politician_match.get('name', 'N/A')}' (Score={politician_match.get('matchScore', 0):.3f})")
+            local_logger.info(f"   ✅ POLITICIAN MATCH: Name='{parsed_data['reportingPersonName']}' → Politician='{politician_match.get('name', 'N/A')}' (Score={politician_match.get('matchScore', 0):.3f})")
             parsed_data['politician'] = 1  # True (DynamoDB doesn't support boolean, use 1/0)
         else:
-            local_logger.info(f"   ℹ️ NO POLITICIAN MATCH: Name='{parsed_data['name']}' not in politician list")
+            local_logger.info(f"   ℹ️ NO POLITICIAN MATCH: Name='{parsed_data['reportingPersonName']}' not in politician list")
             parsed_data['politician'] = 0  # False
     else:
         local_logger.warning(f"   ⚠️ No name extracted from form, cannot check politician match")
@@ -2720,9 +2493,6 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     trade_id = f"sec_{form_data.get('form_type', 'form4')}_{cik}_{accession}_{target_date.replace('-', '')}"
     parsed_data['tradeId'] = trade_id
     parsed_data['formS3Key'] = s3_key
-    
-    # Transform to AI-friendly semantic structure
-    parsed_data = transform_to_semantic_structure(parsed_data, form_data, s3_key)
     
     # Handle amendment logic (will be implemented later when we can query existing records)
     # For now, just mark if it's an amendment
@@ -2746,9 +2516,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         # Convert to DynamoDB format
         # Store all fields, including None/empty values, so columns are visible in the table
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
-        # GSI key fields: formType, name, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
-        # Note: The semantic structure (issuer, reporting_person, transactions) will be stored as JSON strings
-        gsi_key_fields = {'formType', 'name', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
+        # GSI key fields: formType, reportingPersonName (was 'name'), address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
+        gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
         
         local_logger.info(f"      🔄 Converting to DynamoDB format...")
         dynamodb_item = {}
@@ -2843,7 +2612,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"      📦 DynamoDB Item Preview:")
         local_logger.info(f"         TradeId: {dynamodb_item.get('tradeId', 'N/A')}")
         local_logger.info(f"         FormType: {dynamodb_item.get('formType', 'N/A')}")
-        local_logger.info(f"         Name: {dynamodb_item.get('name', 'N/A')}")
+        local_logger.info(f"         ReportingPersonName: {dynamodb_item.get('reportingPersonName', 'N/A')}")
         local_logger.info(f"         IssuerName: {dynamodb_item.get('issuerName', 'N/A')}")
         local_logger.info(f"         TickerSymbol: {dynamodb_item.get('tickerSymbol', 'N/A')}")
         local_logger.info(f"         ReportingDate: {dynamodb_item.get('reportingDate', 'N/A')}")

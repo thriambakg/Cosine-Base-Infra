@@ -1760,7 +1760,7 @@ module "sec_filings_table" {
   attributes = [
     { name = "tradeId", type = "S" },
     { name = "formType", type = "S" },
-    { name = "name", type = "S" },
+    { name = "reportingPersonName", type = "S" }, # Changed from "name" for clarity
     { name = "address", type = "S" },
     { name = "eventDate", type = "S" },
     { name = "reportingDate", type = "S" },
@@ -1780,8 +1780,8 @@ module "sec_filings_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "NameReportingDateIndex"
-      hash_key        = "name"
+      name            = "ReportingPersonNameReportingDateIndex" # Updated GSI name
+      hash_key        = "reportingPersonName"                   # Changed from "name"
       range_key       = "reportingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
