@@ -2606,7 +2606,7 @@ module "sec_filings_opensearch" {
 # IAM Policy for Glue Job to access OpenSearch
 resource "aws_iam_role_policy" "glue_opensearch_access" {
   name = "${var.project_name}-glue-opensearch-access-${var.environment}"
-  role = module.politician_trades_sec_glue_job.role_id
+  role = module.politician_trades_sec_glue_job.role_name
 
   policy = jsonencode({
     Version = "2012-10-17"

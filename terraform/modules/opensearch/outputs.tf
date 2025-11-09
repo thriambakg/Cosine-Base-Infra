@@ -20,18 +20,13 @@ output "domain_endpoint" {
   value       = aws_opensearch_domain.this.endpoint
 }
 
-output "kibana_endpoint" {
-  description = "Domain-specific endpoint for Kibana without https scheme"
-  value       = aws_opensearch_domain.this.kibana_endpoint
+output "dashboard_endpoint" {
+  description = "Domain-specific endpoint for OpenSearch Dashboards (replaces deprecated kibana_endpoint)"
+  value       = aws_opensearch_domain.this.dashboard_endpoint
 }
 
 output "domain_id_output" {
   description = "Unique identifier for the OpenSearch domain (alias for domain_id)"
   value       = aws_opensearch_domain.this.domain_id
-}
-
-output "processing" {
-  description = "Status of a configuration change in the domain"
-  value       = aws_opensearch_domain.this.processing
 }
 
