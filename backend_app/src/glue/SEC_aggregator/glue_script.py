@@ -2181,6 +2181,234 @@ def parse_explanations(html_content: str) -> Dict[str, str]:
     return explanations
 
 
+def get_transaction_code_meaning(code: str) -> str:
+    """
+    Map SEC transaction codes to human-readable meanings for AI agents.
+    Based on SEC Form 4/5 instruction 8.
+    """
+    code_meanings = {
+        'A': 'Grant, award or other acquisition',
+        'C': 'Conversion of derivative security',
+        'D': 'Disposition to the issuer of issuer equity securities',
+        'E': 'Expiration of short derivative position',
+        'F': 'Payment of exercise price or tax liability by delivering or withholding securities',
+        'G': 'Bona fide gift',
+        'H': 'Expiration (or cancellation) of long derivative position with value received',
+        'I': 'Discretionary transaction in accordance with Rule 10b5-1',
+        'J': 'Other acquisition or disposition',
+        'L': 'Small acquisition under Rule 16a-6',
+        'M': 'Exercise or conversion of derivative security',
+        'O': 'Transaction in equity swap or instrument with similar characteristics',
+        'P': 'Open market or private purchase of non-derivative or derivative security',
+        'S': 'Open market or private sale of non-derivative or derivative security',
+        'U': 'Disposition pursuant to a tender of shares in a change of control transaction',
+        'V': 'Transaction voluntarily reported earlier than required',
+        'W': 'Acquisition or disposition by will or the laws of descent and distribution',
+        'X': 'Exercise of out-of-the-money derivative security',
+        'Z': 'Deposit into or withdrawal from voting trust'
+    }
+    return code_meanings.get(code.upper(), f'Transaction code {code} (meaning not specified)')
+
+def get_acquisition_disposition_meaning(value: str) -> str:
+    """Map A/D values to human-readable meanings."""
+    meanings = {
+        'A': 'Acquired',
+        'D': 'Disposed'
+    }
+    return meanings.get(value.upper(), value)
+
+def transform_to_semantic_structure(parsed_data: Dict[str, Any], form_data: Dict[str, Any], s3_key: str) -> Dict[str, Any]:
+    """
+    Transform parsed SEC form data into AI-friendly semantic structure.
+    
+    This creates a self-describing, contextually complete data structure that
+    AI agents can reason over without needing external ontologies or cross-references.
+    """
+    # Extract CIK from form_data
+    cik = form_data.get('cik', 'unknown')
+    accession = form_data.get('accession_number', 'unknown')
+    
+    # Build issuer object
+    issuer = {
+        'name': parsed_data.get('issuerName', '').title() if parsed_data.get('issuerName') else None,
+        'ticker': parsed_data.get('tickerSymbol'),
+        'cik': cik
+    }
+    
+    # Build reporting person object
+    reporting_person = {
+        'name': parsed_data.get('name', '').title() if parsed_data.get('name') else None,
+        'cik': None,  # Could extract from HTML if needed
+        'title': parsed_data.get('relationshipAdditionalText'),
+        'relationship_types': parsed_data.get('relationship', '').split(', ') if parsed_data.get('relationship') else []
+    }
+    
+    # Transform non-derivative securities into semantic transactions
+    transactions = []
+    
+    # Process non-derivative securities
+    for row in parsed_data.get('nonDerivativeSecurities', []):
+        transaction = {
+            'date': row.get('transactionDate'),
+            'code': row.get('transactionCode'),
+            'code_meaning': get_transaction_code_meaning(row.get('transactionCode', '')),
+            'acquisition_or_disposition': row.get('acquiredOrDisposed'),
+            'acquisition_or_disposition_meaning': get_acquisition_disposition_meaning(row.get('acquiredOrDisposed', '')),
+            'shares': row.get('amount'),
+            'price': row.get('price'),
+            'ownership_type': 'Direct' if row.get('ownershipForm') == 'D' else 'Indirect' if row.get('ownershipForm') == 'I' else row.get('ownershipForm'),
+            'is_derivative': False,
+            'security_title': row.get('titleOfSecurity'),
+            'security_type': 'Equity',
+            'footnote': None
+        }
+        
+        # Extract footnote and clean field values
+        # Check price field first (most common location for footnotes)
+        price_field = row.get('price')
+        if isinstance(price_field, dict) and 'footnote' in price_field:
+            footnote_obj = price_field.get('footnote', {})
+            transaction['footnote'] = {
+                'number': footnote_obj.get('number'),
+                'text': footnote_obj.get('explanation', '')
+            }
+            transaction['price'] = price_field.get('value', '')
+        elif isinstance(price_field, dict) and 'value' in price_field:
+            transaction['price'] = price_field.get('value', '')
+        elif not isinstance(price_field, dict):
+            transaction['price'] = price_field
+        
+        # Check other fields for footnotes
+        for field_name in ['titleOfSecurity', 'amount', 'transactionCode']:
+            field_value = row.get(field_name)
+            if isinstance(field_value, dict) and 'footnote' in field_value:
+                if not transaction['footnote']:  # Only set if not already set
+                    footnote_obj = field_value.get('footnote', {})
+                    transaction['footnote'] = {
+                        'number': footnote_obj.get('number'),
+                        'text': footnote_obj.get('explanation', '')
+                    }
+                # Clean the field value
+                if field_name == 'titleOfSecurity':
+                    transaction['security_title'] = field_value.get('value', '')
+                elif field_name == 'amount':
+                    transaction['shares'] = field_value.get('value', '')
+                elif field_name == 'transactionCode':
+                    transaction['code'] = field_value.get('value', '')
+            elif isinstance(field_value, dict) and 'value' in field_value:
+                # Field has value but no footnote
+                if field_name == 'titleOfSecurity':
+                    transaction['security_title'] = field_value.get('value', '')
+                elif field_name == 'amount':
+                    transaction['shares'] = field_value.get('value', '')
+                elif field_name == 'transactionCode':
+                    transaction['code'] = field_value.get('value', '')
+        
+        transactions.append(transaction)
+    
+    # Process derivative securities
+    for row in parsed_data.get('derivativeSecurities', []):
+        transaction = {
+            'date': row.get('transactionDate'),
+            'code': row.get('transactionCode'),
+            'code_meaning': get_transaction_code_meaning(row.get('transactionCode', '')),
+            'acquisition_or_disposition': 'A' if row.get('acquired') else 'D' if row.get('disposed') else None,
+            'acquisition_or_disposition_meaning': get_acquisition_disposition_meaning('A' if row.get('acquired') else 'D' if row.get('disposed') else ''),
+            'shares': row.get('acquired') or row.get('disposed'),
+            'price': row.get('priceOfDerivativeSecurity'),
+            'ownership_type': 'Direct' if row.get('ownershipForm') == 'D' else 'Indirect' if row.get('ownershipForm') == 'I' else row.get('ownershipForm'),
+            'is_derivative': True,
+            'security_title': row.get('titleOfDerivativeSecurity'),
+            'security_type': 'Derivative',
+            'underlying_security': row.get('titleOfUnderlyingSecurity'),
+            'underlying_shares': row.get('amountOrNumberOfShares'),
+            'exercise_price': row.get('conversionOrExercisePrice'),
+            'date_exercisable': row.get('dateExercisable'),
+            'expiration_date': row.get('expirationDate'),
+            'footnote': None
+        }
+        
+        # Extract footnote from various fields and clean values
+        for field_name in ['conversionOrExercisePrice', 'dateExercisable', 'expirationDate', 'priceOfDerivativeSecurity', 'titleOfDerivativeSecurity']:
+            field_value = row.get(field_name)
+            if isinstance(field_value, dict) and 'footnote' in field_value:
+                if not transaction['footnote']:  # Only set if not already set
+                    footnote_obj = field_value.get('footnote', {})
+                    transaction['footnote'] = {
+                        'number': footnote_obj.get('number'),
+                        'text': footnote_obj.get('explanation', '')
+                    }
+                # Clean the field value
+                clean_value = field_value.get('value', '')
+                if field_name == 'conversionOrExercisePrice':
+                    transaction['exercise_price'] = clean_value
+                elif field_name == 'dateExercisable':
+                    transaction['date_exercisable'] = clean_value
+                elif field_name == 'expirationDate':
+                    transaction['expiration_date'] = clean_value
+                elif field_name == 'priceOfDerivativeSecurity':
+                    transaction['price'] = clean_value
+                elif field_name == 'titleOfDerivativeSecurity':
+                    transaction['security_title'] = clean_value
+            elif isinstance(field_value, dict) and 'value' in field_value:
+                # Field has value but no footnote
+                clean_value = field_value.get('value', '')
+                if field_name == 'conversionOrExercisePrice':
+                    transaction['exercise_price'] = clean_value
+                elif field_name == 'dateExercisable':
+                    transaction['date_exercisable'] = clean_value
+                elif field_name == 'expirationDate':
+                    transaction['expiration_date'] = clean_value
+                elif field_name == 'priceOfDerivativeSecurity':
+                    transaction['price'] = clean_value
+                elif field_name == 'titleOfDerivativeSecurity':
+                    transaction['security_title'] = clean_value
+        
+        transactions.append(transaction)
+    
+    # Build the semantic structure
+    semantic_data = {
+        # Keep GSI fields at top level for queryability (with original names for backward compatibility)
+        'tradeId': parsed_data.get('tradeId'),
+        'formType': parsed_data.get('formType'),  # GSI
+        'name': parsed_data.get('name'),  # GSI
+        'eventDate': parsed_data.get('eventDate'),  # GSI
+        'reportingDate': parsed_data.get('reportingDate'),  # GSI
+        'issuerName': parsed_data.get('issuerName'),  # GSI
+        'tickerSymbol': parsed_data.get('tickerSymbol'),  # GSI
+        'relationship': parsed_data.get('relationship'),  # GSI
+        'politician': parsed_data.get('politician', False),
+        
+        # Semantic structure for AI readability
+        'filing_id': f"{cik}-{accession}",
+        'filing_date': parsed_data.get('reportingDate'),
+        'form_type': parsed_data.get('formType'),
+        'form_s3_key': s3_key,
+        'source_url': f"https://www.sec.gov/cgi-bin/viewer?action=view&cik={cik}&accession_number={accession}&xbrl_type=v",
+        
+        # Nested objects for context
+        'issuer': issuer,
+        'reporting_person': reporting_person,
+        
+        # Transactions as atomic units
+        'transactions': transactions,
+        
+        # Additional metadata
+        'address': parsed_data.get('address'),
+        'signature_name': parsed_data.get('signatureName'),
+        'amended': parsed_data.get('amended', False),
+        'amendment': parsed_data.get('amendment', False),
+        'amended_trade_id': parsed_data.get('amendedTradeId'),
+        'misc': parsed_data.get('misc', {}),
+        
+        # Keep raw table data for reference (optional - can be removed if not needed)
+        'raw_non_derivative_securities': parsed_data.get('nonDerivativeSecurities', []),
+        'raw_derivative_securities': parsed_data.get('derivativeSecurities', [])
+    }
+    
+    return semantic_data
+
+
 def parse_remarks(html_content: str) -> Dict[str, Any]:
     """
     Parse remarks section only (explanations are now embedded in table rows).
@@ -2392,6 +2620,9 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     parsed_data['tradeId'] = trade_id
     parsed_data['formS3Key'] = s3_key
     
+    # Transform to AI-friendly semantic structure
+    parsed_data = transform_to_semantic_structure(parsed_data, form_data, s3_key)
+    
     # Handle amendment logic (will be implemented later when we can query existing records)
     # For now, just mark if it's an amendment
     # TODO: Query DynamoDB to find original trade and link them
@@ -2415,6 +2646,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         # Store all fields, including None/empty values, so columns are visible in the table
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
         # GSI key fields: formType, name, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
+        # Note: The semantic structure (issuer, reporting_person, transactions) will be stored as JSON strings
         gsi_key_fields = {'formType', 'name', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
         
         local_logger.info(f"      🔄 Converting to DynamoDB format...")
