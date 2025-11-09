@@ -360,7 +360,9 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
             # Add small delay to avoid rate limiting
             time.sleep(0.3)
             
-            response = session.get(index_url, timeout=30)
+            # Ensure User-Agent is set for index file requests
+            headers = {'User-Agent': SEC_USER_AGENT}
+            response = session.get(index_url, headers=headers, timeout=30)
             
             if response.status_code == 404:
                 logger.info(f"   ⚠️ Index file not found for {date_str} (may be weekend/holiday)")
@@ -1718,22 +1720,44 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         
         result['address'] = ', '.join(address_parts) if address_parts else None
         
+        # Log address extraction
+        if result['address']:
+            local_logger.info(f"   ✅ Extracted address: {result['address'][:100]}...")
+        else:
+            local_logger.warning(f"   ⚠️ Could not extract address from HTML")
+        
         # Extract reporting date (accepted date from form_data or extract from HTML)
         # Note: Event date extraction is form-specific and handled in form-specific functions
         if accepted_date_str:
             # Extract just the date part (YYYY-MM-DD) from timestamp
             date_part = accepted_date_str.split()[0] if ' ' in accepted_date_str else accepted_date_str
             result['reportingDate'] = date_part
+            local_logger.info(f"   ✅ Extracted reportingDate from accepted_date: {result['reportingDate']}")
         else:
             # Fallback: try to extract from HTML signature date
-            signature_date_match = re.search(r'\*\* Signature[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+            # More flexible patterns for signature date
+            signature_date_patterns = [
+                r'\*\* Signature[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+                r'Signature[^<]*Date[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+                r'<u><span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span></u>',  # Date in signature section
+            ]
+            
+            signature_date_match = None
+            for pattern in signature_date_patterns:
+                signature_date_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                if signature_date_match:
+                    break
+            
             if signature_date_match:
                 try:
                     date_str = signature_date_match.group(1)
                     date_obj = datetime.strptime(date_str, '%m/%d/%Y')
                     result['reportingDate'] = date_obj.strftime('%Y-%m-%d')
-                except:
-                    pass
+                    local_logger.info(f"   ✅ Extracted reportingDate from signature: {result['reportingDate']}")
+                except Exception as e:
+                    local_logger.warning(f"   ⚠️ Could not parse reportingDate '{date_str}': {e}")
+            else:
+                local_logger.warning(f"   ⚠️ Could not find reportingDate in HTML")
         
         # Extract issuer name and ticker symbol
         # HTML structure: "3. Issuer Name <b>and</b> Ticker or Trading Symbol</span><br><a>Name</a>"
@@ -1907,6 +1931,14 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         result['relationshipTypes'] = ', '.join(relationship_types) if relationship_types else None  # All relationship types
         result['relationshipAdditionalText'] = relationship_additional if relationship_additional else None
         
+        # Log relationship extraction results
+        if result['relationship']:
+            local_logger.info(f"   ✅ Extracted relationship: {result['relationship']}")
+            if result['relationshipTypes']:
+                local_logger.info(f"   ✅ All relationship types: {result['relationshipTypes']}")
+        else:
+            local_logger.warning(f"   ⚠️ Could not extract relationship from HTML")
+        
         # Extract Individual/Group Filing (6. Individual or Joint/Group Filing)
         # HTML structure: <td><span>X</span></td><td>Form filed by One Reporting Person</td>
         # OR: <td></td><td>Form filed by More than One Reporting Person</td>
@@ -1920,27 +1952,46 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         if individual_filing_match:
             filing_table = individual_filing_match.group(1)
             
-            # Check for "Form filed by One Reporting Person" with X
-            one_person_match = re.search(
+            # More flexible patterns - check for X in checkbox cell followed by text
+            # Pattern 1: Check for "Form filed by One Reporting Person" with X
+            one_person_patterns = [
                 r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Form filed by One Reporting Person</td>',
-                filing_table,
-                re.IGNORECASE | re.DOTALL
-            )
+                r'<td[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*>Form filed by One Reporting Person</td>',
+                r'<span[^>]*class="FormData"[^>]*>X</span>[^<]*Form filed by One Reporting Person',
+            ]
+            
+            one_person_match = None
+            for pattern in one_person_patterns:
+                one_person_match = re.search(pattern, filing_table, re.IGNORECASE | re.DOTALL)
+                if one_person_match:
+                    break
+            
             if one_person_match:
                 result['filingType'] = 'individual'  # Individual filing
+                local_logger.info(f"   ✅ Extracted filingType: individual")
             else:
-                # Check for "Form filed by More than One Reporting Person" with X
-                multiple_persons_match = re.search(
+                # Pattern 2: Check for "Form filed by More than One Reporting Person" with X
+                multiple_persons_patterns = [
                     r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Form filed by More than One Reporting Person</td>',
-                    filing_table,
-                    re.IGNORECASE | re.DOTALL
-                )
+                    r'<td[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*>Form filed by More than One Reporting Person</td>',
+                    r'<span[^>]*class="FormData"[^>]*>X</span>[^<]*Form filed by More than One Reporting Person',
+                ]
+                
+                multiple_persons_match = None
+                for pattern in multiple_persons_patterns:
+                    multiple_persons_match = re.search(pattern, filing_table, re.IGNORECASE | re.DOTALL)
+                    if multiple_persons_match:
+                        break
+                
                 if multiple_persons_match:
                     result['filingType'] = 'joint/group'  # Joint/Group filing
+                    local_logger.info(f"   ✅ Extracted filingType: joint/group")
                 else:
                     result['filingType'] = None  # Could not determine
+                    local_logger.warning(f"   ⚠️ Could not determine filingType from table")
         else:
             result['filingType'] = None
+            local_logger.warning(f"   ⚠️ Could not find Individual or Joint/Group Filing section")
         
         # Extract signature name
         # Pattern: <u><span class="FormData">Signature text</span></u> or "See Exhibit 99.1 for Signature"
@@ -2031,14 +2082,29 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     
     try:
         # Form 4 specific: Extract event date
-        event_date_match = re.search(r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
+        # More flexible pattern to handle various HTML structures
+        event_date_patterns = [
+            r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction[^<]*(\d{1,2}/\d{1,2}/\d{4})',
+        ]
+        
+        event_date_match = None
+        for pattern in event_date_patterns:
+            event_date_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if event_date_match:
+                break
+        
         if event_date_match:
             try:
                 date_str = event_date_match.group(1)
                 date_obj = datetime.strptime(date_str, '%m/%d/%Y')
                 result['eventDate'] = date_obj.strftime('%Y-%m-%d')
-            except:
-                pass
+                local_logger.info(f"   ✅ Extracted eventDate: {result['eventDate']}")
+            except Exception as e:
+                local_logger.warning(f"   ⚠️ Could not parse eventDate '{date_str}': {e}")
+        else:
+            local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
         
         # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
         # OpenSearch will handle full-text search on the raw HTML content stored in S3
