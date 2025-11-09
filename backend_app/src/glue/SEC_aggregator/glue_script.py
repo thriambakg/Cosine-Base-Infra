@@ -2151,7 +2151,12 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         # Convert to DynamoDB format
         dynamodb_item = {}
         for key, value in parsed_data.items():
-            if value is None:
+            # Store amendment field even if None (to explicitly mark as original filing, not amendment)
+            # DynamoDB doesn't support null values, so we store empty string to make field present
+            if value is None and key == 'amendment':
+                dynamodb_item[key] = ''  # Empty string represents null/not an amendment
+                continue
+            elif value is None:
                 continue
             elif isinstance(value, (int, float)):
                 if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
