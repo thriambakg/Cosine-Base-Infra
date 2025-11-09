@@ -2585,7 +2585,7 @@ module "sec_filings_opensearch" {
           ]
         }
         Action   = "es:*"
-        Resource = "arn:aws:es:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:domain/${var.project_name}-sec-filings-search-${var.environment}/*"
+        Resource = "arn:aws:es:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:domain/${var.project_name}-sec-search-${var.environment}/*"
       }
     ]
   })
