@@ -1018,7 +1018,20 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         # Generate S3 key - include accession number to ensure uniqueness
         # Format: trades/{date}/sec/{form_type}-{cik}-{accession}-{date}.{ext}
         # Accession is already in dashed format (e.g., 0001140361-25-040858)
+        # CRITICAL: Accession must be included to prevent S3 key collisions
+        if not accession_dashed or accession_dashed == 'unknown':
+            error_msg = f"   ⚠️ Cannot generate S3 key: accession_dashed is invalid ({accession_dashed})"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            raise ValueError(f"Invalid accession_dashed: {accession_dashed}")
+        
         s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{accession_dashed}-{target_date}.{file_ext}"
+        
+        # Log S3 key generation for debugging
+        local_logger.info(f"      🔑 Generated S3 Key: {s3_key}")
+        local_logger.info(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}, ext={file_ext}")
+        print(f"      🔑 Generated S3 Key: {s3_key}", flush=True)
+        print(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}, ext={file_ext}", flush=True)
         
         local_logger.info(f"")
         local_logger.info(f"      💾 UPLOADING TO S3:")
@@ -1037,31 +1050,47 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         s3_client_local = boto3.client('s3')
         
         # Upload to S3 with correct content type
+        # CRITICAL: S3 upload must succeed before we return success
+        # If S3 upload fails, we cannot proceed with DynamoDB storage
         try:
-            s3_client_local.put_object(
+            s3_upload_response = s3_client_local.put_object(
                 Bucket=s3_bucket_name,
                 Key=s3_key,
                 Body=file_content,
                 ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
             )
             
+            # Verify upload succeeded by checking response
+            if s3_upload_response.get('ResponseMetadata', {}).get('HTTPStatusCode') != 200:
+                raise Exception(f"S3 upload returned non-200 status: {s3_upload_response.get('ResponseMetadata', {}).get('HTTPStatusCode')}")
+            
             local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
+            local_logger.info(f"         HTTP Status: {s3_upload_response.get('ResponseMetadata', {}).get('HTTPStatusCode', 'N/A')}")
+            local_logger.info(f"         ETag: {s3_upload_response.get('ETag', 'N/A')}")
             local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
             local_logger.info(f"      " + "="*70)
             print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
+            print(f"         HTTP Status: {s3_upload_response.get('ResponseMetadata', {}).get('HTTPStatusCode', 'N/A')}", flush=True)
+            print(f"         ETag: {s3_upload_response.get('ETag', 'N/A')}", flush=True)
             print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
             print(f"      " + "="*70, flush=True)
         except Exception as s3_error:
             error_type = type(s3_error).__name__
             error_msg = str(s3_error)
+            import traceback
+            s3_traceback = traceback.format_exc()
             local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
             local_logger.error(f"         Bucket: {s3_bucket_name}")
             local_logger.error(f"         Key: {s3_key}")
             local_logger.error(f"         Size: {len(file_content):,} bytes")
+            local_logger.error(f"         Traceback: {s3_traceback}")
             print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
             print(f"         Bucket: {s3_bucket_name}", flush=True)
             print(f"         Key: {s3_key}", flush=True)
             print(f"         Size: {len(file_content):,} bytes", flush=True)
+            print(f"         Traceback: {s3_traceback}", flush=True)
+            # CRITICAL: Re-raise to ensure download_sec_form returns None
+            # This prevents DynamoDB storage when S3 upload fails
             raise  # Re-raise to be caught by outer exception handler
         
         return {
@@ -2524,9 +2553,27 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         print(error_msg, flush=True)
         return {'skipped': True, 'reason': 'download_failed'}
     
+    # CRITICAL: Verify that downloaded dict contains required keys
+    # If S3 upload failed, download_sec_form should return None, not a partial dict
+    required_keys = ['s3_key', 'content', 'file_ext']
+    missing_keys = [key for key in required_keys if key not in downloaded]
+    if missing_keys:
+        error_msg = f"   ❌ FAILED: Downloaded dict missing required keys: {missing_keys} (CIK={cik}, Accession={accession})"
+        local_logger.error(error_msg)
+        print(error_msg, flush=True)
+        return {'skipped': True, 'reason': 'download_failed'}
+    
     s3_key = downloaded.get('s3_key', 'unknown')
     file_ext = downloaded.get('file_ext', 'unknown')
     file_size = len(downloaded.get('content', b''))
+    
+    # CRITICAL: Verify S3 key is not a placeholder
+    if s3_key == 'unknown' or not s3_key or file_size == 0:
+        error_msg = f"   ❌ FAILED: Invalid download result - S3Key={s3_key}, Size={file_size} (CIK={cik}, Accession={accession})"
+        local_logger.error(error_msg)
+        print(error_msg, flush=True)
+        return {'skipped': True, 'reason': 'download_failed'}
+    
     local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext}, size: {file_size:,} bytes) in {download_duration:.2f}s")
     
     # Parse form metadata
