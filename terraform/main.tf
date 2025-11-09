@@ -2544,7 +2544,7 @@ module "sec_filings_opensearch" {
 
   project_name = var.project_name
   environment  = var.environment
-  domain_name  = "sec-filings-search"
+  domain_name  = "sec" # Shortened to meet 28-char limit: cosine-sec-staging = 18 chars, cosine-sec-production = 21 chars
 
   # Engine version
   engine_version = "OpenSearch_2.11"
@@ -2585,7 +2585,7 @@ module "sec_filings_opensearch" {
           ]
         }
         Action   = "es:*"
-        Resource = "arn:aws:es:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:domain/${var.project_name}-sec-search-${var.environment}/*"
+        Resource = "arn:aws:es:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:domain/${var.project_name}-sec-${var.environment}/*"
       }
     ]
   })
