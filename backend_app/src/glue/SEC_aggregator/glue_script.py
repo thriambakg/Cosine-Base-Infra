@@ -121,6 +121,28 @@ target_date = args.get('date')
 s3_bucket = args.get('s3_bucket')
 dynamodb_table = args.get('dynamodb_table')
 
+# Parse optional OpenSearch arguments manually
+opensearch_endpoint = None
+opensearch_index = None
+for i, arg in enumerate(sys.argv):
+    if arg == '--opensearch_endpoint' or arg.startswith('--opensearch_endpoint='):
+        if '=' in arg:
+            opensearch_endpoint = arg.split('=', 1)[1]
+        elif i + 1 < len(sys.argv):
+            opensearch_endpoint = sys.argv[i + 1]
+    elif arg == '--opensearch_index' or arg.startswith('--opensearch_index='):
+        if '=' in arg:
+            opensearch_index = arg.split('=', 1)[1]
+        elif i + 1 < len(sys.argv):
+            opensearch_index = sys.argv[i + 1]
+
+if opensearch_endpoint:
+    logger.info(f"🔍 OpenSearch enabled: Endpoint={opensearch_endpoint}, Index={opensearch_index or 'sec-filings'}")
+    print(f"🔍 OpenSearch enabled: Endpoint={opensearch_endpoint}, Index={opensearch_index or 'sec-filings'}", flush=True)
+else:
+    logger.info("⚠️ OpenSearch not configured - documents will only be stored to DynamoDB")
+    print("⚠️ OpenSearch not configured - documents will only be stored to DynamoDB", flush=True)
+
 # Parse optional backdate argument manually (since getResolvedOptions requires all args)
 # Format: --backdate=2025-11-05 or --backdate 2025-11-05
 # Step Functions may pass null as --backdate=null or --backdate null
@@ -1595,8 +1617,10 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         'reportingDate': None,
         'issuerName': None,
         'tickerSymbol': None,
-        'relationship': None,
-        'relationshipAdditionalText': None,
+        'relationship': None,  # Primary relationship for GSI
+        'relationshipTypes': None,  # All relationship types (comma-separated)
+        'relationshipAdditionalText': None,  # Additional text for Officer/Other
+        'filingType': None,  # 'individual' or 'joint/group'
         'signatureName': None,
         'amended': False,
         'amendment': False,
@@ -1761,45 +1785,162 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         if ticker_match:
             result['tickerSymbol'] = ticker_match.group(1)
         
-        # Extract relationship (4. Relationship of Reporting Person(s) to Issuer)
-        # HTML structure: <td>Director</td><td align="center"><span class="FormData">X</span></td>
-        # The X comes AFTER the relationship type text
+        # Extract relationship (5. Relationship of Reporting Person(s) to Issuer)
+        # HTML structure: The X is ALWAYS to the LEFT of the relationship type text
+        # The table has 4 columns: [checkbox1] [text1] [checkbox2] [text2]
+        # Row 1: [checkbox] Director [checkbox] 10% Owner
+        # Row 2: [checkbox] Officer [checkbox] Other
+        # Row 3: [empty] [blue text for Officer] [empty] [blue text for Other]
+        # 
+        # Example structure:
+        # <tr>
+        #   <td align="center"></td>  <!-- Column 1: checkbox (empty or X) -->
+        #   <td class="MedSmallFormText">Director</td>  <!-- Column 2: text -->
+        #   <td align="center"><span class="FormData">X</span></td>  <!-- Column 3: checkbox (X) -->
+        #   <td class="MedSmallFormText">10% Owner</td>  <!-- Column 4: text -->
+        # </tr>
         relationship_types = []
         relationship_additional = None
         
-        # Pattern: Look for relationship type text followed by <td> with "X"
-        # Director: <td>Director</td><td><span>X</span></td>
-        director_match = re.search(r'<td[^>]*class="MedSmallFormText"[^>]*>Director</td>[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>', html_content, re.IGNORECASE | re.DOTALL)
-        if director_match:
-            relationship_types.append('Director')
+        # Find the relationship section table
+        relationship_section_match = re.search(
+            r'Relationship of Reporting Person\(s\) to Issuer[^<]*<table[^>]*>(.*?)</table>',
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
         
-        # Officer: <td>Officer</td><td><span>X</span></td>
-        officer_match = re.search(r'<td[^>]*class="MedSmallFormText"[^>]*>Officer[^<]*</td>[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>', html_content, re.IGNORECASE | re.DOTALL)
-        if officer_match:
-            relationship_types.append('Officer')
-            # Extract additional text (title below) - look for the next row with blue text
-            officer_text_match = re.search(r'Officer[^<]*</td>[^<]*</tr>[^<]*<tr>[^<]*<td[^>]*style="color: blue"[^>]*>([^<]+)</td>', html_content, re.IGNORECASE | re.DOTALL)
-            if officer_text_match:
-                relationship_additional = unescape(officer_text_match.group(1)).strip()
+        if relationship_section_match:
+            relationship_table = relationship_section_match.group(1)
+            
+            # Parse each row to find checked relationships
+            # The X is ALWAYS to the LEFT of the relationship text
+            # Structure: [checkbox] [text] [checkbox] [text]
+            # We need to find: <td><span>X</span></td> followed IMMEDIATELY by <td>Relationship Text</td>
+            # The X can be in either checkbox column (column 1 or column 3)
+            
+            # Director: Look for X checkbox followed by "Director" text (in first row, columns 1-2)
+            # Pattern: <td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Director</td>
+            director_match = re.search(
+                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Director</td>',
+                relationship_table,
+                re.IGNORECASE | re.DOTALL
+            )
+            if director_match:
+                relationship_types.append('Director')
+            
+            # Officer: Look for X checkbox followed by "Officer" text (in second row, columns 1-2)
+            # Then extract additional text from the blue text row (third row, column 2)
+            officer_match = re.search(
+                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Officer',
+                relationship_table,
+                re.IGNORECASE | re.DOTALL
+            )
+            if officer_match:
+                relationship_types.append('Officer')
+                # Extract additional text from blue text row (third <tr>, second <td> with style="color: blue")
+                # Pattern: Look for the first blue text cell in the third row (Officer's additional text)
+                # Structure: <tr><td></td><td style="color: blue">text</td><td></td><td style="color: blue">text</td></tr>
+                officer_text_match = re.search(
+                    r'<tr>[^<]*<td[^>]*align="center"[^>]*></td>[^<]*<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
+                    relationship_table,
+                    re.IGNORECASE | re.DOTALL
+                )
+                if officer_text_match:
+                    officer_text = unescape(officer_text_match.group(1)).strip()
+                    if officer_text:
+                        relationship_additional = officer_text
+            
+            # 10% Owner: Look for X checkbox followed by "10% Owner" text (in first row, columns 3-4)
+            # Pattern: <td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>10% Owner</td>
+            owner_match = re.search(
+                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>10%\s*Owner</td>',
+                relationship_table,
+                re.IGNORECASE | re.DOTALL
+            )
+            if owner_match:
+                relationship_types.append('10% Owner')
+            
+            # Other: Look for X checkbox followed by "Other" text (in second row, columns 3-4)
+            # Then extract additional text from the blue text row (third row, column 4)
+            other_match = re.search(
+                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Other',
+                relationship_table,
+                re.IGNORECASE | re.DOTALL
+            )
+            if other_match:
+                relationship_types.append('Other')
+                # Extract additional text from blue text row (third <tr>, fourth <td> with style="color: blue")
+                # Find all blue text cells - the second one is for "Other"
+                blue_text_cells = re.findall(
+                    r'<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
+                    relationship_table,
+                    re.IGNORECASE | re.DOTALL
+                )
+                # The second blue text cell (index 1) is for "Other" (first is for Officer)
+                if len(blue_text_cells) >= 2:
+                    other_text = unescape(blue_text_cells[1]).strip()
+                    if other_text:
+                        # Combine with Officer text if both exist
+                        if relationship_additional:
+                            relationship_additional = relationship_additional + '; ' + other_text
+                        else:
+                            relationship_additional = other_text
+                elif len(blue_text_cells) == 1:
+                    # Only one blue text cell exists - check if it's for Other (would be in fourth column)
+                    # Fallback: look for blue text after "Other" text in the table
+                    other_text_match = re.search(
+                        r'Other[^<]*</td>[^<]*</tr>[^<]*<tr>[^<]*<td[^>]*></td>[^<]*<td[^>]*></td>[^<]*<td[^>]*></td>[^<]*<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
+                        relationship_table,
+                        re.IGNORECASE | re.DOTALL
+                    )
+                    if other_text_match:
+                        other_text = unescape(other_text_match.group(1)).strip()
+                        if other_text:
+                            if relationship_additional:
+                                relationship_additional = relationship_additional + '; ' + other_text
+                            else:
+                                relationship_additional = other_text
         
-        # 10% Owner: <td>10% Owner</td><td><span>X</span></td>
-        owner_match = re.search(r'<td[^>]*class="MedSmallFormText"[^>]*>10% Owner</td>[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>', html_content, re.IGNORECASE | re.DOTALL)
-        if owner_match:
-            relationship_types.append('10% Owner')
-        
-        # Other: <td>Other</td><td><span>X</span></td>
-        other_match = re.search(r'<td[^>]*class="MedSmallFormText"[^>]*>Other[^<]*</td>[^<]*<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>', html_content, re.IGNORECASE | re.DOTALL)
-        if other_match:
-            relationship_types.append('Other')
-            # Extract additional text - look for the next row with blue text
-            other_text_match = re.search(r'Other[^<]*</td>[^<]*</tr>[^<]*<tr>[^<]*<td[^>]*style="color: blue"[^>]*>([^<]+)</td>', html_content, re.IGNORECASE | re.DOTALL)
-            if other_text_match:
-                other_text = unescape(other_text_match.group(1)).strip()
-                if other_text:
-                    relationship_additional = relationship_additional + '; ' + other_text if relationship_additional else other_text
-        
-        result['relationship'] = ', '.join(relationship_types) if relationship_types else None
+        # Store relationship - use first relationship type as primary (for GSI)
+        # Store all relationship types as comma-separated string for completeness
+        result['relationship'] = relationship_types[0] if relationship_types else None  # Primary relationship for GSI
+        result['relationshipTypes'] = ', '.join(relationship_types) if relationship_types else None  # All relationship types
         result['relationshipAdditionalText'] = relationship_additional if relationship_additional else None
+        
+        # Extract Individual/Group Filing (6. Individual or Joint/Group Filing)
+        # HTML structure: <td><span>X</span></td><td>Form filed by One Reporting Person</td>
+        # OR: <td></td><td>Form filed by More than One Reporting Person</td>
+        # The X is ALWAYS to the LEFT of the text
+        individual_filing_match = re.search(
+            r'Individual or Joint/Group Filing[^<]*<table[^>]*>(.*?)</table>',
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
+        
+        if individual_filing_match:
+            filing_table = individual_filing_match.group(1)
+            
+            # Check for "Form filed by One Reporting Person" with X
+            one_person_match = re.search(
+                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Form filed by One Reporting Person</td>',
+                filing_table,
+                re.IGNORECASE | re.DOTALL
+            )
+            if one_person_match:
+                result['filingType'] = 'individual'  # Individual filing
+            else:
+                # Check for "Form filed by More than One Reporting Person" with X
+                multiple_persons_match = re.search(
+                    r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Form filed by More than One Reporting Person</td>',
+                    filing_table,
+                    re.IGNORECASE | re.DOTALL
+                )
+                if multiple_persons_match:
+                    result['filingType'] = 'joint/group'  # Joint/Group filing
+                else:
+                    result['filingType'] = None  # Could not determine
+        else:
+            result['filingType'] = None
         
         # Extract signature name
         # Pattern: <u><span class="FormData">Signature text</span></u> or "See Exhibit 99.1 for Signature"
@@ -2370,7 +2511,8 @@ def parse_remarks(html_content: str) -> Dict[str, Any]:
     return misc
 
 
-def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[Dict[str, Any]], s3_bucket_name: str, dynamodb_table_name: str) -> Dict[str, Any]:
+def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[Dict[str, Any]], s3_bucket_name: str, dynamodb_table_name: str, 
+                 opensearch_endpoint: Optional[str] = None, opensearch_index: Optional[str] = None) -> Dict[str, Any]:
     """
     Process a single SEC form: download, parse, check politician match, store
     
@@ -2709,10 +2851,89 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"         Response Metadata: {put_response.get('ResponseMetadata', {}).get('HTTPStatusCode', 'N/A')}")
         local_logger.info(f"         Write Time: {db_write_duration:.2f}s")
         
+        # Index to OpenSearch if configured
+        opensearch_success = False
+        if opensearch_endpoint:
+            try:
+                opensearch_index_start = datetime.now()
+                local_logger.info(f"      🔍 Indexing to OpenSearch...")
+                
+                # Prepare document for OpenSearch (flatten JSON fields for better searchability)
+                opensearch_doc = {
+                    'tradeId': trade_id,
+                    'formType': parsed_data.get('formType'),
+                    'reportingPersonName': parsed_data.get('reportingPersonName'),
+                    'issuerName': parsed_data.get('issuerName'),
+                    'tickerSymbol': parsed_data.get('tickerSymbol'),
+                    'relationship': parsed_data.get('relationship'),
+                    'relationshipTypes': parsed_data.get('relationshipTypes'),
+                    'relationshipAdditionalText': parsed_data.get('relationshipAdditionalText'),
+                    'filingType': parsed_data.get('filingType'),
+                    'eventDate': parsed_data.get('eventDate'),
+                    'reportingDate': parsed_data.get('reportingDate'),
+                    'address': parsed_data.get('address'),
+                    'signatureName': parsed_data.get('signatureName'),
+                    'politician': parsed_data.get('politician', False),
+                    'formS3Key': s3_key,
+                    'amended': parsed_data.get('amended', False),
+                    'amendment': parsed_data.get('amendment', False),
+                    'amendedTradeId': parsed_data.get('amendedTradeId'),
+                    # Include table data as JSON strings for full-text search
+                    'nonDerivativeSecurities': json.dumps(parsed_data.get('nonDerivativeSecurities', []), default=str) if parsed_data.get('nonDerivativeSecurities') else None,
+                    'derivativeSecurities': json.dumps(parsed_data.get('derivativeSecurities', []), default=str) if parsed_data.get('derivativeSecurities') else None,
+                    'misc': json.dumps(parsed_data.get('misc', {}), default=str) if parsed_data.get('misc') else None,
+                    # Add timestamp for indexing
+                    '@timestamp': datetime.now().isoformat()
+                }
+                
+                # Remove None values
+                opensearch_doc = {k: v for k, v in opensearch_doc.items() if v is not None}
+                
+                # Index document to OpenSearch using requests library
+                index_name = opensearch_index or 'sec-filings'
+                url = f"https://{opensearch_endpoint}/{index_name}/_doc/{trade_id}"
+                
+                # Use AWS SigV4 signing for authentication
+                from botocore.auth import SigV4Auth
+                from botocore.awsrequest import AWSRequest
+                import urllib3
+                
+                # Get AWS region
+                aws_region = boto3.Session().region_name or 'us-east-1'
+                
+                # Create request
+                request = AWSRequest(method='PUT', url=url, data=json.dumps(opensearch_doc), headers={'Content-Type': 'application/json'})
+                
+                # Sign request
+                credentials = boto3.Session().get_credentials()
+                SigV4Auth(credentials, 'es', aws_region).add_auth(request)
+                
+                # Send request
+                http = urllib3.PoolManager()
+                response = http.request(
+                    'PUT',
+                    url,
+                    body=json.dumps(opensearch_doc),
+                    headers=dict(request.headers)
+                )
+                
+                if response.status in [200, 201]:
+                    opensearch_success = True
+                    opensearch_duration = (datetime.now() - opensearch_index_start).total_seconds()
+                    local_logger.info(f"      ✅ OpenSearch indexed successfully in {opensearch_duration:.2f}s")
+                else:
+                    local_logger.warning(f"      ⚠️ OpenSearch indexing returned status {response.status}: {response.data.decode('utf-8')}")
+                    
+            except Exception as opensearch_error:
+                local_logger.warning(f"      ⚠️ OpenSearch indexing failed (non-fatal): {opensearch_error}")
+                # Don't fail the entire process if OpenSearch indexing fails
+        
         store_duration = (datetime.now() - store_start).total_seconds()
         total_duration = (datetime.now() - form_start_time).total_seconds()
         
         local_logger.info(f"   ✅ STORED: TradeId={trade_id}, S3Key={s3_key} in {store_duration:.2f}s")
+        if opensearch_endpoint:
+            local_logger.info(f"   {'✅' if opensearch_success else '⚠️'} OpenSearch: {'Indexed' if opensearch_success else 'Failed (non-fatal)'}")
         local_logger.info(f"   ✅ Form processing complete: Total time {total_duration:.2f}s")
         local_logger.info(f"      Breakdown: Download={download_duration:.2f}s, Parse={parse_duration:.2f}s, Match={match_duration:.2f}s, Store={store_duration:.2f}s")
         
@@ -2721,7 +2942,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             'tradeId': trade_id, 
             'politicianMatch': politician_match is not None,
             's3_key': s3_key,
-            'formS3Key': s3_key  # Also include for compatibility
+            'formS3Key': s3_key,  # Also include for compatibility
+            'opensearch_indexed': opensearch_success if opensearch_endpoint else None
         }
     
     except Exception as e:
@@ -2861,6 +3083,8 @@ try:
     target_date_broadcast = sc.broadcast(target_date)
     s3_bucket_broadcast = sc.broadcast(s3_bucket)
     dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
+    opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
+    opensearch_index_broadcast = sc.broadcast(opensearch_index)
     
     # Limit to first 10 forms for testing
     test_limit = 10
@@ -2901,6 +3125,8 @@ try:
             target_date_local = target_date_broadcast.value
             s3_bucket_local = s3_bucket_broadcast.value
             dynamodb_table_local = dynamodb_table_broadcast.value
+            opensearch_endpoint_local = opensearch_endpoint_broadcast.value
+            opensearch_index_local = opensearch_index_broadcast.value
             
             cik = form_data.get('cik', 'unknown')
             accession = form_data.get('accession_number', 'unknown')
@@ -2910,7 +3136,8 @@ try:
             # Call process_form with explicit parameters from broadcast
             # Note: process_form will create its own boto3 clients inside, so no SSLContext issues
             # process_form now stores directly to DynamoDB and returns a result dict
-            result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, dynamodb_table_local)
+            result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, dynamodb_table_local, 
+                                 opensearch_endpoint_local, opensearch_index_local)
             
             if result.get('success'):
                 msg = f"✅ Form completed: CIK={cik}, TradeId={result.get('tradeId', 'N/A')}, PoliticianMatch={result.get('politicianMatch', False)}"
