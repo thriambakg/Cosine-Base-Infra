@@ -2631,8 +2631,9 @@ resource "aws_iam_role_policy" "glue_opensearch_access" {
 
 # Note: KMS key policy is updated in the locals section below to include OpenSearch service
 
-# Data source for account ID (needed for KMS key policy)
+# Data sources for account ID and region (needed for KMS key policy and OpenSearch)
 data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
 
 # Add Glue role to KMS key policies (after both are created to avoid circular dependency)
 # We reconstruct the policy based on the KMS module's structure and add the Glue role
