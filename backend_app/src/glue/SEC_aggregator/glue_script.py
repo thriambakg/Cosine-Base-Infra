@@ -1670,10 +1670,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         'relationshipAdditionalText': None,  # Additional text for Officer/Other
         'filingType': None,  # 'individual' or 'joint/group'
         'signatureName': None,
-        'amended': False,
-        'amendment': False,
-        'amendedTradeId': None
         # Note: nonDerivativeSecurities, derivativeSecurities, misc removed
+        # Note: amendment fields removed - can be determined via OpenSearch full-text search if needed
         # OpenSearch will handle full-text search on raw HTML content stored in S3
     }
     
@@ -2045,6 +2043,7 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         # Extract signature name
         # Patterns to handle:
         # 1. Exhibit reference: "See Exhibit 99.1 for Signature" or "See Exhibit 99.1 for Signatures" (check first)
+        #    - When found, search Remarks/Explanation sections for Exhibit 99.1 content and extract signature
         # 2. Direct signature with /s/ prefix: <u><span class="FormData">/s/ Name</span></u>
         # 3. Signature in signature section with /s/: ** Signature ... <u><span>/s/ Name</span></u>
         # 4. Signature in signature section without /s/: ** Signature ... <u><span>Name</span></u>
@@ -2055,7 +2054,85 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         # First, check for "See Exhibit" pattern (most specific)
         exhibit_match = re.search(r'<u><span[^>]*class="FormData"[^>]*>See Exhibit 99\.1 for Signature[s]?</span></u>', html_content, re.IGNORECASE)
         if exhibit_match:
-            signature_name = 'see exhibit 99.1 for signature'
+            # Search for Exhibit 99.1 content in Remarks or Explanation of Responses sections
+            # Look for patterns like "Exhibit 99.1 (Signature)" or "Exhibit 99.1 (Signatures and Joint Filer Information)"
+            # and extract signature information from that section
+            local_logger.info(f"   🔍 Found 'See Exhibit 99.1 for signature' - searching for Exhibit 99.1 content")
+            
+            # Search in Remarks section first (most common location)
+            remarks_section = re.search(
+                r'<b>Remarks:</b>.*?</table>',
+                html_content,
+                re.IGNORECASE | re.DOTALL
+            )
+            
+            # Also search in Explanation of Responses section
+            explanation_section = re.search(
+                r'Explanation of Responses.*?<b>Remarks:</b>',
+                html_content,
+                re.IGNORECASE | re.DOTALL
+            )
+            
+            # Search for Exhibit 99.1 references in these sections
+            exhibit_patterns = [
+                # Pattern 1: Look for signature names after "Exhibit 99.1" in the text
+                r'Exhibit 99\.1[^<]*\([^)]*Signature[^)]*\)[^<]*is incorporated[^<]*by reference[^<]*\.',
+                # Pattern 2: Look for /s/ Name patterns near Exhibit 99.1
+                r'Exhibit 99\.1.*?(/s/|s/)\s*([A-Z][^<\n]+)',
+                # Pattern 3: Look for signature names in table cells after Exhibit 99.1 mention
+                r'Exhibit 99\.1.*?<td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>([^<]+)</td>',
+            ]
+            
+            # Search in both sections
+            search_areas = []
+            if remarks_section:
+                search_areas.append(('Remarks', remarks_section.group(0)))
+            if explanation_section:
+                search_areas.append(('Explanation', explanation_section.group(0)))
+            
+            # If no specific sections found, search the entire document for Exhibit 99.1
+            if not search_areas:
+                search_areas.append(('Document', html_content))
+            
+            for section_name, section_content in search_areas:
+                local_logger.info(f"   🔍 Searching {section_name} section for Exhibit 99.1 signature")
+                
+                # First, check if Exhibit 99.1 is mentioned
+                if re.search(r'Exhibit 99\.1', section_content, re.IGNORECASE):
+                    # Try to extract signature from various patterns
+                    # Look for /s/ Name patterns in the section
+                    signature_patterns = [
+                        r'(/s/|s/)\s*([A-Z][A-Za-z\s,\.]+?)(?:\s+Date|\s+\d{1,2}/\d{1,2}/\d{4}|</td>|</span>|$)',
+                        r'Signature[^<]*<u><span[^>]*class="FormData"[^>]*>(/s/|s/)\s*([^<]+)</span></u>',
+                        r'Signature[^<]*<u><span[^>]*class="FormData"[^>]*>([^<]+)</span></u>',
+                    ]
+                    
+                    for pattern in signature_patterns:
+                        sig_match = re.search(pattern, section_content, re.IGNORECASE | re.DOTALL)
+                        if sig_match:
+                            # Extract the signature name
+                            if len(sig_match.groups()) >= 2:
+                                sig_name = sig_match.group(2)  # Second group is usually the name
+                            else:
+                                sig_name = sig_match.group(1)  # First group if only one
+                            
+                            sig_name = unescape(sig_name).strip()
+                            # Remove /s/ or s/ prefix if present
+                            sig_name = re.sub(r'^[/]?s[/]\s*', '', sig_name, flags=re.IGNORECASE)
+                            sig_name = sig_name.strip()
+                            
+                            if sig_name and len(sig_name) > 2:  # Valid signature name
+                                signature_name = sig_name
+                                local_logger.info(f"   ✅ Extracted signature from Exhibit 99.1 in {section_name}: {signature_name}")
+                                break
+                    
+                    if signature_name:
+                        break
+            
+            # If we still didn't find a signature, fall back to the literal text
+            if not signature_name:
+                signature_name = 'see exhibit 99.1 for signature'
+                local_logger.warning(f"   ⚠️ Found 'See Exhibit 99.1 for signature' but could not extract signature from document")
         else:
             # Try patterns in order of specificity
             signature_patterns = [
@@ -2090,11 +2167,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         else:
             local_logger.warning(f"   ⚠️ Could not extract signatureName from HTML")
         
-        # Check for amendment
-        # Forms 3/4/5: "4. If Amendment, Date of Original Filed"
-        amendment_date_match = re.search(r'If Amendment, Date of Original Filed[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
-        if amendment_date_match:
-            result['amendment'] = True
+        # Note: Amendment detection removed - can be determined via OpenSearch full-text search if needed
+        # Users can search for "If Amendment, Date of Original Filed" in htmlContent field
         
         # Note: Table parsing (Table I, Table II, explanations, remarks) is form-specific
         # and handled in form-specific functions (parse_form3_metadata, parse_form4_metadata, parse_form5_metadata)
@@ -2908,7 +2982,6 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"         - Event Date: {parsed_data.get('eventDate', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('eventDate') else '✅'}")
     local_logger.info(f"         - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
     local_logger.info(f"         - Signature Name: {parsed_data.get('signatureName', 'N/A')}")
-    local_logger.info(f"         - Amendment: {parsed_data.get('amendment', False)}")
     local_logger.info(f"         - Filing Type: {parsed_data.get('filingType', 'N/A')}")
     local_logger.info(f"         - Relationship Types: {parsed_data.get('relationshipTypes', 'N/A')}")
     
@@ -2963,9 +3036,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     parsed_data['tradeId'] = trade_id
     parsed_data['formS3Key'] = s3_key
     
-    # Handle amendment logic (will be implemented later when we can query existing records)
-    # For now, just mark if it's an amendment
-    # TODO: Query DynamoDB to find original trade and link them
+    # Note: Amendment logic removed - can be determined via OpenSearch full-text search if needed
     
     # Store to DynamoDB
     store_start = datetime.now()
@@ -2983,7 +3054,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"      ✅ DynamoDB client created, accessing table: {dynamodb_table_name}")
         
         # Convert to DynamoDB format
-        # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipTypes, relationshipAdditionalText, amended, amendment, amendedTradeId, politician)
+        # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipTypes, relationshipAdditionalText, politician)
         # OpenSearch handles full-text search on HTML content
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
         # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
@@ -2991,6 +3062,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         # NOTE: Form-specific checkbox fields (e.g., noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported)
         # are NOT parsed or stored in DynamoDB. These fields are available in OpenSearch via the full htmlContent field
         # for the AI agent to search through. This keeps DynamoDB lightweight with only essential metadata for fast queries.
+        # 
+        # NOTE: Amendment fields removed - can be determined via OpenSearch full-text search if needed
         gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
         
         # Fields to store in DynamoDB (GSI fields + essential metadata)
@@ -3009,10 +3082,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             'signatureName',  # Basic metadata
             'filingType',  # Basic metadata
             'relationshipTypes',  # Basic metadata
-            'relationshipAdditionalText',  # Basic metadata
-            'amended',  # Basic metadata
-            'amendment',  # Basic metadata
-            'amendedTradeId'  # Basic metadata
+            'relationshipAdditionalText'  # Basic metadata
         }
         
         local_logger.info(f"      🔄 Converting to DynamoDB format (simplified: GSI fields + essential metadata only)...")
@@ -3165,10 +3235,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                     'signatureName': parsed_data.get('signatureName'),
                     'politician': parsed_data.get('politician', 0),  # Use 0/1 to match DynamoDB format
                     'formS3Key': s3_key,
-                    'amended': parsed_data.get('amended', False),
-                    'amendment': parsed_data.get('amendment', False),
-                    'amendedTradeId': parsed_data.get('amendedTradeId'),
                     # Include full HTML content for full-text search (AI agent can search this)
+                    # Note: Amendment information available in htmlContent if needed
                     'htmlContent': content_str,  # Full HTML content for OpenSearch full-text search
                     # Add timestamp for indexing
                     '@timestamp': datetime.now().isoformat()

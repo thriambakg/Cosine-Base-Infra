@@ -1053,23 +1053,23 @@ class OpenSearchTester:
         # Test document tests (optional)
         doc_id = None
         if not skip_test_doc:
-            # Test 4: Index test document
-            doc_id = self.index_test_document()
-            results['index_document'] = doc_id is not None
+        # Test 4: Index test document
+        doc_id = self.index_test_document()
+        results['index_document'] = doc_id is not None
+        
+        if doc_id:
+            # Test 5: Search test document
+            results['search_document'] = self.search_test_document(doc_id)
             
-            if doc_id:
-                # Test 5: Search test document
-                results['search_document'] = self.search_test_document(doc_id)
-                
-                # Test 6: Search query
-                results['search_query'] = self.test_search_query()
-                
-                # Test 7: Filtered search
-                results['filtered_search'] = self.test_filtered_search()
-                
-                # Test 8: Cleanup
-                if cleanup:
-                    results['cleanup'] = self.cleanup_test_document(doc_id)
+            # Test 6: Search query
+            results['search_query'] = self.test_search_query()
+            
+            # Test 7: Filtered search
+            results['filtered_search'] = self.test_filtered_search()
+            
+            # Test 8: Cleanup
+            if cleanup:
+                results['cleanup'] = self.cleanup_test_document(doc_id)
         else:
             # Skip test document tests but still do basic search
             results['index_document'] = True  # Skip
