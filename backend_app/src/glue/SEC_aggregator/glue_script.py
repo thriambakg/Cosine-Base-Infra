@@ -528,11 +528,34 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         # Remove any dashes first to get clean number
         accession_clean = accession.replace('-', '').strip()
         
+        # Validate accession number before proceeding
+        if not accession_clean or accession_clean == 'unknown' or len(accession_clean) < 10:
+            error_msg = f"   ❌ Invalid accession number: '{accession}' (cleaned: '{accession_clean}')"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            return None
+        
         # For URL path: use accession WITH dashes (matching working Lambda behavior)
         if len(accession_clean) == 18:
             accession_dashed = f"{accession_clean[:10]}-{accession_clean[10:12]}-{accession_clean[12:]}"
+        elif len(accession_clean) >= 10:
+            # If not exactly 18 chars, try to construct with dashes anyway
+            # Some accessions might be shorter, pad or use as-is
+            if len(accession_clean) >= 12:
+                accession_dashed = f"{accession_clean[:10]}-{accession_clean[10:12]}-{accession_clean[12:]}"
+            else:
+                # Fallback: use as-is (shouldn't happen with valid SEC data)
+                local_logger.warning(f"      ⚠️ Accession length unexpected: {len(accession_clean)} chars, using as-is")
+                print(f"      ⚠️ Accession length unexpected: {len(accession_clean)} chars, using as-is", flush=True)
+                accession_dashed = accession_clean
         else:
-            accession_dashed = accession_clean
+            error_msg = f"   ❌ Accession number too short: '{accession_clean}' (length: {len(accession_clean)})"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            return None
+        
+        local_logger.info(f"      🔑 Accession: clean='{accession_clean}', dashed='{accession_dashed}'")
+        print(f"      🔑 Accession: clean='{accession_clean}', dashed='{accession_dashed}'", flush=True)
         
         # Use constants directly (strings are safe to serialize)
         SEC_BASE_URL_LOCAL = "https://www.sec.gov"
@@ -1064,10 +1087,39 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
                 print(f"      ⚠️ Could not convert URLs in HTML: {url_error}", flush=True)
                 # Continue with original content if conversion fails
         
+        # CRITICAL: Validate file content exists before proceeding
+        if not file_content or len(file_content) == 0:
+            error_msg = f"   ❌ Download failed: No file content retrieved (CIK={cik}, Accession={accession_dashed})"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            return None
+        
         # Generate S3 key - include accession number to ensure uniqueness
         # Format: trades/{date}/sec/{form_type}-{cik}-{accession}-{date}.{ext}
         # Accession is already in dashed format (e.g., 0001140361-25-040858)
+        # CRITICAL: Validate all components before generating S3 key to prevent collisions
+        if not all([form_type, cik, accession_dashed, target_date, file_ext]):
+            error_msg = f"   ❌ Cannot generate S3 key: missing required components"
+            error_msg += f" (form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, target_date={target_date}, file_ext={file_ext})"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            raise ValueError(f"Missing required components for S3 key generation")
+        
+        if accession_dashed == 'unknown' or cik == 'unknown' or form_type == 'unknown':
+            error_msg = f"   ❌ Cannot generate S3 key: invalid component values"
+            error_msg += f" (form_type={form_type}, cik={cik}, accession_dashed={accession_dashed})"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            raise ValueError(f"Invalid component values for S3 key generation")
+        
         s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{accession_dashed}-{target_date}.{file_ext}"
+        
+        local_logger.info(f"      🔑 Generated S3 Key: {s3_key}")
+        local_logger.info(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}, ext={file_ext}")
+        local_logger.info(f"         File size: {len(file_content):,} bytes")
+        print(f"      🔑 Generated S3 Key: {s3_key}", flush=True)
+        print(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}, ext={file_ext}", flush=True)
+        print(f"         File size: {len(file_content):,} bytes", flush=True)
         
         local_logger.info(f"")
         local_logger.info(f"      💾 UPLOADING TO S3:")
@@ -2358,25 +2410,46 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     
     # First check: Verify filing date matches target date before downloading
     local_logger.info(f"   🔍 Step 1/4: Validating filing date...")
+    print(f"   🔍 Step 1/4: Validating filing date...", flush=True)
+    print(f"      Filing date string: '{filing_date_str}'", flush=True)
+    print(f"      Target date: '{target_date}'", flush=True)
+    
     filing_date_obj = None
-    if filing_date_str:
+    if filing_date_str and filing_date_str != 'unknown':
         try:
             # Try YYYY-MM-DD format first
             try:
                 filing_date_obj = datetime.strptime(filing_date_str, '%Y-%m-%d').date()
+                local_logger.info(f"      ✅ Parsed filing date (YYYY-MM-DD): {filing_date_obj}")
+                print(f"      ✅ Parsed filing date (YYYY-MM-DD): {filing_date_obj}", flush=True)
             except ValueError:
                 # Fallback to MM/DD/YYYY
-                filing_date_obj = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
-        except:
-            pass
+                try:
+                    filing_date_obj = datetime.strptime(filing_date_str, '%m/%d/%Y').date()
+                    local_logger.info(f"      ✅ Parsed filing date (MM/DD/YYYY): {filing_date_obj}")
+                    print(f"      ✅ Parsed filing date (MM/DD/YYYY): {filing_date_obj}", flush=True)
+                except ValueError:
+                    local_logger.warning(f"      ⚠️ Could not parse filing date: '{filing_date_str}' (neither YYYY-MM-DD nor MM/DD/YYYY)")
+                    print(f"      ⚠️ Could not parse filing date: '{filing_date_str}' (neither YYYY-MM-DD nor MM/DD/YYYY)", flush=True)
+        except Exception as date_parse_error:
+            local_logger.warning(f"      ⚠️ Date parsing exception: {date_parse_error}")
+            print(f"      ⚠️ Date parsing exception: {date_parse_error}", flush=True)
     
     target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
     
-    if filing_date_obj and filing_date_obj != target_date_obj:
+    # If we couldn't parse the filing date, skip the form (don't process forms with invalid dates)
+    if filing_date_obj is None:
+        local_logger.warning(f"   ⏭️ SKIPPING: Could not parse filing date '{filing_date_str}' - skipping form to avoid processing invalid data")
+        print(f"   ⏭️ SKIPPING: Could not parse filing date '{filing_date_str}' - skipping form", flush=True)
+        return {'skipped': True, 'reason': 'date_parse_failed'}
+    
+    if filing_date_obj != target_date_obj:
         local_logger.info(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} doesn't match target {target_date_obj}")
+        print(f"   ⏭️ SKIPPING: Filing date {filing_date_obj} doesn't match target {target_date_obj}", flush=True)
         return {'skipped': True, 'reason': 'date_mismatch'}
     
-    local_logger.info(f"   ✅ Date validation passed: {filing_date_obj or 'unknown'} matches target {target_date_obj}")
+    local_logger.info(f"   ✅ Date validation passed: {filing_date_obj} matches target {target_date_obj}")
+    print(f"   ✅ Date validation passed: {filing_date_obj} matches target {target_date_obj}", flush=True)
     
     # Download form
     download_start = datetime.now()
@@ -2643,7 +2716,13 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"   ✅ Form processing complete: Total time {total_duration:.2f}s")
         local_logger.info(f"      Breakdown: Download={download_duration:.2f}s, Parse={parse_duration:.2f}s, Match={match_duration:.2f}s, Store={store_duration:.2f}s")
         
-        return {'success': True, 'tradeId': trade_id, 'politicianMatch': politician_match is not None}
+        return {
+            'success': True, 
+            'tradeId': trade_id, 
+            'politicianMatch': politician_match is not None,
+            's3_key': s3_key,
+            'formS3Key': s3_key  # Also include for compatibility
+        }
     
     except Exception as e:
         store_duration = (datetime.now() - store_start).total_seconds()
@@ -2872,6 +2951,33 @@ try:
     results_rdd = forms_rdd.map(process_form_wrapper)
     results = results_rdd.collect()
     logger.info(f"   ✅ Spark processing completed, collecting results...")
+    print(f"   ✅ Spark processing completed, collecting results...", flush=True)
+    
+    # Track S3 keys to detect collisions
+    s3_keys_generated = []
+    for result in results:
+        if result.get('success'):
+            s3_key = result.get('s3_key') or result.get('formS3Key')
+            if s3_key:
+                s3_keys_generated.append(s3_key)
+    
+    # Log S3 key summary to detect collisions
+    if s3_keys_generated:
+        unique_keys = set(s3_keys_generated)
+        logger.info(f"   📦 S3 Keys Generated: {len(s3_keys_generated)} total, {len(unique_keys)} unique")
+        print(f"   📦 S3 Keys Generated: {len(s3_keys_generated)} total, {len(unique_keys)} unique", flush=True)
+        if len(s3_keys_generated) != len(unique_keys):
+            logger.warning(f"   ⚠️ WARNING: S3 KEY COLLISIONS DETECTED!")
+            logger.warning(f"      {len(s3_keys_generated) - len(unique_keys)} duplicate keys found")
+            print(f"   ⚠️ WARNING: S3 KEY COLLISIONS DETECTED!", flush=True)
+            print(f"      {len(s3_keys_generated) - len(unique_keys)} duplicate keys found", flush=True)
+            # Show duplicate keys
+            from collections import Counter
+            key_counts = Counter(s3_keys_generated)
+            duplicates = {k: v for k, v in key_counts.items() if v > 1}
+            for dup_key, count in duplicates.items():
+                logger.warning(f"      Key '{dup_key}' appears {count} times")
+                print(f"      Key '{dup_key}' appears {count} times", flush=True)
     
     # Clean up broadcast variables
     politicians_broadcast.destroy()
