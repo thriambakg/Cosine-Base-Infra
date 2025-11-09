@@ -2576,6 +2576,44 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     
     local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext}, size: {file_size:,} bytes) in {download_duration:.2f}s")
     
+    # CRITICAL: Verify S3 file actually exists before proceeding
+    # This ensures we don't store to DynamoDB if S3 upload silently failed
+    # Note: We use the s3_bucket_name passed to process_form, not a module-level variable
+    try:
+        from botocore.exceptions import ClientError
+        s3_client_verify = boto3.client('s3')
+        s3_verify_response = s3_client_verify.head_object(Bucket=s3_bucket_name, Key=s3_key)
+        s3_file_size = s3_verify_response.get('ContentLength', 0)
+        local_logger.info(f"   ✅ S3 File Verification: File exists in S3, size={s3_file_size:,} bytes")
+        print(f"   ✅ S3 File Verification: File exists in S3, size={s3_file_size:,} bytes", flush=True)
+        
+        # Allow small size differences (e.g., due to encoding) but flag significant mismatches
+        size_diff = abs(s3_file_size - file_size)
+        if size_diff > 100:  # More than 100 bytes difference
+            error_msg = f"   ❌ S3 FILE SIZE MISMATCH: Expected {file_size:,} bytes, found {s3_file_size:,} bytes (diff={size_diff:,}) (CIK={cik}, Accession={accession})"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            return {'skipped': True, 'reason': 'download_failed', 'error': 'S3 file size mismatch'}
+    except ClientError as s3_verify_error:
+        error_code = s3_verify_error.response.get('Error', {}).get('Code', 'Unknown')
+        if error_code == '404' or error_code == 'NoSuchKey':
+            error_msg = f"   ❌ S3 FILE NOT FOUND: File does not exist in S3 (CIK={cik}, Accession={accession}, S3Key={s3_key})"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            return {'skipped': True, 'reason': 'download_failed', 'error': 'S3 file not found'}
+        else:
+            error_type = type(s3_verify_error).__name__
+            error_msg = str(s3_verify_error)
+            local_logger.error(f"   ❌ S3 FILE VERIFICATION FAILED: {error_type}: {error_msg} (CIK={cik}, Accession={accession}, S3Key={s3_key})")
+            print(f"   ❌ S3 FILE VERIFICATION FAILED: {error_type}: {error_msg} (CIK={cik}, Accession={accession}, S3Key={s3_key})", flush=True)
+            return {'skipped': True, 'reason': 'download_failed', 'error': f'S3 verification error: {error_msg}'}
+    except Exception as s3_verify_error:
+        error_type = type(s3_verify_error).__name__
+        error_msg = str(s3_verify_error)
+        local_logger.error(f"   ❌ S3 FILE VERIFICATION FAILED: {error_type}: {error_msg} (CIK={cik}, Accession={accession}, S3Key={s3_key})")
+        print(f"   ❌ S3 FILE VERIFICATION FAILED: {error_type}: {error_msg} (CIK={cik}, Accession={accession}, S3Key={s3_key})", flush=True)
+        return {'skipped': True, 'reason': 'download_failed', 'error': f'S3 verification error: {error_msg}'}
+    
     # Parse form metadata
     parse_start = datetime.now()
     local_logger.info(f"   📊 Step 3/4: Parsing form metadata from S3Key={s3_key}...")
