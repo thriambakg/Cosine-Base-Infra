@@ -1812,36 +1812,45 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         if relationship_section_match:
             relationship_table = relationship_section_match.group(1)
             
+            # Debug: Log the relationship table HTML for troubleshooting
+            local_logger.debug(f"      Relationship table HTML (first 500 chars): {relationship_table[:500]}")
+            
             # Parse each row to find checked relationships
             # The X is ALWAYS to the LEFT of the relationship text
             # Structure: [checkbox] [text] [checkbox] [text]
-            # We need to find: <td><span>X</span></td> followed IMMEDIATELY by <td>Relationship Text</td>
+            # We need to find: <td><span>X</span></td> followed by <td>Relationship Text</td>
             # The X can be in either checkbox column (column 1 or column 3)
+            # Make regex more flexible to handle whitespace/newlines between cells
+            
+            # Use a more robust approach: find all X checkboxes and check what follows them
+            # Pattern: Find <td> with X, then find the next <td> with relationship text
             
             # Director: Look for X checkbox followed by "Director" text (in first row, columns 1-2)
-            # Pattern: <td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Director</td>
+            # Pattern: X in checkbox, then Director in next cell (allowing any content between)
             director_match = re.search(
-                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Director</td>',
+                r'<td[^>]*align="center"[^>]*>.*?<span[^>]*class="FormData"[^>]*>X</span>.*?</td>.*?<td[^>]*class="MedSmallFormText"[^>]*>Director</td>',
                 relationship_table,
                 re.IGNORECASE | re.DOTALL
             )
             if director_match:
                 relationship_types.append('Director')
+                local_logger.debug(f"      ✅ Found Director relationship")
             
             # Officer: Look for X checkbox followed by "Officer" text (in second row, columns 1-2)
             # Then extract additional text from the blue text row (third row, column 2)
             officer_match = re.search(
-                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Officer',
+                r'<td[^>]*align="center"[^>]*>.*?<span[^>]*class="FormData"[^>]*>X</span>.*?</td>.*?<td[^>]*class="MedSmallFormText"[^>]*>Officer',
                 relationship_table,
                 re.IGNORECASE | re.DOTALL
             )
             if officer_match:
                 relationship_types.append('Officer')
+                local_logger.debug(f"      ✅ Found Officer relationship")
                 # Extract additional text from blue text row (third <tr>, second <td> with style="color: blue")
                 # Pattern: Look for the first blue text cell in the third row (Officer's additional text)
                 # Structure: <tr><td></td><td style="color: blue">text</td><td></td><td style="color: blue">text</td></tr>
                 officer_text_match = re.search(
-                    r'<tr>[^<]*<td[^>]*align="center"[^>]*></td>[^<]*<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
+                    r'<tr>.*?<td[^>]*align="center"[^>]*></td>.*?<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
                     relationship_table,
                     re.IGNORECASE | re.DOTALL
                 )
@@ -1849,26 +1858,29 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
                     officer_text = unescape(officer_text_match.group(1)).strip()
                     if officer_text:
                         relationship_additional = officer_text
+                        local_logger.debug(f"      ✅ Found Officer additional text: {officer_text}")
             
             # 10% Owner: Look for X checkbox followed by "10% Owner" text (in first row, columns 3-4)
-            # Pattern: <td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>10% Owner</td>
+            # Pattern: X in checkbox, then 10% Owner in next cell
             owner_match = re.search(
-                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>10%\s*Owner</td>',
+                r'<td[^>]*align="center"[^>]*>.*?<span[^>]*class="FormData"[^>]*>X</span>.*?</td>.*?<td[^>]*class="MedSmallFormText"[^>]*>10%\s*Owner</td>',
                 relationship_table,
                 re.IGNORECASE | re.DOTALL
             )
             if owner_match:
                 relationship_types.append('10% Owner')
+                local_logger.debug(f"      ✅ Found 10% Owner relationship")
             
             # Other: Look for X checkbox followed by "Other" text (in second row, columns 3-4)
             # Then extract additional text from the blue text row (third row, column 4)
             other_match = re.search(
-                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Other',
+                r'<td[^>]*align="center"[^>]*>.*?<span[^>]*class="FormData"[^>]*>X</span>.*?</td>.*?<td[^>]*class="MedSmallFormText"[^>]*>Other',
                 relationship_table,
                 re.IGNORECASE | re.DOTALL
             )
             if other_match:
                 relationship_types.append('Other')
+                local_logger.debug(f"      ✅ Found Other relationship")
                 # Extract additional text from blue text row (third <tr>, fourth <td> with style="color: blue")
                 # Find all blue text cells - the second one is for "Other"
                 blue_text_cells = re.findall(
@@ -1885,6 +1897,7 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
                             relationship_additional = relationship_additional + '; ' + other_text
                         else:
                             relationship_additional = other_text
+                        local_logger.debug(f"      ✅ Found Other additional text: {other_text}")
                 elif len(blue_text_cells) == 1:
                     # Only one blue text cell exists - check if it's for Other (would be in fourth column)
                     # Fallback: look for blue text after "Other" text in the table
@@ -1900,6 +1913,16 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
                                 relationship_additional = relationship_additional + '; ' + other_text
                             else:
                                 relationship_additional = other_text
+                            local_logger.debug(f"      ✅ Found Other additional text (fallback): {other_text}")
+            
+            # Log what we found
+            if relationship_types:
+                local_logger.info(f"      ✅ Parsed relationship types: {', '.join(relationship_types)}")
+            else:
+                local_logger.warning(f"      ⚠️ No relationship types found in table")
+                local_logger.debug(f"      Relationship table HTML: {relationship_table}")
+        else:
+            local_logger.warning(f"      ⚠️ Could not find relationship section table")
         
         # Store relationship - use first relationship type as primary (for GSI)
         # Store all relationship types as comma-separated string for completeness
