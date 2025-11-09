@@ -763,7 +763,7 @@ class OpenSearchTester:
         query = {
             "query": {
                 "bool": {
-                    "must": [
+                    "should": [
                         {
                             "range": {
                                 "eventDate": {
@@ -771,15 +771,27 @@ class OpenSearchTester:
                                     "lte": end_date.strftime('%Y-%m-%d')
                                 }
                             }
+                        },
+                        {
+                            "range": {
+                                "reportingDate": {
+                                    "gte": start_date.strftime('%Y-%m-%d'),
+                                    "lte": end_date.strftime('%Y-%m-%d')
+                                }
+                            }
                         }
                     ],
+                    "minimum_should_match": 1,
                     "must_not": [
                         {"prefix": {"tradeId": "test_"}}
                     ]
                 }
             },
             "size": 10,
-            "sort": [{"eventDate": {"order": "desc"}}]
+            "sort": [
+                {"eventDate": {"order": "desc", "missing": "_last"}},
+                {"reportingDate": {"order": "desc", "missing": "_last"}}
+            ]
         }
         
         try:
@@ -796,6 +808,7 @@ class OpenSearchTester:
                 
                 print(f"[OK] Date range query successful")
                 print(f"   Date range: {start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}")
+                print(f"   Query uses: eventDate OR reportingDate (whichever is available)")
                 print(f"   Total documents: {total_count}")
                 print(f"   Returned: {len(hits)}")
                 
@@ -803,9 +816,13 @@ class OpenSearchTester:
                     print(f"\n   Sample recent documents:")
                     for i, hit in enumerate(hits[:5], 1):
                         source = hit.get('_source', {})
-                        print(f"      {i}. {source.get('eventDate', 'N/A')} - {source.get('reportingPersonName', 'N/A')} - {source.get('issuerName', 'N/A')} ({source.get('tickerSymbol', 'N/A')})")
+                        event_date = source.get('eventDate', 'N/A')
+                        reporting_date = source.get('reportingDate', 'N/A')
+                        date_str = f"Event: {event_date}, Reporting: {reporting_date}"
+                        print(f"      {i}. {date_str} - {source.get('reportingPersonName', 'N/A')} - {source.get('issuerName', 'N/A')} ({source.get('tickerSymbol', 'N/A')})")
                 else:
                     print(f"\n   [INFO] No documents found in date range")
+                    print(f"   Note: This query checks both eventDate and reportingDate fields")
                 
                 return True
             else:
@@ -835,14 +852,6 @@ class OpenSearchTester:
                     "must": [
                         {"term": {"formType": "form4"}},
                         {
-                            "range": {
-                                "eventDate": {
-                                    "gte": start_date.strftime('%Y-%m-%d'),
-                                    "lte": end_date.strftime('%Y-%m-%d')
-                                }
-                            }
-                        },
-                        {
                             "match": {
                                 "htmlContent": {
                                     "query": "Director",
@@ -851,14 +860,36 @@ class OpenSearchTester:
                             }
                         }
                     ],
+                    "should": [
+                        {
+                            "range": {
+                                "eventDate": {
+                                    "gte": start_date.strftime('%Y-%m-%d'),
+                                    "lte": end_date.strftime('%Y-%m-%d')
+                                }
+                            }
+                        },
+                        {
+                            "range": {
+                                "reportingDate": {
+                                    "gte": start_date.strftime('%Y-%m-%d'),
+                                    "lte": end_date.strftime('%Y-%m-%d')
+                                }
+                            }
+                        }
+                    ],
+                    "minimum_should_match": 1,
                     "must_not": [
                         {"prefix": {"tradeId": "test_"}}
                     ]
                 }
             },
             "size": 10,
-            "sort": [{"eventDate": {"order": "desc"}}],
-            "_source": ["tradeId", "formType", "reportingPersonName", "issuerName", "tickerSymbol", "relationship", "eventDate", "formS3Key"]
+            "sort": [
+                {"eventDate": {"order": "desc", "missing": "_last"}},
+                {"reportingDate": {"order": "desc", "missing": "_last"}}
+            ],
+            "_source": ["tradeId", "formType", "reportingPersonName", "issuerName", "tickerSymbol", "relationship", "eventDate", "reportingDate", "formS3Key"]
         }
         
         try:
@@ -875,6 +906,7 @@ class OpenSearchTester:
                 
                 print(f"[OK] Complex query successful")
                 print(f"   Query: Form4 + Date Range ({start_date.strftime('%Y-%m-%d')} to {end_date.strftime('%Y-%m-%d')}) + Full-text search ('Director')")
+                print(f"   Date range uses: eventDate OR reportingDate (whichever is available)")
                 print(f"   Total matches: {total_count}")
                 print(f"   Returned: {len(hits)}")
                 
@@ -882,16 +914,19 @@ class OpenSearchTester:
                     print(f"\n   Sample results:")
                     for i, hit in enumerate(hits[:5], 1):
                         source = hit.get('_source', {})
-                        score = hit.get('_score', 0)
-                        print(f"\n      {i}. Score: {score:.2f}")
+                        score = hit.get('_score')
+                        score_str = f"{score:.2f}" if score is not None else "N/A"
+                        print(f"\n      {i}. Score: {score_str}")
                         print(f"         Trade ID: {source.get('tradeId', 'N/A')}")
                         print(f"         Person: {source.get('reportingPersonName', 'N/A')}")
                         print(f"         Issuer: {source.get('issuerName', 'N/A')} ({source.get('tickerSymbol', 'N/A')})")
                         print(f"         Relationship: {source.get('relationship', 'N/A')}")
                         print(f"         Event Date: {source.get('eventDate', 'N/A')}")
+                        print(f"         Reporting Date: {source.get('reportingDate', 'N/A')}")
                         print(f"         S3 Key: {source.get('formS3Key', 'N/A')}")
                 else:
                     print(f"\n   [INFO] No documents matched complex query")
+                    print(f"   Note: This query checks both eventDate and reportingDate fields")
                 
                 return True
             else:
@@ -900,6 +935,83 @@ class OpenSearchTester:
                 
         except Exception as e:
             print(f"[ERROR] Error executing complex query: {e}")
+            import traceback
+            traceback.print_exc()
+            return False
+    
+    def test_query_by_trade_id(self, trade_id: str) -> bool:
+        """Test querying a specific document by tradeId"""
+        print("\n" + "=" * 80)
+        print(f"Test 16: Query by Trade ID")
+        print("=" * 80)
+        print(f"   Searching for tradeId: {trade_id}")
+        
+        # Query for specific tradeId
+        query = {
+            "query": {
+                "term": {
+                    "tradeId": trade_id
+                }
+            },
+            "size": 1
+        }
+        
+        try:
+            response = self._make_request('POST', f'/{self.index_name}/_search', data=query)
+            
+            if 'hits' in response:
+                total = response.get('hits', {}).get('total', {})
+                if isinstance(total, dict):
+                    total_count = total.get('value', 0)
+                else:
+                    total_count = total
+                
+                hits = response.get('hits', {}).get('hits', [])
+                
+                if total_count > 0 and hits:
+                    source = hits[0].get('_source', {})
+                    print(f"\n[OK] Found document with tradeId: {trade_id}")
+                    print(f"\n   Document Details:")
+                    print(f"      Trade ID: {source.get('tradeId', 'N/A')}")
+                    print(f"      Form Type: {source.get('formType', 'N/A')}")
+                    print(f"      Reporting Person: {source.get('reportingPersonName', 'N/A')}")
+                    print(f"      Signature Name: {source.get('signatureName', 'N/A')}")
+                    print(f"      Issuer: {source.get('issuerName', 'N/A')}")
+                    print(f"      Ticker: {source.get('tickerSymbol', 'N/A')}")
+                    print(f"      Relationship: {source.get('relationship', 'N/A')}")
+                    print(f"      Relationship Types: {source.get('relationshipTypes', 'N/A')}")
+                    print(f"      Relationship Additional: {source.get('relationshipAdditionalText', 'N/A')}")
+                    print(f"      Filing Type: {source.get('filingType', 'N/A')}")
+                    print(f"      Event Date: {source.get('eventDate', 'N/A')}")
+                    print(f"      Reporting Date: {source.get('reportingDate', 'N/A')}")
+                    print(f"      Address: {source.get('address', 'N/A')}")
+                    print(f"      Politician: {source.get('politician', 'N/A')}")
+                    print(f"      Amended: {source.get('amended', 'N/A')}")
+                    print(f"      Amendment: {source.get('amendment', 'N/A')}")
+                    print(f"      Amended Trade ID: {source.get('amendedTradeId', 'N/A')}")
+                    print(f"      S3 Key: {source.get('formS3Key', 'N/A')}")
+                    print(f"      HTML Content Length: {len(source.get('htmlContent', ''))} chars")
+                    
+                    # Show a snippet of HTML content
+                    html_content = source.get('htmlContent', '')
+                    if html_content:
+                        print(f"\n   HTML Content Preview (first 500 chars):")
+                        print(f"      {html_content[:500]}...")
+                    
+                    return True
+                else:
+                    print(f"\n[WARNING] No document found with tradeId: {trade_id}")
+                    print(f"   This could mean:")
+                    print(f"   - The document hasn't been indexed yet")
+                    print(f"   - The tradeId format is incorrect")
+                    print(f"   - The document was filtered out during indexing")
+                    return False
+            else:
+                print(f"[ERROR] Unexpected response: {json.dumps(response, indent=2)}")
+                return False
+                
+        except Exception as e:
+            print(f"[ERROR] Error querying by tradeId: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -1012,10 +1124,17 @@ def main():
     parser.add_argument('--no-cleanup', action='store_true', help='Do not delete test document after tests')
     parser.add_argument('--skip-test-doc', action='store_true', help='Skip test document creation/cleanup tests')
     parser.add_argument('--real-data-only', action='store_true', help='Only run real data query tests (implies --skip-test-doc)')
+    parser.add_argument('--trade-id', help='Query a specific document by tradeId (e.g., sec_form4_1003078_000100307825000157_20251107)')
     
     args = parser.parse_args()
     
     tester = OpenSearchTester(args.endpoint, args.region, args.index)
+    
+    # If trade-id is provided, just run that test and exit
+    if args.trade_id:
+        print(f"\nQuerying document by tradeId: {args.trade_id}")
+        result = tester.test_query_by_trade_id(args.trade_id)
+        sys.exit(0 if result else 1)
     
     # Determine test options
     skip_test_doc = args.skip_test_doc or args.real_data_only

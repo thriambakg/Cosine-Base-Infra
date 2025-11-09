@@ -1976,55 +1976,68 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             local_logger.warning(f"   ⚠️ Could not extract relationship from HTML")
         
         # Extract Individual/Group Filing (6. Individual or Joint/Group Filing)
-        # HTML structure: <td><span>X</span></td><td>Form filed by One Reporting Person</td>
-        # OR: <td></td><td>Form filed by More than One Reporting Person</td>
-        # The X is ALWAYS to the LEFT of the text
-        individual_filing_match = re.search(
-            r'Individual or Joint/Group Filing[^<]*<table[^>]*>(.*?)</table>',
-            html_content,
-            re.IGNORECASE | re.DOTALL
-        )
+        # HTML structure: Two rows, each with checkbox (td) and text (td)
+        # Row 1: <td><span>X</span></td><td>Form filed by One Reporting Person</td>
+        # Row 2: <td></td><td>Form filed by More than One Reporting Person</td>
+        # The checkbox is in the first td, text is in the second td
+        # Try multiple patterns to find the section
+        filing_patterns = [
+            r'Individual or Joint/Group Filing[^<]*(?:\(Check Applicable Line\)[^<]*)?<table[^>]*>(.*?)</table>',
+            r'6\.\s*Individual or Joint/Group Filing[^<]*<table[^>]*>(.*?)</table>',
+            r'Individual or Joint/Group Filing.*?<table[^>]*>(.*?)</table>',
+        ]
         
-        if individual_filing_match:
-            filing_table = individual_filing_match.group(1)
+        filing_table = None
+        for pattern in filing_patterns:
+            individual_filing_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if individual_filing_match:
+                filing_table = individual_filing_match.group(1)
+                local_logger.info(f"   🔍 Found filing type table using pattern")
+                break
+        
+        if filing_table:
+            # Parse table rows - similar to relationship parsing
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', filing_table, re.IGNORECASE | re.DOTALL)
+            local_logger.info(f"   📊 Found {len(rows)} rows in filing type table")
             
-            # More flexible patterns - check for X in checkbox cell followed by text
-            # Pattern 1: Check for "Form filed by One Reporting Person" with X
-            one_person_patterns = [
-                r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Form filed by One Reporting Person</td>',
-                r'<td[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*>Form filed by One Reporting Person</td>',
-                r'<span[^>]*class="FormData"[^>]*>X</span>[^<]*Form filed by One Reporting Person',
-            ]
-            
-            one_person_match = None
-            for pattern in one_person_patterns:
-                one_person_match = re.search(pattern, filing_table, re.IGNORECASE | re.DOTALL)
-                if one_person_match:
-                    break
-            
-            if one_person_match:
-                result['filingType'] = 'individual'  # Individual filing
-                local_logger.info(f"   ✅ Extracted filingType: individual")
-            else:
-                # Pattern 2: Check for "Form filed by More than One Reporting Person" with X
-                multiple_persons_patterns = [
-                    r'<td[^>]*align="center"[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*class="MedSmallFormText"[^>]*>Form filed by More than One Reporting Person</td>',
-                    r'<td[^>]*><span[^>]*class="FormData"[^>]*>X</span></td>[^<]*<td[^>]*>Form filed by More than One Reporting Person</td>',
-                    r'<span[^>]*class="FormData"[^>]*>X</span>[^<]*Form filed by More than One Reporting Person',
-                ]
+            # Parse each row to find which checkbox is checked
+            for row_idx, row_html in enumerate(rows):
+                # Extract all <td> cells in this row
+                cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.IGNORECASE | re.DOTALL)
                 
-                multiple_persons_match = None
-                for pattern in multiple_persons_patterns:
-                    multiple_persons_match = re.search(pattern, filing_table, re.IGNORECASE | re.DOTALL)
-                    if multiple_persons_match:
-                        break
-                
-                if multiple_persons_match:
-                    result['filingType'] = 'joint/group'  # Joint/Group filing
-                    local_logger.info(f"   ✅ Extracted filingType: joint/group")
-                else:
-                    result['filingType'] = None  # Could not determine
-                    local_logger.warning(f"   ⚠️ Could not determine filingType from table")
+                if len(cells) >= 2:
+                    checkbox_cell = cells[0]  # First cell is checkbox
+                    text_cell = cells[1]     # Second cell is text
+                    
+                    # Check if checkbox contains X
+                    has_x = bool(re.search(r'<span[^>]*class="FormData"[^>]*>X</span>', checkbox_cell, re.IGNORECASE))
+                    if not has_x:
+                        # Also check for just X in the cell
+                        has_x = 'X' in checkbox_cell.strip()
+                    
+                    # Extract text from text cell (remove HTML tags)
+                    text_content = re.sub(r'<[^>]+>', '', text_cell).strip()
+                    
+                    local_logger.info(f"   🔍 Row {row_idx + 1}: checkbox has_x={has_x}, text='{text_content}'")
+                    
+                    if has_x and text_content:
+                        text_lower = text_content.lower()
+                        
+                        # Check which type it is
+                        if 'one reporting person' in text_lower or 'individual' in text_lower:
+                            result['filingType'] = 'individual'
+                            local_logger.info(f"   ✅ Extracted filingType: individual")
+                            break
+                        elif 'more than one' in text_lower or 'joint' in text_lower or 'group' in text_lower:
+                            result['filingType'] = 'joint/group'
+                            local_logger.info(f"   ✅ Extracted filingType: joint/group")
+                            break
+            
+            # If we didn't find a match, log warning
+            if not result.get('filingType'):
+                result['filingType'] = None
+                local_logger.warning(f"   ⚠️ Could not determine filingType from table")
+                local_logger.info(f"   🔍 Filing table HTML: {filing_table[:300]}")
         else:
             result['filingType'] = None
             local_logger.warning(f"   ⚠️ Could not find Individual or Joint/Group Filing section")
