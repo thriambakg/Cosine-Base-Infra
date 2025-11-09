@@ -490,3 +490,24 @@ output "lambda_s3_chat_files_policy_arn" {
   description = "ARN of the IAM policy for Lambda access to chat files S3 bucket"
   value       = aws_iam_policy.lambda_s3_chat_files_policy.arn
 }
+
+# OpenSearch Domain Outputs
+output "opensearch_domain_endpoint" {
+  description = "Endpoint of the OpenSearch domain for SEC filings"
+  value       = module.sec_filings_opensearch.domain_endpoint
+}
+
+output "opensearch_domain_arn" {
+  description = "ARN of the OpenSearch domain for SEC filings"
+  value       = module.sec_filings_opensearch.domain_arn
+}
+
+output "opensearch_domain_name" {
+  description = "Name of the OpenSearch domain for SEC filings"
+  value       = module.sec_filings_opensearch.domain_name
+}
+
+output "opensearch_dashboard_endpoint" {
+  description = "Dashboard endpoint of the OpenSearch domain for SEC filings"
+  value       = module.sec_filings_opensearch.dashboard_endpoint
+}
