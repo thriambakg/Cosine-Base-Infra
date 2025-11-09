@@ -1274,8 +1274,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         'relationshipAdditionalText': None,  # Additional text for Officer/Other
         'filingType': None,  # 'individual' or 'joint/group'
         'signatureName': None,
+        'amendment': None,  # Date of original filing if this is an amendment (MM/DD/YYYY format)
         # Note: nonDerivativeSecurities, derivativeSecurities, misc removed
-        # Note: amendment fields removed - can be determined via OpenSearch full-text search if needed
         # OpenSearch will handle full-text search on raw HTML content stored in S3
     }
     
@@ -1771,8 +1771,34 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         else:
             local_logger.warning(f"   ⚠️ Could not extract signatureName from HTML")
         
-        # Note: Amendment detection removed - can be determined via OpenSearch full-text search if needed
-        # Users can search for "If Amendment, Date of Original Filed" in htmlContent field
+        # Extract amendment date (4. or 5. If Amendment, Date of Original Filed)
+        # HTML structure: Label followed by <br> and optional <span class="FormData">DATE</span>
+        # If date is present, this is an amendment; otherwise it's an original filing
+        # Pattern matches both "4. If Amendment" (Form 4, 5) and "5. If Amendment" (Form 3)
+        # The date must be within the same <td> cell as the label, immediately after the label
+        # We match the cell content between <td> and </td>, ensuring the date comes after "If Amendment"
+        # and before the closing </td> tag
+        amendment_patterns = [
+            # Pattern 1: Date immediately after label with (Month/Day/Year) text, within same <td> cell
+            # Use a more restrictive pattern that stops at </td> to prevent matching across cells
+            r'<td[^>]*valign="top"[^>]*>.*?If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>[^<]*</td>',
+            # Pattern 2: More flexible but still within same cell - ensure </td> comes after the date
+            r'<td[^>]*>.*?If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?=[^<]*</td>)',
+        ]
+        
+        amendment_date = None
+        for pattern in amendment_patterns:
+            amendment_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if amendment_match:
+                amendment_date = amendment_match.group(1)
+                local_logger.info(f"   ✅ Extracted amendment date: {amendment_date}")
+                print(f"   ✅ Extracted amendment date: {amendment_date}", flush=True)
+                break
+        
+        if not amendment_date:
+            local_logger.info(f"   ℹ️ No amendment date found - this is an original filing")
+        
+        result['amendment'] = amendment_date
         
         # Note: Table parsing (Table I, Table II, explanations, remarks) is form-specific
         # and handled in form-specific functions (parse_form3_metadata, parse_form4_metadata, parse_form5_metadata)
@@ -1803,9 +1829,11 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 3 specific: Extract event date
         # More flexible pattern to handle various HTML structures
+        # Pattern 1: Use .*? to match any characters (including newlines and HTML) between label and date
+        # This handles cases where "(Month/Day/Year)" text appears between label and date
         event_date_patterns = [
-            r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Event Requiring Statement[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
             r'Date of Event Requiring Statement[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
@@ -1856,9 +1884,11 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 4 specific: Extract event date
         # More flexible pattern to handle various HTML structures
+        # Pattern 1: Use .*? to match any characters (including newlines and HTML) between label and date
+        # This handles cases where "(Month/Day/Year)" text appears between label and date
         event_date_patterns = [
-            r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Earliest Transaction[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
             r'Date of Earliest Transaction[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
@@ -1909,9 +1939,11 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 5 specific: Extract event date (fiscal year end)
         # More flexible pattern to handle various HTML structures
+        # Pattern 1: Use .*? to match any characters (including newlines and HTML) between label and date
+        # This handles cases where "(Month/Day/Year)" text appears between label and date
         event_date_patterns = [
-            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
             r'Statement for Issuer\'s Fiscal Year Ended[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
@@ -2167,6 +2199,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                     'address': parsed_data.get('address'),
                     'politician': parsed_data.get('politician', 0),
                     'filingType': parsed_data.get('filingType'),
+                    'amendment': parsed_data.get('amendment'),
                     'formS3Key': s3_key,
                     'htmlContent': content_str  # Store full HTML for full-text search
                 }
