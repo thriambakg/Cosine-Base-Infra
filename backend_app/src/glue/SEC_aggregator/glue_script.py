@@ -1110,9 +1110,16 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             print(f"         Size: {len(file_content):,} bytes", flush=True)
             raise  # Re-raise to be caught by outer exception handler
         
+        # Decode file_content to string for parsing (S3 upload already done with bytes)
+        # Ensure content is a string for regex operations
+        if isinstance(file_content, bytes):
+            content_str = file_content.decode('utf-8', errors='ignore')
+        else:
+            content_str = file_content
+        
         return {
             's3_key': s3_key,
-            'content': file_content,
+            'content': content_str,  # Return as string for regex parsing
             'file_ext': file_ext,
             'cik': cik,
             'accession_number': accession,
