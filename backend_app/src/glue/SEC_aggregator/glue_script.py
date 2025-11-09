@@ -1600,17 +1600,63 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]])
 def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accepted_date_str: Optional[str]) -> Dict[str, Any]:
     """
     Parse SEC Form HTML and extract all metadata fields (Forms 3, 4, 5)
+    Routes to form-specific parsing functions based on detected form type.
     
     Returns:
         Dict with all extracted metadata fields
     """
     # Import inside function to avoid serialization issues
     import logging
+    local_logger = logging.getLogger()
+    
+    # Detect form type
+    form_number = None
+    form_name_match = re.search(r'class="FormName"[^>]*>FORM\s*(\d+)', html_content, re.IGNORECASE | re.DOTALL)
+    if form_name_match:
+        form_number = form_name_match.group(1)
+    
+    if not form_number:
+        form_match = re.search(r'\bFORM\s+([345])\b', html_content, re.IGNORECASE)
+        if form_match:
+            form_number = form_match.group(1)
+    
+    # Route to form-specific parser
+    if form_number == '3':
+        local_logger.info(f"      📋 Routing to Form 3 parser")
+        return parse_form3_metadata(html_content, form_data, accepted_date_str)
+    elif form_number == '4':
+        local_logger.info(f"      📋 Routing to Form 4 parser")
+        return parse_form4_metadata(html_content, form_data, accepted_date_str)
+    elif form_number == '5':
+        local_logger.info(f"      📋 Routing to Form 5 parser")
+        return parse_form5_metadata(html_content, form_data, accepted_date_str)
+    else:
+        # Default to Form 4 if form type cannot be determined
+        local_logger.warning(f"      ⚠️ Could not determine form type, defaulting to Form 4")
+        return parse_form4_metadata(html_content, form_data, accepted_date_str)
+
+
+def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepted_date_str: Optional[str], form_number: str) -> Dict[str, Any]:
+    """
+    Parse common metadata fields shared across Forms 3, 4, and 5.
+    
+    Args:
+        html_content: HTML content of the SEC form
+        form_data: Form metadata dict
+        accepted_date_str: Accepted date string
+        form_number: Form number ('3', '4', or '5')
+    
+    Returns:
+        Dict with common metadata fields
+    """
+    # Import inside function to avoid serialization issues
+    import logging
     from html import unescape
+    from datetime import datetime
     local_logger = logging.getLogger()
     
     result = {
-        'formType': form_data.get('form_type', 'unknown'),
+        'formType': f'form{form_number}' if form_number else 'form4',
         'reportingPersonName': None,  # Changed from 'name' for clarity
         'address': None,
         'eventDate': None,
@@ -1631,22 +1677,6 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
     }
     
     try:
-        # Detect form type
-        form_number = None
-        form_name_match = re.search(r'class="FormName"[^>]*>FORM\s*(\d+)', html_content, re.IGNORECASE | re.DOTALL)
-        if form_name_match:
-            form_number = form_name_match.group(1)
-        
-        if not form_number:
-            form_match = re.search(r'\bFORM\s+([345])\b', html_content, re.IGNORECASE)
-            if form_match:
-                form_number = form_match.group(1)
-        
-        is_form3 = form_number == '3'
-        is_form4 = form_number == '4'
-        is_form5 = form_number == '5'
-        
-        result['formType'] = f'form{form_number}' if form_number else 'form4'
         
         # Extract reporting person name (1. Name and Address of Reporting Person)
         # Pattern: <a href="...cgi-bin/browse-edgar...CIK=...">Name</a>
@@ -1689,41 +1719,8 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         
         result['address'] = ', '.join(address_parts) if address_parts else None
         
-        # Extract event date
-        # Form 3: "Date of Event Requiring Statement"
-        # Form 4: "Date of Earliest Transaction"
-        # Form 5: "Statement for Issuer's Fiscal Year Ended"
-        # Note: There may be <br> tags between the label and the date
-        if is_form3:
-            event_date_match = re.search(r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
-            if event_date_match:
-                try:
-                    date_str = event_date_match.group(1)
-                    date_obj = datetime.strptime(date_str, '%m/%d/%Y')
-                    result['eventDate'] = date_obj.strftime('%Y-%m-%d')
-                except:
-                    pass
-        elif is_form4:
-            # Form 4 uses "Date of Earliest Transaction"
-            event_date_match = re.search(r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
-            if event_date_match:
-                try:
-                    date_str = event_date_match.group(1)
-                    date_obj = datetime.strptime(date_str, '%m/%d/%Y')
-                    result['eventDate'] = date_obj.strftime('%Y-%m-%d')
-                except:
-                    pass
-        elif is_form5:
-            fiscal_year_match = re.search(r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
-            if fiscal_year_match:
-                try:
-                    date_str = fiscal_year_match.group(1)
-                    date_obj = datetime.strptime(date_str, '%m/%d/%Y')
-                    result['eventDate'] = date_obj.strftime('%Y-%m-%d')
-                except:
-                    pass
-        
         # Extract reporting date (accepted date from form_data or extract from HTML)
+        # Note: Event date extraction is form-specific and handled in form-specific functions
         if accepted_date_str:
             # Extract just the date part (YYYY-MM-DD) from timestamp
             date_part = accepted_date_str.split()[0] if ' ' in accepted_date_str else accepted_date_str
@@ -1812,117 +1809,98 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         if relationship_section_match:
             relationship_table = relationship_section_match.group(1)
             
-            # Debug: Log the relationship table HTML for troubleshooting
-            local_logger.debug(f"      Relationship table HTML (first 500 chars): {relationship_table[:500]}")
+            # Log the full relationship table HTML for debugging
+            local_logger.info(f"      🔍 Relationship table HTML (full): {relationship_table}")
+            print(f"      🔍 Relationship table HTML (full): {relationship_table}", flush=True)
             
-            # Parse each row to find checked relationships
-            # The X is ALWAYS to the LEFT of the relationship text
-            # Structure: [checkbox] [text] [checkbox] [text]
-            # We need to find: <td><span>X</span></td> followed by <td>Relationship Text</td>
-            # The X can be in either checkbox column (column 1 or column 3)
-            # Make regex more flexible to handle whitespace/newlines between cells
+            # More robust parsing: Find all table rows and parse each cell pair
+            # Pattern: Match each <tr>...</tr> block
+            rows = re.findall(r'<tr>(.*?)</tr>', relationship_table, re.IGNORECASE | re.DOTALL)
+            local_logger.info(f"      📊 Found {len(rows)} rows in relationship table")
+            print(f"      📊 Found {len(rows)} rows in relationship table", flush=True)
             
-            # Use a more robust approach: find all X checkboxes and check what follows them
-            # Pattern: Find <td> with X, then find the next <td> with relationship text
+            # Parse each row
+            for row_idx, row_html in enumerate(rows):
+                local_logger.info(f"      🔍 Parsing row {row_idx + 1}: {row_html[:200]}")
+                print(f"      🔍 Parsing row {row_idx + 1}: {row_html[:200]}", flush=True)
+                
+                # Extract all <td> cells in this row
+                cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.IGNORECASE | re.DOTALL)
+                local_logger.info(f"      📋 Row {row_idx + 1} has {len(cells)} cells")
+                print(f"      📋 Row {row_idx + 1} has {len(cells)} cells", flush=True)
+                
+                # Check each checkbox-text pair: (cell 0, cell 1) and (cell 2, cell 3)
+                for pair_idx in [0, 2]:
+                    if pair_idx + 1 < len(cells):
+                        checkbox_cell = cells[pair_idx]
+                        text_cell = cells[pair_idx + 1]
+                        
+                        # Check if checkbox contains X
+                        has_x = 'X' in checkbox_cell and 'FormData' in checkbox_cell
+                        
+                        # Extract text from text cell (remove HTML tags)
+                        text_content = re.sub(r'<[^>]+>', '', text_cell).strip()
+                        
+                        local_logger.info(f"      🔍 Pair {pair_idx//2 + 1}: checkbox='{checkbox_cell[:100]}', has_x={has_x}, text='{text_content}'")
+                        print(f"      🔍 Pair {pair_idx//2 + 1}: checkbox='{checkbox_cell[:100]}', has_x={has_x}, text='{text_content}'", flush=True)
+                        
+                        if has_x and text_content:
+                            # Match relationship type
+                            if 'Director' in text_content and 'Director' not in relationship_types:
+                                relationship_types.append('Director')
+                                local_logger.info(f"      ✅ Found Director relationship")
+                                print(f"      ✅ Found Director relationship", flush=True)
+                            elif 'Officer' in text_content and 'Officer' not in relationship_types:
+                                relationship_types.append('Officer')
+                                local_logger.info(f"      ✅ Found Officer relationship")
+                                print(f"      ✅ Found Officer relationship", flush=True)
+                            elif '10%' in text_content and 'Owner' in text_content and '10% Owner' not in relationship_types:
+                                relationship_types.append('10% Owner')
+                                local_logger.info(f"      ✅ Found 10% Owner relationship")
+                                print(f"      ✅ Found 10% Owner relationship", flush=True)
+                            elif 'Other' in text_content and 'Other' not in relationship_types:
+                                relationship_types.append('Other')
+                                local_logger.info(f"      ✅ Found Other relationship")
+                                print(f"      ✅ Found Other relationship", flush=True)
             
-            # Director: Look for X checkbox followed by "Director" text (in first row, columns 1-2)
-            # Pattern: X in checkbox, then Director in next cell (allowing any content between)
-            director_match = re.search(
-                r'<td[^>]*align="center"[^>]*>.*?<span[^>]*class="FormData"[^>]*>X</span>.*?</td>.*?<td[^>]*class="MedSmallFormText"[^>]*>Director</td>',
-                relationship_table,
-                re.IGNORECASE | re.DOTALL
-            )
-            if director_match:
-                relationship_types.append('Director')
-                local_logger.debug(f"      ✅ Found Director relationship")
-            
-            # Officer: Look for X checkbox followed by "Officer" text (in second row, columns 1-2)
-            # Then extract additional text from the blue text row (third row, column 2)
-            officer_match = re.search(
-                r'<td[^>]*align="center"[^>]*>.*?<span[^>]*class="FormData"[^>]*>X</span>.*?</td>.*?<td[^>]*class="MedSmallFormText"[^>]*>Officer',
-                relationship_table,
-                re.IGNORECASE | re.DOTALL
-            )
-            if officer_match:
-                relationship_types.append('Officer')
-                local_logger.debug(f"      ✅ Found Officer relationship")
-                # Extract additional text from blue text row (third <tr>, second <td> with style="color: blue")
-                # Pattern: Look for the first blue text cell in the third row (Officer's additional text)
-                # Structure: <tr><td></td><td style="color: blue">text</td><td></td><td style="color: blue">text</td></tr>
-                officer_text_match = re.search(
-                    r'<tr>.*?<td[^>]*align="center"[^>]*></td>.*?<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
-                    relationship_table,
-                    re.IGNORECASE | re.DOTALL
-                )
-                if officer_text_match:
-                    officer_text = unescape(officer_text_match.group(1)).strip()
-                    if officer_text:
-                        relationship_additional = officer_text
-                        local_logger.debug(f"      ✅ Found Officer additional text: {officer_text}")
-            
-            # 10% Owner: Look for X checkbox followed by "10% Owner" text (in first row, columns 3-4)
-            # Pattern: X in checkbox, then 10% Owner in next cell
-            owner_match = re.search(
-                r'<td[^>]*align="center"[^>]*>.*?<span[^>]*class="FormData"[^>]*>X</span>.*?</td>.*?<td[^>]*class="MedSmallFormText"[^>]*>10%\s*Owner</td>',
-                relationship_table,
-                re.IGNORECASE | re.DOTALL
-            )
-            if owner_match:
-                relationship_types.append('10% Owner')
-                local_logger.debug(f"      ✅ Found 10% Owner relationship")
-            
-            # Other: Look for X checkbox followed by "Other" text (in second row, columns 3-4)
-            # Then extract additional text from the blue text row (third row, column 4)
-            other_match = re.search(
-                r'<td[^>]*align="center"[^>]*>.*?<span[^>]*class="FormData"[^>]*>X</span>.*?</td>.*?<td[^>]*class="MedSmallFormText"[^>]*>Other',
-                relationship_table,
-                re.IGNORECASE | re.DOTALL
-            )
-            if other_match:
-                relationship_types.append('Other')
-                local_logger.debug(f"      ✅ Found Other relationship")
-                # Extract additional text from blue text row (third <tr>, fourth <td> with style="color: blue")
-                # Find all blue text cells - the second one is for "Other"
+            # Extract additional text from blue text cells (third row)
+            if len(rows) >= 3:
+                blue_text_row = rows[2]  # Third row (index 2)
                 blue_text_cells = re.findall(
                     r'<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
-                    relationship_table,
+                    blue_text_row,
                     re.IGNORECASE | re.DOTALL
                 )
-                # The second blue text cell (index 1) is for "Other" (first is for Officer)
-                if len(blue_text_cells) >= 2:
-                    other_text = unescape(blue_text_cells[1]).strip()
-                    if other_text:
-                        # Combine with Officer text if both exist
-                        if relationship_additional:
-                            relationship_additional = relationship_additional + '; ' + other_text
-                        else:
-                            relationship_additional = other_text
-                        local_logger.debug(f"      ✅ Found Other additional text: {other_text}")
-                elif len(blue_text_cells) == 1:
-                    # Only one blue text cell exists - check if it's for Other (would be in fourth column)
-                    # Fallback: look for blue text after "Other" text in the table
-                    other_text_match = re.search(
-                        r'Other[^<]*</td>[^<]*</tr>[^<]*<tr>[^<]*<td[^>]*></td>[^<]*<td[^>]*></td>[^<]*<td[^>]*></td>[^<]*<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
-                        relationship_table,
-                        re.IGNORECASE | re.DOTALL
-                    )
-                    if other_text_match:
-                        other_text = unescape(other_text_match.group(1)).strip()
+                if blue_text_cells:
+                    # First blue cell is for Officer, second is for Other
+                    if len(blue_text_cells) >= 1 and 'Officer' in relationship_types:
+                        officer_text = unescape(blue_text_cells[0]).strip()
+                        if officer_text:
+                            relationship_additional = officer_text
+                            local_logger.info(f"      ✅ Found Officer additional text: {officer_text}")
+                            print(f"      ✅ Found Officer additional text: {officer_text}", flush=True)
+                    if len(blue_text_cells) >= 2 and 'Other' in relationship_types:
+                        other_text = unescape(blue_text_cells[1]).strip()
                         if other_text:
                             if relationship_additional:
                                 relationship_additional = relationship_additional + '; ' + other_text
                             else:
                                 relationship_additional = other_text
-                            local_logger.debug(f"      ✅ Found Other additional text (fallback): {other_text}")
+                            local_logger.info(f"      ✅ Found Other additional text: {other_text}")
+                            print(f"      ✅ Found Other additional text: {other_text}", flush=True)
             
             # Log what we found
             if relationship_types:
                 local_logger.info(f"      ✅ Parsed relationship types: {', '.join(relationship_types)}")
+                print(f"      ✅ Parsed relationship types: {', '.join(relationship_types)}", flush=True)
             else:
                 local_logger.warning(f"      ⚠️ No relationship types found in table")
-                local_logger.debug(f"      Relationship table HTML: {relationship_table}")
+                print(f"      ⚠️ No relationship types found in table", flush=True)
+                local_logger.info(f"      Full relationship table HTML: {relationship_table}")
+                print(f"      Full relationship table HTML: {relationship_table}", flush=True)
         else:
             local_logger.warning(f"      ⚠️ Could not find relationship section table")
+            print(f"      ⚠️ Could not find relationship section table", flush=True)
         
         # Store relationship - use first relationship type as primary (for GSI)
         # Store all relationship types as comma-separated string for completeness
@@ -1988,27 +1966,52 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         if amendment_date_match:
             result['amendment'] = True
         
+        # Note: Table parsing (Table I, Table II, explanations, remarks) is form-specific
+        # and handled in form-specific functions (parse_form3_metadata, parse_form4_metadata, parse_form5_metadata)
+        
+    except Exception as e:
+        local_logger.error(f"❌ Error parsing form metadata: {e}")
+        import traceback
+        local_logger.error(f"   Traceback: {traceback.format_exc()}")
+    
+    return result
+
+
+def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_date_str: Optional[str]) -> Dict[str, Any]:
+    """
+    Parse Form 3 specific metadata.
+    Form 3 differences:
+    - Event date label: "Date of Event Requiring Statement"
+    - Table structure: Different column layout
+    """
+    import logging
+    from html import unescape
+    from datetime import datetime
+    local_logger = logging.getLogger()
+    
+    # Get common metadata
+    result = _parse_common_metadata(html_content, form_data, accepted_date_str, '3')
+    
+    try:
+        # Form 3 specific: Extract event date
+        event_date_match = re.search(r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
+        if event_date_match:
+            try:
+                date_str = event_date_match.group(1)
+                date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                result['eventDate'] = date_obj.strftime('%Y-%m-%d')
+            except:
+                pass
+        
         # Parse explanations first (needed for table parsing)
         explanations_dict = parse_explanations(html_content)
-        explanations_msg = f"📝 Parsed {len(explanations_dict)} explanations: {list(explanations_dict.keys())}"
-        logger.info(explanations_msg)
-        print(explanations_msg, flush=True)
-        if explanations_dict:
-            for num, text in list(explanations_dict.items())[:2]:  # Log first 2
-                explanation_preview = f"   Explanation {num}: {text[:100]}..."
-                logger.info(explanation_preview)
-                print(explanation_preview, flush=True)
-        else:
-            no_explanations_msg = "⚠️ No explanations found in document"
-            logger.warning(no_explanations_msg)
-            print(no_explanations_msg, flush=True)
         
-        # Parse Table I - Non-Derivative Securities (pass explanations for footnote embedding)
-        table1_data = parse_table_i(html_content, is_form3, is_form4, is_form5, explanations_dict)
+        # Parse Table I - Non-Derivative Securities (Form 3 specific structure)
+        table1_data = parse_table_i(html_content, is_form3=True, is_form4=False, is_form5=False, explanations_dict=explanations_dict)
         result['nonDerivativeSecurities'] = table1_data
         
-        # Parse Table II - Derivative Securities (pass explanations for footnote embedding)
-        table2_data = parse_table_ii(html_content, is_form3, is_form4, is_form5, explanations_dict)
+        # Parse Table II - Derivative Securities (Form 3 specific structure)
+        table2_data = parse_table_ii(html_content, is_form3=True, is_form4=False, is_form5=False, explanations_dict=explanations_dict)
         result['derivativeSecurities'] = table2_data
         
         # Parse remarks only (explanations are now embedded in table rows)
@@ -2016,7 +2019,105 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
         result['misc'] = misc_data
         
     except Exception as e:
-        local_logger.error(f"❌ Error parsing form metadata: {e}")
+        local_logger.error(f"❌ Error parsing Form 3 metadata: {e}")
+        import traceback
+        local_logger.error(f"   Traceback: {traceback.format_exc()}")
+    
+    return result
+
+
+def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_date_str: Optional[str]) -> Dict[str, Any]:
+    """
+    Parse Form 4 specific metadata.
+    Form 4 differences:
+    - Event date label: "Date of Earliest Transaction"
+    - Table structure: Standard column layout
+    """
+    import logging
+    from html import unescape
+    from datetime import datetime
+    local_logger = logging.getLogger()
+    
+    # Get common metadata
+    result = _parse_common_metadata(html_content, form_data, accepted_date_str, '4')
+    
+    try:
+        # Form 4 specific: Extract event date
+        event_date_match = re.search(r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
+        if event_date_match:
+            try:
+                date_str = event_date_match.group(1)
+                date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                result['eventDate'] = date_obj.strftime('%Y-%m-%d')
+            except:
+                pass
+        
+        # Parse explanations first (needed for table parsing)
+        explanations_dict = parse_explanations(html_content)
+        
+        # Parse Table I - Non-Derivative Securities (Form 4 specific structure)
+        table1_data = parse_table_i(html_content, is_form3=False, is_form4=True, is_form5=False, explanations_dict=explanations_dict)
+        result['nonDerivativeSecurities'] = table1_data
+        
+        # Parse Table II - Derivative Securities (Form 4 specific structure)
+        table2_data = parse_table_ii(html_content, is_form3=False, is_form4=True, is_form5=False, explanations_dict=explanations_dict)
+        result['derivativeSecurities'] = table2_data
+        
+        # Parse remarks only (explanations are now embedded in table rows)
+        misc_data = parse_remarks(html_content)
+        result['misc'] = misc_data
+        
+    except Exception as e:
+        local_logger.error(f"❌ Error parsing Form 4 metadata: {e}")
+        import traceback
+        local_logger.error(f"   Traceback: {traceback.format_exc()}")
+    
+    return result
+
+
+def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_date_str: Optional[str]) -> Dict[str, Any]:
+    """
+    Parse Form 5 specific metadata.
+    Form 5 differences:
+    - Event date label: "Statement for Issuer's Fiscal Year Ended"
+    - Table structure: Similar to Form 4
+    """
+    import logging
+    from html import unescape
+    from datetime import datetime
+    local_logger = logging.getLogger()
+    
+    # Get common metadata
+    result = _parse_common_metadata(html_content, form_data, accepted_date_str, '5')
+    
+    try:
+        # Form 5 specific: Extract event date (fiscal year end)
+        fiscal_year_match = re.search(r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+        if fiscal_year_match:
+            try:
+                date_str = fiscal_year_match.group(1)
+                date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                result['eventDate'] = date_obj.strftime('%Y-%m-%d')
+            except:
+                pass
+        
+        # Parse explanations first (needed for table parsing)
+        explanations_dict = parse_explanations(html_content)
+        
+        # Parse Table I - Non-Derivative Securities (Form 5 specific structure)
+        table1_data = parse_table_i(html_content, is_form3=False, is_form4=False, is_form5=True, explanations_dict=explanations_dict)
+        result['nonDerivativeSecurities'] = table1_data
+        
+        # Parse Table II - Derivative Securities (Form 5 specific structure)
+        table2_data = parse_table_ii(html_content, is_form3=False, is_form4=False, is_form5=True, explanations_dict=explanations_dict)
+        result['derivativeSecurities'] = table2_data
+        
+        # Parse remarks only (explanations are now embedded in table rows)
+        misc_data = parse_remarks(html_content)
+        result['misc'] = misc_data
+        
+    except Exception as e:
+        local_logger.error(f"❌ Error parsing Form 5 metadata: {e}")
         import traceback
         local_logger.error(f"   Traceback: {traceback.format_exc()}")
     
@@ -2896,7 +2997,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                     'reportingDate': parsed_data.get('reportingDate'),
                     'address': parsed_data.get('address'),
                     'signatureName': parsed_data.get('signatureName'),
-                    'politician': parsed_data.get('politician', False),
+                    'politician': parsed_data.get('politician', 0),  # Use 0/1 to match DynamoDB format
                     'formS3Key': s3_key,
                     'amended': parsed_data.get('amended', False),
                     'amendment': parsed_data.get('amendment', False),

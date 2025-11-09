@@ -84,26 +84,26 @@ class OpenSearchTester:
     def test_connection(self) -> bool:
         """Test connection to OpenSearch domain"""
         print("=" * 80)
-        print("🔍 Test 1: Connection Test")
+        print("Test 1: Connection Test")
         print("=" * 80)
         
         try:
             response = self._make_request('GET', '/_cluster/health')
             
             if 'status' in response:
-                print(f"✅ Connection successful!")
+                print(f"[OK] Connection successful!")
                 print(f"   Cluster Status: {response.get('status', 'unknown')}")
                 print(f"   Cluster Name: {response.get('cluster_name', 'unknown')}")
                 print(f"   Number of Nodes: {response.get('number_of_nodes', 'unknown')}")
                 print(f"   Active Shards: {response.get('active_shards', 'unknown')}")
                 return True
             else:
-                print(f"❌ Connection failed: Unexpected response")
+                print(f"[ERROR] Connection failed: Unexpected response")
                 print(f"   Response: {json.dumps(response, indent=2)}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Connection failed: {e}")
+            print(f"[ERROR] Connection failed: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -111,32 +111,28 @@ class OpenSearchTester:
     def test_index_exists(self) -> bool:
         """Check if index exists"""
         print("\n" + "=" * 80)
-        print("🔍 Test 2: Index Existence Check")
+        print("Test 2: Index Existence Check")
         print("=" * 80)
         
         try:
-            response = self._make_request('HEAD', f'/{self.index_name}')
-            
-            # HEAD request returns 200 if exists, 404 if not
-            # We can't get status from urllib3 easily, so try GET instead
             response = self._make_request('GET', f'/{self.index_name}')
             
             if 'error' in response:
                 if response.get('error', {}).get('type') == 'index_not_found_exception':
-                    print(f"ℹ️  Index '{self.index_name}' does not exist yet")
+                    print(f"[INFO] Index '{self.index_name}' does not exist yet")
                     return False
                 else:
-                    print(f"❌ Error checking index: {response.get('error', {})}")
+                    print(f"[ERROR] Error checking index: {response.get('error', {})}")
                     return False
             else:
-                print(f"✅ Index '{self.index_name}' exists")
+                print(f"[OK] Index '{self.index_name}' exists")
                 if 'settings' in response:
                     print(f"   Number of Shards: {response.get('settings', {}).get('index', {}).get('number_of_shards', 'unknown')}")
                     print(f"   Number of Replicas: {response.get('settings', {}).get('index', {}).get('number_of_replicas', 'unknown')}")
                 return True
                 
         except Exception as e:
-            print(f"❌ Error checking index: {e}")
+            print(f"[ERROR] Error checking index: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -144,7 +140,7 @@ class OpenSearchTester:
     def create_index(self) -> bool:
         """Create index with mapping"""
         print("\n" + "=" * 80)
-        print("🔍 Test 3: Create Index")
+        print("Test 3: Create Index")
         print("=" * 80)
         
         # Index mapping based on SEC form structure
@@ -191,24 +187,24 @@ class OpenSearchTester:
             response = self._make_request('PUT', f'/{self.index_name}', data=mapping)
             
             if 'acknowledged' in response and response.get('acknowledged'):
-                print(f"✅ Index '{self.index_name}' created successfully")
+                print(f"[OK] Index '{self.index_name}' created successfully")
                 print(f"   Acknowledged: {response.get('acknowledged')}")
                 print(f"   Index: {response.get('index', self.index_name)}")
                 return True
             elif 'error' in response:
                 error_type = response.get('error', {}).get('type', 'unknown')
                 if error_type == 'resource_already_exists_exception':
-                    print(f"ℹ️  Index '{self.index_name}' already exists")
+                    print(f"[INFO] Index '{self.index_name}' already exists")
                     return True
                 else:
-                    print(f"❌ Error creating index: {response.get('error', {})}")
+                    print(f"[ERROR] Error creating index: {response.get('error', {})}")
                     return False
             else:
-                print(f"❌ Unexpected response: {json.dumps(response, indent=2)}")
+                print(f"[ERROR] Unexpected response: {json.dumps(response, indent=2)}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error creating index: {e}")
+            print(f"[ERROR] Error creating index: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -216,7 +212,7 @@ class OpenSearchTester:
     def index_test_document(self) -> Optional[str]:
         """Index a test document"""
         print("\n" + "=" * 80)
-        print("🔍 Test 4: Index Test Document")
+        print("Test 4: Index Test Document")
         print("=" * 80)
         
         # Create a test document similar to what Glue job would index
@@ -233,7 +229,7 @@ class OpenSearchTester:
             "reportingDate": "2025-11-08",
             "address": "123 Test Street, Test City, ST 12345",
             "signatureName": "Test Person",
-            "politician": False,
+            "politician": 0,  # Use 0/1 instead of boolean to match DynamoDB/Glue job format
             "formS3Key": "trades/2025-11-08/sec/test-form.html",
             "amended": False,
             "amendment": False,
@@ -253,17 +249,17 @@ class OpenSearchTester:
             response = self._make_request('PUT', f'/{self.index_name}/_doc/{doc_id}', data=test_doc)
             
             if response.get('result') in ['created', 'updated']:
-                print(f"✅ Test document indexed successfully")
+                print(f"[OK] Test document indexed successfully")
                 print(f"   Document ID: {doc_id}")
                 print(f"   Result: {response.get('result')}")
                 print(f"   Version: {response.get('_version', 'N/A')}")
                 return doc_id
             else:
-                print(f"❌ Unexpected response: {json.dumps(response, indent=2)}")
+                print(f"[ERROR] Unexpected response: {json.dumps(response, indent=2)}")
                 return None
                 
         except Exception as e:
-            print(f"❌ Error indexing document: {e}")
+            print(f"[ERROR] Error indexing document: {e}")
             import traceback
             traceback.print_exc()
             return None
@@ -271,7 +267,7 @@ class OpenSearchTester:
     def search_test_document(self, doc_id: str) -> bool:
         """Search for the test document"""
         print("\n" + "=" * 80)
-        print("🔍 Test 5: Search Test Document")
+        print("Test 5: Search Test Document")
         print("=" * 80)
         
         # Search by document ID
@@ -279,17 +275,17 @@ class OpenSearchTester:
             response = self._make_request('GET', f'/{self.index_name}/_doc/{doc_id}')
             
             if 'found' in response and response.get('found'):
-                print(f"✅ Document found by ID")
+                print(f"[OK] Document found by ID")
                 print(f"   Document ID: {response.get('_id')}")
                 print(f"   Source: {json.dumps(response.get('_source', {}), indent=2)}")
                 return True
             else:
-                print(f"❌ Document not found")
+                print(f"[ERROR] Document not found")
                 print(f"   Response: {json.dumps(response, indent=2)}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error searching document: {e}")
+            print(f"[ERROR] Error searching document: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -297,7 +293,7 @@ class OpenSearchTester:
     def test_search_query(self) -> bool:
         """Test search query capabilities"""
         print("\n" + "=" * 80)
-        print("🔍 Test 6: Search Query Test")
+        print("Test 6: Search Query Test")
         print("=" * 80)
         
         # Test a simple search query
@@ -318,7 +314,7 @@ class OpenSearchTester:
                 else:
                     total_count = total
                 
-                print(f"✅ Search query successful")
+                print(f"[OK] Search query successful")
                 print(f"   Total documents: {total_count}")
                 print(f"   Returned: {len(response.get('hits', {}).get('hits', []))}")
                 
@@ -332,11 +328,11 @@ class OpenSearchTester:
                 
                 return True
             else:
-                print(f"❌ Unexpected response: {json.dumps(response, indent=2)}")
+                print(f"[ERROR] Unexpected response: {json.dumps(response, indent=2)}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error executing search query: {e}")
+            print(f"[ERROR] Error executing search query: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -344,7 +340,7 @@ class OpenSearchTester:
     def test_filtered_search(self) -> bool:
         """Test filtered search (e.g., by form type)"""
         print("\n" + "=" * 80)
-        print("🔍 Test 7: Filtered Search Test")
+        print("Test 7: Filtered Search Test")
         print("=" * 80)
         
         # Search for form4 documents
@@ -367,17 +363,17 @@ class OpenSearchTester:
                 else:
                     total_count = total
                 
-                print(f"✅ Filtered search successful")
+                print(f"[OK] Filtered search successful")
                 print(f"   Form Type: form4")
                 print(f"   Total matches: {total_count}")
                 print(f"   Returned: {len(response.get('hits', {}).get('hits', []))}")
                 return True
             else:
-                print(f"❌ Unexpected response: {json.dumps(response, indent=2)}")
+                print(f"[ERROR] Unexpected response: {json.dumps(response, indent=2)}")
                 return False
                 
         except Exception as e:
-            print(f"❌ Error executing filtered search: {e}")
+            print(f"[ERROR] Error executing filtered search: {e}")
             import traceback
             traceback.print_exc()
             return False
@@ -385,29 +381,29 @@ class OpenSearchTester:
     def cleanup_test_document(self, doc_id: str) -> bool:
         """Delete the test document"""
         print("\n" + "=" * 80)
-        print("🔍 Test 8: Cleanup Test Document")
+        print("Test 8: Cleanup Test Document")
         print("=" * 80)
         
         try:
             response = self._make_request('DELETE', f'/{self.index_name}/_doc/{doc_id}')
             
             if response.get('result') == 'deleted':
-                print(f"✅ Test document deleted successfully")
+                print(f"[OK] Test document deleted successfully")
                 print(f"   Document ID: {doc_id}")
                 return True
             else:
-                print(f"ℹ️  Document may not exist or already deleted")
+                print(f"[INFO] Document may not exist or already deleted")
                 print(f"   Response: {json.dumps(response, indent=2)}")
                 return True  # Not a failure if already deleted
                 
         except Exception as e:
-            print(f"⚠️  Error deleting test document (non-critical): {e}")
+            print(f"[WARNING] Error deleting test document (non-critical): {e}")
             return True  # Non-critical
     
     def run_all_tests(self, cleanup: bool = True) -> Dict[str, bool]:
         """Run all tests"""
         print("\n" + "=" * 80)
-        print("🚀 OpenSearch Test Suite")
+        print("OpenSearch Test Suite")
         print("=" * 80)
         print(f"Endpoint: {self.endpoint}")
         print(f"Region: {self.region}")
@@ -419,7 +415,7 @@ class OpenSearchTester:
         # Test 1: Connection
         results['connection'] = self.test_connection()
         if not results['connection']:
-            print("\n❌ Connection failed. Cannot proceed with other tests.")
+            print("\n[ERROR] Connection failed. Cannot proceed with other tests.")
             return results
         
         # Test 2: Check index
@@ -451,10 +447,10 @@ class OpenSearchTester:
         
         # Summary
         print("\n" + "=" * 80)
-        print("📊 Test Summary")
+        print("Test Summary")
         print("=" * 80)
         for test_name, passed in results.items():
-            status = "✅ PASS" if passed else "❌ FAIL"
+            status = "[PASS]" if passed else "[FAIL]"
             print(f"   {status}: {test_name}")
         
         total = len(results)
@@ -484,4 +480,3 @@ def main():
 
 if __name__ == '__main__':
     main()
-
