@@ -1805,45 +1805,74 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         if ticker_match:
             result['tickerSymbol'] = ticker_match.group(1)
         
-        # Extract relationship (5. Relationship of Reporting Person(s) to Issuer)
-        # HTML structure: The X is ALWAYS to the LEFT of the relationship type text
-        # The table has 4 columns: [checkbox1] [text1] [checkbox2] [text2]
+        # Extract relationship (4. or 5. Relationship of Reporting Person(s) to Issuer)
+        # HTML structure: The table has 4 columns per row: [checkbox1] [text1] [checkbox2] [text2]
         # Row 1: [checkbox] Director [checkbox] 10% Owner
         # Row 2: [checkbox] Officer [checkbox] Other
         # Row 3: [empty] [blue text for Officer] [empty] [blue text for Other]
         # 
-        # Example structure:
+        # The checkbox IMMEDIATELY BEFORE the text marks that relationship type
+        # Structure: <td>checkbox</td><td>text</td><td>checkbox</td><td>text</td>
+        # 
+        # Example:
         # <tr>
-        #   <td align="center"></td>  <!-- Column 1: checkbox (empty or X) -->
-        #   <td class="MedSmallFormText">Director</td>  <!-- Column 2: text -->
-        #   <td align="center"><span class="FormData">X</span></td>  <!-- Column 3: checkbox (X) -->
-        #   <td class="MedSmallFormText">10% Owner</td>  <!-- Column 4: text -->
+        #   <td align="center"></td>  <!-- Cell 0: checkbox (empty) -->
+        #   <td class="MedSmallFormText">Director</td>  <!-- Cell 1: text -->
+        #   <td align="center"><span class="FormData">X</span></td>  <!-- Cell 2: checkbox (X) -->
+        #   <td class="MedSmallFormText">10% Owner</td>  <!-- Cell 3: text -->
         # </tr>
+        # In this case, X in cell 2 marks "10% Owner" in cell 3
         relationship_types = []
         relationship_additional = None
         
         # Find the relationship section table
-        relationship_section_match = re.search(
-            r'Relationship of Reporting Person\(s\) to Issuer[^<]*<table[^>]*>(.*?)</table>',
-            html_content,
-            re.IGNORECASE | re.DOTALL
-        )
+        # Pattern: Look for "Relationship of Reporting Person(s) to Issuer" followed by a table
+        # Be more flexible - allow various HTML structures between the label and table
+        relationship_patterns = [
+            # Pattern 1: Direct match with minimal HTML between
+            r'Relationship of Reporting Person\(s\) to Issuer[^<]*(?:<br[^>]*>)?[^<]*(?:\(Check all applicable\)[^<]*)?<table[^>]*>(.*?)</table>',
+            # Pattern 2: More flexible - allow any HTML between label and table
+            r'Relationship of Reporting Person\(s\) to Issuer.*?<table[^>]*>(.*?)</table>',
+            # Pattern 3: Look for the table that contains "Director" and "Officer" text
+            r'<table[^>]*>.*?Director.*?Officer.*?</table>',
+        ]
         
-        if relationship_section_match:
-            relationship_table = relationship_section_match.group(1)
-            
+        relationship_section_match = None
+        relationship_table = None
+        
+        for pattern in relationship_patterns:
+            relationship_section_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if relationship_section_match:
+                # Extract the table content
+                if len(relationship_section_match.groups()) > 0:
+                    relationship_table = relationship_section_match.group(1)
+                else:
+                    # Pattern 3 matches the whole table, extract it differently
+                    relationship_table = relationship_section_match.group(0)
+                    # Remove the opening table tag to get just the content
+                    relationship_table = re.sub(r'^<table[^>]*>', '', relationship_table, flags=re.IGNORECASE)
+                    relationship_table = re.sub(r'</table>$', '', relationship_table, flags=re.IGNORECASE)
+                
+                if relationship_table and ('Director' in relationship_table or 'Officer' in relationship_table):
+                    break
+        
+        if relationship_section_match and relationship_table:
             # Log the full relationship table HTML for debugging
-            local_logger.info(f"      🔍 Relationship table HTML (full): {relationship_table}")
-            print(f"      🔍 Relationship table HTML (full): {relationship_table}", flush=True)
+            local_logger.info(f"      🔍 Relationship table HTML (full): {relationship_table[:500]}")
+            print(f"      🔍 Relationship table HTML (full): {relationship_table[:500]}", flush=True)
             
             # More robust parsing: Find all table rows and parse each cell pair
             # Pattern: Match each <tr>...</tr> block
-            rows = re.findall(r'<tr>(.*?)</tr>', relationship_table, re.IGNORECASE | re.DOTALL)
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', relationship_table, re.IGNORECASE | re.DOTALL)
             local_logger.info(f"      📊 Found {len(rows)} rows in relationship table")
             print(f"      📊 Found {len(rows)} rows in relationship table", flush=True)
             
-            # Parse each row
+            # Parse each row (skip row 3 which has blue text for Officer/Other)
             for row_idx, row_html in enumerate(rows):
+                # Skip the third row (index 2) which contains blue text for additional info
+                if row_idx >= 2:
+                    continue
+                
                 local_logger.info(f"      🔍 Parsing row {row_idx + 1}: {row_html[:200]}")
                 print(f"      🔍 Parsing row {row_idx + 1}: {row_html[:200]}", flush=True)
                 
@@ -1853,13 +1882,18 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                 print(f"      📋 Row {row_idx + 1} has {len(cells)} cells", flush=True)
                 
                 # Check each checkbox-text pair: (cell 0, cell 1) and (cell 2, cell 3)
+                # The checkbox is in the odd-indexed cell (0, 2), text is in the even-indexed cell (1, 3)
                 for pair_idx in [0, 2]:
                     if pair_idx + 1 < len(cells):
                         checkbox_cell = cells[pair_idx]
                         text_cell = cells[pair_idx + 1]
                         
-                        # Check if checkbox contains X
-                        has_x = 'X' in checkbox_cell and 'FormData' in checkbox_cell
+                        # Check if checkbox contains X (look for FormData class with X)
+                        # Pattern: <span class="FormData">X</span> or just X in the cell
+                        has_x = bool(re.search(r'<span[^>]*class="FormData"[^>]*>X</span>', checkbox_cell, re.IGNORECASE))
+                        if not has_x:
+                            # Also check for just X in the cell (some forms might not have FormData class)
+                            has_x = 'X' in checkbox_cell.strip()
                         
                         # Extract text from text cell (remove HTML tags)
                         text_content = re.sub(r'<[^>]+>', '', text_cell).strip()
@@ -1868,20 +1902,22 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                         print(f"      🔍 Pair {pair_idx//2 + 1}: checkbox='{checkbox_cell[:100]}', has_x={has_x}, text='{text_content}'", flush=True)
                         
                         if has_x and text_content:
-                            # Match relationship type
-                            if 'Director' in text_content and 'Director' not in relationship_types:
+                            # Match relationship type - check for exact matches first
+                            text_lower = text_content.lower()
+                            
+                            if 'director' in text_lower and 'director' not in relationship_types:
                                 relationship_types.append('Director')
                                 local_logger.info(f"      ✅ Found Director relationship")
                                 print(f"      ✅ Found Director relationship", flush=True)
-                            elif 'Officer' in text_content and 'Officer' not in relationship_types:
+                            elif 'officer' in text_lower and 'officer' not in relationship_types:
                                 relationship_types.append('Officer')
                                 local_logger.info(f"      ✅ Found Officer relationship")
                                 print(f"      ✅ Found Officer relationship", flush=True)
-                            elif '10%' in text_content and 'Owner' in text_content and '10% Owner' not in relationship_types:
+                            elif '10%' in text_content and 'owner' in text_lower and '10% Owner' not in relationship_types:
                                 relationship_types.append('10% Owner')
                                 local_logger.info(f"      ✅ Found 10% Owner relationship")
                                 print(f"      ✅ Found 10% Owner relationship", flush=True)
-                            elif 'Other' in text_content and 'Other' not in relationship_types:
+                            elif 'other' in text_lower and 'other' not in relationship_types:
                                 relationship_types.append('Other')
                                 local_logger.info(f"      ✅ Found Other relationship")
                                 print(f"      ✅ Found Other relationship", flush=True)
@@ -1994,21 +2030,52 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             local_logger.warning(f"   ⚠️ Could not find Individual or Joint/Group Filing section")
         
         # Extract signature name
-        # Pattern: <u><span class="FormData">Signature text</span></u> or "See Exhibit 99.1 for Signature"
-        signature_match = re.search(r'<u><span[^>]*class="FormData"[^>]*>(/s/|s/)?\s*([^<]+)</span></u>', html_content, re.IGNORECASE)
-        if signature_match:
-            signature_name = unescape(signature_match.group(2)).strip()
-            # Remove /s/ or s/ prefix if present
-            signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
-            result['signatureName'] = signature_name.lower()
+        # Patterns to handle:
+        # 1. Exhibit reference: "See Exhibit 99.1 for Signature" or "See Exhibit 99.1 for Signatures" (check first)
+        # 2. Direct signature with /s/ prefix: <u><span class="FormData">/s/ Name</span></u>
+        # 3. Signature in signature section with /s/: ** Signature ... <u><span>/s/ Name</span></u>
+        # 4. Signature in signature section without /s/: ** Signature ... <u><span>Name</span></u>
+        # 5. Direct signature without /s/ (but not "See Exhibit"): <u><span>Name</span></u>
+        
+        signature_name = None
+        
+        # First, check for "See Exhibit" pattern (most specific)
+        exhibit_match = re.search(r'<u><span[^>]*class="FormData"[^>]*>See Exhibit 99\.1 for Signature[s]?</span></u>', html_content, re.IGNORECASE)
+        if exhibit_match:
+            signature_name = 'see exhibit 99.1 for signature'
         else:
-            # Fallback: try to find signature in the signature section
-            # Pattern: ** Signature of Reporting Person ... <u><span>text</span></u>
-            signature_fallback = re.search(r'\*\* Signature[^<]*<u><span[^>]*class="FormData"[^>]*>([^<]+)</span></u>', html_content, re.IGNORECASE | re.DOTALL)
-            if signature_fallback:
-                signature_name = unescape(signature_fallback.group(1)).strip()
-                signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
-                result['signatureName'] = signature_name.lower()
+            # Try patterns in order of specificity
+            signature_patterns = [
+                # Pattern 1: Direct signature with /s/ prefix
+                (r'<u><span[^>]*class="FormData"[^>]*>(/s/|s/)\s*([^<]+)</span></u>', 2),
+                # Pattern 2: Signature in signature section with /s/
+                (r'\*\* Signature[^<]*<u><span[^>]*class="FormData"[^>]*>(/s/|s/)\s*([^<]+)</span></u>', 2),
+                # Pattern 3: Signature in signature section without /s/
+                (r'\*\* Signature[^<]*<u><span[^>]*class="FormData"[^>]*>([^<]+)</span></u>', 1),
+                # Pattern 4: Direct signature without /s/ (exclude "See Exhibit" and common prefixes)
+                (r'<u><span[^>]*class="FormData"[^>]*>(?!/s/|s/|See Exhibit)([^<]+)</span></u>', 1),
+            ]
+            
+            for pattern, group_idx in signature_patterns:
+                signature_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                if signature_match:
+                    # Extract the signature name from the appropriate group
+                    if group_idx <= len(signature_match.groups()):
+                        signature_name = unescape(signature_match.group(group_idx)).strip()
+                        
+                        # Skip if it's "See Exhibit" or empty
+                        if signature_name and 'see exhibit' not in signature_name.lower():
+                            # Remove /s/ or s/ prefix if present (shouldn't be needed but just in case)
+                            signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
+                            signature_name = signature_name.strip()
+                            if signature_name:
+                                break
+        
+        if signature_name:
+            result['signatureName'] = signature_name.lower()
+            local_logger.info(f"   ✅ Extracted signatureName: {result['signatureName']}")
+        else:
+            local_logger.warning(f"   ⚠️ Could not extract signatureName from HTML")
         
         # Check for amendment
         # Forms 3/4/5: "4. If Amendment, Date of Original Filed"
@@ -2044,14 +2111,29 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     
     try:
         # Form 3 specific: Extract event date
-        event_date_match = re.search(r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE | re.DOTALL)
+        # More flexible pattern to handle various HTML structures
+        event_date_patterns = [
+            r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement[^<]*(\d{1,2}/\d{1,2}/\d{4})',
+        ]
+        
+        event_date_match = None
+        for pattern in event_date_patterns:
+            event_date_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if event_date_match:
+                break
+        
         if event_date_match:
             try:
                 date_str = event_date_match.group(1)
                 date_obj = datetime.strptime(date_str, '%m/%d/%Y')
                 result['eventDate'] = date_obj.strftime('%Y-%m-%d')
-            except:
-                pass
+                local_logger.info(f"   ✅ Extracted eventDate: {result['eventDate']}")
+            except Exception as e:
+                local_logger.warning(f"   ⚠️ Could not parse eventDate '{date_str}': {e}")
+        else:
+            local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
         
         # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
         # OpenSearch will handle full-text search on the raw HTML content stored in S3
@@ -2135,14 +2217,29 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     
     try:
         # Form 5 specific: Extract event date (fiscal year end)
-        fiscal_year_match = re.search(r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
-        if fiscal_year_match:
+        # More flexible pattern to handle various HTML structures
+        event_date_patterns = [
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(\d{1,2}/\d{1,2}/\d{4})',
+        ]
+        
+        event_date_match = None
+        for pattern in event_date_patterns:
+            event_date_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if event_date_match:
+                break
+        
+        if event_date_match:
             try:
-                date_str = fiscal_year_match.group(1)
+                date_str = event_date_match.group(1)
                 date_obj = datetime.strptime(date_str, '%m/%d/%Y')
                 result['eventDate'] = date_obj.strftime('%Y-%m-%d')
-            except:
-                pass
+                local_logger.info(f"   ✅ Extracted eventDate: {result['eventDate']}")
+            except Exception as e:
+                local_logger.warning(f"   ⚠️ Could not parse eventDate '{date_str}': {e}")
+        else:
+            local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
         
         # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
         # OpenSearch will handle full-text search on the raw HTML content stored in S3
@@ -2877,6 +2974,10 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         # OpenSearch handles full-text search on HTML content
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
         # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
+        # 
+        # NOTE: Form-specific checkbox fields (e.g., noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported)
+        # are NOT parsed or stored in DynamoDB. These fields are available in OpenSearch via the full htmlContent field
+        # for the AI agent to search through. This keeps DynamoDB lightweight with only essential metadata for fast queries.
         gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
         
         # Fields to store in DynamoDB (GSI fields + essential metadata)
@@ -3032,6 +3133,9 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                 
                 # Prepare document for OpenSearch
                 # Include GSI fields for filtering + full HTML content for full-text search
+                # NOTE: The htmlContent field contains the complete HTML including all checkbox fields
+                # (noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported, etc.)
+                # which are not parsed but are searchable via full-text search in OpenSearch
                 opensearch_doc = {
                     'tradeId': trade_id,
                     'formType': parsed_data.get('formType'),
