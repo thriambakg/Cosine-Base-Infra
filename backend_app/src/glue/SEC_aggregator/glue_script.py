@@ -1670,10 +1670,9 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         'signatureName': None,
         'amended': False,
         'amendment': False,
-        'amendedTradeId': None,
-        'nonDerivativeSecurities': [],
-        'derivativeSecurities': [],
-        'misc': {}
+        'amendedTradeId': None
+        # Note: nonDerivativeSecurities, derivativeSecurities, misc removed
+        # OpenSearch will handle full-text search on raw HTML content stored in S3
     }
     
     try:
@@ -2003,20 +2002,9 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
             except:
                 pass
         
-        # Parse explanations first (needed for table parsing)
-        explanations_dict = parse_explanations(html_content)
-        
-        # Parse Table I - Non-Derivative Securities (Form 3 specific structure)
-        table1_data = parse_table_i(html_content, is_form3=True, is_form4=False, is_form5=False, explanations_dict=explanations_dict)
-        result['nonDerivativeSecurities'] = table1_data
-        
-        # Parse Table II - Derivative Securities (Form 3 specific structure)
-        table2_data = parse_table_ii(html_content, is_form3=True, is_form4=False, is_form5=False, explanations_dict=explanations_dict)
-        result['derivativeSecurities'] = table2_data
-        
-        # Parse remarks only (explanations are now embedded in table rows)
-        misc_data = parse_remarks(html_content)
-        result['misc'] = misc_data
+        # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
+        # OpenSearch will handle full-text search on the raw HTML content stored in S3
+        # This simplifies the pipeline and avoids parsing errors from non-uniform forms
         
     except Exception as e:
         local_logger.error(f"❌ Error parsing Form 3 metadata: {e}")
@@ -2052,20 +2040,9 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
             except:
                 pass
         
-        # Parse explanations first (needed for table parsing)
-        explanations_dict = parse_explanations(html_content)
-        
-        # Parse Table I - Non-Derivative Securities (Form 4 specific structure)
-        table1_data = parse_table_i(html_content, is_form3=False, is_form4=True, is_form5=False, explanations_dict=explanations_dict)
-        result['nonDerivativeSecurities'] = table1_data
-        
-        # Parse Table II - Derivative Securities (Form 4 specific structure)
-        table2_data = parse_table_ii(html_content, is_form3=False, is_form4=True, is_form5=False, explanations_dict=explanations_dict)
-        result['derivativeSecurities'] = table2_data
-        
-        # Parse remarks only (explanations are now embedded in table rows)
-        misc_data = parse_remarks(html_content)
-        result['misc'] = misc_data
+        # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
+        # OpenSearch will handle full-text search on the raw HTML content stored in S3
+        # This simplifies the pipeline and avoids parsing errors from non-uniform forms
         
     except Exception as e:
         local_logger.error(f"❌ Error parsing Form 4 metadata: {e}")
@@ -2101,20 +2078,9 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
             except:
                 pass
         
-        # Parse explanations first (needed for table parsing)
-        explanations_dict = parse_explanations(html_content)
-        
-        # Parse Table I - Non-Derivative Securities (Form 5 specific structure)
-        table1_data = parse_table_i(html_content, is_form3=False, is_form4=False, is_form5=True, explanations_dict=explanations_dict)
-        result['nonDerivativeSecurities'] = table1_data
-        
-        # Parse Table II - Derivative Securities (Form 5 specific structure)
-        table2_data = parse_table_ii(html_content, is_form3=False, is_form4=False, is_form5=True, explanations_dict=explanations_dict)
-        result['derivativeSecurities'] = table2_data
-        
-        # Parse remarks only (explanations are now embedded in table rows)
-        misc_data = parse_remarks(html_content)
-        result['misc'] = misc_data
+        # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
+        # OpenSearch will handle full-text search on the raw HTML content stored in S3
+        # This simplifies the pipeline and avoids parsing errors from non-uniform forms
         
     except Exception as e:
         local_logger.error(f"❌ Error parsing Form 5 metadata: {e}")
@@ -2767,36 +2733,24 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"         - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
     local_logger.info(f"         - Signature Name: {parsed_data.get('signatureName', 'N/A')}")
     local_logger.info(f"         - Amendment: {parsed_data.get('amendment', False)}")
-    local_logger.info(f"         - Table I rows (Non-Derivative): {len(parsed_data.get('nonDerivativeSecurities', []))}")
-    if parsed_data.get('nonDerivativeSecurities'):
-        local_logger.info(f"            First row: {json.dumps(parsed_data['nonDerivativeSecurities'][0], default=str)[:200]}")
-    local_logger.info(f"         - Table II rows (Derivative): {len(parsed_data.get('derivativeSecurities', []))} {'⚠️ MISSING' if len(parsed_data.get('derivativeSecurities', [])) == 0 else '✅'}")
-    if parsed_data.get('derivativeSecurities'):
-        local_logger.info(f"            First row: {json.dumps(parsed_data['derivativeSecurities'][0], default=str)[:200]}")
-    local_logger.info(f"         - Misc/Explanations: {len(parsed_data.get('misc', {}))} entries {'⚠️ MISSING' if len(parsed_data.get('misc', {})) == 0 else '✅'}")
-    if parsed_data.get('misc'):
-        misc_preview = {k: str(v)[:100] for k, v in list(parsed_data['misc'].items())[:3]}
-        local_logger.info(f"            Preview: {json.dumps(misc_preview, default=str)[:300]}")
+    local_logger.info(f"         - Filing Type: {parsed_data.get('filingType', 'N/A')}")
+    local_logger.info(f"         - Relationship Types: {parsed_data.get('relationshipTypes', 'N/A')}")
     
-    # Print critical missing fields to console for immediate visibility
+    # Print critical missing GSI fields to console for immediate visibility
     print(f"   ✅ Parsing complete in {parse_duration:.2f}s:", flush=True)
-    missing_fields = []
+    missing_gsi_fields = []
     if not parsed_data.get('address'):
-        missing_fields.append('address')
+        missing_gsi_fields.append('address')
     if not parsed_data.get('issuerName'):
-        missing_fields.append('issuerName')
+        missing_gsi_fields.append('issuerName')
     if not parsed_data.get('relationship'):
-        missing_fields.append('relationship')
+        missing_gsi_fields.append('relationship')
     if not parsed_data.get('eventDate'):
-        missing_fields.append('eventDate')
-    if len(parsed_data.get('derivativeSecurities', [])) == 0:
-        missing_fields.append('derivativeSecurities')
-    if len(parsed_data.get('misc', {})) == 0:
-        missing_fields.append('misc')
-    if missing_fields:
-        print(f"      ⚠️ MISSING FIELDS: {', '.join(missing_fields)}", flush=True)
+        missing_gsi_fields.append('eventDate')
+    if missing_gsi_fields:
+        print(f"      ⚠️ MISSING GSI FIELDS: {', '.join(missing_gsi_fields)}", flush=True)
     else:
-        print(f"      ✅ All critical fields extracted successfully", flush=True)
+        print(f"      ✅ All critical GSI fields extracted successfully", flush=True)
     
     # Check for critical missing fields (for validation)
     critical_missing = []
@@ -2853,16 +2807,44 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"      ✅ DynamoDB client created, accessing table: {dynamodb_table_name}")
         
         # Convert to DynamoDB format
-        # Store all fields, including None/empty values, so columns are visible in the table
+        # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipTypes, relationshipAdditionalText, amended, amendment, amendedTradeId, politician)
+        # OpenSearch handles full-text search on HTML content
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
-        # GSI key fields: formType, reportingPersonName (was 'name'), address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
+        # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
         gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
         
-        local_logger.info(f"      🔄 Converting to DynamoDB format...")
+        # Fields to store in DynamoDB (GSI fields + essential metadata)
+        fields_to_store = {
+            'tradeId',  # Primary key
+            'formS3Key',  # S3 key for document retrieval
+            'formType',  # GSI
+            'reportingPersonName',  # GSI
+            'address',  # GSI
+            'eventDate',  # GSI
+            'reportingDate',  # GSI
+            'issuerName',  # GSI
+            'tickerSymbol',  # GSI
+            'relationship',  # GSI
+            'politician',  # GSI
+            'signatureName',  # Basic metadata
+            'filingType',  # Basic metadata
+            'relationshipTypes',  # Basic metadata
+            'relationshipAdditionalText',  # Basic metadata
+            'amended',  # Basic metadata
+            'amendment',  # Basic metadata
+            'amendedTradeId'  # Basic metadata
+        }
+        
+        local_logger.info(f"      🔄 Converting to DynamoDB format (simplified: GSI fields + essential metadata only)...")
         dynamodb_item = {}
-        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0, 'null_fields': 0, 'gsi_omitted': 0}
+        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0, 'null_fields': 0, 'gsi_omitted': 0, 'filtered_out': 0}
         
         for key, value in parsed_data.items():
+            # Skip fields not in our simplified schema
+            if key not in fields_to_store:
+                conversion_stats['filtered_out'] += 1
+                local_logger.debug(f"         {key}: filtered out (not in simplified schema)")
+                continue
             try:
                 # Handle None values
                 if value is None:
@@ -2946,7 +2928,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                 # Store as null on error
                 dynamodb_item[key] = None
         
-        local_logger.info(f"      ✅ Conversion complete: {conversion_stats['converted']} converted, {conversion_stats['skipped']} skipped, {conversion_stats['errors']} errors")
+        local_logger.info(f"      ✅ Conversion complete: {conversion_stats['converted']} converted, {conversion_stats['filtered_out']} filtered out, {conversion_stats['gsi_omitted']} GSI keys omitted, {conversion_stats['errors']} errors")
         
         local_logger.info(f"      📦 DynamoDB Item Preview:")
         local_logger.info(f"         TradeId: {dynamodb_item.get('tradeId', 'N/A')}")
@@ -2982,7 +2964,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                 opensearch_index_start = datetime.now()
                 local_logger.info(f"      🔍 Indexing to OpenSearch...")
                 
-                # Prepare document for OpenSearch (flatten JSON fields for better searchability)
+                # Prepare document for OpenSearch
+                # Include GSI fields for filtering + full HTML content for full-text search
                 opensearch_doc = {
                     'tradeId': trade_id,
                     'formType': parsed_data.get('formType'),
@@ -3002,10 +2985,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                     'amended': parsed_data.get('amended', False),
                     'amendment': parsed_data.get('amendment', False),
                     'amendedTradeId': parsed_data.get('amendedTradeId'),
-                    # Include table data as JSON strings for full-text search
-                    'nonDerivativeSecurities': json.dumps(parsed_data.get('nonDerivativeSecurities', []), default=str) if parsed_data.get('nonDerivativeSecurities') else None,
-                    'derivativeSecurities': json.dumps(parsed_data.get('derivativeSecurities', []), default=str) if parsed_data.get('derivativeSecurities') else None,
-                    'misc': json.dumps(parsed_data.get('misc', {}), default=str) if parsed_data.get('misc') else None,
+                    # Include full HTML content for full-text search (AI agent can search this)
+                    'htmlContent': content_str,  # Full HTML content for OpenSearch full-text search
                     # Add timestamp for indexing
                     '@timestamp': datetime.now().isoformat()
                 }
