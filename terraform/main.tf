@@ -1767,7 +1767,8 @@ module "sec_filings_table" {
     { name = "issuerName", type = "S" },
     { name = "tickerSymbol", type = "S" },
     { name = "relationship", type = "S" },
-    { name = "politician", type = "N" }
+    { name = "politician", type = "N" },
+    { name = "amendmentDate", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -1830,6 +1831,14 @@ module "sec_filings_table" {
     {
       name            = "PoliticianReportingDateIndex"
       hash_key        = "politician"
+      range_key       = "reportingDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "AmendmentDateIndex"
+      hash_key        = "amendmentDate"
       range_key       = "reportingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity

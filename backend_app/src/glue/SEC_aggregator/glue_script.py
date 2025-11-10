@@ -1670,8 +1670,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         'relationshipAdditionalText': None,  # Additional text for Officer/Other
         'filingType': None,  # 'individual' or 'joint/group'
         'signatureName': None,
+        'amendmentDate': None,  # Amendment date if form is an amendment (GSI)
         # Note: nonDerivativeSecurities, derivativeSecurities, misc removed
-        # Note: amendment fields removed - can be determined via OpenSearch full-text search if needed
         # OpenSearch will handle full-text search on raw HTML content stored in S3
     }
     
@@ -2197,12 +2197,12 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     result = _parse_common_metadata(html_content, form_data, accepted_date_str, '3')
     
     try:
-        # Form 3 specific: Extract event date
-        # More flexible pattern to handle various HTML structures
+        # Form 3 specific: Extract event date (Field 2: "Date of Event Requiring Statement")
+        # Use field number for more specific matching
         event_date_patterns = [
-            r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'2\.\s*Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
             r'Date of Event Requiring Statement[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Event Requiring Statement[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
         event_date_match = None
@@ -2221,6 +2221,30 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
                 local_logger.warning(f"   ⚠️ Could not parse eventDate '{date_str}': {e}")
         else:
             local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
+        
+        # Form 3 specific: Extract amendment date (Field 5: "If Amendment, Date of Original Filed")
+        amendment_date_patterns = [
+            r'5\.\s*If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+        ]
+        
+        amendment_date_match = None
+        for pattern in amendment_date_patterns:
+            amendment_date_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if amendment_date_match:
+                break
+        
+        if amendment_date_match:
+            try:
+                date_str = amendment_date_match.group(1)
+                date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                result['amendmentDate'] = date_obj.strftime('%Y-%m-%d')
+                local_logger.info(f"   ✅ Extracted amendmentDate: {result['amendmentDate']}")
+            except Exception as e:
+                local_logger.warning(f"   ⚠️ Could not parse amendmentDate '{date_str}': {e}")
+        else:
+            result['amendmentDate'] = None
+            local_logger.info(f"   ℹ️ No amendment date found (form is not an amendment)")
         
         # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
         # OpenSearch will handle full-text search on the raw HTML content stored in S3
@@ -2250,12 +2274,12 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     result = _parse_common_metadata(html_content, form_data, accepted_date_str, '4')
     
     try:
-        # Form 4 specific: Extract event date
-        # More flexible pattern to handle various HTML structures
+        # Form 4 specific: Extract event date (Field 3: "Date of Earliest Transaction")
+        # Use field number for more specific matching
         event_date_patterns = [
-            r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'3\.\s*Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
             r'Date of Earliest Transaction[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Earliest Transaction[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
         event_date_match = None
@@ -2274,6 +2298,30 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
                 local_logger.warning(f"   ⚠️ Could not parse eventDate '{date_str}': {e}")
         else:
             local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
+        
+        # Form 4 specific: Extract amendment date (Field 4: "If Amendment, Date of Original Filed")
+        amendment_date_patterns = [
+            r'4\.\s*If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+        ]
+        
+        amendment_date_match = None
+        for pattern in amendment_date_patterns:
+            amendment_date_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if amendment_date_match:
+                break
+        
+        if amendment_date_match:
+            try:
+                date_str = amendment_date_match.group(1)
+                date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                result['amendmentDate'] = date_obj.strftime('%Y-%m-%d')
+                local_logger.info(f"   ✅ Extracted amendmentDate: {result['amendmentDate']}")
+            except Exception as e:
+                local_logger.warning(f"   ⚠️ Could not parse amendmentDate '{date_str}': {e}")
+        else:
+            result['amendmentDate'] = None
+            local_logger.info(f"   ℹ️ No amendment date found (form is not an amendment)")
         
         # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
         # OpenSearch will handle full-text search on the raw HTML content stored in S3
@@ -2303,12 +2351,12 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     result = _parse_common_metadata(html_content, form_data, accepted_date_str, '5')
     
     try:
-        # Form 5 specific: Extract event date (fiscal year end)
-        # More flexible pattern to handle various HTML structures
+        # Form 5 specific: Extract event date (Field 3: "Statement for Issuer's Fiscal Year Ended")
+        # Use field number for more specific matching
         event_date_patterns = [
-            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'3\.\s*Statement for Issuer\'s Fiscal Year Ended[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
             r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
         event_date_match = None
@@ -2327,6 +2375,30 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
                 local_logger.warning(f"   ⚠️ Could not parse eventDate '{date_str}': {e}")
         else:
             local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
+        
+        # Form 5 specific: Extract amendment date (Field 4: "If Amendment, Date of Original Filed")
+        amendment_date_patterns = [
+            r'4\.\s*If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+        ]
+        
+        amendment_date_match = None
+        for pattern in amendment_date_patterns:
+            amendment_date_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if amendment_date_match:
+                break
+        
+        if amendment_date_match:
+            try:
+                date_str = amendment_date_match.group(1)
+                date_obj = datetime.strptime(date_str, '%m/%d/%Y')
+                result['amendmentDate'] = date_obj.strftime('%Y-%m-%d')
+                local_logger.info(f"   ✅ Extracted amendmentDate: {result['amendmentDate']}")
+            except Exception as e:
+                local_logger.warning(f"   ⚠️ Could not parse amendmentDate '{date_str}': {e}")
+        else:
+            result['amendmentDate'] = None
+            local_logger.info(f"   ℹ️ No amendment date found (form is not an amendment)")
         
         # Note: Table parsing (nonDerivativeSecurities, derivativeSecurities, misc) removed
         # OpenSearch will handle full-text search on the raw HTML content stored in S3
@@ -2981,6 +3053,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"         - Relationship Additional: {parsed_data.get('relationshipAdditionalText', 'N/A')}")
     local_logger.info(f"         - Event Date: {parsed_data.get('eventDate', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('eventDate') else '✅'}")
     local_logger.info(f"         - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
+    local_logger.info(f"         - Amendment Date: {parsed_data.get('amendmentDate', 'N/A')}")
     local_logger.info(f"         - Signature Name: {parsed_data.get('signatureName', 'N/A')}")
     local_logger.info(f"         - Filing Type: {parsed_data.get('filingType', 'N/A')}")
     local_logger.info(f"         - Relationship Types: {parsed_data.get('relationshipTypes', 'N/A')}")
@@ -3057,14 +3130,12 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipTypes, relationshipAdditionalText, politician)
         # OpenSearch handles full-text search on HTML content
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
-        # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
+        # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship, amendmentDate
         # 
         # NOTE: Form-specific checkbox fields (e.g., noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported)
         # are NOT parsed or stored in DynamoDB. These fields are available in OpenSearch via the full htmlContent field
         # for the AI agent to search through. This keeps DynamoDB lightweight with only essential metadata for fast queries.
-        # 
-        # NOTE: Amendment fields removed - can be determined via OpenSearch full-text search if needed
-        gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
+        gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship', 'amendmentDate'}
         
         # Fields to store in DynamoDB (GSI fields + essential metadata)
         fields_to_store = {
@@ -3079,6 +3150,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             'tickerSymbol',  # GSI
             'relationship',  # GSI
             'politician',  # GSI
+            'amendmentDate',  # GSI (null if not an amendment)
             'signatureName',  # Basic metadata
             'filingType',  # Basic metadata
             'relationshipTypes',  # Basic metadata
@@ -3234,9 +3306,9 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                     'address': parsed_data.get('address'),
                     'signatureName': parsed_data.get('signatureName'),
                     'politician': parsed_data.get('politician', 0),  # Use 0/1 to match DynamoDB format
+                    'amendmentDate': parsed_data.get('amendmentDate'),  # Amendment date if form is an amendment
                     'formS3Key': s3_key,
                     # Include full HTML content for full-text search (AI agent can search this)
-                    # Note: Amendment information available in htmlContent if needed
                     'htmlContent': content_str,  # Full HTML content for OpenSearch full-text search
                     # Add timestamp for indexing
                     '@timestamp': datetime.now().isoformat()
