@@ -299,7 +299,7 @@ def load_politician_list() -> List[Dict[str, Any]]:
         raise
 
 
-def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4', '5'], is_backdate_mode: bool = False) -> List[Dict[str, Any]]:
+def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4', '5']) -> List[Dict[str, Any]]:
     """
     Fetch SEC forms using Daily Index Files (recommended approach)
     
@@ -310,16 +310,21 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     This approach is more reliable than browse-edgar HTML scraping and less likely to be blocked.
     
     Args:
-        target_date: Target date in YYYY-MM-DD format (for normal mode) or backdate (for backdate mode)
+        target_date: Target date in YYYY-MM-DD format (must match exactly)
         form_types: List of form types to fetch (default: ['3', '4', '5'])
-        is_backdate_mode: If True, fetch all records from today back to target_date (multiple index files).
-                         If False, only fetch records matching target_date exactly (single index file).
     
     Returns:
         List of form metadata dicts with keys: form_type, cik, accession_number, filename, filing_date
     """
     all_forms = []
     target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+    
+    # Filter out future dates (files won't exist yet)
+    today = datetime.now().date()
+    if target_date_obj > today:
+        logger.warning(f"   ⚠️ Target date {target_date} is in the future, skipping")
+        print(f"   ⚠️ Target date {target_date} is in the future, skipping", flush=True)
+        return []
     
     session = requests.Session()
     # Use browser-like headers to avoid 403 Forbidden errors
@@ -332,28 +337,10 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
         'Referer': 'https://www.sec.gov/',
     })
     
-    # Determine which dates to fetch
-    dates_to_fetch = []
-    if is_backdate_mode:
-        # Backdate mode: fetch from today back to target_date
-        # Stop when we encounter a date before target_date (the backdate cutoff)
-        current_date = datetime.now().date()
-        date_iter = current_date
-        while date_iter >= target_date_obj:
-            dates_to_fetch.append(date_iter)
-            date_iter -= timedelta(days=1)
-    else:
-        # Normal mode: fetch only target_date
-        dates_to_fetch = [target_date_obj]
-    
-    # Filter out future dates (files won't exist yet)
-    today = datetime.now().date()
-    dates_to_fetch = [d for d in dates_to_fetch if d <= today]
-    
-    # Note: We don't pre-filter weekends because:
-    # 1. Some filings might be filed on weekends (rare but possible)
-    # 2. We'll handle 403/404 errors gracefully when fetching
-    # 3. It's better to try and get a clear response than assume
+    date_str = target_date_obj.strftime('%Y-%m-%d')
+    date_str_idx = target_date_obj.strftime('%Y%m%d')
+    year = target_date_obj.year
+    quarter = (target_date_obj.month - 1) // 3 + 1
     
     logger.info("")
     logger.info(f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}")
@@ -361,206 +348,179 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     
     fetch_start = datetime.now()
     
-    # Fetch forms from each date's index file
-    for date_to_fetch in dates_to_fetch:
-        date_str = date_to_fetch.strftime('%Y-%m-%d')
-        date_str_idx = date_to_fetch.strftime('%Y%m%d')
-        year = date_to_fetch.year
-        quarter = (date_to_fetch.month - 1) // 3 + 1
+    # Fetch forms from the single date's index file
+    date_to_fetch = target_date_obj
+    # Daily index file URL
+    index_url = f"{SEC_BASE_URL}/Archives/edgar/daily-index/{year}/QTR{quarter}/master.{date_str_idx}.idx"
+    
+    logger.info(f"📥 Fetching daily index file for {date_str}...")
+    print(f"📥 Fetching daily index file for {date_str}...", flush=True)
+    
+    try:
+        # Add delay to avoid rate limiting
+        time.sleep(0.3)
         
-        # Daily index file URL
-        index_url = f"{SEC_BASE_URL}/Archives/edgar/daily-index/{year}/QTR{quarter}/master.{date_str_idx}.idx"
+        # Retry logic for 403 errors (SEC may temporarily block rapid requests)
+        max_retries = 3
+        retry_delay = 1.0
+        response = None
         
-        logger.info(f"📥 Fetching daily index file for {date_str}...")
-        print(f"📥 Fetching daily index file for {date_str}...", flush=True)
-        
-        try:
-            # Add delay to avoid rate limiting (increased for backdate mode)
-            # Use slightly longer delay for backdate mode since we're fetching multiple files
-            delay = 0.5 if is_backdate_mode else 0.3
-            time.sleep(delay)
-            
-            # Retry logic for 403 errors (SEC may temporarily block rapid requests)
-            max_retries = 3
-            retry_delay = 1.0
-            response = None
-            
-            for attempt in range(max_retries):
-                try:
-                    # Use session with pre-configured headers (includes User-Agent)
-                    # The session already has User-Agent and other headers set
-                    response = session.get(index_url, timeout=30)
-                    
-                    if response.status_code == 200:
-                        break  # Success, exit retry loop
-                    elif response.status_code == 403:
-                        # SEC returns 403 for non-existent index files (weekends/holidays/future dates)
-                        # Check if it's a weekend first
-                        weekday = date_to_fetch.weekday()  # 0=Monday, 6=Sunday
-                        if weekday >= 5:  # Saturday (5) or Sunday (6)
-                            logger.info(f"   ⏭️ Skipping {date_str} (weekend - no filings)")
-                            print(f"   ⏭️ Skipping {date_str} (weekend - no filings)", flush=True)
-                            response = None  # Mark as skipped
-                            break
-                        elif attempt < max_retries - 1:
-                            # Might be temporary rate limit, retry
-                            wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
-                            logger.warning(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...")
-                            print(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...", flush=True)
-                            time.sleep(wait_time)
-                            continue
-                        else:
-                            # Last attempt failed - likely no index file exists (holiday or not available yet)
-                            logger.info(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)")
-                            print(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)", flush=True)
-                            response = None  # Mark as skipped
-                            break
-                    elif response.status_code == 404:
-                        logger.info(f"   ⏭️ Skipping {date_str} (404 - no index file, may be weekend/holiday)")
-                        print(f"   ⏭️ Skipping {date_str} (404 - no index file, may be weekend/holiday)", flush=True)
+        for attempt in range(max_retries):
+            try:
+                # Use session with pre-configured headers (includes User-Agent)
+                # The session already has User-Agent and other headers set
+                response = session.get(index_url, timeout=30)
+                
+                if response.status_code == 200:
+                    break  # Success, exit retry loop
+                elif response.status_code == 403:
+                    # SEC returns 403 for non-existent index files (weekends/holidays/future dates)
+                    # Check if it's a weekend first
+                    weekday = date_to_fetch.weekday()  # 0=Monday, 6=Sunday
+                    if weekday >= 5:  # Saturday (5) or Sunday (6)
+                        logger.info(f"   ⏭️ Skipping {date_str} (weekend - no filings)")
+                        print(f"   ⏭️ Skipping {date_str} (weekend - no filings)", flush=True)
                         response = None  # Mark as skipped
-                        break  # 404 is expected for weekends/holidays, don't retry
-                    else:
-                        response.raise_for_status()
-                except requests.exceptions.RequestException as e:
-                    if attempt < max_retries - 1:
-                        wait_time = retry_delay * (2 ** attempt)
-                        logger.warning(f"   ⚠️ Request error for {date_str} (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait_time:.1f}s...")
-                        print(f"   ⚠️ Request error for {date_str} (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait_time:.1f}s...", flush=True)
+                        break
+                    elif attempt < max_retries - 1:
+                        # Might be temporary rate limit, retry
+                        wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                        logger.warning(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...")
+                        print(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...", flush=True)
                         time.sleep(wait_time)
                         continue
                     else:
-                        raise
-            
-            if response is None:
-                logger.error(f"   ❌ Failed to fetch index file for {date_str} after {max_retries} attempts")
-                print(f"   ❌ Failed to fetch index file for {date_str} after {max_retries} attempts", flush=True)
+                        # Last attempt failed - likely no index file exists (holiday or not available yet)
+                        logger.info(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)")
+                        print(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)", flush=True)
+                        response = None  # Mark as skipped
+                        break
+                elif response.status_code == 404:
+                    logger.info(f"   ⏭️ Skipping {date_str} (404 - no index file, may be weekend/holiday)")
+                    print(f"   ⏭️ Skipping {date_str} (404 - no index file, may be weekend/holiday)", flush=True)
+                    response = None  # Mark as skipped
+                    break  # 404 is expected for weekends/holidays, don't retry
+                else:
+                    response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = retry_delay * (2 ** attempt)
+                    logger.warning(f"   ⚠️ Request error for {date_str} (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait_time:.1f}s...")
+                    print(f"   ⚠️ Request error for {date_str} (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait_time:.1f}s...", flush=True)
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise
+        
+        if response is None:
+            logger.info(f"   ⏭️ Skipping {date_str} (no index file available)")
+            print(f"   ⏭️ Skipping {date_str} (no index file available)", flush=True)
+            return []
+        
+        if response.status_code != 200:
+            logger.error(f"   ❌ Unexpected status code {response.status_code} for {date_str}")
+            print(f"   ❌ Unexpected status code {response.status_code} for {date_str}", flush=True)
+            return []
+        
+        # Parse the index file
+        # Format: CIK|Company Name|Form Type|Date Filed|File Name
+        content = response.text
+        lines = content.split('\n')
+        
+        # Find the header line and data start
+        header_found = False
+        data_start_idx = 0
+        
+        for idx, line in enumerate(lines):
+            if line.startswith('CIK|'):
+                header_found = True
+                data_start_idx = idx + 1
+                break
+        
+        if not header_found:
+            logger.warning(f"   ⚠️ No header line found in index file for {date_str}")
+            return []
+        
+        # Parse data lines
+        forms_for_date = []
+        form_type_nums = [ft.replace('form', '') for ft in form_types]
+        
+        for line in lines[data_start_idx:]:
+            if not line.strip():
                 continue
             
-            if response.status_code == 404:
-                continue  # Already logged, skip to next date
-            
-            # Parse the index file
-            # Format: CIK|Company Name|Form Type|Date Filed|File Name
-            content = response.text
-            lines = content.split('\n')
-            
-            # Find the header line and data start
-            header_found = False
-            data_start_idx = 0
-            
-            for idx, line in enumerate(lines):
-                if line.startswith('CIK|'):
-                    header_found = True
-                    data_start_idx = idx + 1
-                    break
-            
-            if not header_found:
-                logger.warning(f"   ⚠️ No header line found in index file for {date_str}")
+            # Parse pipe-delimited format: CIK|Company Name|Form Type|Date Filed|File Name
+            parts = line.split('|')
+            if len(parts) < 5:
                 continue
             
-            # Parse data lines
-            forms_for_date = []
-            form_type_nums = [ft.replace('form', '') for ft in form_types]
-            first_date_in_batch = None  # Track first filing date in this batch for backdate mode
-            
-            for line in lines[data_start_idx:]:
-                if not line.strip():
-                    continue
+            try:
+                cik = parts[0].strip()
+                company_name = parts[1].strip()
+                form_type_raw = parts[2].strip()
+                date_filed = parts[3].strip()
+                filename = parts[4].strip()
                 
-                # Parse pipe-delimited format: CIK|Company Name|Form Type|Date Filed|File Name
-                parts = line.split('|')
-                if len(parts) < 5:
-                    continue
+                # Check if this is a Form 3, 4, or 5
+                # Be strict: only match exact form types (3, 4, 5) or "FORM 3", "FORM 4", "FORM 5"
+                # Don't match numbers from other form types like "N-MFP3", "10-K", "8-K", etc.
+                form_num = None
                 
-                try:
-                    cik = parts[0].strip()
-                    company_name = parts[1].strip()
-                    form_type_raw = parts[2].strip()
-                    date_filed = parts[3].strip()
-                    filename = parts[4].strip()
-                    
-                    # Check if this is a Form 3, 4, or 5
-                    # Be strict: only match exact form types (3, 4, 5) or "FORM 3", "FORM 4", "FORM 5"
-                    # Don't match numbers from other form types like "N-MFP3", "10-K", "8-K", etc.
-                    form_num = None
-                    
-                    # Try exact match first (e.g., "3", "4", "5")
-                    if form_type_raw.strip() in form_type_nums:
-                        form_num = form_type_raw.strip()
-                    else:
-                        # Try "FORM 3", "FORM 4", "FORM 5" pattern (case insensitive)
-                        form_match = re.search(r'\bFORM\s+([345])\b', form_type_raw, re.IGNORECASE)
-                        if form_match:
-                            form_num = form_match.group(1)
-                    
-                    if form_num and form_num in form_type_nums:
-                        # Parse filing date for comparison
-                        try:
-                            filing_date_obj = datetime.strptime(date_filed, '%Y%m%d').date()
-                            filing_date_str = filing_date_obj.strftime('%Y-%m-%d')
-                            
-                            # Track first date in batch for backdate mode
-                            if is_backdate_mode and first_date_in_batch is None:
-                                first_date_in_batch = filing_date_obj
-                            
-                            # In backdate mode, only include forms with filing_date >= target_date
-                            # In normal mode, only include forms matching target_date exactly
-                            if is_backdate_mode:
-                                if filing_date_obj < target_date_obj:
-                                    # Skip forms filed before backdate
-                                    continue
-                            else:
-                                # Normal mode: must match exactly
-                                if date_filed != date_str_idx:
-                                    continue
-                            
-                            # Extract accession number from filename
-                            # Format: {accession}-{form_type}.txt or {accession}-index.htm
-                            accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
-                            if accession_match:
-                                accession_dashed = accession_match.group(1)
-                                accession_clean = accession_dashed.replace('-', '')
-                                
-                                form_data = {
-                                    'cik': cik,
-                                    'accession_number': accession_clean,  # Without dashes (matching downloader input format)
-                                    'form_type': f'form{form_num}',
-                                    'filing_date': filing_date_str,  # Use parsed date in YYYY-MM-DD format
-                                    'company_name': company_name,
-                                    'filename': filename
-                                }
-                                forms_for_date.append(form_data)
-                        except (ValueError, TypeError):
-                            # If date parsing fails, skip this form
+                # Try exact match first (e.g., "3", "4", "5")
+                if form_type_raw.strip() in form_type_nums:
+                    form_num = form_type_raw.strip()
+                else:
+                    # Try "FORM 3", "FORM 4", "FORM 5" pattern (case insensitive)
+                    form_match = re.search(r'\bFORM\s+([345])\b', form_type_raw, re.IGNORECASE)
+                    if form_match:
+                        form_num = form_match.group(1)
+                
+                if form_num and form_num in form_type_nums:
+                    # Parse filing date for comparison
+                    try:
+                        filing_date_obj = datetime.strptime(date_filed, '%Y%m%d').date()
+                        filing_date_str = filing_date_obj.strftime('%Y-%m-%d')
+                        
+                        # Only include forms matching target_date exactly
+                        if date_filed != date_str_idx:
                             continue
-                except Exception:
-                    continue
-            
-            all_forms.extend(forms_for_date)
-            
-            if forms_for_date:
-                logger.info(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}")
-                print(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}", flush=True)
-            
-            # In backdate mode, check if first date in batch is before target_date
-            # If so, stop fetching (we've reached the cutoff)
-            if is_backdate_mode and first_date_in_batch is not None:
-                if first_date_in_batch < target_date_obj:
-                    logger.info(f"   ⏹️ Stopping fetch: first date in batch ({first_date_in_batch}) is before backdate {target_date}")
-                    print(f"   ⏹️ Stopping fetch: first date in batch ({first_date_in_batch}) is before backdate {target_date}", flush=True)
-                    break
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"   ❌ Error fetching index file for {date_str}: {e}")
-            print(f"   ❌ Error fetching index file for {date_str}: {e}", flush=True)
-            continue
-        except Exception as e:
-            logger.error(f"   ❌ Unexpected error processing index file for {date_str}: {e}")
-            print(f"   ❌ Unexpected error processing index file for {date_str}: {e}", flush=True)
-            import traceback
-            logger.error(f"   Traceback: {traceback.format_exc()}")
-            continue
+                        
+                        # Extract accession number from filename
+                        # Format: {accession}-{form_type}.txt or {accession}-index.htm
+                        accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
+                        if accession_match:
+                            accession_dashed = accession_match.group(1)
+                            accession_clean = accession_dashed.replace('-', '')
+                            
+                            form_data = {
+                                'cik': cik,
+                                'accession_number': accession_clean,  # Without dashes (matching downloader input format)
+                                'form_type': f'form{form_num}',
+                                'filing_date': filing_date_str,  # Use parsed date in YYYY-MM-DD format
+                                'company_name': company_name,
+                                'filename': filename
+                            }
+                            forms_for_date.append(form_data)
+                    except (ValueError, TypeError):
+                        # If date parsing fails, skip this form
+                        continue
+            except Exception:
+                continue
+        
+        all_forms.extend(forms_for_date)
+        
+        if forms_for_date:
+            logger.info(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}")
+            print(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}", flush=True)
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"   ❌ Error fetching index file for {date_str}: {e}")
+        print(f"   ❌ Error fetching index file for {date_str}: {e}", flush=True)
+    except Exception as e:
+        logger.error(f"   ❌ Unexpected error processing index file for {date_str}: {e}")
+        print(f"   ❌ Unexpected error processing index file for {date_str}: {e}", flush=True)
+        import traceback
+        logger.error(f"   Traceback: {traceback.format_exc()}")
     
     fetch_duration = (datetime.now() - fetch_start).total_seconds()
     
@@ -3650,220 +3610,192 @@ try:
     logger.info(f"✅ Stage 1 Complete: Loaded {len(politicians)} politicians in {stage1_duration:.2f} seconds")
     logger.info("=" * 80)
     
-    # Step 2: Fetch SEC forms with pagination
+    # Helper function to process forms for a single date
+    def process_single_date(date_str: str) -> Dict[str, Any]:
+        """Process all forms for a single date: fetch, then process with Spark"""
+        logger.info("")
+        logger.info("=" * 80)
+        logger.info(f"📋 Processing date: {date_str}")
+        logger.info("=" * 80)
+        
+        # Step 2a: Fetch forms for this date
+        stage2_start = datetime.now()
+        forms = fetch_sec_forms_paginated(date_str)
+        stage2_duration = (datetime.now() - stage2_start).total_seconds()
+        
+        if not forms:
+            logger.info(f"   ⏭️ No forms found for {date_str}, skipping processing")
+            print(f"   ⏭️ No forms found for {date_str}, skipping processing", flush=True)
+            return {
+                'date': date_str,
+                'total_forms': 0,
+                'successful_stored': 0,
+                'failed_stored': 0,
+                'skipped_date_mismatch': 0,
+                'skipped_download_failed': 0,
+                'skipped_unsupported_type': 0,
+                'politician_matches': 0,
+                'no_politician_matches': 0,
+                'results': []
+            }
+        
+        logger.info(f"   ✅ Fetched {len(forms)} forms for {date_str} in {stage2_duration:.2f} seconds")
+        print(f"   ✅ Fetched {len(forms)} forms for {date_str} in {stage2_duration:.2f} seconds", flush=True)
+        
+        # Step 2b: Process forms with Spark
+        logger.info("")
+        logger.info(f"   📊 Processing {len(forms)} forms for {date_str} using Spark")
+        print(f"   📊 Processing {len(forms)} forms for {date_str} using Spark", flush=True)
+        stage3_start = datetime.now()
+        
+        # Broadcast necessary variables
+        politicians_broadcast = sc.broadcast(politicians)
+        target_date_broadcast = sc.broadcast(date_str)
+        s3_bucket_broadcast = sc.broadcast(s3_bucket)
+        dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
+        opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
+        opensearch_index_broadcast = sc.broadcast(opensearch_index)
+        
+        # Process each form (download, parse, check match, store)
+        def process_form_wrapper(form_data):
+            import logging
+            import traceback
+            local_logger = logging.getLogger()
+            local_logger.setLevel(logging.INFO)
+            
+            try:
+                politicians_local = politicians_broadcast.value
+                target_date_local = target_date_broadcast.value
+                s3_bucket_local = s3_bucket_broadcast.value
+                dynamodb_table_local = dynamodb_table_broadcast.value
+                opensearch_endpoint_local = opensearch_endpoint_broadcast.value
+                opensearch_index_local = opensearch_index_broadcast.value
+                
+                cik = form_data.get('cik', 'unknown')
+                accession = form_data.get('accession_number', 'unknown')
+                
+                result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, 
+                                     dynamodb_table_local, opensearch_endpoint_local, opensearch_index_local)
+                
+                return result
+            except Exception as e:
+                local_logger.error(f"❌ FATAL ERROR processing form: {e}")
+                return {'success': False, 'error': str(e)}
+        
+        # Create RDD and process
+        forms_rdd = sc.parallelize(forms)
+        results_rdd = forms_rdd.map(process_form_wrapper)
+        results = results_rdd.collect()
+        
+        # Clean up broadcast variables
+        politicians_broadcast.destroy()
+        target_date_broadcast.destroy()
+        s3_bucket_broadcast.destroy()
+        dynamodb_table_broadcast.destroy()
+        opensearch_endpoint_broadcast.destroy()
+        opensearch_index_broadcast.destroy()
+        
+        stage3_duration = (datetime.now() - stage3_start).total_seconds()
+        
+        # Calculate statistics
+        total_forms_processed = len(forms)
+        successful_stored = builtins.sum(1 for r in results if r.get('success'))
+        failed_stored = builtins.sum(1 for r in results if not r.get('success') and not r.get('skipped'))
+        skipped_date_mismatch = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'date_mismatch')
+        skipped_download_failed = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'download_failed')
+        skipped_unsupported_type = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'unsupported_file_type')
+        politician_matches = builtins.sum(1 for r in results if r.get('politicianMatch'))
+        no_politician_matches = successful_stored - politician_matches
+        
+        logger.info(f"   ✅ Completed processing {date_str}: {successful_stored}/{total_forms_processed} stored in {stage3_duration:.2f} seconds")
+        print(f"   ✅ Completed processing {date_str}: {successful_stored}/{total_forms_processed} stored in {stage3_duration:.2f} seconds", flush=True)
+        
+        return {
+            'date': date_str,
+            'total_forms': total_forms_processed,
+            'successful_stored': successful_stored,
+            'failed_stored': failed_stored,
+            'skipped_date_mismatch': skipped_date_mismatch,
+            'skipped_download_failed': skipped_download_failed,
+            'skipped_unsupported_type': skipped_unsupported_type,
+            'politician_matches': politician_matches,
+            'no_politician_matches': no_politician_matches,
+            'results': results
+        }
+    
+    # Step 2 & 3: Fetch and process forms (sequential batches for backdate mode)
     logger.info("")
     logger.info("=" * 80)
-    logger.info("📋 STAGE 2: FETCHING SEC FORMS")
+    logger.info("📋 STAGE 2 & 3: FETCHING AND PROCESSING SEC FORMS")
     logger.info("=" * 80)
+    
+    all_results = []
+    all_date_stats = []
+    
     if is_backdate_mode:
-        search_msg = f"🔍 BACKDATE MODE: Fetching all Forms 3, 4, 5 from {target_date} onwards (until first date in batch is before {target_date})"
+        # Backdate mode: process each date sequentially
+        logger.info(f"🔍 BACKDATE MODE: Processing dates from today back to {target_date}")
+        print(f"🔍 BACKDATE MODE: Processing dates from today back to {target_date}", flush=True)
+        
+        target_date_obj = datetime.strptime(target_date, '%Y-%m-%d').date()
+        current_date = datetime.now().date()
+        date_iter = current_date
+        
+        while date_iter >= target_date_obj:
+            date_str = date_iter.strftime('%Y-%m-%d')
+            date_stats = process_single_date(date_str)
+            all_date_stats.append(date_stats)
+            all_results.extend(date_stats['results'])
+            date_iter -= timedelta(days=1)
     else:
-        search_msg = f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}"
-    logger.info(search_msg)
-    print(search_msg, flush=True)
-    stage2_start = datetime.now()
-    forms = fetch_sec_forms_paginated(target_date, is_backdate_mode=is_backdate_mode)
-    stage2_duration = (datetime.now() - stage2_start).total_seconds()
-    stage2_msg = f"✅ Stage 2 Complete: Fetched {len(forms)} forms in {stage2_duration:.2f} seconds"
-    logger.info(stage2_msg)
-    print(stage2_msg, flush=True)
+        # Normal mode: process single date
+        date_stats = process_single_date(target_date)
+        all_date_stats.append(date_stats)
+        all_results = date_stats['results']
     
-    # Log form type breakdown
-    form_type_counts = {}
-    for form in forms:
-        form_type = form.get('form_type', 'unknown')
-        form_type_counts[form_type] = form_type_counts.get(form_type, 0) + 1
+    # Aggregate statistics across all dates
+    total_forms_processed = builtins.sum(s['total_forms'] for s in all_date_stats)
+    successful_stored = builtins.sum(s['successful_stored'] for s in all_date_stats)
+    failed_stored = builtins.sum(s['failed_stored'] for s in all_date_stats)
+    skipped_date_mismatch = builtins.sum(s['skipped_date_mismatch'] for s in all_date_stats)
+    skipped_download_failed = builtins.sum(s['skipped_download_failed'] for s in all_date_stats)
+    skipped_unsupported_type = builtins.sum(s['skipped_unsupported_type'] for s in all_date_stats)
+    politician_matches = builtins.sum(s['politician_matches'] for s in all_date_stats)
+    no_politician_matches = builtins.sum(s['no_politician_matches'] for s in all_date_stats)
     
-    breakdown_header = "Form Type Breakdown:"
-    logger.info(breakdown_header)
-    print(breakdown_header, flush=True)
-    
-    for form_type, count in sorted(form_type_counts.items()):
-        type_msg = f"   - {form_type}: {count}"
-        logger.info(type_msg)
-        print(type_msg, flush=True)
-    
-    # Log preview of fetched files (first 10)
-    preview_header = f"📋 Preview of Fetched Files (showing first {builtins.min(10, len(forms))} of {len(forms)}):"
-    logger.info(preview_header)
-    print(preview_header, flush=True)
-    
-    for idx, form in enumerate(forms[:10], 1):
-        form_msg = (f"   {idx}. CIK={form.get('cik', 'N/A')}, "
-                   f"Accession={form.get('accession_number', 'N/A')[:20]}, "
-                   f"Type={form.get('form_type', 'N/A')}, "
-                   f"FilingDate={form.get('filing_date', 'N/A')}, "
-                   f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
-        logger.info(form_msg)
-        print(form_msg, flush=True)
-    
-    if len(forms) > 10:
-        more_msg = f"   ... ({len(forms) - 10} more files)"
-        logger.info(more_msg)
-        print(more_msg, flush=True)
-    
-    separator = "=" * 80
-    logger.info(separator)
-    print(separator, flush=True)
-    
-    # Step 3: Process forms in parallel using Spark
+    # Log summary across all dates
     logger.info("")
     logger.info("=" * 80)
-    logger.info("📊 STAGE 3: PROCESSING FORMS")
+    logger.info("📊 SUMMARY ACROSS ALL DATES")
     logger.info("=" * 80)
-    logger.info(f"🔄 Processing {len(forms)} forms in parallel using Spark")
-    logger.info(f"   This stage will: download, parse metadata, check politician match, and store to DynamoDB")
-    stage3_start = datetime.now()
+    for date_stat in all_date_stats:
+        if date_stat['total_forms'] > 0:
+            logger.info(f"   {date_stat['date']}: {date_stat['successful_stored']}/{date_stat['total_forms']} stored")
+            print(f"   {date_stat['date']}: {date_stat['successful_stored']}/{date_stat['total_forms']} stored", flush=True)
     
-    # Broadcast necessary variables to avoid serialization issues
-    # Broadcast variables are sent once to each worker, not serialized with each task
-    politicians_broadcast = sc.broadcast(politicians)
-    target_date_broadcast = sc.broadcast(target_date)
-    s3_bucket_broadcast = sc.broadcast(s3_bucket)
-    dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
-    opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
-    opensearch_index_broadcast = sc.broadcast(opensearch_index)
-    
-    # Process all forms (no limit)
-    logger.info(f"   📊 Processing all {len(forms)} forms for the target date(s)")
-    print(f"   📊 Processing all {len(forms)} forms for the target date(s)", flush=True)
-    
-    # Create RDD from forms list
-    forms_rdd = sc.parallelize(forms)
-    
-    # Track processing statistics
-    processing_stats = {
-        'total_forms': len(forms),
-        'successful_stored': 0,
-        'failed_stored': 0,
-        'skipped_date_mismatch': 0,
-        'skipped_download_failed': 0,
-        'skipped_unsupported_type': 0,
-        'politician_matches': 0,
-        'no_politician_matches': 0
-    }
-    
-    # Process each form (download, parse, check match, store)
-    # Use a standalone function that doesn't capture module-level variables
-    def process_form_wrapper(form_data):
-        # Import inside function to avoid capturing module-level state
-        import logging
-        import traceback
-        
-        # Get logger locally - don't use module-level logger
-        local_logger = logging.getLogger()
-        local_logger.setLevel(logging.INFO)
-        
-        try:
-            # Get broadcasted values
-            politicians_local = politicians_broadcast.value
-            target_date_local = target_date_broadcast.value
-            s3_bucket_local = s3_bucket_broadcast.value
-            dynamodb_table_local = dynamodb_table_broadcast.value
-            opensearch_endpoint_local = opensearch_endpoint_broadcast.value
-            opensearch_index_local = opensearch_index_broadcast.value
-            
-            cik = form_data.get('cik', 'unknown')
-            accession = form_data.get('accession_number', 'unknown')
-            
-            local_logger.info(f"🔄 Starting processing: Form {form_data.get('form_type', 'unknown')} - CIK={cik}, Accession={accession}")
-            
-            # Call process_form with explicit parameters from broadcast
-            # Note: process_form will create its own boto3 clients inside, so no SSLContext issues
-            # process_form now stores directly to DynamoDB and returns a result dict
-            result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, dynamodb_table_local, 
-                                 opensearch_endpoint_local, opensearch_index_local)
-            
-            if result.get('success'):
-                msg = f"✅ Form completed: CIK={cik}, TradeId={result.get('tradeId', 'N/A')}, PoliticianMatch={result.get('politicianMatch', False)}"
-                local_logger.info(msg)
-                print(msg, flush=True)
-            elif result.get('skipped'):
-                reason = result.get('reason', 'unknown')
-                msg = f"⏭️ Form skipped: CIK={cik}, Accession={accession}, Reason={reason}"
-                local_logger.info(msg)
-                print(msg, flush=True)
-                if reason == 'date_mismatch':
-                    detail = f"   Details: Filing date doesn't match target date"
-                    local_logger.warning(detail)
-                    print(detail, flush=True)
-                elif reason == 'download_failed':
-                    detail = f"   Details: Could not download form from SEC website"
-                    local_logger.warning(detail)
-                    print(detail, flush=True)
-                elif reason == 'unsupported_file_type':
-                    detail = f"   Details: File type not supported (only HTML supported currently)"
-                    local_logger.warning(detail)
-                    print(detail, flush=True)
-            else:
-                error_msg = result.get('error', 'unknown')
-                msg = f"❌ Form failed: CIK={cik}, Accession={accession}, Error={error_msg}"
-                local_logger.warning(msg)
-                print(msg, flush=True)
-            
-            return result
-        except Exception as e:
-            cik = form_data.get('cik', 'unknown')
-            accession = form_data.get('accession_number', 'unknown')
-            local_logger.error(f"❌ FATAL ERROR processing form (CIK={cik}, Accession={accession}): {e}")
-            local_logger.error(f"   Traceback: {traceback.format_exc()}")
-            return {'success': False, 'error': str(e)}
-    
-    logger.info(f"   Starting Spark parallel processing...")
-    results_rdd = forms_rdd.map(process_form_wrapper)
-    results = results_rdd.collect()
-    logger.info(f"   ✅ Spark processing completed, collecting results...")
-    print(f"   ✅ Spark processing completed, collecting results...", flush=True)
+    logger.info("")
+    logger.info(f"   Total across all dates: {successful_stored}/{total_forms_processed} stored")
+    print(f"   Total across all dates: {successful_stored}/{total_forms_processed} stored", flush=True)
     
     # Track S3 keys to detect collisions
     s3_keys_generated = []
-    for result in results:
+    for result in all_results:
         if result.get('success'):
             s3_key = result.get('s3_key') or result.get('formS3Key')
             if s3_key:
                 s3_keys_generated.append(s3_key)
     
-    # Log S3 key summary to detect collisions
     if s3_keys_generated:
         unique_keys = set(s3_keys_generated)
         logger.info(f"   📦 S3 Keys Generated: {len(s3_keys_generated)} total, {len(unique_keys)} unique")
         print(f"   📦 S3 Keys Generated: {len(s3_keys_generated)} total, {len(unique_keys)} unique", flush=True)
         if len(s3_keys_generated) != len(unique_keys):
             logger.warning(f"   ⚠️ WARNING: S3 KEY COLLISIONS DETECTED!")
-            logger.warning(f"      {len(s3_keys_generated) - len(unique_keys)} duplicate keys found")
             print(f"   ⚠️ WARNING: S3 KEY COLLISIONS DETECTED!", flush=True)
-            print(f"      {len(s3_keys_generated) - len(unique_keys)} duplicate keys found", flush=True)
-            # Show duplicate keys
-            from collections import Counter
-            key_counts = Counter(s3_keys_generated)
-            duplicates = {k: v for k, v in key_counts.items() if v > 1}
-            for dup_key, count in duplicates.items():
-                logger.warning(f"      Key '{dup_key}' appears {count} times")
-                print(f"      Key '{dup_key}' appears {count} times", flush=True)
     
-    # Clean up broadcast variables
-    politicians_broadcast.destroy()
-    target_date_broadcast.destroy()
-    s3_bucket_broadcast.destroy()
-    dynamodb_table_broadcast.destroy()
-    
-    stage3_duration = (datetime.now() - stage3_start).total_seconds()
-    
-    # Calculate final statistics
-    # Use builtins.sum to avoid conflict with PySpark's sum() function
-    total_forms_processed = len(forms)
-    successful_stored = builtins.sum(1 for r in results if r.get('success'))
-    failed_stored = builtins.sum(1 for r in results if not r.get('success') and not r.get('skipped'))
-    skipped_date_mismatch = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'date_mismatch')
-    skipped_download_failed = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'download_failed')
-    skipped_unsupported_type = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'unsupported_file_type')
-    politician_matches = builtins.sum(1 for r in results if r.get('politicianMatch'))
-    no_politician_matches = successful_stored - politician_matches
-    
-    logger.info("")
-    logger.info(f"✅ Stage 3 Complete: Processed {total_forms_processed} forms in {stage3_duration:.2f} seconds")
-    logger.info(f"   Average processing time per form: {stage3_duration / total_forms_processed if total_forms_processed > 0 else 0:.2f} seconds")
-    logger.info("=" * 80)
+    separator = "=" * 80
+    logger.info(separator)
+    print(separator, flush=True)
     
     # Step 4: Final Summary
     logger.info("")
@@ -3897,7 +3829,7 @@ try:
         logger.info(f"   📋 Sample of Failed Forms (first 5):")
         print("", flush=True)
         print(f"   📋 Sample of Failed Forms (first 5):", flush=True)
-        failed_samples = [r for r in results if not r.get('success') and not r.get('skipped')][:5]
+        failed_samples = [r for r in all_results if not r.get('success') and not r.get('skipped')][:5]
         for idx, failed in enumerate(failed_samples, 1):
             error_info = f"      {idx}. Error: {failed.get('error', 'Unknown error')}"
             logger.info(error_info)
@@ -3910,7 +3842,7 @@ try:
     if skipped_download_failed > 0:
         logger.info("")
         logger.info(f"   📋 Sample of Download Failures (first 5):")
-        download_failed_samples = [r for r in results if r.get('skipped') and r.get('reason') == 'download_failed'][:5]
+        download_failed_samples = [r for r in all_results if r.get('skipped') and r.get('reason') == 'download_failed'][:5]
         for idx, failed in enumerate(download_failed_samples, 1):
             logger.info(f"      {idx}. Reason: {failed.get('reason', 'Unknown')}")
     
