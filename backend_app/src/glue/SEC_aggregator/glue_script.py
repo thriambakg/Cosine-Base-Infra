@@ -1676,8 +1676,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         'issuerName': None,
         'tickerSymbol': None,
         'relationship': None,  # Primary relationship for GSI
-        'relationshipTypes': None,  # All relationship types (comma-separated)
-        'relationshipAdditionalText': None,  # Additional text for Officer/Other
+        'relationshipTypes': None,  # All relationship types (list, stored as JSON array)
+        'relationshipAdditionalText': None,  # Additional text for Officer/Other (dict, stored as JSON object)
         'filingType': None,  # 'individual' or 'joint/group'
         'signatureName': None,
         'amendmentDate': None,  # Amendment date if form is an amendment (GSI)
@@ -1863,7 +1863,7 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         # </tr>
         # In this case, X in cell 2 marks "10% Owner" in cell 3
         relationship_types = []
-        relationship_additional = None
+        relationship_additional_dict = {}  # Dict mapping relationship type to additional text
         
         # Find the relationship section table
         # Pattern: Look for "Relationship of Reporting Person(s) to Issuer" followed by a table
@@ -1986,8 +1986,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                 print(f"      🔍 Blue text cells found: {blue_text_cells}", flush=True)
                 
                 if blue_text_cells:
-                    # First blue cell (index 1) is for Officer, second blue cell (index 3) is for Other
-                    # Find which cells actually have blue style
+                    # Extract additional text for each relationship type
+                    # Cell 1 (index 1) is for Officer, Cell 3 (index 3) is for Other
                     officer_text = None
                     other_text = None
                     
@@ -1999,25 +1999,18 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                     if len(blue_text_cells) > 3 and blue_text_cells[3] is not None:
                         other_text = unescape(blue_text_cells[3]).strip() if blue_text_cells[3] else None
                     
-                    # Assign based on which relationship type is checked
+                    # Build dict mapping relationship type to additional text
                     if 'Officer' in relationship_types and officer_text:
-                        relationship_additional = officer_text
+                        relationship_additional_dict['Officer'] = officer_text
                         local_logger.info(f"      ✅ Found Officer additional text: {officer_text}")
                         print(f"      ✅ Found Officer additional text: {officer_text}", flush=True)
-                    elif 'Other' in relationship_types and other_text:
-                        relationship_additional = other_text
+                    
+                    if 'Other' in relationship_types and other_text:
+                        relationship_additional_dict['Other'] = other_text
                         local_logger.info(f"      ✅ Found Other additional text: {other_text}")
                         print(f"      ✅ Found Other additional text: {other_text}", flush=True)
-                    elif officer_text and not relationship_additional:
-                        # Fallback: if Officer is checked but we found text in Officer cell
-                        relationship_additional = officer_text
-                        local_logger.info(f"      ✅ Found additional text in Officer cell: {officer_text}")
-                        print(f"      ✅ Found additional text in Officer cell: {officer_text}", flush=True)
-                    elif other_text and not relationship_additional:
-                        # Fallback: if Other is checked but we found text in Other cell
-                        relationship_additional = other_text
-                        local_logger.info(f"      ✅ Found additional text in Other cell: {other_text}")
-                        print(f"      ✅ Found additional text in Other cell: {other_text}", flush=True)
+                    
+                    # Note: Director and 10% Owner don't have additional text fields
             
             # Log what we found
             if relationship_types:
@@ -2033,10 +2026,13 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             print(f"      ⚠️ Could not find relationship section table", flush=True)
         
         # Store relationship - use first relationship type as primary (for GSI)
-        # Store all relationship types as comma-separated string for completeness
         result['relationship'] = relationship_types[0] if relationship_types else None  # Primary relationship for GSI
-        result['relationshipTypes'] = ', '.join(relationship_types) if relationship_types else None  # All relationship types
-        result['relationshipAdditionalText'] = relationship_additional if relationship_additional else None
+        # Store relationshipTypes as a list (will be stored as JSON array string in DynamoDB)
+        result['relationshipTypes'] = relationship_types if relationship_types else None
+        
+        # Store relationshipAdditionalText as a dict (will be stored as JSON object string in DynamoDB)
+        # Format: {"Officer": "President and CEO", "Other": "Trustee"}
+        result['relationshipAdditionalText'] = relationship_additional_dict if relationship_additional_dict else None
         
         # Log relationship extraction results
         if result['relationship']:
