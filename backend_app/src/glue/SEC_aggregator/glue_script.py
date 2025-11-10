@@ -107,17 +107,25 @@ job = Job(glueContext)
 # Get job parameters
 # Note: getResolvedOptions requires ALL listed arguments to be provided
 # Only include required arguments here
-args = getResolvedOptions(sys.argv, [
-    'JOB_NAME',
-    'date',      # Target date in YYYY-MM-DD format (for normal daily runs) - may be null
-    's3_bucket',
-    'dynamodb_table'
-])
+# Parse date manually first to check if backdate mode is active
+# If backdate is provided, date can be null/optional
+backdate_provided = False
+for i, arg in enumerate(sys.argv):
+    if arg == '--backdate' or arg.startswith('--backdate='):
+        backdate_provided = True
+        break
+
+# Only require date if backdate is not provided
+required_args = ['JOB_NAME', 's3_bucket', 'dynamodb_table']
+if not backdate_provided:
+    required_args.append('date')  # Only require date if not in backdate mode
+
+args = getResolvedOptions(sys.argv, required_args)
 
 job.init(args['JOB_NAME'], args)
 
 # Extract required parameters
-target_date = args.get('date')
+target_date = args.get('date')  # May be None if backdate mode
 s3_bucket = args.get('s3_bucket')
 dynamodb_table = args.get('dynamodb_table')
 
@@ -328,6 +336,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     dates_to_fetch = []
     if is_backdate_mode:
         # Backdate mode: fetch from today back to target_date
+        # Stop when we encounter a date before target_date (the backdate cutoff)
         current_date = datetime.now().date()
         date_iter = current_date
         while date_iter >= target_date_obj:
@@ -393,6 +402,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
             # Parse data lines
             forms_for_date = []
             form_type_nums = [ft.replace('form', '') for ft in form_types]
+            first_date_in_batch = None  # Track first filing date in this batch for backdate mode
             
             for line in lines[data_start_idx:]:
                 if not line.strip():
@@ -425,8 +435,26 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                             form_num = form_match.group(1)
                     
                     if form_num and form_num in form_type_nums:
-                        # Check if date matches (index file date format is YYYYMMDD)
-                        if date_filed == date_str_idx:
+                        # Parse filing date for comparison
+                        try:
+                            filing_date_obj = datetime.strptime(date_filed, '%Y%m%d').date()
+                            filing_date_str = filing_date_obj.strftime('%Y-%m-%d')
+                            
+                            # Track first date in batch for backdate mode
+                            if is_backdate_mode and first_date_in_batch is None:
+                                first_date_in_batch = filing_date_obj
+                            
+                            # In backdate mode, only include forms with filing_date >= target_date
+                            # In normal mode, only include forms matching target_date exactly
+                            if is_backdate_mode:
+                                if filing_date_obj < target_date_obj:
+                                    # Skip forms filed before backdate
+                                    continue
+                            else:
+                                # Normal mode: must match exactly
+                                if date_filed != date_str_idx:
+                                    continue
+                            
                             # Extract accession number from filename
                             # Format: {accession}-{form_type}.txt or {accession}-index.htm
                             accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
@@ -438,11 +466,14 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                                     'cik': cik,
                                     'accession_number': accession_clean,  # Without dashes (matching downloader input format)
                                     'form_type': f'form{form_num}',
-                                    'filing_date': date_str,
+                                    'filing_date': filing_date_str,  # Use parsed date in YYYY-MM-DD format
                                     'company_name': company_name,
                                     'filename': filename
                                 }
                                 forms_for_date.append(form_data)
+                        except (ValueError, TypeError):
+                            # If date parsing fails, skip this form
+                            continue
                 except Exception:
                     continue
             
@@ -451,6 +482,14 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
             if forms_for_date:
                 logger.info(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}")
                 print(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}", flush=True)
+            
+            # In backdate mode, check if first date in batch is before target_date
+            # If so, stop fetching (we've reached the cutoff)
+            if is_backdate_mode and first_date_in_batch is not None:
+                if first_date_in_batch < target_date_obj:
+                    logger.info(f"   ⏹️ Stopping fetch: first date in batch ({first_date_in_batch}) is before backdate {target_date}")
+                    print(f"   ⏹️ Stopping fetch: first date in batch ({first_date_in_batch}) is before backdate {target_date}", flush=True)
+                    break
             
         except requests.exceptions.RequestException as e:
             logger.error(f"   ❌ Error fetching index file for {date_str}: {e}")
