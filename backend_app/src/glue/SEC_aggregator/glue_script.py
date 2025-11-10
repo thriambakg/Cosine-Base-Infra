@@ -369,9 +369,9 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
             # Add small delay to avoid rate limiting
             time.sleep(0.3)
             
-            # Ensure User-Agent is set for index file requests
-            headers = {'User-Agent': SEC_USER_AGENT}
-            response = session.get(index_url, headers=headers, timeout=30)
+            # Use session with pre-configured headers (includes User-Agent)
+            # The session already has User-Agent and other headers set
+            response = session.get(index_url, timeout=30)
             
             if response.status_code == 404:
                 logger.info(f"   ⚠️ Index file not found for {date_str} (may be weekend/holiday)")
