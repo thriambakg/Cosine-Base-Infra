@@ -411,28 +411,38 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                     filename = parts[4].strip()
                     
                     # Check if this is a Form 3, 4, or 5
-                    form_match = re.search(r'(\d+)', form_type_raw)
-                    if form_match:
-                        form_num = form_match.group(1)
-                        if form_num in form_type_nums:
-                            # Check if date matches (index file date format is YYYYMMDD)
-                            if date_filed == date_str_idx:
-                                # Extract accession number from filename
-                                # Format: {accession}-{form_type}.txt or {accession}-index.htm
-                                accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
-                                if accession_match:
-                                    accession_dashed = accession_match.group(1)
-                                    accession_clean = accession_dashed.replace('-', '')
-                                    
-                                    form_data = {
-                                        'cik': cik,
-                                        'accession_number': accession_clean,  # Without dashes (matching downloader input format)
-                                        'form_type': f'form{form_num}',
-                                        'filing_date': date_str,
-                                        'company_name': company_name,
-                                        'filename': filename
-                                    }
-                                    forms_for_date.append(form_data)
+                    # Be strict: only match exact form types (3, 4, 5) or "FORM 3", "FORM 4", "FORM 5"
+                    # Don't match numbers from other form types like "N-MFP3", "10-K", "8-K", etc.
+                    form_num = None
+                    
+                    # Try exact match first (e.g., "3", "4", "5")
+                    if form_type_raw.strip() in form_type_nums:
+                        form_num = form_type_raw.strip()
+                    else:
+                        # Try "FORM 3", "FORM 4", "FORM 5" pattern (case insensitive)
+                        form_match = re.search(r'\bFORM\s+([345])\b', form_type_raw, re.IGNORECASE)
+                        if form_match:
+                            form_num = form_match.group(1)
+                    
+                    if form_num and form_num in form_type_nums:
+                        # Check if date matches (index file date format is YYYYMMDD)
+                        if date_filed == date_str_idx:
+                            # Extract accession number from filename
+                            # Format: {accession}-{form_type}.txt or {accession}-index.htm
+                            accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
+                            if accession_match:
+                                accession_dashed = accession_match.group(1)
+                                accession_clean = accession_dashed.replace('-', '')
+                                
+                                form_data = {
+                                    'cik': cik,
+                                    'accession_number': accession_clean,  # Without dashes (matching downloader input format)
+                                    'form_type': f'form{form_num}',
+                                    'filing_date': date_str,
+                                    'company_name': company_name,
+                                    'filename': filename
+                                }
+                                forms_for_date.append(form_data)
                 except Exception:
                     continue
             
