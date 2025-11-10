@@ -2030,100 +2030,55 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                                 local_logger.info(f"      ✅ Found Other relationship")
                                 print(f"      ✅ Found Other relationship", flush=True)
             
-            # Extract additional text from blue text cells
-            # The additional text appears in cells that are styled blue, typically in a row after the checkboxes
-            # We need to find all rows and look for blue-styled cells, then map them to the correct relationship type
-            
-            # First, find which columns correspond to Officer and Other based on the checkbox rows
-            officer_col_idx = None
-            other_col_idx = None
-            
-            # Scan the first two rows to find which column indices have Officer and Other checkboxes
-            for row_idx in range(min(2, len(rows))):
-                row_html = rows[row_idx]
-                cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.IGNORECASE | re.DOTALL)
+            # Extract additional text from blue text cells (third row)
+            if len(rows) >= 3:
+                blue_text_row = rows[2]  # Third row (index 2)
+                # Extract all cells from the blue text row
+                blue_text_cells_raw = re.findall(r'<td[^>]*>(.*?)</td>', blue_text_row, re.IGNORECASE | re.DOTALL)
                 
-                for cell_idx in range(len(cells)):
-                    checkbox_cell = cells[cell_idx]
-                    # Check if this checkbox is checked
-                    has_x = bool(re.search(r'<span[^>]*class="FormData"[^>]*>X</span>', checkbox_cell, re.IGNORECASE))
-                    if not has_x:
-                        has_x = 'X' in checkbox_cell.strip()
-                    
-                    if has_x and cell_idx + 1 < len(cells):
-                        # Check the next cell for the relationship type text
-                        text_cell = cells[cell_idx + 1]
-                        text_content = re.sub(r'<[^>]+>', '', text_cell).strip().lower()
-                        
-                        if 'officer' in text_content and officer_col_idx is None:
-                            officer_col_idx = cell_idx + 1  # The text cell is one after the checkbox
-                            local_logger.info(f"      ✅ Found Officer in column {officer_col_idx}")
-                            print(f"      ✅ Found Officer in column {officer_col_idx}", flush=True)
-                        elif 'other' in text_content and other_col_idx is None:
-                            other_col_idx = cell_idx + 1  # The text cell is one after the checkbox
-                            local_logger.info(f"      ✅ Found Other in column {other_col_idx}")
-                            print(f"      ✅ Found Other in column {other_col_idx}", flush=True)
-            
-            # Now search all rows for blue-styled cells and extract text from the correct columns
-            officer_text = None
-            other_text = None
-            
-            for row_idx, row_html in enumerate(rows):
-                cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.IGNORECASE | re.DOTALL)
-                
-                for cell_idx, cell_html in enumerate(cells):
-                    # Check if cell has blue style (multiple patterns)
-                    is_blue = (
-                        re.search(r'style="[^"]*color:\s*blue', cell_html, re.IGNORECASE) or
-                        re.search(r'style="[^"]*color:\s*#0000ff', cell_html, re.IGNORECASE) or
-                        re.search(r'style="[^"]*color:\s*#0000FF', cell_html, re.IGNORECASE) or
-                        re.search(r'style="[^"]*color:\s*rgb\(0,\s*0,\s*255\)', cell_html, re.IGNORECASE) or
-                        re.search(r'class="[^"]*blue', cell_html, re.IGNORECASE) or
-                        re.search(r'class="[^"]*Blue', cell_html, re.IGNORECASE)
-                    )
-                    
-                    if is_blue:
+                # Check each cell for blue style and extract text
+                blue_text_cells = []
+                for cell_html in blue_text_cells_raw:
+                    # Check if cell has blue style
+                    if re.search(r'style="color:\s*blue"', cell_html, re.IGNORECASE):
                         # Extract text content (remove HTML tags)
-                        cell_text = unescape(re.sub(r'<[^>]+>', '', cell_html)).strip()
-                        
+                        cell_text = re.sub(r'<[^>]+>', '', cell_html).strip()
                         if cell_text:
-                            # Map to relationship type based on column index
-                            if officer_col_idx is not None and cell_idx == officer_col_idx:
-                                officer_text = cell_text
-                                local_logger.info(f"      ✅ Found Officer additional text in column {cell_idx}: {officer_text}")
-                                print(f"      ✅ Found Officer additional text in column {cell_idx}: {officer_text}", flush=True)
-                            elif other_col_idx is not None and cell_idx == other_col_idx:
-                                other_text = cell_text
-                                local_logger.info(f"      ✅ Found Other additional text in column {cell_idx}: {other_text}")
-                                print(f"      ✅ Found Other additional text in column {cell_idx}: {other_text}", flush=True)
-                            else:
-                                # If we don't know the column mapping yet, try to infer from context
-                                # This handles cases where the structure is slightly different
-                                if 'Officer' in relationship_types and officer_text is None:
-                                    # Check if this cell is in a position that could be Officer (typically column 1 or 2)
-                                    if cell_idx in [1, 2] and officer_col_idx is None:
-                                        officer_text = cell_text
-                                        local_logger.info(f"      ✅ Inferred Officer additional text from column {cell_idx}: {officer_text}")
-                                        print(f"      ✅ Inferred Officer additional text from column {cell_idx}: {officer_text}", flush=True)
-                                elif 'Other' in relationship_types and other_text is None:
-                                    # Check if this cell is in a position that could be Other (typically column 3 or 4)
-                                    if cell_idx in [3, 4] and other_col_idx is None:
-                                        other_text = cell_text
-                                        local_logger.info(f"      ✅ Inferred Other additional text from column {cell_idx}: {other_text}")
-                                        print(f"      ✅ Inferred Other additional text from column {cell_idx}: {other_text}", flush=True)
-            
-            # Build dict mapping relationship type to additional text
-            if 'Officer' in relationship_types and officer_text:
-                relationship_additional_dict['Officer'] = officer_text
-                local_logger.info(f"      ✅ Stored Officer additional text: {officer_text}")
-                print(f"      ✅ Stored Officer additional text: {officer_text}", flush=True)
-            
-            if 'Other' in relationship_types and other_text:
-                relationship_additional_dict['Other'] = other_text
-                local_logger.info(f"      ✅ Stored Other additional text: {other_text}")
-                print(f"      ✅ Stored Other additional text: {other_text}", flush=True)
-            
-            # Note: Director and 10% Owner don't have additional text fields
+                            blue_text_cells.append(cell_text)
+                        else:
+                            blue_text_cells.append('')  # Empty cell but still blue
+                    else:
+                        blue_text_cells.append(None)  # Not a blue cell
+                
+                local_logger.info(f"      🔍 Blue text cells found: {blue_text_cells}")
+                print(f"      🔍 Blue text cells found: {blue_text_cells}", flush=True)
+                
+                if blue_text_cells:
+                    # Extract additional text for each relationship type
+                    # Cell 1 (index 1) is for Officer, Cell 3 (index 3) is for Other
+                    officer_text = None
+                    other_text = None
+                    
+                    # Cell 1 (index 1) is for Officer
+                    if len(blue_text_cells) > 1 and blue_text_cells[1] is not None:
+                        officer_text = unescape(blue_text_cells[1]).strip() if blue_text_cells[1] else None
+                    
+                    # Cell 3 (index 3) is for Other
+                    if len(blue_text_cells) > 3 and blue_text_cells[3] is not None:
+                        other_text = unescape(blue_text_cells[3]).strip() if blue_text_cells[3] else None
+                    
+                    # Build dict mapping relationship type to additional text
+                    if 'Officer' in relationship_types and officer_text:
+                        relationship_additional_dict['Officer'] = officer_text
+                        local_logger.info(f"      ✅ Found Officer additional text: {officer_text}")
+                        print(f"      ✅ Found Officer additional text: {officer_text}", flush=True)
+                    
+                    if 'Other' in relationship_types and other_text:
+                        relationship_additional_dict['Other'] = other_text
+                        local_logger.info(f"      ✅ Found Other additional text: {other_text}")
+                        print(f"      ✅ Found Other additional text: {other_text}", flush=True)
+                    
+                    # Note: Director and 10% Owner don't have additional text fields
             
             # Log what we found
             if relationship_types:
