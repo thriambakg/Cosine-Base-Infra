@@ -1675,8 +1675,7 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         'reportingDate': None,
         'issuerName': None,
         'tickerSymbol': None,
-        'relationship': None,  # Primary relationship for GSI
-        'relationshipTypes': None,  # All relationship types (list, stored as JSON array)
+        'relationship': None,  # Relationship combination code (bitmask) for GSI
         'relationshipAdditionalText': None,  # Additional text for Officer/Other (dict, stored as JSON object)
         'filingType': None,  # 'individual' or 'joint/group'
         'signatureName': None,
@@ -2046,9 +2045,6 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         # 0 = no relationships (shouldn't happen), 1-15 = various combinations
         result['relationship'] = relationship_code if relationship_code > 0 else None
         
-        # Store relationshipTypes as a list (will be stored as JSON array string in DynamoDB)
-        result['relationshipTypes'] = relationship_types if relationship_types else None
-        
         # Store relationshipAdditionalText as a dict (will be stored as JSON object string in DynamoDB)
         # Format: {"Officer": "President and CEO", "Other": "Trustee"}
         result['relationshipAdditionalText'] = relationship_additional_dict if relationship_additional_dict else None
@@ -2062,8 +2058,6 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             if result['relationship'] & 4: rel_names.append('10% Owner')
             if result['relationship'] & 8: rel_names.append('Other')
             local_logger.info(f"   ✅ Extracted relationship code: {result['relationship']} ({', '.join(rel_names)})")
-            if result['relationshipTypes']:
-                local_logger.info(f"   ✅ All relationship types: {result['relationshipTypes']}")
             if result['relationshipAdditionalText']:
                 local_logger.info(f"   ✅ Relationship additional text: {result['relationshipAdditionalText']}")
         else:
@@ -3168,7 +3162,6 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"         - Amendment Date: {parsed_data.get('amendmentDate', 'N/A')} {'(not an amendment)' if not parsed_data.get('amendmentDate') else '(amendment)'}")
     local_logger.info(f"         - Signature Name: {parsed_data.get('signatureName', 'N/A')}")
     local_logger.info(f"         - Filing Type: {parsed_data.get('filingType', 'N/A')}")
-    local_logger.info(f"         - Relationship Types: {parsed_data.get('relationshipTypes', 'N/A')}")
     
     # Print critical missing GSI fields to console for immediate visibility
     print(f"   ✅ Parsing complete in {parse_duration:.2f}s:", flush=True)
@@ -3239,7 +3232,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"      ✅ DynamoDB client created, accessing table: {dynamodb_table_name}")
         
         # Convert to DynamoDB format
-        # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipTypes, relationshipAdditionalText, politician)
+        # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipAdditionalText, politician)
         # OpenSearch handles full-text search on HTML content
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
         # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship, amendmentDate
@@ -3265,7 +3258,6 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             'amendmentDate',  # GSI (null if not an amendment)
             'signatureName',  # Basic metadata
             'filingType',  # Basic metadata
-            'relationshipTypes',  # Basic metadata
             'relationshipAdditionalText'  # Basic metadata
         }
         
@@ -3412,7 +3404,6 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
                     'issuerName': parsed_data.get('issuerName'),
                     'tickerSymbol': parsed_data.get('tickerSymbol'),
                     'relationship': parsed_data.get('relationship'),
-                    'relationshipTypes': parsed_data.get('relationshipTypes'),
                     'relationshipAdditionalText': parsed_data.get('relationshipAdditionalText'),
                     'filingType': parsed_data.get('filingType'),
                     'eventDate': parsed_data.get('eventDate'),
