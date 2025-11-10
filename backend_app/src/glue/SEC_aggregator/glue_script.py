@@ -3554,11 +3554,11 @@ try:
     opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
     opensearch_index_broadcast = sc.broadcast(opensearch_index)
     
-    # Limit to first 10 forms for testing
-    test_limit = 10
+    # Limit to first 100 forms for processing
+    test_limit = 100
     if len(forms) > test_limit:
-        logger.info(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)")
-        print(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)", flush=True)
+        logger.info(f"   ⚠️ PROCESSING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)")
+        print(f"   ⚠️ PROCESSING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)", flush=True)
         forms = forms[:test_limit]
     
     # Create RDD from forms list
