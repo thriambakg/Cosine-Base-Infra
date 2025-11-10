@@ -1965,28 +1965,59 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             # Extract additional text from blue text cells (third row)
             if len(rows) >= 3:
                 blue_text_row = rows[2]  # Third row (index 2)
-                blue_text_cells = re.findall(
-                    r'<td[^>]*style="color:\s*blue"[^>]*>([^<]+)</td>',
-                    blue_text_row,
-                    re.IGNORECASE | re.DOTALL
-                )
+                # Extract all cells from the blue text row
+                blue_text_cells_raw = re.findall(r'<td[^>]*>(.*?)</td>', blue_text_row, re.IGNORECASE | re.DOTALL)
+                
+                # Check each cell for blue style and extract text
+                blue_text_cells = []
+                for cell_html in blue_text_cells_raw:
+                    # Check if cell has blue style
+                    if re.search(r'style="color:\s*blue"', cell_html, re.IGNORECASE):
+                        # Extract text content (remove HTML tags)
+                        cell_text = re.sub(r'<[^>]+>', '', cell_html).strip()
+                        if cell_text:
+                            blue_text_cells.append(cell_text)
+                        else:
+                            blue_text_cells.append('')  # Empty cell but still blue
+                    else:
+                        blue_text_cells.append(None)  # Not a blue cell
+                
+                local_logger.info(f"      🔍 Blue text cells found: {blue_text_cells}")
+                print(f"      🔍 Blue text cells found: {blue_text_cells}", flush=True)
+                
                 if blue_text_cells:
-                    # First blue cell is for Officer, second is for Other
-                    if len(blue_text_cells) >= 1 and 'Officer' in relationship_types:
-                        officer_text = unescape(blue_text_cells[0]).strip()
-                        if officer_text:
-                            relationship_additional = officer_text
-                            local_logger.info(f"      ✅ Found Officer additional text: {officer_text}")
-                            print(f"      ✅ Found Officer additional text: {officer_text}", flush=True)
-                    if len(blue_text_cells) >= 2 and 'Other' in relationship_types:
-                        other_text = unescape(blue_text_cells[1]).strip()
-                        if other_text:
-                            if relationship_additional:
-                                relationship_additional = relationship_additional + '; ' + other_text
-                            else:
-                                relationship_additional = other_text
-                            local_logger.info(f"      ✅ Found Other additional text: {other_text}")
-                            print(f"      ✅ Found Other additional text: {other_text}", flush=True)
+                    # First blue cell (index 1) is for Officer, second blue cell (index 3) is for Other
+                    # Find which cells actually have blue style
+                    officer_text = None
+                    other_text = None
+                    
+                    # Cell 1 (index 1) is for Officer
+                    if len(blue_text_cells) > 1 and blue_text_cells[1] is not None:
+                        officer_text = unescape(blue_text_cells[1]).strip() if blue_text_cells[1] else None
+                    
+                    # Cell 3 (index 3) is for Other
+                    if len(blue_text_cells) > 3 and blue_text_cells[3] is not None:
+                        other_text = unescape(blue_text_cells[3]).strip() if blue_text_cells[3] else None
+                    
+                    # Assign based on which relationship type is checked
+                    if 'Officer' in relationship_types and officer_text:
+                        relationship_additional = officer_text
+                        local_logger.info(f"      ✅ Found Officer additional text: {officer_text}")
+                        print(f"      ✅ Found Officer additional text: {officer_text}", flush=True)
+                    elif 'Other' in relationship_types and other_text:
+                        relationship_additional = other_text
+                        local_logger.info(f"      ✅ Found Other additional text: {other_text}")
+                        print(f"      ✅ Found Other additional text: {other_text}", flush=True)
+                    elif officer_text and not relationship_additional:
+                        # Fallback: if Officer is checked but we found text in Officer cell
+                        relationship_additional = officer_text
+                        local_logger.info(f"      ✅ Found additional text in Officer cell: {officer_text}")
+                        print(f"      ✅ Found additional text in Officer cell: {officer_text}", flush=True)
+                    elif other_text and not relationship_additional:
+                        # Fallback: if Other is checked but we found text in Other cell
+                        relationship_additional = other_text
+                        local_logger.info(f"      ✅ Found additional text in Other cell: {other_text}")
+                        print(f"      ✅ Found additional text in Other cell: {other_text}", flush=True)
             
             # Log what we found
             if relationship_types:
