@@ -346,6 +346,15 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
         # Normal mode: fetch only target_date
         dates_to_fetch = [target_date_obj]
     
+    # Filter out future dates (files won't exist yet)
+    today = datetime.now().date()
+    dates_to_fetch = [d for d in dates_to_fetch if d <= today]
+    
+    # Note: We don't pre-filter weekends because:
+    # 1. Some filings might be filed on weekends (rare but possible)
+    # 2. We'll handle 403/404 errors gracefully when fetching
+    # 3. It's better to try and get a clear response than assume
+    
     logger.info("")
     logger.info(f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}")
     print(f"🔍 Searching for Forms 3, 4, 5 filed on {target_date}", flush=True)
@@ -366,19 +375,70 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
         print(f"📥 Fetching daily index file for {date_str}...", flush=True)
         
         try:
-            # Add small delay to avoid rate limiting
-            time.sleep(0.3)
+            # Add delay to avoid rate limiting (increased for backdate mode)
+            # Use slightly longer delay for backdate mode since we're fetching multiple files
+            delay = 0.5 if is_backdate_mode else 0.3
+            time.sleep(delay)
             
-            # Use session with pre-configured headers (includes User-Agent)
-            # The session already has User-Agent and other headers set
-            response = session.get(index_url, timeout=30)
+            # Retry logic for 403 errors (SEC may temporarily block rapid requests)
+            max_retries = 3
+            retry_delay = 1.0
+            response = None
             
-            if response.status_code == 404:
-                logger.info(f"   ⚠️ Index file not found for {date_str} (may be weekend/holiday)")
-                print(f"   ⚠️ Index file not found for {date_str} (may be weekend/holiday)", flush=True)
+            for attempt in range(max_retries):
+                try:
+                    # Use session with pre-configured headers (includes User-Agent)
+                    # The session already has User-Agent and other headers set
+                    response = session.get(index_url, timeout=30)
+                    
+                    if response.status_code == 200:
+                        break  # Success, exit retry loop
+                    elif response.status_code == 403:
+                        # SEC returns 403 for non-existent index files (weekends/holidays/future dates)
+                        # Check if it's a weekend first
+                        weekday = date_to_fetch.weekday()  # 0=Monday, 6=Sunday
+                        if weekday >= 5:  # Saturday (5) or Sunday (6)
+                            logger.info(f"   ⏭️ Skipping {date_str} (weekend - no filings)")
+                            print(f"   ⏭️ Skipping {date_str} (weekend - no filings)", flush=True)
+                            response = None  # Mark as skipped
+                            break
+                        elif attempt < max_retries - 1:
+                            # Might be temporary rate limit, retry
+                            wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                            logger.warning(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...")
+                            print(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...", flush=True)
+                            time.sleep(wait_time)
+                            continue
+                        else:
+                            # Last attempt failed - likely no index file exists (holiday or not available yet)
+                            logger.info(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)")
+                            print(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)", flush=True)
+                            response = None  # Mark as skipped
+                            break
+                    elif response.status_code == 404:
+                        logger.info(f"   ⏭️ Skipping {date_str} (404 - no index file, may be weekend/holiday)")
+                        print(f"   ⏭️ Skipping {date_str} (404 - no index file, may be weekend/holiday)", flush=True)
+                        response = None  # Mark as skipped
+                        break  # 404 is expected for weekends/holidays, don't retry
+                    else:
+                        response.raise_for_status()
+                except requests.exceptions.RequestException as e:
+                    if attempt < max_retries - 1:
+                        wait_time = retry_delay * (2 ** attempt)
+                        logger.warning(f"   ⚠️ Request error for {date_str} (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait_time:.1f}s...")
+                        print(f"   ⚠️ Request error for {date_str} (attempt {attempt + 1}/{max_retries}): {e}, retrying in {wait_time:.1f}s...", flush=True)
+                        time.sleep(wait_time)
+                        continue
+                    else:
+                        raise
+            
+            if response is None:
+                logger.error(f"   ❌ Failed to fetch index file for {date_str} after {max_retries} attempts")
+                print(f"   ❌ Failed to fetch index file for {date_str} after {max_retries} attempts", flush=True)
                 continue
             
-            response.raise_for_status()
+            if response.status_code == 404:
+                continue  # Already logged, skip to next date
             
             # Parse the index file
             # Format: CIK|Company Name|Form Type|Date Filed|File Name
