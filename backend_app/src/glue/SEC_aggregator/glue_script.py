@@ -39,6 +39,54 @@ import boto3
 import requests
 
 # ============================================================================
+# Helper Functions for Human-Readable Code Mappings
+# ============================================================================
+
+def get_transaction_code_meaning(code: str) -> str:
+    """
+    Map SEC transaction codes to human-readable meanings.
+    Based on SEC Form 4/5 instruction 8.
+    """
+    code_meanings = {
+        'A': 'Grant, award or other acquisition',
+        'C': 'Conversion of derivative security',
+        'D': 'Disposition to the issuer of issuer equity securities',
+        'E': 'Expiration of short derivative position',
+        'F': 'Payment of exercise price or tax liability by delivering or withholding securities',
+        'G': 'Bona fide gift',
+        'H': 'Expiration (or cancellation) of long derivative position with value received',
+        'I': 'Discretionary transaction in accordance with Rule 10b5-1',
+        'J': 'Other acquisition or disposition',
+        'L': 'Small acquisition under Rule 16a-6',
+        'M': 'Exercise or conversion of derivative security',
+        'O': 'Transaction in equity swap or instrument with similar characteristics',
+        'P': 'Open market or private purchase of non-derivative or derivative security',
+        'S': 'Open market or private sale of non-derivative or derivative security',
+        'U': 'Disposition pursuant to a tender of shares in a change of control transaction',
+        'V': 'Transaction voluntarily reported earlier than required',
+        'W': 'Acquisition or disposition by will or the laws of descent and distribution',
+        'X': 'Exercise of out-of-the-money derivative security',
+        'Z': 'Deposit into or withdrawal from voting trust'
+    }
+    return code_meanings.get(code.upper(), f'Transaction code {code} (meaning not specified)')
+
+def get_ownership_type_meaning(code: str) -> str:
+    """Map ownership form codes to human-readable meanings."""
+    meanings = {
+        'D': 'Direct',
+        'I': 'Indirect'
+    }
+    return meanings.get(code.upper(), code)
+
+def get_transaction_direction_meaning(code: str) -> str:
+    """Map A/D values to human-readable meanings."""
+    meanings = {
+        'A': 'Acquired',
+        'D': 'Disposed'
+    }
+    return meanings.get(code.upper(), code)
+
+# ============================================================================
 # Configure logging
 # Glue jobs benefit from both logger and print() for visibility
 logger = logging.getLogger()
@@ -150,6 +198,37 @@ SEC_BROWSE_EDGAR_URL = f"{SEC_BASE_URL}/cgi-bin/browse-edgar"
 
 # Name matching threshold
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
+
+# Standard Senate PTR ranges for amount mapping
+SENATE_PTR_RANGES = [
+    (0, 1000),
+    (1001, 15000),
+    (15001, 50000),
+    (50001, 100000),
+    (100001, 250000),
+    (250001, 500000),
+    (500001, 1000000),
+    (1000001, 5000000),
+    (5000001, 25000000),
+    (25000001, 50000000),
+    (50000001, None)  # Over $50,000,000
+]
+
+
+def find_standard_range(amount_value: float) -> tuple:
+    """Find the standard Senate PTR range that contains the given amount"""
+    if amount_value <= 0:
+        return SENATE_PTR_RANGES[0]
+    
+    for range_min, range_max in SENATE_PTR_RANGES:
+        if range_max is None:
+            if amount_value >= range_min:
+                return (range_min, None)
+        else:
+            if range_min <= amount_value <= range_max:
+                return (range_min, range_max)
+    return SENATE_PTR_RANGES[0]
+
 
 def load_politician_list() -> List[Dict[str, Any]]:
     """Load congress-legislators CSV from S3"""
@@ -1110,16 +1189,9 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             print(f"         Size: {len(file_content):,} bytes", flush=True)
             raise  # Re-raise to be caught by outer exception handler
         
-        # Decode file_content to string for parsing (S3 upload already done with bytes)
-        # Ensure content is a string for regex operations
-        if isinstance(file_content, bytes):
-            content_str = file_content.decode('utf-8', errors='ignore')
-        else:
-            content_str = file_content
-        
         return {
             's3_key': s3_key,
-            'content': content_str,  # Return as string for regex parsing
+            'content': file_content,
             'file_ext': file_ext,
             'cik': cik,
             'accession_number': accession,
@@ -1150,12 +1222,325 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         return None
 
 
+def parse_sec_form_html(html_content: str, s3_key: str, filing_date: str) -> List[Dict[str, Any]]:
+    """
+    Parse SEC Form HTML and extract trade data (full implementation from SEC matcher)
+    """
+    # Import inside function to avoid serialization issues
+    import logging
+    local_logger = logging.getLogger()
+    
+    trades = []
+    
+    try:
+        local_logger.info(f"   🔍 PARSING: Starting parse for S3Key={s3_key}")
+        
+        # Extract filer/owner name
+        # Pattern: <a href="/cgi-bin/browse-edgar?action=getcompany&CIK=...">Name</a>
+        name_match = re.search(r'<a[^>]*href="/cgi-bin/browse-edgar[^"]*CIK=\d+">([^<]+)</a>', html_content, re.IGNORECASE)
+        filer_name = None
+        if name_match:
+            filer_name = unescape(name_match.group(1)).strip()
+        
+        if not filer_name:
+            # Try alternative pattern: name might be in different format
+            name_patterns = [
+                r'Name and Address of Reporting Person[^<]*<[^>]*>([^<]+)</[^>]*>',
+                r'Reporting Person[^<]*<[^>]*>([^<]+)</[^>]*>',
+            ]
+            for pattern in name_patterns:
+                match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                if match:
+                    filer_name = unescape(match.group(1)).strip()
+                    break
+        
+        if not filer_name:
+            local_logger.warning(f"   ⚠️ PARSE WARNING: Could not extract filer name from HTML S3Key={s3_key}")
+            return trades
+        
+        local_logger.info(f"   ✅ PARSED FILER NAME: FilerName={filer_name}, S3Key={s3_key}")
+        
+        # Detect form type
+        form_number = None
+        form_name_match = re.search(r'class="FormName"[^>]*>FORM\s*(\d+)', html_content, re.IGNORECASE | re.DOTALL)
+        if form_name_match:
+            form_number = form_name_match.group(1)
+        
+        if not form_number:
+            form_in_filename = re.search(r'form[_-]?(\d+)', s3_key, re.IGNORECASE)
+            if form_in_filename:
+                form_number = form_in_filename.group(1)
+        
+        if not form_number:
+            form_type_match = re.search(r'<title>SEC\s+FORM\s+(\d+)</title>', html_content, re.IGNORECASE | re.DOTALL)
+            if form_type_match:
+                form_number = form_type_match.group(1)
+        
+        if not form_number:
+            form_match = re.search(r'\bFORM\s+([345])\b', html_content, re.IGNORECASE)
+            if form_match:
+                form_number = form_match.group(1)
+        
+        is_form3 = form_number == '3'
+        is_form4 = form_number == '4'
+        is_form5 = form_number == '5'
+        
+        if not form_number:
+            is_form4 = True
+            form_number = '4'
+        
+        # Extract issuer name and ticker
+        issuer_match = re.search(r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>', html_content, re.IGNORECASE)
+        issuer_name = issuer_match.group(1).strip() if issuer_match else None
+        
+        ticker_match = re.search(r'\[ <span[^>]*>([A-Z0-9]+)</span> \]', html_content)
+        ticker = ticker_match.group(1) if ticker_match else None
+        
+        # Extract filing date
+        filing_date_extracted = None
+        if is_form4:
+            date_match = re.search(r'Date of Earliest Transaction[^<]*<span[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+            if date_match:
+                try:
+                    filing_date_obj = datetime.strptime(date_match.group(1), '%m/%d/%Y')
+                    filing_date_extracted = filing_date_obj.strftime('%Y-%m-%d')
+                except:
+                    pass
+        elif is_form3:
+            date_match = re.search(r'Date of Event Requiring Statement[^<]*<span[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>', html_content, re.IGNORECASE)
+            if date_match:
+                try:
+                    filing_date_obj = datetime.strptime(date_match.group(1), '%m/%d/%Y')
+                    filing_date_extracted = filing_date_obj.strftime('%Y-%m-%d')
+                except:
+                    pass
+        
+        filing_date_final = filing_date_extracted or filing_date
+        
+        # Parse Table I - Non-Derivative Securities
+        table1_pattern = r'Table I[^<]*<tbody>(.*?)</tbody>'
+        table1_match = re.search(table1_pattern, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if table1_match:
+            tbody_content = table1_match.group(1)
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
+            
+            for row in rows:
+                cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
+                
+                def clean_cell(cell):
+                    text = re.sub(r'<[^>]+>', '', cell)
+                    text = unescape(text)
+                    return text.strip()
+                
+                if is_form4 and len(cells) >= 8:
+                    security_name = clean_cell(cells[0]) if len(cells) > 0 else None
+                    trans_date = clean_cell(cells[1]) if len(cells) > 1 else None
+                    trans_code = clean_cell(cells[3]) if len(cells) > 3 else None
+                    shares_str = clean_cell(cells[5]) if len(cells) > 5 else None
+                    trans_type = clean_cell(cells[6]) if len(cells) > 6 else None
+                    price_str = clean_cell(cells[7]) if len(cells) > 7 else None
+                    
+                    has_transaction = (trans_date and trans_date.strip() and 
+                                     trans_code and trans_code.strip() and
+                                     shares_str and shares_str.strip())
+                    
+                    if security_name and has_transaction:
+                        shares = None
+                        if shares_str:
+                            try:
+                                shares = int(re.sub(r'[,\.]', '', shares_str))
+                            except:
+                                pass
+                        
+                        price = None
+                        if price_str:
+                            try:
+                                price_str_clean = re.sub(r'[\$,]', '', price_str)
+                                price = float(price_str_clean)
+                            except:
+                                pass
+                        
+                        transaction_date = None
+                        try:
+                            trans_date_obj = datetime.strptime(trans_date, '%m/%d/%Y')
+                            transaction_date = trans_date_obj.strftime('%Y-%m-%d')
+                        except:
+                            transaction_date = filing_date_final
+                        
+                        total_amount = None
+                        if shares and price:
+                            total_amount = shares * price
+                        
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': security_name,
+                            'transactionDate': transaction_date,
+                            'filingDate': filing_date_final,
+                            'transactionType': trans_code,
+                            'shares': shares,
+                            'pricePerShare': price,
+                            'totalAmount': total_amount,
+                            'transactionDirection': trans_type,
+                            'formType': f'form{form_number}' if form_number else 'form4',
+                        }
+                        trades.append(trade)
+                elif is_form3 and len(cells) >= 4:
+                    security_name = clean_cell(cells[0]) if len(cells) > 0 else None
+                    shares_owned_str = clean_cell(cells[1]) if len(cells) > 1 else None
+                    ownership_form = clean_cell(cells[2]) if len(cells) > 2 else None
+                    indirect_nature = clean_cell(cells[3]) if len(cells) > 3 else None
+                    
+                    if security_name and shares_owned_str:
+                        shares = None
+                        try:
+                            shares = int(re.sub(r'[,\.]', '', shares_owned_str))
+                        except:
+                            pass
+                        
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': security_name,
+                            'transactionDate': filing_date_final,
+                            'filingDate': filing_date_final,
+                            'transactionType': 'I',
+                            'shares': shares,
+                            'pricePerShare': None,
+                            'totalAmount': None,
+                            'transactionDirection': 'A',
+                            'formType': 'form3',
+                            'ownershipForm': ownership_form,
+                            'indirectNature': indirect_nature,
+                            'isInitialOwnership': True,
+                        }
+                        trades.append(trade)
+        
+        # Parse Table II - Derivative Securities
+        table2_pattern = r'Table II[^<]*<tbody>(.*?)</tbody>'
+        table2_match = re.search(table2_pattern, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if table2_match:
+            tbody_content = table2_match.group(1)
+            rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
+            
+            for row in rows:
+                cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
+                
+                def clean_cell(cell):
+                    text = re.sub(r'<[^>]+>', '', cell)
+                    text = unescape(text)
+                    return text.strip()
+                
+                if is_form4 and len(cells) >= 10:
+                    derivative_name = clean_cell(cells[0]) if len(cells) > 0 else None
+                    exercise_price_str = clean_cell(cells[1]) if len(cells) > 1 else None
+                    trans_date = clean_cell(cells[2]) if len(cells) > 2 else None
+                    trans_code = clean_cell(cells[4]) if len(cells) > 4 else None
+                    shares_acquired = clean_cell(cells[6]) if len(cells) > 6 else None
+                    shares_disposed = clean_cell(cells[7]) if len(cells) > 7 else None
+                    underlying_title = clean_cell(cells[10]) if len(cells) > 10 else None
+                    price_str = clean_cell(cells[12]) if len(cells) > 12 else None
+                    
+                    has_transaction = (trans_date and trans_date.strip() and 
+                                     trans_code and trans_code.strip() and
+                                     (shares_acquired and shares_acquired.strip() or 
+                                      shares_disposed and shares_disposed.strip()))
+                    
+                    if derivative_name and has_transaction:
+                        shares = None
+                        if shares_acquired and shares_acquired.strip():
+                            try:
+                                shares = int(re.sub(r'[,\.]', '', shares_acquired))
+                            except:
+                                pass
+                        elif shares_disposed and shares_disposed.strip():
+                            try:
+                                shares = -int(re.sub(r'[,\.]', '', shares_disposed))
+                            except:
+                                pass
+                        
+                        if shares is None:
+                            continue
+                        
+                        price = None
+                        if price_str and price_str.strip():
+                            try:
+                                price_str_clean = re.sub(r'[\$,]', '', price_str)
+                                price = float(price_str_clean)
+                            except:
+                                pass
+                        elif exercise_price_str and exercise_price_str.strip():
+                            try:
+                                price_str_clean = re.sub(r'[\$,]', '', exercise_price_str)
+                                price = float(price_str_clean)
+                            except:
+                                pass
+                        
+                        transaction_date = None
+                        try:
+                            trans_date_obj = datetime.strptime(trans_date, '%m/%d/%Y')
+                            transaction_date = trans_date_obj.strftime('%Y-%m-%d')
+                        except:
+                            transaction_date = filing_date_final
+                        
+                        exercise_price = None
+                        if exercise_price_str and exercise_price_str.strip():
+                            try:
+                                exercise_price = float(re.sub(r'[\$,]', '', exercise_price_str))
+                            except:
+                                pass
+                        
+                        total_amount = None
+                        if shares and price:
+                            total_amount = abs(shares) * price
+                        
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': f"{derivative_name} (underlying: {underlying_title})" if underlying_title else derivative_name,
+                            'transactionDate': transaction_date,
+                            'filingDate': filing_date_final,
+                            'transactionType': trans_code,
+                            'shares': shares,
+                            'pricePerShare': price,
+                            'totalAmount': total_amount,
+                            'exercisePrice': exercise_price,
+                            'formType': f'form{form_number}' if form_number else 'form4',
+                            'isDerivative': True,
+                        }
+                        trades.append(trade)
+        
+        local_logger.info(f"   ✅ PARSED DATA: Extracted {len(trades)} trades from S3Key={s3_key}")
+        
+        # Log all parsed trades for verification
+        if trades:
+            local_logger.info(f"   📋 PARSED TRADES DETAIL (S3Key={s3_key}):")
+            for trade_idx, trade in enumerate(trades, 1):
+                local_logger.info(f"      Trade {trade_idx}: Filer={trade.get('filerName', 'N/A')}, "
+                                f"Security={trade.get('securityName', 'N/A')[:60]}, "
+                                f"Symbol={trade.get('securitySymbol', 'N/A')}, "
+                                f"Type={trade.get('transactionType', 'N/A')}, "
+                                f"Amount=${trade.get('totalAmount', 'N/A')}, "
+                                f"Shares={trade.get('shares', 'N/A')}, "
+                                f"Date={trade.get('transactionDate', 'N/A')}")
+        else:
+            local_logger.warning(f"   ⚠️ PARSED DATA: No trades extracted from S3Key={s3_key}")
+        
+    except Exception as e:
+        local_logger.error(f"   ❌ PARSE ERROR: Error parsing SEC form HTML S3Key={s3_key}: {e}")
+        import traceback
+        local_logger.error(f"      Traceback: {traceback.format_exc()}")
+    
+    return trades
+
+
 def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     """Fuzzy match filer name to politician name"""
-    # Handle None or empty filer_name
-    if not filer_name:
-        return 0.0
-    
     politician_name = politician.get('name', '')
     
     # Try exact match first
@@ -1181,9 +1566,6 @@ def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
 
 def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
     """Find best matching politician for a filer name"""
-    # Handle None or empty filer_name
-    if not filer_name:
-        return None
     # Import inside function to avoid serialization issues
     import logging
     local_logger = logging.getLogger()
@@ -1288,8 +1670,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         'relationshipAdditionalText': None,  # Additional text for Officer/Other
         'filingType': None,  # 'individual' or 'joint/group'
         'signatureName': None,
-        'amendment': None,  # Date of original filing if this is an amendment (MM/DD/YYYY format)
         # Note: nonDerivativeSecurities, derivativeSecurities, misc removed
+        # Note: amendment fields removed - can be determined via OpenSearch full-text search if needed
         # OpenSearch will handle full-text search on raw HTML content stored in S3
     }
     
@@ -1785,34 +2167,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         else:
             local_logger.warning(f"   ⚠️ Could not extract signatureName from HTML")
         
-        # Extract amendment date (4. or 5. If Amendment, Date of Original Filed)
-        # HTML structure: Label followed by <br> and optional <span class="FormData">DATE</span>
-        # If date is present, this is an amendment; otherwise it's an original filing
-        # Pattern matches both "4. If Amendment" (Form 4, 5) and "5. If Amendment" (Form 3)
-        # The date must be within the same <td> cell as the label, immediately after the label
-        # We match the cell content between <td> and </td>, ensuring the date comes after "If Amendment"
-        # and before the closing </td> tag
-        amendment_patterns = [
-            # Pattern 1: Date immediately after label with (Month/Day/Year) text, within same <td> cell
-            # Use a more restrictive pattern that stops at </td> to prevent matching across cells
-            r'<td[^>]*valign="top"[^>]*>.*?If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>[^<]*</td>',
-            # Pattern 2: More flexible but still within same cell - ensure </td> comes after the date
-            r'<td[^>]*>.*?If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?=[^<]*</td>)',
-        ]
-        
-        amendment_date = None
-        for pattern in amendment_patterns:
-            amendment_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
-            if amendment_match:
-                amendment_date = amendment_match.group(1)
-                local_logger.info(f"   ✅ Extracted amendment date: {amendment_date}")
-                print(f"   ✅ Extracted amendment date: {amendment_date}", flush=True)
-                break
-        
-        if not amendment_date:
-            local_logger.info(f"   ℹ️ No amendment date found - this is an original filing")
-        
-        result['amendment'] = amendment_date
+        # Note: Amendment detection removed - can be determined via OpenSearch full-text search if needed
+        # Users can search for "If Amendment, Date of Original Filed" in htmlContent field
         
         # Note: Table parsing (Table I, Table II, explanations, remarks) is form-specific
         # and handled in form-specific functions (parse_form3_metadata, parse_form4_metadata, parse_form5_metadata)
@@ -1843,11 +2199,9 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 3 specific: Extract event date
         # More flexible pattern to handle various HTML structures
-        # Pattern 1: Use .*? to match any characters (including newlines and HTML) between label and date
-        # This handles cases where "(Month/Day/Year)" text appears between label and date
         event_date_patterns = [
-            r'Date of Event Requiring Statement.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Event Requiring Statement[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
             r'Date of Event Requiring Statement[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
@@ -1898,11 +2252,9 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 4 specific: Extract event date
         # More flexible pattern to handle various HTML structures
-        # Pattern 1: Use .*? to match any characters (including newlines and HTML) between label and date
-        # This handles cases where "(Month/Day/Year)" text appears between label and date
         event_date_patterns = [
-            r'Date of Earliest Transaction.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Earliest Transaction[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
             r'Date of Earliest Transaction[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
@@ -1953,11 +2305,9 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 5 specific: Extract event date (fiscal year end)
         # More flexible pattern to handle various HTML structures
-        # Pattern 1: Use .*? to match any characters (including newlines and HTML) between label and date
-        # This handles cases where "(Month/Day/Year)" text appears between label and date
         event_date_patterns = [
-            r'Statement for Issuer\'s Fiscal Year Ended.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:\(Month/Day/Year\))?[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
             r'Statement for Issuer\'s Fiscal Year Ended[^<]*(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
@@ -1990,7 +2340,518 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     return result
 
 
-def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[Dict[str, Any]], s3_bucket_name: str, dynamodb_table_name: str,
+def parse_table_i(html_content: str, is_form3: bool, is_form4: bool, is_form5: bool, explanations_dict: Dict[str, str] = None) -> List[Dict[str, Any]]:
+    """Parse Table I - Non-Derivative Securities"""
+    # Import inside function to avoid serialization issues
+    from html import unescape
+    
+    table_data = []
+    
+    try:
+        # Find Table I tbody
+        # Pattern must allow HTML tags between "Table I" and <tbody> (e.g., <thead> section)
+        table1_pattern = r'Table I.*?<tbody>(.*?)</tbody>'
+        table1_match = re.search(table1_pattern, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if not table1_match:
+            import logging
+            local_logger = logging.getLogger()
+            local_logger.warning(f"⚠️ Table I tbody not found in HTML")
+            return table_data
+        
+        tbody_content = table1_match.group(1)
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
+        
+        import logging
+        local_logger = logging.getLogger()
+        local_logger.info(f"   📊 Table I: Found {len(rows)} rows in tbody")
+        print(f"   📊 Table I: Found {len(rows)} rows in tbody", flush=True)
+        
+        def extract_footnote(cell):
+            """Extract footnote number from a cell (e.g., <sup>(1)</sup> -> 1, or None if no footnote)"""
+            # Pattern: <sup>(1)</sup> or <sup>(2)</sup> etc.
+            footnote_match = re.search(r'<sup>\((\d+)\)</sup>', cell, re.IGNORECASE)
+            if footnote_match:
+                try:
+                    return int(footnote_match.group(1))
+                except:
+                    pass
+            return None
+        
+        def clean_cell(cell, remove_footnote=True):
+            """Clean cell text, optionally removing footnote HTML first"""
+            # Remove footnote HTML before cleaning to avoid including "(1)" in the value
+            if remove_footnote:
+                # Remove entire FootnoteData spans (may contain nested <sup> tags)
+                # Pattern: <span class="FootnoteData">...<sup>(1)</sup>...</span>
+                cell = re.sub(r'<span[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>.*?</span>', '', cell, flags=re.IGNORECASE | re.DOTALL)
+                # Also remove standalone <sup>(1)</sup> tags that might not be in FootnoteData spans
+                cell = re.sub(r'<sup>\(\d+\)</sup>', '', cell, flags=re.IGNORECASE)
+            # Now remove all remaining HTML tags
+            text = re.sub(r'<[^>]+>', '', cell)
+            text = unescape(text)
+            return text.strip()
+        
+        def create_field_value(cell, explanations_dict):
+            """Create field value - either string or object with value, footnote number, and explanation"""
+            footnote_num = extract_footnote(cell)
+            # Clean cell and remove footnote HTML so value doesn't include "(1)" text
+            value = clean_cell(cell, remove_footnote=True)
+            
+            if footnote_num is not None:
+                # Field has a footnote - create object structure
+                explanation_text = ""
+                if explanations_dict:
+                    # Try both string and int keys
+                    explanation_text = explanations_dict.get(str(footnote_num), "") or explanations_dict.get(int(footnote_num), "")
+                    if not explanation_text:
+                        # Debug: log when explanation is missing
+                        missing_msg = f"⚠️ Footnote {footnote_num} found in Table I cell but no explanation in dict."
+                        local_logger.warning(missing_msg)
+                        print(missing_msg, flush=True)
+                        detail_msg = f"   Footnote num type: {type(footnote_num)}, value: {footnote_num}"
+                        local_logger.warning(detail_msg)
+                        print(detail_msg, flush=True)
+                        keys_msg = f"   Available keys: {list(explanations_dict.keys())}"
+                        local_logger.warning(keys_msg)
+                        print(keys_msg, flush=True)
+                        key_types_msg = f"   Key types: {[type(k) for k in explanations_dict.keys()]}"
+                        local_logger.warning(key_types_msg)
+                        print(key_types_msg, flush=True)
+                        lookup_msg = f"   Looking for: str({footnote_num})={str(footnote_num)}, int({footnote_num})={int(footnote_num)}"
+                        local_logger.warning(lookup_msg)
+                        print(lookup_msg, flush=True)
+                else:
+                    empty_dict_msg = f"⚠️ Footnote {footnote_num} found but explanations_dict is None or empty"
+                    local_logger.warning(empty_dict_msg)
+                    print(empty_dict_msg, flush=True)
+                
+                footnote_obj = {
+                    "value": value,
+                    "footnote": {
+                        "number": footnote_num,
+                        "explanation": explanation_text
+                    }
+                }
+                return footnote_obj
+            else:
+                # No footnote - just return the string value
+                return value
+        
+        for row in rows:
+            cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
+            
+            if is_form3 and len(cells) >= 4:
+                # Form 3: Title | Amount | Ownership Form | Nature of Indirect
+                ownership_form_raw = create_field_value(cells[2], explanations_dict) if len(cells) > 2 else ''
+                ownership_form = ownership_form_raw.get('value', ownership_form_raw) if isinstance(ownership_form_raw, dict) else ownership_form_raw
+                
+                row_data = {
+                    'securityName': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',  # Renamed from titleOfSecurity
+                    'shares': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',  # Renamed from amountOfSecurities
+                    'ownershipType': get_ownership_type_meaning(ownership_form) if ownership_form else None,  # Renamed from ownershipForm, add human-readable
+                    'ownershipTypeCode': ownership_form,  # Keep code for filtering
+                    'indirectOwnershipNature': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else ''  # Renamed from natureOfIndirectBeneficialOwnership
+                }
+                table_data.append(row_data)
+            elif (is_form4 or is_form5) and len(cells) >= 8:
+                # Form 4/5: Title | Transaction Date | ... | Amount | (A) or (D) | Price | ...
+                # Extract raw values first
+                transaction_code_raw = create_field_value(cells[3], explanations_dict) if len(cells) > 3 else ''
+                transaction_code = transaction_code_raw.get('value', transaction_code_raw) if isinstance(transaction_code_raw, dict) else transaction_code_raw
+                
+                acquired_or_disposed_raw = create_field_value(cells[6], explanations_dict) if len(cells) > 6 else ''
+                acquired_or_disposed = acquired_or_disposed_raw.get('value', acquired_or_disposed_raw) if isinstance(acquired_or_disposed_raw, dict) else acquired_or_disposed_raw
+                
+                ownership_form_raw = create_field_value(cells[9], explanations_dict) if len(cells) > 9 else ''
+                ownership_form = ownership_form_raw.get('value', ownership_form_raw) if isinstance(ownership_form_raw, dict) else ownership_form_raw
+                
+                row_data = {
+                    'securityName': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',  # Renamed from titleOfSecurity
+                    'transactionDate': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
+                    'deemedExecutionDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
+                    'transactionCode': transaction_code,  # Keep code for filtering
+                    'transactionType': get_transaction_code_meaning(transaction_code) if transaction_code else None,  # Add human-readable
+                    'transactionCodeV': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',
+                    'shares': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',  # Renamed from amount
+                    'transactionDirection': acquired_or_disposed,  # Renamed from acquiredOrDisposed
+                    'transactionDirectionText': get_transaction_direction_meaning(acquired_or_disposed) if acquired_or_disposed else None,  # Add human-readable
+                    'pricePerShare': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''  # Renamed from price
+                }
+                # Add remaining columns if present
+                if len(cells) > 8:
+                    row_data['totalOwnedAfterTransaction'] = create_field_value(cells[8], explanations_dict)  # Renamed from amountOfSecuritiesBeneficiallyOwned
+                if len(cells) > 9:
+                    row_data['ownershipType'] = get_ownership_type_meaning(ownership_form) if ownership_form else None  # Renamed from ownershipForm, add human-readable
+                    row_data['ownershipTypeCode'] = ownership_form  # Keep code for filtering
+                if len(cells) > 10:
+                    row_data['indirectOwnershipNature'] = create_field_value(cells[10], explanations_dict)  # Renamed from natureOfIndirectBeneficialOwnership
+                table_data.append(row_data)
+    
+    except Exception as e:
+        import logging
+        local_logger = logging.getLogger()
+        local_logger.error(f"❌ Error parsing Table I: {e}")
+    
+    return table_data
+
+
+def parse_table_ii(html_content: str, is_form3: bool, is_form4: bool, is_form5: bool, explanations_dict: Dict[str, str] = None) -> List[Dict[str, Any]]:
+    """Parse Table II - Derivative Securities"""
+    # Import inside function to avoid serialization issues
+    from html import unescape
+    
+    table_data = []
+    
+    try:
+        # Find Table II tbody
+        # Pattern must allow HTML tags between "Table II" and <tbody> (e.g., <thead> section)
+        table2_pattern = r'Table II.*?<tbody>(.*?)</tbody>'
+        table2_match = re.search(table2_pattern, html_content, re.IGNORECASE | re.DOTALL)
+        
+        if not table2_match:
+            import logging
+            local_logger = logging.getLogger()
+            local_logger.warning(f"⚠️ Table II tbody not found in HTML")
+            return table_data
+        
+        tbody_content = table2_match.group(1)
+        rows = re.findall(r'<tr[^>]*>(.*?)</tr>', tbody_content, re.DOTALL | re.IGNORECASE)
+        
+        import logging
+        local_logger = logging.getLogger()
+        local_logger.info(f"   📊 Table II: Found {len(rows)} rows in tbody")
+        print(f"   📊 Table II: Found {len(rows)} rows in tbody", flush=True)
+        
+        def extract_footnote(cell):
+            """Extract footnote number from a cell (e.g., <sup>(1)</sup> -> 1, or None if no footnote)"""
+            # Pattern: <sup>(1)</sup> or <sup>(2)</sup> etc.
+            footnote_match = re.search(r'<sup>\((\d+)\)</sup>', cell, re.IGNORECASE)
+            if footnote_match:
+                try:
+                    return int(footnote_match.group(1))
+                except:
+                    pass
+            return None
+        
+        def clean_cell(cell, remove_footnote=True):
+            """Clean cell text, optionally removing footnote HTML first"""
+            # Remove footnote HTML before cleaning to avoid including "(1)" in the value
+            if remove_footnote:
+                # Remove entire FootnoteData spans (may contain nested <sup> tags)
+                # Pattern: <span class="FootnoteData">...<sup>(1)</sup>...</span>
+                cell = re.sub(r'<span[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>.*?</span>', '', cell, flags=re.IGNORECASE | re.DOTALL)
+                # Also remove standalone <sup>(1)</sup> tags that might not be in FootnoteData spans
+                cell = re.sub(r'<sup>\(\d+\)</sup>', '', cell, flags=re.IGNORECASE)
+            # Now remove all remaining HTML tags
+            text = re.sub(r'<[^>]+>', '', cell)
+            text = unescape(text)
+            return text.strip()
+        
+        def create_field_value(cell, explanations_dict):
+            """Create field value - either string or object with value, footnote number, and explanation"""
+            footnote_num = extract_footnote(cell)
+            # Clean cell and remove footnote HTML so value doesn't include "(1)" text
+            value = clean_cell(cell, remove_footnote=True)
+            
+            if footnote_num is not None:
+                # Field has a footnote - create object structure
+                explanation_text = ""
+                if explanations_dict:
+                    # Try both string and int keys
+                    explanation_text = explanations_dict.get(str(footnote_num), "") or explanations_dict.get(int(footnote_num), "")
+                    if not explanation_text:
+                        # Debug: log when explanation is missing
+                        missing_msg = f"⚠️ Footnote {footnote_num} found in Table II cell but no explanation in dict."
+                        local_logger.warning(missing_msg)
+                        print(missing_msg, flush=True)
+                        detail_msg = f"   Footnote num type: {type(footnote_num)}, value: {footnote_num}"
+                        local_logger.warning(detail_msg)
+                        print(detail_msg, flush=True)
+                        keys_msg = f"   Available keys: {list(explanations_dict.keys())}"
+                        local_logger.warning(keys_msg)
+                        print(keys_msg, flush=True)
+                        key_types_msg = f"   Key types: {[type(k) for k in explanations_dict.keys()]}"
+                        local_logger.warning(key_types_msg)
+                        print(key_types_msg, flush=True)
+                        lookup_msg = f"   Looking for: str({footnote_num})={str(footnote_num)}, int({footnote_num})={int(footnote_num)}"
+                        local_logger.warning(lookup_msg)
+                        print(lookup_msg, flush=True)
+                else:
+                    empty_dict_msg = f"⚠️ Footnote {footnote_num} found but explanations_dict is None or empty"
+                    local_logger.warning(empty_dict_msg)
+                    print(empty_dict_msg, flush=True)
+                
+                footnote_obj = {
+                    "value": value,
+                    "footnote": {
+                        "number": footnote_num,
+                        "explanation": explanation_text
+                    }
+                }
+                return footnote_obj
+            else:
+                # No footnote - just return the string value
+                return value
+        
+        for row in rows:
+            cells = re.findall(r'<td[^>]*>(.*?)</td>', row, re.DOTALL | re.IGNORECASE)
+            
+            if is_form3 and len(cells) >= 6:
+                # Form 3: Title | Date Exercisable | Expiration Date | Title | Amount | Conversion Price | Ownership | Nature
+                # Note: Form 3 has 8 columns, but we need at least 6 to parse basic info
+                ownership_form_raw = create_field_value(cells[6], explanations_dict) if len(cells) > 6 else ''
+                ownership_form = ownership_form_raw.get('value', ownership_form_raw) if isinstance(ownership_form_raw, dict) else ownership_form_raw
+                
+                row_data = {
+                    'derivativeSecurityName': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',  # Renamed from titleOfDerivativeSecurity
+                    'dateExercisable': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',
+                    'expirationDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
+                    'underlyingSecurityName': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',  # Renamed from titleOfUnderlyingSecurity
+                    'underlyingShares': create_field_value(cells[4], explanations_dict) if len(cells) > 4 else '',  # Renamed from amountOrNumberOfShares
+                    'exercisePrice': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',  # Renamed from conversionOrExercisePrice
+                    'ownershipType': get_ownership_type_meaning(ownership_form) if ownership_form else None,  # Renamed from ownershipForm, add human-readable
+                    'ownershipTypeCode': ownership_form,  # Keep code for filtering
+                    'indirectOwnershipNature': create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''  # Renamed from natureOfIndirectBeneficialOwnership
+                }
+                # Only add if we have at least the title (check if it's a dict or string)
+                title_value = row_data['derivativeSecurityName']
+                if isinstance(title_value, dict):
+                    title_str = title_value.get('value', '')
+                else:
+                    title_str = str(title_value)
+                if title_str:
+                    table_data.append(row_data)
+            elif (is_form4 or is_form5) and len(cells) >= 10:
+                # Form 4/5: Title | Conversion Price | Transaction Date | ... | (A) | (D) | Date Exercisable | Expiration | Title | Amount | Price | ...
+                # Extract raw values first
+                transaction_code_raw = create_field_value(cells[4], explanations_dict) if len(cells) > 4 else ''
+                transaction_code = transaction_code_raw.get('value', transaction_code_raw) if isinstance(transaction_code_raw, dict) else transaction_code_raw
+                
+                acquired_raw = create_field_value(cells[6], explanations_dict) if len(cells) > 6 else ''
+                acquired = acquired_raw.get('value', acquired_raw) if isinstance(acquired_raw, dict) else acquired_raw
+                
+                disposed_raw = create_field_value(cells[7], explanations_dict) if len(cells) > 7 else ''
+                disposed = disposed_raw.get('value', disposed_raw) if isinstance(disposed_raw, dict) else disposed_raw
+                
+                # Determine transaction direction and shares (positive=acquired, negative=disposed)
+                shares_value = None
+                transaction_direction = None
+                if acquired and acquired.strip():
+                    try:
+                        shares_value = float(acquired.replace(',', ''))
+                        transaction_direction = 'A'
+                    except:
+                        pass
+                elif disposed and disposed.strip():
+                    try:
+                        shares_value = -float(disposed.replace(',', ''))
+                        transaction_direction = 'D'
+                    except:
+                        pass
+                
+                ownership_form_raw = create_field_value(cells[14], explanations_dict) if len(cells) > 14 else ''
+                ownership_form = ownership_form_raw.get('value', ownership_form_raw) if isinstance(ownership_form_raw, dict) else ownership_form_raw
+                
+                row_data = {
+                    'derivativeSecurityName': create_field_value(cells[0], explanations_dict) if len(cells) > 0 else '',  # Renamed from titleOfDerivativeSecurity
+                    'exercisePrice': create_field_value(cells[1], explanations_dict) if len(cells) > 1 else '',  # Renamed from conversionOrExercisePrice
+                    'transactionDate': create_field_value(cells[2], explanations_dict) if len(cells) > 2 else '',
+                    'deemedExecutionDate': create_field_value(cells[3], explanations_dict) if len(cells) > 3 else '',
+                    'transactionCode': transaction_code,  # Keep code for filtering
+                    'transactionType': get_transaction_code_meaning(transaction_code) if transaction_code else None,  # Add human-readable
+                    'transactionCodeV': create_field_value(cells[5], explanations_dict) if len(cells) > 5 else '',
+                    'shares': shares_value,  # Combined acquired/disposed (positive=acquired, negative=disposed)
+                    'transactionDirection': transaction_direction,  # 'A' or 'D'
+                    'transactionDirectionText': get_transaction_direction_meaning(transaction_direction) if transaction_direction else None,  # Add human-readable
+                    'dateExercisable': create_field_value(cells[8], explanations_dict) if len(cells) > 8 else '',
+                    'expirationDate': create_field_value(cells[9], explanations_dict) if len(cells) > 9 else '',
+                    'underlyingSecurityName': create_field_value(cells[10], explanations_dict) if len(cells) > 10 else '',  # Renamed from titleOfUnderlyingSecurity
+                    'underlyingShares': create_field_value(cells[11], explanations_dict) if len(cells) > 11 else '',  # Renamed from amountOrNumberOfShares
+                    'pricePerShare': create_field_value(cells[12], explanations_dict) if len(cells) > 12 else ''  # Renamed from priceOfDerivativeSecurity
+                }
+                # Add remaining columns if present
+                if len(cells) > 13:
+                    row_data['totalOwnedAfterTransaction'] = create_field_value(cells[13], explanations_dict)  # Renamed from numberOfDerivativeSecuritiesBeneficiallyOwned
+                if len(cells) > 14:
+                    row_data['ownershipType'] = get_ownership_type_meaning(ownership_form) if ownership_form else None  # Renamed from ownershipForm, add human-readable
+                    row_data['ownershipTypeCode'] = ownership_form  # Keep code for filtering
+                if len(cells) > 15:
+                    row_data['indirectOwnershipNature'] = create_field_value(cells[15], explanations_dict)  # Renamed from natureOfIndirectBeneficialOwnership
+                table_data.append(row_data)
+    
+    except Exception as e:
+        import logging
+        local_logger = logging.getLogger()
+        local_logger.error(f"❌ Error parsing Table II: {e}")
+    
+    return table_data
+
+
+def parse_explanations(html_content: str) -> Dict[str, str]:
+    """
+    Parse numbered explanations from "Explanation of Responses" section.
+    
+    Returns:
+        Dict with numbered explanation keys (e.g., "1", "2") mapping to explanation text.
+        Example: {"1": "Explanation text for footnote (1)", "2": "Explanation text for footnote (2)"}
+    
+    Note: These explanations are embedded directly in table row fields that have footnotes.
+          This function is separate from parse_remarks() to allow explanations to be passed to table parsers.
+    """
+    # Import inside function to avoid serialization issues
+    from html import unescape
+    import logging
+    local_logger = logging.getLogger()
+    
+    explanations = {}
+    
+    try:
+        # Find "Explanation of Responses" section
+        # Pattern: Look for the header row, then capture all following rows until we hit Remarks or end of table
+        # The section ends when we hit <b>Remarks:</b> or </table> or </body>
+        # More flexible pattern that handles various HTML structures
+        explanation_section = re.search(
+            r'Explanation of Responses[^<]*</td>[^<]*</tr>(.*?)(?=<tr><td[^>]*><b>Remarks|</table>|</body>)',
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
+        
+        # If that doesn't work, try a simpler pattern
+        if not explanation_section:
+            explanation_section = re.search(
+                r'Explanation of Responses.*?</tr>(.*?)(?=<b>Remarks|</table>|</body>)',
+                html_content,
+                re.IGNORECASE | re.DOTALL
+            )
+        
+        if explanation_section:
+            explanation_text = explanation_section.group(1)
+            section_found_msg = f"🔍 Found Explanation section, length: {len(explanation_text)} chars"
+            local_logger.info(section_found_msg)
+            print(section_found_msg, flush=True)
+            
+            # Extract numbered explanations from FootnoteData cells
+            # Pattern: Look for <tr><td class="FootnoteData">1. ...</td></tr>
+            # The text can be very long, so we need to capture everything until </td>
+            # Use a more robust pattern that handles the full cell content
+            # First try: Match with <tr> wrapper
+            footnote_rows = re.findall(
+                r'<tr>\s*<td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>\s*(\d+)\.\s+(.*?)</td>\s*</tr>',
+                explanation_text,
+                re.IGNORECASE | re.DOTALL
+            )
+            
+            # If primary pattern fails, try without requiring <tr> wrapper
+            if not footnote_rows:
+                footnote_rows = re.findall(
+                    r'<td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>\s*(\d+)\.\s+(.*?)</td>',
+                    explanation_text,
+                    re.IGNORECASE | re.DOTALL
+                )
+            
+            # If still no matches, try matching the entire explanation section more flexibly
+            if not footnote_rows:
+                # Pattern: Look for "1. " or "2. " followed by text until next number or </td> or </tr>
+                # This pattern captures text that may span multiple lines
+                footnote_rows = re.findall(
+                    r'(\d+)\.\s+((?:(?!\d+\.)[^<])+?)(?=\d+\.|</td>|</tr>|$)',
+                    explanation_text,
+                    re.IGNORECASE | re.DOTALL
+                )
+            
+            rows_found_msg = f"🔍 Found {len(footnote_rows)} footnote rows using primary pattern"
+            local_logger.info(rows_found_msg)
+            print(rows_found_msg, flush=True)
+            
+            for num, text in footnote_rows:
+                cleaned_text = re.sub(r'<[^>]+>', '', text)  # Remove any remaining HTML tags
+                cleaned_text = unescape(cleaned_text).strip()
+                if cleaned_text:
+                    explanations[num] = cleaned_text
+                    parsed_msg = f"✅ Parsed explanation {num}: {cleaned_text[:80]}..."
+                    local_logger.info(parsed_msg)
+                    print(parsed_msg, flush=True)
+                else:
+                    empty_msg = f"⚠️ Explanation {num} was empty after cleaning"
+                    local_logger.warning(empty_msg)
+                    print(empty_msg, flush=True)
+            
+            # Debug: Print the final explanations dict
+            final_dict_msg = f"📝 Final explanations dict: {explanations}"
+            local_logger.info(final_dict_msg)
+            print(final_dict_msg, flush=True)
+            
+            # Fallback: If no footnote rows found, try the original pattern
+            if not explanations:
+                fallback_msg = "⚠️ Primary pattern failed, trying fallback pattern"
+                local_logger.warning(fallback_msg)
+                print(fallback_msg, flush=True)
+                explanation_pattern = r'(\d+)\.\s+([^<\d]+?)(?=\d+\.|$)'
+                explanation_matches = re.findall(explanation_pattern, explanation_text, re.DOTALL)
+                
+                fallback_found_msg = f"🔍 Fallback pattern found {len(explanation_matches)} matches"
+                local_logger.info(fallback_found_msg)
+                print(fallback_found_msg, flush=True)
+                
+                for num, text in explanation_matches:
+                    cleaned_text = re.sub(r'<[^>]+>', '', text)
+                    cleaned_text = unescape(cleaned_text).strip()
+                    if cleaned_text:
+                        explanations[num] = cleaned_text
+                        fallback_parsed_msg = f"✅ Parsed explanation {num} (fallback): {cleaned_text[:80]}..."
+                        local_logger.info(fallback_parsed_msg)
+                        print(fallback_parsed_msg, flush=True)
+        else:
+            not_found_msg = "⚠️ Could not find 'Explanation of Responses' section in HTML"
+            local_logger.warning(not_found_msg)
+            print(not_found_msg, flush=True)
+    
+    except Exception as e:
+        import traceback
+        error_msg = f"❌ Error parsing explanations: {e}\n{traceback.format_exc()}"
+        local_logger.error(error_msg)
+        print(error_msg, flush=True)
+    
+    return explanations
+
+
+def parse_remarks(html_content: str) -> Dict[str, Any]:
+    """
+    Parse remarks section only (explanations are now embedded in table rows).
+    
+    Returns:
+        Dict with optional "remarks" key containing remarks text.
+        Example: {"remarks": "Exhibit 99.1 (Signatures and Joint Filer Information) is incorporated herein by reference."}
+    """
+    # Import inside function to avoid serialization issues
+    from html import unescape
+    
+    misc = {}
+    
+    try:
+        # Find "Remarks" section
+        # Pattern: <b>Remarks:</b> ... <td class="FootnoteData">...</td>
+        remarks_match = re.search(
+            r'<b>Remarks:</b>[^<]*</td>[^<]*</tr>[^<]*<tr><td[^>]*class="[^"]*FootnoteData[^"]*"[^>]*>(.*?)</td>',
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
+        if remarks_match:
+            remarks_text = re.sub(r'<[^>]+>', '', remarks_match.group(1))  # Remove HTML tags
+            remarks_text = unescape(remarks_text).strip()
+            if remarks_text:
+                misc['remarks'] = remarks_text
+    
+    except Exception as e:
+        import logging
+        local_logger = logging.getLogger()
+        local_logger.error(f"❌ Error parsing remarks: {e}")
+    
+    return misc
+
+
+def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[Dict[str, Any]], s3_bucket_name: str, dynamodb_table_name: str, 
                  opensearch_endpoint: Optional[str] = None, opensearch_index: Optional[str] = None) -> Dict[str, Any]:
     """
     Process a single SEC form: download, parse, check politician match, store
@@ -2092,177 +2953,397 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         print(error_msg, flush=True)
         return {'skipped': True, 'reason': 'download_failed'}
     
-    s3_key = downloaded.get('s3_key')
-    content_str = downloaded.get('content')
-    
-    if not s3_key or not content_str:
-        error_msg = f"   ❌ FAILED: Downloaded form missing s3_key or content (CIK={cik}, Accession={accession})"
-        local_logger.warning(error_msg)
-        print(error_msg, flush=True)
-        return {'skipped': True, 'reason': 'download_failed'}
-    
-    local_logger.info(f"   ✅ Downloaded form: S3Key={s3_key}, Size={len(content_str)} bytes, Duration={download_duration:.2f}s")
-    print(f"   ✅ Downloaded form: S3Key={s3_key}, Size={len(content_str)} bytes, Duration={download_duration:.2f}s", flush=True)
+    s3_key = downloaded.get('s3_key', 'unknown')
+    file_ext = downloaded.get('file_ext', 'unknown')
+    file_size = len(downloaded.get('content', b''))
+    local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext}, size: {file_size:,} bytes) in {download_duration:.2f}s")
     
     # Parse form metadata
     parse_start = datetime.now()
-    local_logger.info(f"   🔍 Step 3/4: Parsing form metadata...")
-    print(f"   🔍 Step 3/4: Parsing form metadata...", flush=True)
+    local_logger.info(f"   📊 Step 3/4: Parsing form metadata from S3Key={s3_key}...")
+    if downloaded['file_ext'] != 'html':
+        local_logger.warning(f"   ⚠️ Unsupported file type: {downloaded['file_ext']} (CIK={cik}, Accession={accession})")
+        return {'skipped': True, 'reason': 'unsupported_file_type'}
     
+    content_str = downloaded['content'].decode('utf-8', errors='ignore')
     parsed_data = parse_sec_form_metadata(content_str, form_data, accepted_date_str)
     parse_duration = (datetime.now() - parse_start).total_seconds()
     
-    if not parsed_data:
-        error_msg = f"   ❌ FAILED: Could not parse form metadata (CIK={cik}, Accession={accession}) after {parse_duration:.2f}s"
-        local_logger.warning(error_msg)
-        print(error_msg, flush=True)
-        return {'skipped': True, 'reason': 'parse_failed'}
-    
+    # Log parsed data summary with full details
     local_logger.info(f"   ✅ Parsing complete in {parse_duration:.2f}s:")
+    local_logger.info(f"      📊 PARSED DATA SUMMARY:")
+    local_logger.info(f"         - Form Type: {parsed_data.get('formType', 'N/A')}")
+    local_logger.info(f"         - ReportingPersonName: {parsed_data.get('reportingPersonName', 'N/A')}")
+    local_logger.info(f"         - Address: {parsed_data.get('address', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('address') else '✅'}")
+    local_logger.info(f"         - Issuer: {parsed_data.get('issuerName', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('issuerName') else '✅'}")
+    local_logger.info(f"         - Ticker: {parsed_data.get('tickerSymbol', 'N/A')}")
+    local_logger.info(f"         - Relationship: {parsed_data.get('relationship', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('relationship') else '✅'}")
+    local_logger.info(f"         - Relationship Additional: {parsed_data.get('relationshipAdditionalText', 'N/A')}")
+    local_logger.info(f"         - Event Date: {parsed_data.get('eventDate', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('eventDate') else '✅'}")
+    local_logger.info(f"         - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
+    local_logger.info(f"         - Signature Name: {parsed_data.get('signatureName', 'N/A')}")
+    local_logger.info(f"         - Filing Type: {parsed_data.get('filingType', 'N/A')}")
+    local_logger.info(f"         - Relationship Types: {parsed_data.get('relationshipTypes', 'N/A')}")
+    
+    # Print critical missing GSI fields to console for immediate visibility
     print(f"   ✅ Parsing complete in {parse_duration:.2f}s:", flush=True)
+    missing_gsi_fields = []
+    if not parsed_data.get('address'):
+        missing_gsi_fields.append('address')
+    if not parsed_data.get('issuerName'):
+        missing_gsi_fields.append('issuerName')
+    if not parsed_data.get('relationship'):
+        missing_gsi_fields.append('relationship')
+    if not parsed_data.get('eventDate'):
+        missing_gsi_fields.append('eventDate')
+    if missing_gsi_fields:
+        print(f"      ⚠️ MISSING GSI FIELDS: {', '.join(missing_gsi_fields)}", flush=True)
+    else:
+        print(f"      ✅ All critical GSI fields extracted successfully", flush=True)
     
-    trade_id = parsed_data.get('tradeId')
-    reporting_person = parsed_data.get('reportingPersonName', 'N/A')
-    issuer = parsed_data.get('issuerName', 'N/A')
-    ticker = parsed_data.get('tickerSymbol', 'N/A')
-    
-    local_logger.info(f"      TradeId: {trade_id}")
-    print(f"      TradeId: {trade_id}", flush=True)
-    local_logger.info(f"      Reporting Person: {reporting_person}")
-    print(f"      Reporting Person: {reporting_person}", flush=True)
-    local_logger.info(f"      Issuer: {issuer} ({ticker})")
-    print(f"      Issuer: {issuer} ({ticker})", flush=True)
+    # Check for critical missing fields (for validation)
+    critical_missing = []
+    if not parsed_data.get('reportingPersonName'):
+        critical_missing.append('reportingPersonName')
+    if not parsed_data.get('formType'):
+        critical_missing.append('formType')
+    if not parsed_data.get('reportingDate'):
+        critical_missing.append('reportingDate')
+    if critical_missing:
+        local_logger.warning(f"      ⚠️ WARNING: Missing critical fields: {', '.join(critical_missing)}")
     
     # Check politician match
     match_start = datetime.now()
-    local_logger.info(f"   🔍 Step 4/4: Checking politician match...")
-    print(f"   🔍 Step 4/4: Checking politician match...", flush=True)
-    
-    politician_match = find_matching_politician(reporting_person, politicians)
-    match_duration = (datetime.now() - match_start).total_seconds()
-    
-    if politician_match:
-        parsed_data['politician'] = 1
-        parsed_data['politicianName'] = politician_match.get('name', '')
-        parsed_data['politicianParty'] = politician_match.get('party', '')
-        parsed_data['politicianState'] = politician_match.get('state', '')
-        local_logger.info(f"   ✅ Politician match: {politician_match.get('name', 'N/A')} ({politician_match.get('party', 'N/A')}, {politician_match.get('state', 'N/A')})")
-        print(f"   ✅ Politician match: {politician_match.get('name', 'N/A')} ({politician_match.get('party', 'N/A')}, {politician_match.get('state', 'N/A')})", flush=True)
+    local_logger.info(f"   🔍 Step 4/4: Checking politician match for name='{parsed_data.get('reportingPersonName', 'N/A')}'...")
+    politician_match = None
+    if parsed_data.get('reportingPersonName'):
+        politician_match = find_matching_politician(parsed_data['reportingPersonName'], politicians)
+        if politician_match:
+            local_logger.info(f"   ✅ POLITICIAN MATCH: Name='{parsed_data['reportingPersonName']}' → Politician='{politician_match.get('name', 'N/A')}' (Score={politician_match.get('matchScore', 0):.3f})")
+            parsed_data['politician'] = 1  # True (DynamoDB doesn't support boolean, use 1/0)
+        else:
+            local_logger.info(f"   ℹ️ NO POLITICIAN MATCH: Name='{parsed_data['reportingPersonName']}' not in politician list")
+            parsed_data['politician'] = 0  # False
     else:
-        parsed_data['politician'] = 0
-        local_logger.info(f"   ℹ️ No politician match found")
-        print(f"   ℹ️ No politician match found", flush=True)
+        local_logger.warning(f"   ⚠️ No name extracted from form, cannot check politician match")
+        parsed_data['politician'] = 0  # False
+    
+    match_duration = (datetime.now() - match_start).total_seconds()
+    local_logger.info(f"   ✅ Matching complete in {match_duration:.2f}s")
+    
+    # Generate trade ID
+    trade_id = f"sec_{form_data.get('form_type', 'form4')}_{cik}_{accession}_{target_date.replace('-', '')}"
+    parsed_data['tradeId'] = trade_id
+    parsed_data['formS3Key'] = s3_key
+    
+    # Note: Amendment logic removed - can be determined via OpenSearch full-text search if needed
     
     # Store to DynamoDB
     store_start = datetime.now()
-    local_logger.info(f"   💾 Storing to DynamoDB...")
-    print(f"   💾 Storing to DynamoDB...", flush=True)
+    local_logger.info(f"   💾 Storing to DynamoDB (TradeId={trade_id})...")
+    local_logger.info(f"      📊 DynamoDB Write Details:")
+    local_logger.info(f"         Table: {dynamodb_table_name}")
+    local_logger.info(f"         TradeId: {trade_id}")
+    local_logger.info(f"         Item Keys: {list(parsed_data.keys())}")
     
     try:
+        # Create DynamoDB client locally
+        local_logger.info(f"      🔄 Creating DynamoDB client...")
         dynamodb_local = boto3.resource('dynamodb')
         table_local = dynamodb_local.Table(dynamodb_table_name)
+        local_logger.info(f"      ✅ DynamoDB client created, accessing table: {dynamodb_table_name}")
         
         # Convert to DynamoDB format
+        # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipTypes, relationshipAdditionalText, politician)
+        # OpenSearch handles full-text search on HTML content
+        # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
+        # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship
+        # 
+        # NOTE: Form-specific checkbox fields (e.g., noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported)
+        # are NOT parsed or stored in DynamoDB. These fields are available in OpenSearch via the full htmlContent field
+        # for the AI agent to search through. This keeps DynamoDB lightweight with only essential metadata for fast queries.
+        # 
+        # NOTE: Amendment fields removed - can be determined via OpenSearch full-text search if needed
+        gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
+        
+        # Fields to store in DynamoDB (GSI fields + essential metadata)
+        fields_to_store = {
+            'tradeId',  # Primary key
+            'formS3Key',  # S3 key for document retrieval
+            'formType',  # GSI
+            'reportingPersonName',  # GSI
+            'address',  # GSI
+            'eventDate',  # GSI
+            'reportingDate',  # GSI
+            'issuerName',  # GSI
+            'tickerSymbol',  # GSI
+            'relationship',  # GSI
+            'politician',  # GSI
+            'signatureName',  # Basic metadata
+            'filingType',  # Basic metadata
+            'relationshipTypes',  # Basic metadata
+            'relationshipAdditionalText'  # Basic metadata
+        }
+        
+        local_logger.info(f"      🔄 Converting to DynamoDB format (simplified: GSI fields + essential metadata only)...")
         dynamodb_item = {}
+        conversion_stats = {'skipped': 0, 'converted': 0, 'errors': 0, 'null_fields': 0, 'gsi_omitted': 0, 'filtered_out': 0}
+        
         for key, value in parsed_data.items():
-            # Store amendment field even if None (to explicitly mark as original filing, not amendment)
-            # DynamoDB doesn't support null values, so we store empty string to make field present
-            if value is None and key == 'amendment':
-                dynamodb_item[key] = ''  # Empty string represents null/not an amendment
+            # Skip fields not in our simplified schema
+            if key not in fields_to_store:
+                conversion_stats['filtered_out'] += 1
+                local_logger.debug(f"         {key}: filtered out (not in simplified schema)")
                 continue
-            elif value is None:
-                continue
-            elif isinstance(value, (int, float)):
-                if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
-                    continue
-                dynamodb_item[key] = Decimal(str(value))
-            elif isinstance(value, list):
-                dynamodb_item[key] = [Decimal(str(v)) if isinstance(v, (int, float)) else v for v in value]
-            else:
-                dynamodb_item[key] = value
-        
-        table_local.put_item(Item=dynamodb_item)
-        store_duration = (datetime.now() - store_start).total_seconds()
-        
-        local_logger.info(f"   ✅ Stored to DynamoDB in {store_duration:.2f}s: TradeId={trade_id}")
-        print(f"   ✅ Stored to DynamoDB in {store_duration:.2f}s: TradeId={trade_id}", flush=True)
-        
-        # Store to OpenSearch if configured
-        if opensearch_endpoint and opensearch_index:
-            opensearch_start = datetime.now()
-            local_logger.info(f"   🔍 Storing to OpenSearch...")
-            print(f"   🔍 Storing to OpenSearch...", flush=True)
-            
             try:
-                import requests
-                from requests_aws4auth import AWS4Auth
-                import json
+                # Handle None values
+                if value is None:
+                    # GSI keys cannot be NULL or empty - omit them from the item
+                    if key in gsi_key_fields:
+                        conversion_stats['gsi_omitted'] += 1
+                        local_logger.debug(f"         {key}: omitted (GSI key, cannot be null/empty)")
+                        continue  # Skip this field - don't include it in the item
+                    else:
+                        dynamodb_item[key] = None
+                        conversion_stats['null_fields'] += 1
+                        local_logger.debug(f"         {key}: null")
+                    continue
                 
-                # Create AWS4Auth for signing requests
-                credentials = boto3.Session().get_credentials()
-                awsauth = AWS4Auth(credentials.access_key, credentials.secret_key, 'us-east-1', 'es', session_token=credentials.token)
+                # Handle empty strings
+                if value == '':
+                    # GSI keys: omit empty strings (cannot be in GSI)
+                    if key in gsi_key_fields:
+                        conversion_stats['gsi_omitted'] += 1
+                        local_logger.debug(f"         {key}: omitted (GSI key, empty string not allowed)")
+                        continue  # Skip this field - don't include it in the item
+                    else:
+                        dynamodb_item[key] = None
+                        conversion_stats['null_fields'] += 1
+                        local_logger.debug(f"         {key}: null (was empty string)")
+                    continue
                 
-                # Create OpenSearch document
+                # Handle empty lists - store as empty JSON array string
+                if isinstance(value, list) and len(value) == 0:
+                    dynamodb_item[key] = '[]'  # Store as empty JSON array string
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: [] (empty list)")
+                    continue
+                
+                # Handle empty dicts - store as empty JSON object string
+                if isinstance(value, dict) and len(value) == 0:
+                    dynamodb_item[key] = '{}'  # Store as empty JSON object string
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: {{}} (empty dict)")
+                    continue
+                
+                # Handle numeric values
+                if isinstance(value, (int, float)):
+                    if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
+                        # Invalid float - store as null
+                        dynamodb_item[key] = None
+                        conversion_stats['null_fields'] += 1
+                        local_logger.warning(f"         {key}: null (invalid float value {value})")
+                        continue
+                    dynamodb_item[key] = Decimal(str(value))
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: Decimal ({value})")
+                
+                # Handle lists (non-empty) - store as JSON string
+                elif isinstance(value, list):
+                    dynamodb_item[key] = json.dumps(value)
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: JSON array ({len(value)} items)")
+                
+                # Handle dicts (non-empty) - store as JSON string
+                elif isinstance(value, dict):
+                    dynamodb_item[key] = json.dumps(value)
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: JSON object ({len(value)} keys)")
+                
+                # Handle boolean values
+                elif isinstance(value, bool):
+                    dynamodb_item[key] = value  # DynamoDB supports boolean
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: Boolean ({value})")
+                
+                # Handle strings and other types
+                else:
+                    dynamodb_item[key] = str(value)
+                    conversion_stats['converted'] += 1
+                    local_logger.debug(f"         {key}: String ({len(str(value))} chars)")
+                    
+            except Exception as e:
+                conversion_stats['errors'] += 1
+                local_logger.error(f"         Error converting {key}: {e}")
+                # Store as null on error
+                dynamodb_item[key] = None
+        
+        local_logger.info(f"      ✅ Conversion complete: {conversion_stats['converted']} converted, {conversion_stats['filtered_out']} filtered out, {conversion_stats['gsi_omitted']} GSI keys omitted, {conversion_stats['errors']} errors")
+        
+        local_logger.info(f"      📦 DynamoDB Item Preview:")
+        local_logger.info(f"         TradeId: {dynamodb_item.get('tradeId', 'N/A')}")
+        local_logger.info(f"         FormType: {dynamodb_item.get('formType', 'N/A')}")
+        local_logger.info(f"         ReportingPersonName: {dynamodb_item.get('reportingPersonName', 'N/A')}")
+        local_logger.info(f"         IssuerName: {dynamodb_item.get('issuerName', 'N/A')}")
+        local_logger.info(f"         TickerSymbol: {dynamodb_item.get('tickerSymbol', 'N/A')}")
+        local_logger.info(f"         ReportingDate: {dynamodb_item.get('reportingDate', 'N/A')}")
+        local_logger.info(f"         EventDate: {dynamodb_item.get('eventDate', 'N/A')}")
+        local_logger.info(f"         Relationship: {dynamodb_item.get('relationship', 'N/A')}")
+        local_logger.info(f"         Politician: {dynamodb_item.get('politician', 'N/A')}")
+        local_logger.info(f"         FormS3Key: {dynamodb_item.get('formS3Key', 'N/A')}")
+        local_logger.info(f"         Total Fields: {len(dynamodb_item)}")
+        
+        # Log full item for debugging (truncated)
+        item_preview = {k: (str(v)[:100] + '...' if len(str(v)) > 100 else v) for k, v in list(dynamodb_item.items())[:10]}
+        local_logger.info(f"         Item Preview (first 10 fields): {json.dumps(item_preview, default=str)}")
+        
+        local_logger.info(f"      📡 Calling DynamoDB PutItem API...")
+        db_write_start = datetime.now()
+        put_response = table_local.put_item(Item=dynamodb_item)
+        db_write_duration = (datetime.now() - db_write_start).total_seconds()
+        
+        local_logger.info(f"      ✅ DynamoDB PutItem Response:")
+        local_logger.info(f"         Success: True")
+        local_logger.info(f"         Response Metadata: {put_response.get('ResponseMetadata', {}).get('HTTPStatusCode', 'N/A')}")
+        local_logger.info(f"         Write Time: {db_write_duration:.2f}s")
+        
+        # Index to OpenSearch if configured
+        opensearch_success = False
+        if opensearch_endpoint:
+            try:
+                opensearch_index_start = datetime.now()
+                local_logger.info(f"      🔍 Indexing to OpenSearch...")
+                
+                # Prepare document for OpenSearch
+                # Include GSI fields for filtering + full HTML content for full-text search
+                # NOTE: The htmlContent field contains the complete HTML including all checkbox fields
+                # (noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported, etc.)
+                # which are not parsed but are searchable via full-text search in OpenSearch
                 opensearch_doc = {
                     'tradeId': trade_id,
                     'formType': parsed_data.get('formType'),
                     'reportingPersonName': parsed_data.get('reportingPersonName'),
-                    'signatureName': parsed_data.get('signatureName'),
                     'issuerName': parsed_data.get('issuerName'),
                     'tickerSymbol': parsed_data.get('tickerSymbol'),
                     'relationship': parsed_data.get('relationship'),
                     'relationshipTypes': parsed_data.get('relationshipTypes'),
                     'relationshipAdditionalText': parsed_data.get('relationshipAdditionalText'),
+                    'filingType': parsed_data.get('filingType'),
                     'eventDate': parsed_data.get('eventDate'),
                     'reportingDate': parsed_data.get('reportingDate'),
                     'address': parsed_data.get('address'),
-                    'politician': parsed_data.get('politician', 0),
-                    'filingType': parsed_data.get('filingType'),
-                    'amendment': parsed_data.get('amendment'),
+                    'signatureName': parsed_data.get('signatureName'),
+                    'politician': parsed_data.get('politician', 0),  # Use 0/1 to match DynamoDB format
                     'formS3Key': s3_key,
-                    'htmlContent': content_str  # Store full HTML for full-text search
+                    # Include full HTML content for full-text search (AI agent can search this)
+                    # Note: Amendment information available in htmlContent if needed
+                    'htmlContent': content_str,  # Full HTML content for OpenSearch full-text search
+                    # Add timestamp for indexing
+                    '@timestamp': datetime.now().isoformat()
                 }
                 
-                # Index document
-                url = f"https://{opensearch_endpoint}/{opensearch_index}/_doc/{trade_id}"
-                response = requests.put(url, auth=awsauth, json=opensearch_doc, headers={'Content-Type': 'application/json'})
+                # Remove None values
+                opensearch_doc = {k: v for k, v in opensearch_doc.items() if v is not None}
                 
-                if response.status_code in [200, 201]:
-                    opensearch_duration = (datetime.now() - opensearch_start).total_seconds()
-                    local_logger.info(f"   ✅ Stored to OpenSearch in {opensearch_duration:.2f}s: TradeId={trade_id}")
-                    print(f"   ✅ Stored to OpenSearch in {opensearch_duration:.2f}s: TradeId={trade_id}", flush=True)
+                # Index document to OpenSearch using requests library
+                index_name = opensearch_index or 'sec-filings'
+                url = f"https://{opensearch_endpoint}/{index_name}/_doc/{trade_id}"
+                
+                # Use AWS SigV4 signing for authentication
+                from botocore.auth import SigV4Auth
+                from botocore.awsrequest import AWSRequest
+                import urllib3
+                
+                # Get AWS region
+                aws_region = boto3.Session().region_name or 'us-east-1'
+                
+                # Create request
+                request = AWSRequest(method='PUT', url=url, data=json.dumps(opensearch_doc), headers={'Content-Type': 'application/json'})
+                
+                # Sign request
+                credentials = boto3.Session().get_credentials()
+                SigV4Auth(credentials, 'es', aws_region).add_auth(request)
+                
+                # Send request
+                http = urllib3.PoolManager()
+                response = http.request(
+                    'PUT',
+                    url,
+                    body=json.dumps(opensearch_doc),
+                    headers=dict(request.headers)
+                )
+                
+                if response.status in [200, 201]:
+                    opensearch_success = True
+                    opensearch_duration = (datetime.now() - opensearch_index_start).total_seconds()
+                    local_logger.info(f"      ✅ OpenSearch indexed successfully in {opensearch_duration:.2f}s")
                 else:
-                    local_logger.warning(f"   ⚠️ OpenSearch indexing failed: {response.status_code} - {response.text}")
-                    print(f"   ⚠️ OpenSearch indexing failed: {response.status_code}", flush=True)
+                    local_logger.warning(f"      ⚠️ OpenSearch indexing returned status {response.status}: {response.data.decode('utf-8')}")
+                    
             except Exception as opensearch_error:
-                local_logger.warning(f"   ⚠️ OpenSearch error: {opensearch_error}")
-                print(f"   ⚠️ OpenSearch error: {opensearch_error}", flush=True)
+                local_logger.warning(f"      ⚠️ OpenSearch indexing failed (non-fatal): {opensearch_error}")
+                # Don't fail the entire process if OpenSearch indexing fails
         
-        form_duration = (datetime.now() - form_start_time).total_seconds()
-        local_logger.info(f"   ✅ Form processing complete in {form_duration:.2f}s")
-        print(f"   ✅ Form processing complete in {form_duration:.2f}s", flush=True)
+        store_duration = (datetime.now() - store_start).total_seconds()
+        total_duration = (datetime.now() - form_start_time).total_seconds()
+        
+        local_logger.info(f"   ✅ STORED: TradeId={trade_id}, S3Key={s3_key} in {store_duration:.2f}s")
+        if opensearch_endpoint:
+            local_logger.info(f"   {'✅' if opensearch_success else '⚠️'} OpenSearch: {'Indexed' if opensearch_success else 'Failed (non-fatal)'}")
+        local_logger.info(f"   ✅ Form processing complete: Total time {total_duration:.2f}s")
         local_logger.info(f"      Breakdown: Download={download_duration:.2f}s, Parse={parse_duration:.2f}s, Match={match_duration:.2f}s, Store={store_duration:.2f}s")
-        print(f"      Breakdown: Download={download_duration:.2f}s, Parse={parse_duration:.2f}s, Match={match_duration:.2f}s, Store={store_duration:.2f}s", flush=True)
         
         return {
-            'success': True,
-            'tradeId': trade_id,
-            'politicianMatch': bool(politician_match),
-            'downloadDuration': download_duration,
-            'parseDuration': parse_duration,
-            'matchDuration': match_duration,
-            'storeDuration': store_duration
+            'success': True, 
+            'tradeId': trade_id, 
+            'politicianMatch': politician_match is not None,
+            's3_key': s3_key,
+            'formS3Key': s3_key,  # Also include for compatibility
+            'opensearch_indexed': opensearch_success if opensearch_endpoint else None
         }
-        
+    
     except Exception as e:
-        import traceback
-        error_msg = f"   ❌ FAILED: Error storing to DynamoDB: {e}"
+        store_duration = (datetime.now() - store_start).total_seconds()
+        total_duration = (datetime.now() - form_start_time).total_seconds()
+        error_msg = f"   ❌ STORAGE ERROR: Failed to store to DynamoDB after {store_duration:.2f}s (Total: {total_duration:.2f}s): {e}"
         local_logger.error(error_msg)
         print(error_msg, flush=True)
+        import traceback
         traceback_str = traceback.format_exc()
         local_logger.error(f"      Traceback: {traceback_str}")
         print(f"      Traceback: {traceback_str}", flush=True)
         return {'success': False, 'error': str(e), 'traceback': traceback_str}
+
+
+def write_to_dynamodb(trades: List[Dict[str, Any]], dynamodb_table_name: str):
+    """Batch write trades to DynamoDB"""
+    if not trades:
+        return
+    
+    # Create DynamoDB resource and table locally to avoid Spark serialization issues
+    dynamodb_local = boto3.resource('dynamodb')
+    table_local = dynamodb_local.Table(dynamodb_table_name)
+    
+    # Convert to DynamoDB format
+    with table_local.batch_writer() as batch:
+        for trade in trades:
+            # Convert numeric fields to Decimal
+            dynamodb_item = {}
+            for key, value in trade.items():
+                if value is None:
+                    continue
+                elif isinstance(value, (int, float)):
+                    if isinstance(value, float) and (value != value or value == float('inf') or value == float('-inf')):
+                        continue
+                    dynamodb_item[key] = Decimal(str(value))
+                elif isinstance(value, list):
+                    dynamodb_item[key] = [Decimal(str(v)) if isinstance(v, (int, float)) else v for v in value]
+                else:
+                    dynamodb_item[key] = value
+            
+            batch.put_item(Item=dynamodb_item)
+    
+    logger.info(f"✅ Wrote {len(trades)} trades to DynamoDB")
 
 
 # Main execution
@@ -2301,83 +3382,332 @@ try:
     stage2_start = datetime.now()
     forms = fetch_sec_forms_paginated(target_date, is_backdate_mode=is_backdate_mode)
     stage2_duration = (datetime.now() - stage2_start).total_seconds()
-    logger.info(f"✅ Stage 2 Complete: Found {len(forms)} forms in {stage2_duration:.2f} seconds")
-    logger.info("=" * 80)
+    stage2_msg = f"✅ Stage 2 Complete: Fetched {len(forms)} forms in {stage2_duration:.2f} seconds"
+    logger.info(stage2_msg)
+    print(stage2_msg, flush=True)
     
-    # Limit to 10 test files for testing (remove this limit in production)
+    # Log form type breakdown
+    form_type_counts = {}
+    for form in forms:
+        form_type = form.get('form_type', 'unknown')
+        form_type_counts[form_type] = form_type_counts.get(form_type, 0) + 1
+    
+    breakdown_header = "Form Type Breakdown:"
+    logger.info(breakdown_header)
+    print(breakdown_header, flush=True)
+    
+    for form_type, count in sorted(form_type_counts.items()):
+        type_msg = f"   - {form_type}: {count}"
+        logger.info(type_msg)
+        print(type_msg, flush=True)
+    
+    # Log preview of fetched files (first 10)
+    preview_header = f"📋 Preview of Fetched Files (showing first {builtins.min(10, len(forms))} of {len(forms)}):"
+    logger.info(preview_header)
+    print(preview_header, flush=True)
+    
+    for idx, form in enumerate(forms[:10], 1):
+        form_msg = (f"   {idx}. CIK={form.get('cik', 'N/A')}, "
+                   f"Accession={form.get('accession_number', 'N/A')[:20]}, "
+                   f"Type={form.get('form_type', 'N/A')}, "
+                   f"FilingDate={form.get('filing_date', 'N/A')}, "
+                   f"AcceptedDate={form.get('accepted_date', 'N/A') or 'N/A'}")
+        logger.info(form_msg)
+        print(form_msg, flush=True)
+    
     if len(forms) > 10:
-        logger.info(f"⚠️ Limiting to 10 test files (found {len(forms)} total)")
-        print(f"⚠️ Limiting to 10 test files (found {len(forms)} total)", flush=True)
-        forms = forms[:10]
+        more_msg = f"   ... ({len(forms) - 10} more files)"
+        logger.info(more_msg)
+        print(more_msg, flush=True)
     
-    # Step 3: Process forms
+    separator = "=" * 80
+    logger.info(separator)
+    print(separator, flush=True)
+    
+    # Step 3: Process forms in parallel using Spark
     logger.info("")
     logger.info("=" * 80)
-    logger.info("📋 STAGE 3: PROCESSING FORMS")
+    logger.info("📊 STAGE 3: PROCESSING FORMS")
     logger.info("=" * 80)
+    logger.info(f"🔄 Processing {len(forms)} forms in parallel using Spark")
+    logger.info(f"   This stage will: download, parse metadata, check politician match, and store to DynamoDB")
     stage3_start = datetime.now()
     
-    # Get OpenSearch endpoint and index from job parameters if available
-    opensearch_endpoint = None
-    opensearch_index = None
-    try:
-        opensearch_endpoint = args.get('--opensearch-endpoint')
-        opensearch_index = args.get('--opensearch-index', 'sec-filings')
-    except:
-        pass
+    # Broadcast necessary variables to avoid serialization issues
+    # Broadcast variables are sent once to each worker, not serialized with each task
+    politicians_broadcast = sc.broadcast(politicians)
+    target_date_broadcast = sc.broadcast(target_date)
+    s3_bucket_broadcast = sc.broadcast(s3_bucket)
+    dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
+    opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
+    opensearch_index_broadcast = sc.broadcast(opensearch_index)
     
-    # Process forms using Spark if available, otherwise process sequentially
-    if 'sc' in globals() and sc:
-        logger.info("   Using Spark for parallel processing...")
-        # Create RDD and process in parallel
-        forms_rdd = sc.parallelize(forms)
-        results = forms_rdd.map(lambda form: process_form(
-            form, target_date, politicians, s3_bucket, dynamodb_table,
-            opensearch_endpoint, opensearch_index
-        )).collect()
-    else:
-        logger.info("   Processing forms sequentially (Spark not available)...")
-        results = []
-        for i, form in enumerate(forms, 1):
-            logger.info(f"   Processing form {i}/{len(forms)}...")
-            result = process_form(
-                form, target_date, politicians, s3_bucket, dynamodb_table,
-                opensearch_endpoint, opensearch_index
-            )
-            results.append(result)
+    # Limit to first 10 forms for testing
+    test_limit = 10
+    if len(forms) > test_limit:
+        logger.info(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)")
+        print(f"   ⚠️ TESTING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)", flush=True)
+        forms = forms[:test_limit]
+    
+    # Create RDD from forms list
+    forms_rdd = sc.parallelize(forms)
+    
+    # Track processing statistics
+    processing_stats = {
+        'total_forms': len(forms),
+        'successful_stored': 0,
+        'failed_stored': 0,
+        'skipped_date_mismatch': 0,
+        'skipped_download_failed': 0,
+        'skipped_unsupported_type': 0,
+        'politician_matches': 0,
+        'no_politician_matches': 0
+    }
+    
+    # Process each form (download, parse, check match, store)
+    # Use a standalone function that doesn't capture module-level variables
+    def process_form_wrapper(form_data):
+        # Import inside function to avoid capturing module-level state
+        import logging
+        import traceback
+        
+        # Get logger locally - don't use module-level logger
+        local_logger = logging.getLogger()
+        local_logger.setLevel(logging.INFO)
+        
+        try:
+            # Get broadcasted values
+            politicians_local = politicians_broadcast.value
+            target_date_local = target_date_broadcast.value
+            s3_bucket_local = s3_bucket_broadcast.value
+            dynamodb_table_local = dynamodb_table_broadcast.value
+            opensearch_endpoint_local = opensearch_endpoint_broadcast.value
+            opensearch_index_local = opensearch_index_broadcast.value
+            
+            cik = form_data.get('cik', 'unknown')
+            accession = form_data.get('accession_number', 'unknown')
+            
+            local_logger.info(f"🔄 Starting processing: Form {form_data.get('form_type', 'unknown')} - CIK={cik}, Accession={accession}")
+            
+            # Call process_form with explicit parameters from broadcast
+            # Note: process_form will create its own boto3 clients inside, so no SSLContext issues
+            # process_form now stores directly to DynamoDB and returns a result dict
+            result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, dynamodb_table_local, 
+                                 opensearch_endpoint_local, opensearch_index_local)
+            
+            if result.get('success'):
+                msg = f"✅ Form completed: CIK={cik}, TradeId={result.get('tradeId', 'N/A')}, PoliticianMatch={result.get('politicianMatch', False)}"
+                local_logger.info(msg)
+                print(msg, flush=True)
+            elif result.get('skipped'):
+                reason = result.get('reason', 'unknown')
+                msg = f"⏭️ Form skipped: CIK={cik}, Accession={accession}, Reason={reason}"
+                local_logger.info(msg)
+                print(msg, flush=True)
+                if reason == 'date_mismatch':
+                    detail = f"   Details: Filing date doesn't match target date"
+                    local_logger.warning(detail)
+                    print(detail, flush=True)
+                elif reason == 'download_failed':
+                    detail = f"   Details: Could not download form from SEC website"
+                    local_logger.warning(detail)
+                    print(detail, flush=True)
+                elif reason == 'unsupported_file_type':
+                    detail = f"   Details: File type not supported (only HTML supported currently)"
+                    local_logger.warning(detail)
+                    print(detail, flush=True)
+            else:
+                error_msg = result.get('error', 'unknown')
+                msg = f"❌ Form failed: CIK={cik}, Accession={accession}, Error={error_msg}"
+                local_logger.warning(msg)
+                print(msg, flush=True)
+            
+            return result
+        except Exception as e:
+            cik = form_data.get('cik', 'unknown')
+            accession = form_data.get('accession_number', 'unknown')
+            local_logger.error(f"❌ FATAL ERROR processing form (CIK={cik}, Accession={accession}): {e}")
+            local_logger.error(f"   Traceback: {traceback.format_exc()}")
+            return {'success': False, 'error': str(e)}
+    
+    logger.info(f"   Starting Spark parallel processing...")
+    results_rdd = forms_rdd.map(process_form_wrapper)
+    results = results_rdd.collect()
+    logger.info(f"   ✅ Spark processing completed, collecting results...")
+    print(f"   ✅ Spark processing completed, collecting results...", flush=True)
+    
+    # Track S3 keys to detect collisions
+    s3_keys_generated = []
+    for result in results:
+        if result.get('success'):
+            s3_key = result.get('s3_key') or result.get('formS3Key')
+            if s3_key:
+                s3_keys_generated.append(s3_key)
+    
+    # Log S3 key summary to detect collisions
+    if s3_keys_generated:
+        unique_keys = set(s3_keys_generated)
+        logger.info(f"   📦 S3 Keys Generated: {len(s3_keys_generated)} total, {len(unique_keys)} unique")
+        print(f"   📦 S3 Keys Generated: {len(s3_keys_generated)} total, {len(unique_keys)} unique", flush=True)
+        if len(s3_keys_generated) != len(unique_keys):
+            logger.warning(f"   ⚠️ WARNING: S3 KEY COLLISIONS DETECTED!")
+            logger.warning(f"      {len(s3_keys_generated) - len(unique_keys)} duplicate keys found")
+            print(f"   ⚠️ WARNING: S3 KEY COLLISIONS DETECTED!", flush=True)
+            print(f"      {len(s3_keys_generated) - len(unique_keys)} duplicate keys found", flush=True)
+            # Show duplicate keys
+            from collections import Counter
+            key_counts = Counter(s3_keys_generated)
+            duplicates = {k: v for k, v in key_counts.items() if v > 1}
+            for dup_key, count in duplicates.items():
+                logger.warning(f"      Key '{dup_key}' appears {count} times")
+                print(f"      Key '{dup_key}' appears {count} times", flush=True)
+    
+    # Clean up broadcast variables
+    politicians_broadcast.destroy()
+    target_date_broadcast.destroy()
+    s3_bucket_broadcast.destroy()
+    dynamodb_table_broadcast.destroy()
     
     stage3_duration = (datetime.now() - stage3_start).total_seconds()
     
-    # Count results (use builtins.sum to avoid Spark's sum function)
-    successful = builtins.sum(1 for r in results if r.get('success', False))
-    skipped = builtins.sum(1 for r in results if r.get('skipped', False))
-    failed = builtins.sum(1 for r in results if not r.get('success', False) and not r.get('skipped', False))
-    politician_matches = builtins.sum(1 for r in results if r.get('politicianMatch', False))
+    # Calculate final statistics
+    # Use builtins.sum to avoid conflict with PySpark's sum() function
+    total_forms_processed = len(forms)
+    successful_stored = builtins.sum(1 for r in results if r.get('success'))
+    failed_stored = builtins.sum(1 for r in results if not r.get('success') and not r.get('skipped'))
+    skipped_date_mismatch = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'date_mismatch')
+    skipped_download_failed = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'download_failed')
+    skipped_unsupported_type = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'unsupported_file_type')
+    politician_matches = builtins.sum(1 for r in results if r.get('politicianMatch'))
+    no_politician_matches = successful_stored - politician_matches
     
-    logger.info(f"✅ Stage 3 Complete: Processed {len(results)} forms in {stage3_duration:.2f} seconds")
-    logger.info(f"   ✅ Successful: {successful}")
-    logger.info(f"   ⏭️  Skipped: {skipped}")
-    logger.info(f"   ❌ Failed: {failed}")
-    logger.info(f"   👤 Politician Matches: {politician_matches}")
+    logger.info("")
+    logger.info(f"✅ Stage 3 Complete: Processed {total_forms_processed} forms in {stage3_duration:.2f} seconds")
+    logger.info(f"   Average processing time per form: {stage3_duration / total_forms_processed if total_forms_processed > 0 else 0:.2f} seconds")
     logger.info("=" * 80)
     
-    # Final summary
-    total_duration = (datetime.now() - stage1_start).total_seconds()
+    # Step 4: Final Summary
     logger.info("")
     logger.info("=" * 80)
-    logger.info("🎉 JOB COMPLETE")
+    logger.info("📊 STAGE 4: FINAL SUMMARY")
     logger.info("=" * 80)
-    logger.info(f"📊 Summary:")
-    logger.info(f"   Total Duration: {total_duration:.2f} seconds")
-    logger.info(f"   Forms Found: {len(forms)}")
-    logger.info(f"   Forms Processed: {successful}")
-    logger.info(f"   Forms Skipped: {skipped}")
-    logger.info(f"   Forms Failed: {failed}")
-    logger.info(f"   Politician Matches: {politician_matches}")
+    logger.info(f"📈 Processing Statistics:")
+    logger.info(f"   - Total forms fetched: {total_forms_processed}")
+    logger.info(f"   - Successfully stored: {successful_stored} ({successful_stored/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info(f"   - Failed to store: {failed_stored} ({failed_stored/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info(f"   - Skipped (date mismatch): {skipped_date_mismatch} ({skipped_date_mismatch/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info(f"   - Skipped (download failed): {skipped_download_failed} ({skipped_download_failed/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info(f"   - Skipped (unsupported file type): {skipped_unsupported_type} ({skipped_unsupported_type/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
+    logger.info("")
+    logger.info(f"👤 Politician Matching Statistics:")
+    logger.info(f"   - Forms with politician match: {politician_matches} ({politician_matches/successful_stored*100 if successful_stored > 0 else 0:.1f}% of stored)")
+    logger.info(f"   - Forms without politician match: {no_politician_matches} ({no_politician_matches/successful_stored*100 if successful_stored > 0 else 0:.1f}% of stored)")
+    logger.info("")
+    
+    # Detailed failure analysis
+    logger.info("")
+    logger.info(f"🔍 Detailed Failure Analysis:")
+    logger.info(f"   - Skipped (date mismatch): {skipped_date_mismatch} forms")
+    logger.info(f"   - Skipped (download failed): {skipped_download_failed} forms")
+    logger.info(f"   - Skipped (unsupported file type): {skipped_unsupported_type} forms")
+    logger.info(f"   - Failed to store: {failed_stored} forms")
+    
+    # Show sample of failed results for debugging
+    if failed_stored > 0:
+        logger.info("")
+        logger.info(f"   📋 Sample of Failed Forms (first 5):")
+        print("", flush=True)
+        print(f"   📋 Sample of Failed Forms (first 5):", flush=True)
+        failed_samples = [r for r in results if not r.get('success') and not r.get('skipped')][:5]
+        for idx, failed in enumerate(failed_samples, 1):
+            error_info = f"      {idx}. Error: {failed.get('error', 'Unknown error')}"
+            logger.info(error_info)
+            print(error_info, flush=True)
+            if failed.get('traceback'):
+                traceback_preview = failed.get('traceback', '')[:500]  # First 500 chars
+                logger.info(f"         Traceback (preview): {traceback_preview}")
+                print(f"         Traceback (preview): {traceback_preview}", flush=True)
+    
+    if skipped_download_failed > 0:
+        logger.info("")
+        logger.info(f"   📋 Sample of Download Failures (first 5):")
+        download_failed_samples = [r for r in results if r.get('skipped') and r.get('reason') == 'download_failed'][:5]
+        for idx, failed in enumerate(download_failed_samples, 1):
+            logger.info(f"      {idx}. Reason: {failed.get('reason', 'Unknown')}")
+    
+    if skipped_date_mismatch > 0:
+        logger.info("")
+        logger.info(f"   ⚠️ Note: {skipped_date_mismatch} forms were skipped due to date mismatch")
+        logger.info(f"      This is normal if the filing date in the form doesn't match the target date")
+    
+    # Check for critical failures that should cause job to fail
+    if total_forms_processed == 0:
+        error_msg = "❌ CRITICAL ERROR: No forms were fetched from SEC API!"
+        logger.error("")
+        logger.error(error_msg)
+        print("", flush=True)
+        print(error_msg, flush=True)
+        print("   This could indicate:", flush=True)
+        print("      - SEC API is blocking requests (403 Forbidden)", flush=True)
+        print("      - Network connectivity issues", flush=True)
+        print("      - Invalid date parameter", flush=True)
+        print("      - No forms filed on the target date", flush=True)
+        raise Exception("No forms were fetched from SEC API. Check SEC API access, network connectivity, and date parameters.")
+    
+    if successful_stored == 0:
+        error_msg = "❌ CRITICAL ERROR: No forms were successfully stored!"
+        logger.error("")
+        logger.error(error_msg)
+        print("", flush=True)
+        print(error_msg, flush=True)
+        print("   This could indicate:", flush=True)
+        
+        for detail in [
+            "- Download failures for all forms (check network/SEC website)",
+            "- Parsing failures for all forms (check HTML structure)",
+            "- Date mismatches for all forms (check target date)",
+            "- DynamoDB write failures (check permissions/table)"
+        ]:
+            logger.error(f"      {detail}")
+            print(f"      {detail}", flush=True)
+        
+        review_msg = "      Review the detailed logs above for specific error messages"
+        logger.error(review_msg)
+        print(review_msg, flush=True)
+        
+        # Log detailed breakdown of what happened
+        print("", flush=True)
+        print("   🔍 DETAILED BREAKDOWN:", flush=True)
+        print(f"      Total forms fetched: {total_forms_processed}", flush=True)
+        print(f"      Successfully stored: {successful_stored}", flush=True)
+        print(f"      Failed to store: {failed_stored}", flush=True)
+        print(f"      Skipped (date mismatch): {skipped_date_mismatch}", flush=True)
+        print(f"      Skipped (download failed): {skipped_download_failed}", flush=True)
+        print(f"      Skipped (unsupported file type): {skipped_unsupported_type}", flush=True)
+        
+        raise Exception(f"No forms were successfully stored. {total_forms_processed} forms were fetched but none were stored. Check logs for details.")
+    elif successful_stored < total_forms_processed * 0.5:
+        logger.warning("")
+        logger.warning(f"   ⚠️ WARNING: Less than 50% of forms were successfully stored!")
+        logger.warning(f"      Success rate: {successful_stored/total_forms_processed*100:.1f}%")
+        logger.warning(f"      Review the detailed logs above for specific error messages")
+    
     logger.info("=" * 80)
+    logger.info("")
+    logger.info("=" * 80)
+    logger.info("✅ SEC ETL JOB COMPLETED SUCCESSFULLY")
+    logger.info("=" * 80)
+    total_duration = (datetime.now() - stage1_start).total_seconds()
+    logger.info(f"⏰ Total Job Duration: {total_duration:.2f} seconds ({total_duration/60:.2f} minutes)")
+    logger.info(f"⏰ Job End Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    logger.info("=" * 80)
+    
+    job.commit()
     
 except Exception as e:
     logger.error(f"❌ Fatal error in SEC ETL job: {e}")
     import traceback
     logger.error(f"Traceback: {traceback.format_exc()}")
     raise
+
+
