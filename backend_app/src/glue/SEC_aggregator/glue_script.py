@@ -2200,9 +2200,10 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
         # Form 3 specific: Extract event date (Field 2: "Date of Event Requiring Statement")
         # Use field number for more specific matching
         event_date_patterns = [
-            r'2\.\s*Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Event Requiring Statement[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
-            r'Date of Event Requiring Statement[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'2\.\s*Date of Event Requiring Statement[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'2\.\s*Date of Event Requiring Statement.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
+            r'Date of Event Requiring Statement.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         event_date_match = None
@@ -2277,9 +2278,10 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
         # Form 4 specific: Extract event date (Field 3: "Date of Earliest Transaction")
         # Use field number for more specific matching
         event_date_patterns = [
-            r'3\.\s*Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Earliest Transaction[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
-            r'Date of Earliest Transaction[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'3\.\s*Date of Earliest Transaction[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'3\.\s*Date of Earliest Transaction.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
+            r'Date of Earliest Transaction.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         event_date_match = None
@@ -2354,9 +2356,10 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
         # Form 5 specific: Extract event date (Field 3: "Statement for Issuer's Fiscal Year Ended")
         # Use field number for more specific matching
         event_date_patterns = [
-            r'3\.\s*Statement for Issuer\'s Fiscal Year Ended[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
-            r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'3\.\s*Statement for Issuer\'s Fiscal Year Ended[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'3\.\s*Statement for Issuer\'s Fiscal Year Ended.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
+            r'Statement for Issuer\'s Fiscal Year Ended.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         event_date_match = None
@@ -3259,7 +3262,8 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"         IssuerName: {dynamodb_item.get('issuerName', 'N/A')}")
         local_logger.info(f"         TickerSymbol: {dynamodb_item.get('tickerSymbol', 'N/A')}")
         local_logger.info(f"         ReportingDate: {dynamodb_item.get('reportingDate', 'N/A')}")
-        local_logger.info(f"         EventDate: {dynamodb_item.get('eventDate', 'N/A')}")
+        local_logger.info(f"         EventDate: {dynamodb_item.get('eventDate', 'N/A')} {'⚠️ OMITTED (null GSI)' if 'eventDate' not in dynamodb_item and parsed_data.get('eventDate') is None else ''}")
+        local_logger.info(f"         AmendmentDate: {dynamodb_item.get('amendmentDate', 'N/A')} {'⚠️ OMITTED (null GSI)' if 'amendmentDate' not in dynamodb_item and parsed_data.get('amendmentDate') is None else ''}")
         local_logger.info(f"         Relationship: {dynamodb_item.get('relationship', 'N/A')}")
         local_logger.info(f"         Politician: {dynamodb_item.get('politician', 'N/A')}")
         local_logger.info(f"         FormS3Key: {dynamodb_item.get('formS3Key', 'N/A')}")
