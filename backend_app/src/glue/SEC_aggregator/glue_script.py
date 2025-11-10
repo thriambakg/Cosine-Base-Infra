@@ -1706,14 +1706,13 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         
         # City, State, Zip - they're in a table row after (City) (State) (Zip) labels
         # Pattern: (City) ... (State) ... (Zip) ... <table><tr><td><span>SIOUX FALLS</span></td><td><span>SD</span></td><td><span>57104</span></td></tr></table>
-        # NOTE: For GSI, we only need the state (2-letter abbreviation)
         city_state_zip_pattern = r'\(City\)[^<]*\(State\)[^<]*\(Zip\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>'
         csv_match = re.search(city_state_zip_pattern, html_content, re.IGNORECASE | re.DOTALL)
         if csv_match:
             city = unescape(csv_match.group(1)).strip()
             state = unescape(csv_match.group(2)).strip()
             zip_code = unescape(csv_match.group(3)).strip()
-            # Store only the state for the address GSI (2-letter state abbreviation)
+            # Store only the state abbreviation (2-letter code) for GSI
             if state:
                 result['address'] = state.upper()  # Store state in uppercase (e.g., "SD", "NY", "CA")
                 local_logger.info(f"   ✅ Extracted address (state only): {result['address']}")
@@ -2214,11 +2213,11 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 3 specific: Extract event date (Field 2: "Date of Event Requiring Statement")
         # Use field number for more specific matching
+        # HTML structure: <span class="MedSmallFormText">2. Date of Event Requiring Statement...</span><br><span class="FormData">11/03/2025</span>
         event_date_patterns = [
-            r'2\.\s*Date of Event Requiring Statement[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'2\.\s*Date of Event Requiring Statement.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Event Requiring Statement[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
-            r'Date of Event Requiring Statement.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'2\.\s*Date of Event Requiring Statement[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Event Requiring Statement[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
+            r'Date of Event Requiring Statement[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         event_date_match = None
@@ -2239,9 +2238,10 @@ def parse_form3_metadata(html_content: str, form_data: Dict[str, Any], accepted_
             local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
         
         # Form 3 specific: Extract amendment date (Field 5: "If Amendment, Date of Original Filed")
+        # HTML structure: <span class="MedSmallFormText">5. If Amendment, Date of Original Filed...</span><br><span class="FormData">date</span>
         amendment_date_patterns = [
-            r'5\.\s*If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'5\.\s*If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         amendment_date_match = None
@@ -2292,11 +2292,11 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 4 specific: Extract event date (Field 3: "Date of Earliest Transaction")
         # Use field number for more specific matching
+        # HTML structure: <span class="MedSmallFormText">3. Date of Earliest Transaction...</span><br><span class="FormData">11/06/2025</span>
         event_date_patterns = [
-            r'3\.\s*Date of Earliest Transaction[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'3\.\s*Date of Earliest Transaction.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Date of Earliest Transaction[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
-            r'Date of Earliest Transaction.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'3\.\s*Date of Earliest Transaction[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Date of Earliest Transaction[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
+            r'Date of Earliest Transaction[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         event_date_match = None
@@ -2317,9 +2317,10 @@ def parse_form4_metadata(html_content: str, form_data: Dict[str, Any], accepted_
             local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
         
         # Form 4 specific: Extract amendment date (Field 4: "If Amendment, Date of Original Filed")
+        # HTML structure: <span class="MedSmallFormText">4. If Amendment, Date of Original Filed...</span><br><span class="FormData">date</span>
         amendment_date_patterns = [
-            r'4\.\s*If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'4\.\s*If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         amendment_date_match = None
@@ -2370,11 +2371,11 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
     try:
         # Form 5 specific: Extract event date (Field 3: "Statement for Issuer's Fiscal Year Ended")
         # Use field number for more specific matching
+        # HTML structure: <span class="MedSmallFormText">3. Statement for Issuer's Fiscal Year Ended...</span><br><span class="FormData">09/30/2025</span>
         event_date_patterns = [
-            r'3\.\s*Statement for Issuer\'s Fiscal Year Ended[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'3\.\s*Statement for Issuer\'s Fiscal Year Ended.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:\(Month/Day/Year\)[^<]*)?(?:<br[^>]*>)?\s*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
-            r'Statement for Issuer\'s Fiscal Year Ended.*?<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'3\.\s*Statement for Issuer\'s Fiscal Year Ended[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>(?![^<]*If Amendment)',
+            r'Statement for Issuer\'s Fiscal Year Ended[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         event_date_match = None
@@ -2395,9 +2396,10 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
             local_logger.warning(f"   ⚠️ Could not find eventDate in HTML")
         
         # Form 5 specific: Extract amendment date (Field 4: "If Amendment, Date of Original Filed")
+        # HTML structure: <span class="MedSmallFormText">4. If Amendment, Date of Original Filed...</span><br><span class="FormData">date</span>
         amendment_date_patterns = [
-            r'4\.\s*If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
-            r'If Amendment, Date of Original Filed[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'4\.\s*If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
+            r'If Amendment, Date of Original Filed[^<]*(?:\(Month/Day/Year\)[^<]*)?</span>[^<]*(?:<br[^>]*>)?[^<]*<span[^>]*class="FormData"[^>]*>(\d{1,2}/\d{1,2}/\d{4})</span>',
         ]
         
         amendment_date_match = None
@@ -3071,7 +3073,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"         - Relationship Additional: {parsed_data.get('relationshipAdditionalText', 'N/A')}")
     local_logger.info(f"         - Event Date: {parsed_data.get('eventDate', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('eventDate') else '✅'}")
     local_logger.info(f"         - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
-    local_logger.info(f"         - Amendment Date: {parsed_data.get('amendmentDate', 'N/A')}")
+    local_logger.info(f"         - Amendment Date: {parsed_data.get('amendmentDate', 'N/A')} {'(not an amendment)' if not parsed_data.get('amendmentDate') else '(amendment)'}")
     local_logger.info(f"         - Signature Name: {parsed_data.get('signatureName', 'N/A')}")
     local_logger.info(f"         - Filing Type: {parsed_data.get('filingType', 'N/A')}")
     local_logger.info(f"         - Relationship Types: {parsed_data.get('relationshipTypes', 'N/A')}")
@@ -3148,13 +3150,12 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipTypes, relationshipAdditionalText, politician)
         # OpenSearch handles full-text search on HTML content
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
-        # GSI key fields: formType, reportingPersonName, address (state only), eventDate, reportingDate, issuerName, tickerSymbol, relationship
-        # NOTE: amendmentDate is NOT a GSI key - it can be null and will be stored as null when not present
+        # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship, amendmentDate
         # 
         # NOTE: Form-specific checkbox fields (e.g., noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported)
         # are NOT parsed or stored in DynamoDB. These fields are available in OpenSearch via the full htmlContent field
         # for the AI agent to search through. This keeps DynamoDB lightweight with only essential metadata for fast queries.
-        gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
+        gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship', 'amendmentDate'}
         
         # Fields to store in DynamoDB (GSI fields + essential metadata)
         fields_to_store = {
@@ -3169,7 +3170,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             'tickerSymbol',  # GSI
             'relationship',  # GSI
             'politician',  # GSI
-            'amendmentDate',  # Basic metadata (null if not an amendment, NOT a GSI key)
+            'amendmentDate',  # GSI (null if not an amendment)
             'signatureName',  # Basic metadata
             'filingType',  # Basic metadata
             'relationshipTypes',  # Basic metadata
@@ -3278,8 +3279,9 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"         IssuerName: {dynamodb_item.get('issuerName', 'N/A')}")
         local_logger.info(f"         TickerSymbol: {dynamodb_item.get('tickerSymbol', 'N/A')}")
         local_logger.info(f"         ReportingDate: {dynamodb_item.get('reportingDate', 'N/A')}")
-        local_logger.info(f"         EventDate: {dynamodb_item.get('eventDate', 'N/A')} {'⚠️ OMITTED (null GSI)' if 'eventDate' not in dynamodb_item and parsed_data.get('eventDate') is None else ''}")
-        local_logger.info(f"         AmendmentDate: {dynamodb_item.get('amendmentDate', 'N/A')} {'⚠️ OMITTED (null GSI)' if 'amendmentDate' not in dynamodb_item and parsed_data.get('amendmentDate') is None else ''}")
+        local_logger.info(f"         EventDate: {dynamodb_item.get('eventDate', 'N/A')} {'⚠️ OMITTED (null/empty GSI)' if 'eventDate' not in dynamodb_item else ''}")
+        local_logger.info(f"         AmendmentDate: {dynamodb_item.get('amendmentDate', 'N/A')} {'⚠️ OMITTED (null/empty GSI)' if 'amendmentDate' not in dynamodb_item else ''}")
+        local_logger.info(f"         Address: {dynamodb_item.get('address', 'N/A')} {'⚠️ OMITTED (null/empty GSI)' if 'address' not in dynamodb_item else ''}")
         local_logger.info(f"         Relationship: {dynamodb_item.get('relationship', 'N/A')}")
         local_logger.info(f"         Politician: {dynamodb_item.get('politician', 'N/A')}")
         local_logger.info(f"         FormS3Key: {dynamodb_item.get('formS3Key', 'N/A')}")

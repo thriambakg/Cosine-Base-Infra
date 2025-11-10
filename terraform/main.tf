@@ -1843,7 +1843,7 @@ module "sec_filings_table" {
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
-    },
+    }
   ]
 
   billing_mode                   = var.dynamodb_billing_mode
