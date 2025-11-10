@@ -1706,23 +1706,38 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         
         # City, State, Zip - they're in a table row after (City) (State) (Zip) labels
         # Pattern: (City) ... (State) ... (Zip) ... <table><tr><td><span>SIOUX FALLS</span></td><td><span>SD</span></td><td><span>57104</span></td></tr></table>
+        # NOTE: For GSI, we only need the state (2-letter abbreviation)
         city_state_zip_pattern = r'\(City\)[^<]*\(State\)[^<]*\(Zip\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>'
         csv_match = re.search(city_state_zip_pattern, html_content, re.IGNORECASE | re.DOTALL)
         if csv_match:
             city = unescape(csv_match.group(1)).strip()
             state = unescape(csv_match.group(2)).strip()
             zip_code = unescape(csv_match.group(3)).strip()
-            csv_line = f"{city}, {state} {zip_code}".strip()
-            if csv_line:
-                address_parts.append(csv_line)
-        
-        result['address'] = ', '.join(address_parts) if address_parts else None
-        
-        # Log address extraction
-        if result['address']:
-            local_logger.info(f"   ✅ Extracted address: {result['address'][:100]}...")
+            # Store only the state for the address GSI (2-letter state abbreviation)
+            if state:
+                result['address'] = state.upper()  # Store state in uppercase (e.g., "SD", "NY", "CA")
+                local_logger.info(f"   ✅ Extracted address (state only): {result['address']}")
+            else:
+                result['address'] = None
         else:
-            local_logger.warning(f"   ⚠️ Could not extract address from HTML")
+            # Fallback: try to find state in other patterns
+            state_patterns = [
+                r'\(State\)[^<]*<table[^>]*>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
+                r'<td[^>]*class="MedSmallFormText"[^>]*>\(State\)</td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
+            ]
+            state_match = None
+            for pattern in state_patterns:
+                state_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                if state_match:
+                    state = unescape(state_match.group(1)).strip().upper()
+                    if state:
+                        result['address'] = state
+                        local_logger.info(f"   ✅ Extracted address (state only, fallback): {result['address']}")
+                        break
+            
+            if not result.get('address'):
+                result['address'] = None
+                local_logger.warning(f"   ⚠️ Could not extract address (state) from HTML")
         
         # Extract reporting date (accepted date from form_data or extract from HTML)
         # Note: Event date extraction is form-specific and handled in form-specific functions
@@ -3133,12 +3148,13 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         # Simplified: Only store GSI fields + essential metadata (tradeId, formS3Key, signatureName, filingType, relationshipTypes, relationshipAdditionalText, politician)
         # OpenSearch handles full-text search on HTML content
         # IMPORTANT: GSI keys cannot be NULL or empty strings - they must be omitted from the item if missing
-        # GSI key fields: formType, reportingPersonName, address, eventDate, reportingDate, issuerName, tickerSymbol, relationship, amendmentDate
+        # GSI key fields: formType, reportingPersonName, address (state only), eventDate, reportingDate, issuerName, tickerSymbol, relationship
+        # NOTE: amendmentDate is NOT a GSI key - it can be null and will be stored as null when not present
         # 
         # NOTE: Form-specific checkbox fields (e.g., noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported)
         # are NOT parsed or stored in DynamoDB. These fields are available in OpenSearch via the full htmlContent field
         # for the AI agent to search through. This keeps DynamoDB lightweight with only essential metadata for fast queries.
-        gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship', 'amendmentDate'}
+        gsi_key_fields = {'formType', 'reportingPersonName', 'address', 'eventDate', 'reportingDate', 'issuerName', 'tickerSymbol', 'relationship'}
         
         # Fields to store in DynamoDB (GSI fields + essential metadata)
         fields_to_store = {
@@ -3153,7 +3169,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             'tickerSymbol',  # GSI
             'relationship',  # GSI
             'politician',  # GSI
-            'amendmentDate',  # GSI (null if not an amendment)
+            'amendmentDate',  # Basic metadata (null if not an amendment, NOT a GSI key)
             'signatureName',  # Basic metadata
             'filingType',  # Basic metadata
             'relationshipTypes',  # Basic metadata
