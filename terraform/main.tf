@@ -1836,6 +1836,14 @@ module "sec_filings_table" {
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
+    {
+      name            = "AmendmentDateIndex"
+      hash_key        = "amendmentDate"
+      range_key       = "reportingDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
   ]
 
   billing_mode                   = var.dynamodb_billing_mode
