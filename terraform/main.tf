@@ -1766,7 +1766,7 @@ module "sec_filings_table" {
     { name = "reportingDate", type = "S" },
     { name = "issuerName", type = "S" },
     { name = "tickerSymbol", type = "S" },
-    { name = "relationship", type = "S" },
+    { name = "relationship", type = "N" },
     { name = "politician", type = "N" },
     { name = "amendmentDate", type = "S" }
   ]

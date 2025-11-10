@@ -1865,6 +1865,16 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         relationship_types = []
         relationship_additional_dict = {}  # Dict mapping relationship type to additional text
         
+        # Relationship type bitmask mapping for GSI (scalar value)
+        # Director = 1, Officer = 2, 10% Owner = 4, Other = 8
+        # This allows up to 15 unique combinations (0 = no relationships, shouldn't happen)
+        RELATIONSHIP_BITMASK = {
+            'Director': 1,
+            'Officer': 2,
+            '10% Owner': 4,
+            'Other': 8
+        }
+        
         # Find the relationship section table
         # Pattern: Look for "Relationship of Reporting Person(s) to Issuer" followed by a table
         # Be more flexible - allow various HTML structures between the label and table
@@ -2025,8 +2035,17 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             local_logger.warning(f"      ⚠️ Could not find relationship section table")
             print(f"      ⚠️ Could not find relationship section table", flush=True)
         
-        # Store relationship - use first relationship type as primary (for GSI)
-        result['relationship'] = relationship_types[0] if relationship_types else None  # Primary relationship for GSI
+        # Calculate relationship combination code (bitmask) for GSI
+        # This allows querying by any combination of relationships
+        relationship_code = 0
+        for rel_type in relationship_types:
+            if rel_type in RELATIONSHIP_BITMASK:
+                relationship_code |= RELATIONSHIP_BITMASK[rel_type]
+        
+        # Store relationship code as GSI (scalar numeric value)
+        # 0 = no relationships (shouldn't happen), 1-15 = various combinations
+        result['relationship'] = relationship_code if relationship_code > 0 else None
+        
         # Store relationshipTypes as a list (will be stored as JSON array string in DynamoDB)
         result['relationshipTypes'] = relationship_types if relationship_types else None
         
@@ -2036,9 +2055,17 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         
         # Log relationship extraction results
         if result['relationship']:
-            local_logger.info(f"   ✅ Extracted relationship: {result['relationship']}")
+            # Decode relationship code for logging
+            rel_names = []
+            if result['relationship'] & 1: rel_names.append('Director')
+            if result['relationship'] & 2: rel_names.append('Officer')
+            if result['relationship'] & 4: rel_names.append('10% Owner')
+            if result['relationship'] & 8: rel_names.append('Other')
+            local_logger.info(f"   ✅ Extracted relationship code: {result['relationship']} ({', '.join(rel_names)})")
             if result['relationshipTypes']:
                 local_logger.info(f"   ✅ All relationship types: {result['relationshipTypes']}")
+            if result['relationshipAdditionalText']:
+                local_logger.info(f"   ✅ Relationship additional text: {result['relationshipAdditionalText']}")
         else:
             local_logger.warning(f"   ⚠️ Could not extract relationship from HTML")
         
@@ -3124,7 +3151,17 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"         - Address: {parsed_data.get('address', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('address') else '✅'}")
     local_logger.info(f"         - Issuer: {parsed_data.get('issuerName', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('issuerName') else '✅'}")
     local_logger.info(f"         - Ticker: {parsed_data.get('tickerSymbol', 'N/A')}")
-    local_logger.info(f"         - Relationship: {parsed_data.get('relationship', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('relationship') else '✅'}")
+    relationship_code = parsed_data.get('relationship')
+    if relationship_code:
+        # Decode relationship code for display
+        rel_names = []
+        if relationship_code & 1: rel_names.append('Director')
+        if relationship_code & 2: rel_names.append('Officer')
+        if relationship_code & 4: rel_names.append('10% Owner')
+        if relationship_code & 8: rel_names.append('Other')
+        local_logger.info(f"         - Relationship Code: {relationship_code} ({', '.join(rel_names)}) ✅")
+    else:
+        local_logger.info(f"         - Relationship Code: N/A ⚠️ MISSING")
     local_logger.info(f"         - Relationship Additional: {parsed_data.get('relationshipAdditionalText', 'N/A')}")
     local_logger.info(f"         - Event Date: {parsed_data.get('eventDate', 'N/A')} {'⚠️ MISSING' if not parsed_data.get('eventDate') else '✅'}")
     local_logger.info(f"         - Reporting Date: {parsed_data.get('reportingDate', 'N/A')}")
