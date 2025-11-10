@@ -1975,110 +1975,109 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             local_logger.info(f"      📊 Found {len(rows)} rows in relationship table")
             print(f"      📊 Found {len(rows)} rows in relationship table", flush=True)
             
-            # Parse each row (skip row 3 which has blue text for Officer/Other)
-            for row_idx, row_html in enumerate(rows):
-                # Skip the third row (index 2) which contains blue text for additional info
-                if row_idx >= 2:
-                    continue
-                
-                local_logger.info(f"      🔍 Parsing row {row_idx + 1}: {row_html[:200]}")
-                print(f"      🔍 Parsing row {row_idx + 1}: {row_html[:200]}", flush=True)
-                
-                # Extract all <td> cells in this row
-                cells = re.findall(r'<td[^>]*>(.*?)</td>', row_html, re.IGNORECASE | re.DOTALL)
-                local_logger.info(f"      📋 Row {row_idx + 1} has {len(cells)} cells")
-                print(f"      📋 Row {row_idx + 1} has {len(cells)} cells", flush=True)
+            # Track which checkboxes are checked and their cell positions
+            # Structure: Row 1 has Director/10% Owner, Row 2 has Officer/Other
+            # We need to find row 2 (the checkbox row for Officer/Other) and row 3 (additional text row)
+            checked_positions = {}  # Maps relationship type to checkbox cell index in row 2
+            
+            # Find row 2 (index 1) which contains Officer and Other checkboxes
+            if len(rows) >= 2:
+                checkbox_row = rows[1]  # Second row (index 1) - Officer/Other row
+                checkbox_cells = re.findall(r'<td[^>]*>(.*?)</td>', checkbox_row, re.IGNORECASE | re.DOTALL)
+                local_logger.info(f"      📋 Checkbox row has {len(checkbox_cells)} cells")
+                print(f"      📋 Checkbox row has {len(checkbox_cells)} cells", flush=True)
                 
                 # Check each checkbox-text pair: (cell 0, cell 1) and (cell 2, cell 3)
-                # The checkbox is in the odd-indexed cell (0, 2), text is in the even-indexed cell (1, 3)
+                # Cell 0 = Officer checkbox, Cell 1 = "Officer" text
+                # Cell 2 = Other checkbox, Cell 3 = "Other" text
                 for pair_idx in [0, 2]:
-                    if pair_idx + 1 < len(cells):
-                        checkbox_cell = cells[pair_idx]
-                        text_cell = cells[pair_idx + 1]
+                    if pair_idx + 1 < len(checkbox_cells):
+                        checkbox_cell = checkbox_cells[pair_idx]
+                        text_cell = checkbox_cells[pair_idx + 1]
                         
-                        # Check if checkbox contains X (look for FormData class with X)
-                        # Pattern: <span class="FormData">X</span> or just X in the cell
+                        # Check if checkbox contains X
                         has_x = bool(re.search(r'<span[^>]*class="FormData"[^>]*>X</span>', checkbox_cell, re.IGNORECASE))
                         if not has_x:
-                            # Also check for just X in the cell (some forms might not have FormData class)
                             has_x = 'X' in checkbox_cell.strip()
                         
                         # Extract text from text cell (remove HTML tags)
                         text_content = re.sub(r'<[^>]+>', '', text_cell).strip()
+                        text_lower = text_content.lower()
                         
-                        local_logger.info(f"      🔍 Pair {pair_idx//2 + 1}: checkbox='{checkbox_cell[:100]}', has_x={has_x}, text='{text_content}'")
-                        print(f"      🔍 Pair {pair_idx//2 + 1}: checkbox='{checkbox_cell[:100]}', has_x={has_x}, text='{text_content}'", flush=True)
+                        local_logger.info(f"      🔍 Pair {pair_idx//2 + 1}: checkbox cell {pair_idx}, has_x={has_x}, text='{text_content}'")
+                        print(f"      🔍 Pair {pair_idx//2 + 1}: checkbox cell {pair_idx}, has_x={has_x}, text='{text_content}'", flush=True)
                         
                         if has_x and text_content:
-                            # Match relationship type - check for exact matches first
+                            # Determine relationship type based on text
+                            if 'officer' in text_lower:
+                                relationship_types.append('Officer')
+                                checked_positions['Officer'] = pair_idx  # Store checkbox cell index
+                                local_logger.info(f"      ✅ Found Officer relationship (checkbox in cell {pair_idx})")
+                                print(f"      ✅ Found Officer relationship (checkbox in cell {pair_idx})", flush=True)
+                            elif 'other' in text_lower:
+                                relationship_types.append('Other')
+                                checked_positions['Other'] = pair_idx  # Store checkbox cell index
+                                local_logger.info(f"      ✅ Found Other relationship (checkbox in cell {pair_idx})")
+                                print(f"      ✅ Found Other relationship (checkbox in cell {pair_idx})", flush=True)
+                
+                # Also check row 1 (index 0) for Director and 10% Owner
+                if len(rows) >= 1:
+                    first_row = rows[0]
+                    first_row_cells = re.findall(r'<td[^>]*>(.*?)</td>', first_row, re.IGNORECASE | re.DOTALL)
+                    
+                    for pair_idx in [0, 2]:
+                        if pair_idx + 1 < len(first_row_cells):
+                            checkbox_cell = first_row_cells[pair_idx]
+                            text_cell = first_row_cells[pair_idx + 1]
+                            
+                            has_x = bool(re.search(r'<span[^>]*class="FormData"[^>]*>X</span>', checkbox_cell, re.IGNORECASE))
+                            if not has_x:
+                                has_x = 'X' in checkbox_cell.strip()
+                            
+                            text_content = re.sub(r'<[^>]+>', '', text_cell).strip()
                             text_lower = text_content.lower()
                             
-                            if 'director' in text_lower and 'director' not in relationship_types:
-                                relationship_types.append('Director')
-                                local_logger.info(f"      ✅ Found Director relationship")
-                                print(f"      ✅ Found Director relationship", flush=True)
-                            elif 'officer' in text_lower and 'officer' not in relationship_types:
-                                relationship_types.append('Officer')
-                                local_logger.info(f"      ✅ Found Officer relationship")
-                                print(f"      ✅ Found Officer relationship", flush=True)
-                            elif '10%' in text_content and 'owner' in text_lower and '10% Owner' not in relationship_types:
-                                relationship_types.append('10% Owner')
-                                local_logger.info(f"      ✅ Found 10% Owner relationship")
-                                print(f"      ✅ Found 10% Owner relationship", flush=True)
-                            elif 'other' in text_lower and 'other' not in relationship_types:
-                                relationship_types.append('Other')
-                                local_logger.info(f"      ✅ Found Other relationship")
-                                print(f"      ✅ Found Other relationship", flush=True)
+                            if has_x and text_content:
+                                if 'director' in text_lower and 'Director' not in relationship_types:
+                                    relationship_types.append('Director')
+                                    local_logger.info(f"      ✅ Found Director relationship")
+                                    print(f"      ✅ Found Director relationship", flush=True)
+                                elif '10%' in text_content and 'owner' in text_lower and '10% Owner' not in relationship_types:
+                                    relationship_types.append('10% Owner')
+                                    local_logger.info(f"      ✅ Found 10% Owner relationship")
+                                    print(f"      ✅ Found 10% Owner relationship", flush=True)
             
-            # Extract additional text from blue text cells (third row)
-            if len(rows) >= 3:
-                blue_text_row = rows[2]  # Third row (index 2)
-                # Extract all cells from the blue text row
-                blue_text_cells_raw = re.findall(r'<td[^>]*>(.*?)</td>', blue_text_row, re.IGNORECASE | re.DOTALL)
+            # Extract additional text from row 3 (index 2) using cell index mapping
+            # Mapping: If Officer checkbox is in cell 0, get text from cell 1 in row 3
+            #          If Other checkbox is in cell 2, get text from cell 3 in row 3
+            if len(rows) >= 3 and checked_positions:
+                additional_text_row = rows[2]  # Third row (index 2)
+                additional_text_cells = re.findall(r'<td[^>]*>(.*?)</td>', additional_text_row, re.IGNORECASE | re.DOTALL)
+                local_logger.info(f"      📋 Additional text row has {len(additional_text_cells)} cells")
+                print(f"      📋 Additional text row has {len(additional_text_cells)} cells", flush=True)
                 
-                # Check each cell for blue style and extract text
-                blue_text_cells = []
-                for cell_html in blue_text_cells_raw:
-                    # Check if cell has blue style
-                    if re.search(r'style="color:\s*blue"', cell_html, re.IGNORECASE):
-                        # Extract text content (remove HTML tags)
-                        cell_text = re.sub(r'<[^>]+>', '', cell_html).strip()
-                        if cell_text:
-                            blue_text_cells.append(cell_text)
-                        else:
-                            blue_text_cells.append('')  # Empty cell but still blue
-                    else:
-                        blue_text_cells.append(None)  # Not a blue cell
+                # Extract text based on checkbox positions
+                # Officer: checkbox in cell 0 → additional text in cell 1
+                if 'Officer' in checked_positions and checked_positions['Officer'] == 0:
+                    if len(additional_text_cells) > 1:
+                        officer_cell_html = additional_text_cells[1]
+                        officer_text = re.sub(r'<[^>]+>', '', officer_cell_html).strip()
+                        officer_text = unescape(officer_text) if officer_text else None
+                        if officer_text:
+                            relationship_additional_dict['Officer'] = officer_text
+                            local_logger.info(f"      ✅ Found Officer additional text (cell 1): {officer_text}")
+                            print(f"      ✅ Found Officer additional text (cell 1): {officer_text}", flush=True)
                 
-                local_logger.info(f"      🔍 Blue text cells found: {blue_text_cells}")
-                print(f"      🔍 Blue text cells found: {blue_text_cells}", flush=True)
-                
-                if blue_text_cells:
-                    # Extract additional text for each relationship type
-                    # Cell 1 (index 1) is for Officer, Cell 3 (index 3) is for Other
-                    officer_text = None
-                    other_text = None
-                    
-                    # Cell 1 (index 1) is for Officer
-                    if len(blue_text_cells) > 1 and blue_text_cells[1] is not None:
-                        officer_text = unescape(blue_text_cells[1]).strip() if blue_text_cells[1] else None
-                    
-                    # Cell 3 (index 3) is for Other
-                    if len(blue_text_cells) > 3 and blue_text_cells[3] is not None:
-                        other_text = unescape(blue_text_cells[3]).strip() if blue_text_cells[3] else None
-                    
-                    # Build dict mapping relationship type to additional text
-                    if 'Officer' in relationship_types and officer_text:
-                        relationship_additional_dict['Officer'] = officer_text
-                        local_logger.info(f"      ✅ Found Officer additional text: {officer_text}")
-                        print(f"      ✅ Found Officer additional text: {officer_text}", flush=True)
-                    
-                    if 'Other' in relationship_types and other_text:
-                        relationship_additional_dict['Other'] = other_text
-                        local_logger.info(f"      ✅ Found Other additional text: {other_text}")
-                        print(f"      ✅ Found Other additional text: {other_text}", flush=True)
-                    
-                    # Note: Director and 10% Owner don't have additional text fields
+                # Other: checkbox in cell 2 → additional text in cell 3
+                if 'Other' in checked_positions and checked_positions['Other'] == 2:
+                    if len(additional_text_cells) > 3:
+                        other_cell_html = additional_text_cells[3]
+                        other_text = re.sub(r'<[^>]+>', '', other_cell_html).strip()
+                        other_text = unescape(other_text) if other_text else None
+                        if other_text:
+                            relationship_additional_dict['Other'] = other_text
+                            local_logger.info(f"      ✅ Found Other additional text (cell 3): {other_text}")
+                            print(f"      ✅ Found Other additional text (cell 3): {other_text}", flush=True)
             
             # Log what we found
             if relationship_types:
