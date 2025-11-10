@@ -2080,9 +2080,10 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             if rel_type in RELATIONSHIP_BITMASK:
                 relationship_code |= RELATIONSHIP_BITMASK[rel_type]
         
-        # Store relationship code as GSI (scalar numeric value)
+        # Store relationship code as GSI (stored as string in DynamoDB to match existing table schema)
         # 0 = no relationships (shouldn't happen), 1-15 = various combinations
-        result['relationship'] = relationship_code if relationship_code > 0 else None
+        # Store as string to match DynamoDB table schema (can be changed to N after table recreation)
+        result['relationship'] = str(relationship_code) if relationship_code > 0 else None
         
         # Store relationshipAdditionalText as a dict (will be stored as JSON object string in DynamoDB)
         # Format: {"Officer": "President and CEO", "Other": "Trustee"}
@@ -2090,12 +2091,13 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         
         # Log relationship extraction results
         if result['relationship']:
-            # Decode relationship code for logging
+            # Decode relationship code for logging (convert string back to int for bitwise operations)
+            rel_code_int = int(result['relationship'])
             rel_names = []
-            if result['relationship'] & 1: rel_names.append('Director')
-            if result['relationship'] & 2: rel_names.append('Officer')
-            if result['relationship'] & 4: rel_names.append('10% Owner')
-            if result['relationship'] & 8: rel_names.append('Other')
+            if rel_code_int & 1: rel_names.append('Director')
+            if rel_code_int & 2: rel_names.append('Officer')
+            if rel_code_int & 4: rel_names.append('10% Owner')
+            if rel_code_int & 8: rel_names.append('Other')
             local_logger.info(f"   ✅ Extracted relationship code: {result['relationship']} ({', '.join(rel_names)})")
             if result['relationshipAdditionalText']:
                 local_logger.info(f"   ✅ Relationship additional text: {result['relationshipAdditionalText']}")
@@ -3186,13 +3188,17 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"         - Ticker: {parsed_data.get('tickerSymbol', 'N/A')}")
     relationship_code = parsed_data.get('relationship')
     if relationship_code:
-        # Decode relationship code for display
-        rel_names = []
-        if relationship_code & 1: rel_names.append('Director')
-        if relationship_code & 2: rel_names.append('Officer')
-        if relationship_code & 4: rel_names.append('10% Owner')
-        if relationship_code & 8: rel_names.append('Other')
-        local_logger.info(f"         - Relationship Code: {relationship_code} ({', '.join(rel_names)}) ✅")
+        # Decode relationship code for display (convert string to int for bitwise operations)
+        try:
+            rel_code_int = int(relationship_code)
+            rel_names = []
+            if rel_code_int & 1: rel_names.append('Director')
+            if rel_code_int & 2: rel_names.append('Officer')
+            if rel_code_int & 4: rel_names.append('10% Owner')
+            if rel_code_int & 8: rel_names.append('Other')
+            local_logger.info(f"         - Relationship Code: {relationship_code} ({', '.join(rel_names)}) ✅")
+        except (ValueError, TypeError):
+            local_logger.info(f"         - Relationship Code: {relationship_code} ✅")
     else:
         local_logger.info(f"         - Relationship Code: N/A ⚠️ MISSING")
     local_logger.info(f"         - Relationship Additional: {parsed_data.get('relationshipAdditionalText', 'N/A')}")
