@@ -3595,12 +3595,9 @@ try:
     opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
     opensearch_index_broadcast = sc.broadcast(opensearch_index)
     
-    # Limit to first 100 forms for processing
-    test_limit = 100
-    if len(forms) > test_limit:
-        logger.info(f"   ⚠️ PROCESSING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)")
-        print(f"   ⚠️ PROCESSING MODE: Limiting to first {test_limit} forms (out of {len(forms)} total)", flush=True)
-        forms = forms[:test_limit]
+    # Process all forms (no limit)
+    logger.info(f"   📊 Processing all {len(forms)} forms for the target date(s)")
+    print(f"   📊 Processing all {len(forms)} forms for the target date(s)", flush=True)
     
     # Create RDD from forms list
     forms_rdd = sc.parallelize(forms)
