@@ -1704,10 +1704,24 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                 if street:
                     address_parts.append(street)
         
-        # City, State, Zip - they're in a table row after (City) (State) (Zip) labels
-        # Pattern: (City) ... (State) ... (Zip) ... <table><tr><td><span>SIOUX FALLS</span></td><td><span>SD</span></td><td><span>57104</span></td></tr></table>
-        city_state_zip_pattern = r'\(City\)[^<]*\(State\)[^<]*\(Zip\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>'
-        csv_match = re.search(city_state_zip_pattern, html_content, re.IGNORECASE | re.DOTALL)
+        # City, State, Zip - they're in a table row after (Street) label and before (City) (State) (Zip) labels
+        # HTML structure: <span class="MedSmallFormText">(Street)</span><table><tr><td><span>CITY</span></td><td><span>STATE</span></td><td><span>ZIP</span></td></tr></table><hr><table><tr><td>(City)</td><td>(State)</td><td>(Zip)</td></tr></table>
+        # Pattern 1: Look for table after (Street) that contains city, state, zip in FormData spans
+        city_state_zip_patterns = [
+            # Pattern: (Street) ... <table><tr><td><span class="FormData">CITY</span></td><td><span class="FormData">STATE</span></td><td><span class="FormData">ZIP</span></td></tr></table>
+            r'\(Street\)[^<]*<table[^>]*border="0"[^>]*width="100%"[^>]*>.*?<tr>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>',
+            # More flexible pattern without width attributes
+            r'\(Street\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>',
+            # Pattern: Look for table between (Street) and (City) labels
+            r'\(Street\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>[^<]*<hr[^>]*>[^<]*\(City\)',
+        ]
+        
+        csv_match = None
+        for pattern in city_state_zip_patterns:
+            csv_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if csv_match:
+                break
+        
         if csv_match:
             city = unescape(csv_match.group(1)).strip()
             state = unescape(csv_match.group(2)).strip()
@@ -1721,15 +1735,19 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         else:
             # Fallback: try to find state in other patterns
             state_patterns = [
+                # Look for state in table row with three FormData cells (city, state, zip)
+                r'<td[^>]*><span[^>]*class="FormData"[^>]*>[^<]+</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>[^<]+</span></td>',
+                # Look for state after (State) label
                 r'\(State\)[^<]*<table[^>]*>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
-                r'<td[^>]*class="MedSmallFormText"[^>]*>\(State\)</td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
+                # Look for state in table cell with width="33%"
+                r'<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
             ]
             state_match = None
             for pattern in state_patterns:
                 state_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
                 if state_match:
                     state = unescape(state_match.group(1)).strip().upper()
-                    if state:
+                    if state and len(state) == 2:  # Ensure it's a 2-letter state code
                         result['address'] = state
                         local_logger.info(f"   ✅ Extracted address (state only, fallback): {result['address']}")
                         break
