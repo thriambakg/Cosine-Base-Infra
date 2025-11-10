@@ -2348,11 +2348,11 @@ try:
     
     stage3_duration = (datetime.now() - stage3_start).total_seconds()
     
-    # Count results
-    successful = sum(1 for r in results if r.get('success', False))
-    skipped = sum(1 for r in results if r.get('skipped', False))
-    failed = sum(1 for r in results if not r.get('success', False) and not r.get('skipped', False))
-    politician_matches = sum(1 for r in results if r.get('politicianMatch', False))
+    # Count results (use builtins.sum to avoid Spark's sum function)
+    successful = builtins.sum(1 for r in results if r.get('success', False))
+    skipped = builtins.sum(1 for r in results if r.get('skipped', False))
+    failed = builtins.sum(1 for r in results if not r.get('success', False) and not r.get('skipped', False))
+    politician_matches = builtins.sum(1 for r in results if r.get('politicianMatch', False))
     
     logger.info(f"✅ Stage 3 Complete: Processed {len(results)} forms in {stage3_duration:.2f} seconds")
     logger.info(f"   ✅ Successful: {successful}")
