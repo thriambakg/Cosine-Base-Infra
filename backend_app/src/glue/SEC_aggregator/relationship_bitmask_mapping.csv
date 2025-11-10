@@ -1,0 +1,18 @@
+Relationship Code,Binary,Director,Officer,10% Owner,Other,Description
+0,0000,No,No,No,No,No relationships (should not occur)
+1,0001,Yes,No,No,No,Director only
+2,0010,No,Yes,No,No,Officer only
+3,0011,Yes,Yes,No,No,Director + Officer
+4,0100,No,No,Yes,No,10% Owner only
+5,0101,Yes,No,Yes,No,Director + 10% Owner
+6,0110,No,Yes,Yes,No,Officer + 10% Owner
+7,0111,Yes,Yes,Yes,No,Director + Officer + 10% Owner
+8,1000,No,No,No,Yes,Other only
+9,1001,Yes,No,No,Yes,Director + Other
+10,1010,No,Yes,No,Yes,Officer + Other
+11,1011,Yes,Yes,No,Yes,Director + Officer + Other
+12,1100,No,No,Yes,Yes,10% Owner + Other
+13,1101,Yes,No,Yes,Yes,Director + 10% Owner + Other
+14,1110,No,Yes,Yes,Yes,Officer + 10% Owner + Other
+15,1111,Yes,Yes,Yes,Yes,Director + Officer + 10% Owner + Other
+
