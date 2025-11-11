@@ -56,7 +56,7 @@ def download_and_store_senate_ptr(ptr_data: Dict[str, Any], target_date: str) ->
             else:
                 # Fallback: extract from URL
                 filename = url.split('/')[-1].rstrip('/') or 'senate-ptr.html'
-            s3_key = f"trades/{target_date}/senate/{filename}"
+            s3_key = f"trades/senate/{target_date}/{filename}"
         
         logger.info(f"📦 Will store Senate PTR to S3: {s3_key}")
         
@@ -719,7 +719,9 @@ def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> 
         if not s3_key:
             # Extract filename from URL (e.g., "20033394.pdf" from "public_disc/ptr-pdfs/2025/20033394.pdf")
             filename = url.split('/')[-1] or f'house-ptr-{uuid}.pdf' if uuid else 'house-ptr.pdf'
-            s3_key = f"trades/{target_date}/house/{filename}"
+            # Extract year from target_date (YYYY-MM-DD format)
+            year = target_date.split('-')[0] if target_date and '-' in target_date else datetime.now().strftime('%Y')
+            s3_key = f"trades/house/{year}/{filename}"
         
         logger.info(f"📦 Will store House PTR to S3: {s3_key}")
         logger.info(f"📥 Downloading House PTR PDF from {url}")
@@ -813,7 +815,7 @@ def lambda_handler(event, context):
     Returns:
     {
         "success": true,
-        "s3Key": "trades/2025-11-07/senate/senate-ptr-uuid.html",
+        "s3Key": "trades/senate/2025-11-07/senate-ptr-uuid.html",
         "formType": "senate_ptr" or "house_ptr",
         "source": "senate" or "house",
         "filingDate": "2025-11-07",

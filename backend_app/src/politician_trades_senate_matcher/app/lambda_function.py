@@ -1506,7 +1506,7 @@ def lambda_handler(event, context):
     
     Expected input (from Step Functions Map state):
     {
-        "s3Key": "trades/2024-01-15/senate/senate-ptr-uuid.html",
+        "s3Key": "trades/senate/2024-01-15/senate-ptr-uuid.html",
         "formType": "senate_ptr",
         "filingDate": "2024-01-15",
         "filer_name": "Scott, Rick (Senator)",

@@ -2427,7 +2427,17 @@ module "politician_trades_state_machine" {
                             }
                           }
                         }
-                        End = true
+                        Next = "SummarizeHouseDownloads"
+                      }
+                      SummarizeHouseDownloads = {
+                        Type    = "Pass"
+                        Comment = "Transform download results to minimal summary to avoid Step Functions size limit (256KB)"
+                        Result = {
+                          "summary" : "House PTR downloads completed",
+                          "note" : "Individual download results discarded to avoid state size limit"
+                        }
+                        ResultPath = "$.downloadResults"
+                        End        = true
                       }
                     }
                   }
