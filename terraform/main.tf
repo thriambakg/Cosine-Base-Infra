@@ -2357,23 +2357,111 @@ module "politician_trades_state_machine" {
                     }
                   },
                   {
-                    # House Pipeline (placeholder - skip for now)
+                    # House Pipeline
                     StartAt = "TransformHouse"
                     States = {
                       TransformHouse = {
                         Type    = "Pass"
-                        Comment = "Transform: Extract housePTRs from fetchResults (placeholder - not implemented)"
+                        Comment = "Transform: Extract housePTRs array from fetchResults. Preserve date for later use."
                         Parameters = {
-                          "date.$" : "$.fetchResults.date",
+                          "date.$" : "$.fetchResults.date", # Will be available at $.date in subsequent states
                           "items.$" : "$.fetchResults.housePTRs",
                           "source" : "house"
                         }
-                        Next = "MatchHouse"
+                        ResultPath = "$" # Replace entire state with transformed data
+                        Next       = "DownloadHouse"
                       }
-                      MatchHouse = {
+                      DownloadHouse = {
+                        Type           = "Map"
+                        Comment        = "Download House PTRs in parallel - saves to trades/YYYY-MM-DD/house/*"
+                        ItemsPath      = "$.items"
+                        MaxConcurrency = 10
+                        ResultPath     = "$.downloadResults"
+                        Iterator = {
+                          StartAt = "DownloadHousePTR"
+                          States = {
+                            DownloadHousePTR = {
+                              Type     = "Task"
+                              Resource = module.politician_trades_downloader.function_arn
+                              Comment  = "Download a single House PTR"
+                              Retry = [
+                                {
+                                  ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                                  IntervalSeconds = 60
+                                  MaxAttempts     = 5
+                                  BackoffRate     = 2.0
+                                },
+                                {
+                                  ErrorEquals     = ["States.ALL"]
+                                  IntervalSeconds = 10
+                                  MaxAttempts     = 2
+                                  BackoffRate     = 2.0
+                                }
+                              ]
+                              Catch = [
+                                {
+                                  ErrorEquals = ["States.ALL"]
+                                  ResultPath  = "$.error"
+                                  Next        = "DownloadHousePTRFailed"
+                                }
+                              ]
+                              End = true
+                            }
+                            DownloadHousePTRFailed = {
+                              Type    = "Pass"
+                              Comment = "Continue even if download fails"
+                              Result  = { "success" : false, "error" : "Download failed" }
+                              End     = true
+                            }
+                          }
+                        }
+                        Next = "SkipMatchHouse"
+                      }
+                      SkipMatchHouse = {
                         Type    = "Pass"
-                        Comment = "House pipeline placeholder - returns empty results"
-                        Result  = []
+                        Comment = "Skip House PTR matching - Textract implementation needed. Returns empty match results."
+                        Parameters = {
+                          "date.$" : "$.date",
+                          "matchResults" : []
+                        }
+                        ResultPath = "$"
+                        Next       = "SaveHouseTrades"
+                      }
+                      SaveHouseTrades = {
+                        Type    = "Pass"
+                        Comment = "Collect all matched trades from SkipMatchHouse (empty for now). Date preserved from TransformHouse."
+                        Parameters = {
+                          "date.$" : "$.date", # Date preserved from TransformHouse (before Map states)
+                          "matchedTrades" : []
+                        }
+                        Next = "SaveHouseTradesTask"
+                      }
+                      SaveHouseTradesTask = {
+                        Type       = "Task"
+                        Resource   = module.politician_trades_saver.function_arn
+                        Comment    = "Save matched House trades directly to DynamoDB (no aggregation needed) - currently empty until Textract implemented"
+                        ResultPath = "$.saveResults"
+                        End        = true
+                        Retry = [
+                          {
+                            ErrorEquals     = ["States.ALL"]
+                            IntervalSeconds = 30
+                            MaxAttempts     = 3
+                            BackoffRate     = 2.0
+                          }
+                        ]
+                        Catch = [
+                          {
+                            ErrorEquals = ["States.ALL"]
+                            ResultPath  = "$.error"
+                            Next        = "SaveHouseTradesFailed"
+                          }
+                        ]
+                      }
+                      SaveHouseTradesFailed = {
+                        Type    = "Pass"
+                        Comment = "Continue even if save fails"
+                        Result  = { "success" : false, "error" : "Save failed" }
                         End     = true
                       }
                     }
