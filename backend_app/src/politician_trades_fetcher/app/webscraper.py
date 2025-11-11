@@ -1,6 +1,8 @@
 """
-Web Scraper Helper Class for Senate PTRs
-Scrapes Senate financial disclosure forms (PTRs) from efdsearch.senate.gov
+Web Scraper Helper Class for Congressional PTRs
+Scrapes Senate and House financial disclosure forms (PTRs)
+- Senate: efdsearch.senate.gov
+- House: disclosures-clerk.house.gov
 """
 
 import logging
@@ -17,12 +19,16 @@ logger.setLevel(logging.INFO)
 
 class CongressionalPTRScraper:
     
-    """Scraper for Senate Periodic Transaction Reports (PTRs)"""
+    """Scraper for Senate and House Periodic Transaction Reports (PTRs)"""
+    
+    # House Clerk base URL
+    HOUSE_BASE_URL = "https://disclosures-clerk.house.gov"
+    HOUSE_SEARCH_ENDPOINT = f"{HOUSE_BASE_URL}/FinancialDisclosure/ViewMemberSearchResult"
     
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36'
         })
     
     def fetch_senate_ptrs(self, target_date: str) -> List[Dict[str, Any]]:
@@ -381,6 +387,232 @@ class CongressionalPTRScraper:
             
         except Exception as e:
             logger.error(f"❌ Error fetching Senate PTRs: {e}")
+            logger.error(f"Traceback: {tb.format_exc()}")
+            return []
+    
+    def _get_house_antiforgery_token(self) -> str:
+        """Get the antiforgery token from the House search view endpoint"""
+        # First, visit the main page to establish session
+        main_page_url = f"{self.HOUSE_BASE_URL}/FinancialDisclosure"
+        self.session.get(main_page_url, timeout=30)
+        
+        # Then fetch the search view which contains the form with the token
+        search_view_url = f"{self.HOUSE_BASE_URL}/FinancialDisclosure/ViewSearch"
+        
+        view_headers = {
+            "accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8",
+            "accept-language": "en-US,en;q=0.9",
+            "referer": f"{self.HOUSE_BASE_URL}/FinancialDisclosure",
+        }
+        
+        try:
+            response = self.session.get(search_view_url, headers=view_headers, timeout=30)
+            response.raise_for_status()
+            
+            html_content = response.text
+            
+            # Try multiple patterns to find the antiforgery token
+            patterns = [
+                r'<input[^>]*name=["\']__RequestVerificationToken["\'][^>]*value=["\']([^"\']+)["\']',
+                r'<input[^>]*value=["\']([^"\']+)["\'][^>]*name=["\']__RequestVerificationToken["\']',
+                r'__RequestVerificationToken["\']?\s*[:=]\s*["\']([^"\']+)["\']',
+                r'name=["\']__RequestVerificationToken["\'][^>]*value=["\']([^"\']+)["\']',
+                r'__RequestVerificationToken[^>]*value=["\']([A-Za-z0-9_-]+)',
+                r'<input[^>]*type=["\']hidden["\'][^>]*name=["\']__RequestVerificationToken["\'][^>]*value=["\']([^"\']+)["\']',
+            ]
+            
+            for pattern in patterns:
+                token_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                if token_match:
+                    return token_match.group(1)
+            
+            # If no pattern worked, try to find any input with RequestVerificationToken
+            all_inputs = re.findall(r'<input[^>]*>', html_content, re.IGNORECASE)
+            for input_tag in all_inputs:
+                if '__RequestVerificationToken' in input_tag:
+                    value_match = re.search(r'value=["\']([^"\']+)["\']', input_tag)
+                    if value_match:
+                        return value_match.group(1)
+            
+            logger.error("❌ Could not find antiforgery token in House search view")
+            return None
+            
+        except Exception as e:
+            logger.error(f"❌ Error fetching House search view: {e}")
+            return None
+    
+    def _parse_house_name(self, name_text: str) -> Dict[str, str]:
+        """
+        Parse House representative name into components
+        Examples:
+        - "Aderholt, Hon.. Robert B." -> lname="Aderholt", fname="Robert", mname="B."
+        - "Allen, Hon.. Richard W." -> lname="Allen", fname="Richard", mname="W."
+        - "Pelosi, Nancy" -> lname="Pelosi", fname="Nancy", mname=""
+        """
+        # Remove "Hon.." prefix if present
+        name_text = re.sub(r'^Hon\.\.?\s*', '', name_text, flags=re.IGNORECASE).strip()
+        
+        # Split by comma
+        parts = [p.strip() for p in name_text.split(',')]
+        
+        if len(parts) >= 2:
+            lname = parts[0]
+            # First name and middle name are in parts[1]
+            name_parts = parts[1].strip().split()
+            if len(name_parts) >= 2:
+                fname = name_parts[0]
+                mname = ' '.join(name_parts[1:])
+            elif len(name_parts) == 1:
+                fname = name_parts[0]
+                mname = ""
+            else:
+                fname = ""
+                mname = ""
+        elif len(parts) == 1:
+            # No comma - try to split by space (last word is last name)
+            name_parts = parts[0].strip().split()
+            if len(name_parts) >= 2:
+                lname = name_parts[-1]
+                fname = name_parts[0]
+                mname = ' '.join(name_parts[1:-1]) if len(name_parts) > 2 else ""
+            else:
+                lname = parts[0]
+                fname = ""
+                mname = ""
+        else:
+            lname = name_text
+            fname = ""
+            mname = ""
+        
+        return {
+            'fname': fname,
+            'mname': mname,
+            'lname': lname
+        }
+    
+    def fetch_house_ptrs(self, filing_year: str = None) -> List[Dict[str, Any]]:
+        """
+        Fetch House PTRs for a specific filing year from House Clerk website
+        
+        House PTRs are published at: https://disclosures-clerk.house.gov/FinancialDisclosure
+        This site uses a search interface that requires antiforgery token
+        
+        Args:
+            filing_year: Year in YYYY format (defaults to current year)
+            
+        Returns:
+            List of PTR metadata dicts with url, view_url, filer_name, fname, mname, lname, uuid, etc.
+        """
+        if filing_year is None:
+            filing_year = str(datetime.now().year)
+        
+        logger.info(f"🏛️ Fetching House PTRs for filing year: {filing_year}")
+        
+        ptrs = []
+        
+        try:
+            # Get antiforgery token
+            logger.info("🔍 Fetching antiforgery token...")
+            token = self._get_house_antiforgery_token()
+            
+            if not token:
+                logger.error("❌ Failed to get antiforgery token")
+                return []
+            
+            logger.info(f"✅ Got antiforgery token: {token[:20]}...")
+            
+            # Prepare form data
+            form_data = {
+                "LastName": "",
+                "FilingYear": filing_year,
+                "State": "",
+                "District": "",
+                "__RequestVerificationToken": token
+            }
+            
+            # Headers for search request
+            headers = {
+                "accept": "*/*",
+                "accept-language": "en-US,en;q=0.9",
+                "content-type": "application/x-www-form-urlencoded; charset=UTF-8",
+                "origin": self.HOUSE_BASE_URL,
+                "referer": f"{self.HOUSE_BASE_URL}/FinancialDisclosure",
+                "x-requested-with": "XMLHttpRequest",
+            }
+            
+            logger.info(f"📤 Sending search request for year {filing_year}...")
+            response = self.session.post(
+                self.HOUSE_SEARCH_ENDPOINT,
+                data=form_data,
+                headers=headers,
+                timeout=30
+            )
+            response.raise_for_status()
+            
+            html_content = response.text
+            logger.info(f"✅ Search request successful (status: {response.status_code})")
+            
+            # Parse PTR links from HTML
+            # Pattern: <a href="public_disc/ptr-pdfs/2025/20032062.pdf" target="_blank">Name</a>
+            ptr_patterns = [
+                r'<a\s+href="(public_disc/ptr-pdfs/[^"]+\.pdf)"[^>]*target="_blank"[^>]*>([^<]+)</a>',
+                r'<a\s+href="(public_disc/ptr-pdfs/[^"]+\.pdf)"[^>]*>([^<]+)</a>',
+                r'href="(public_disc/[^"]*ptr[^"]*\.pdf)"[^>]*>([^<]+)</a>',
+            ]
+            
+            matches = []
+            for pattern in ptr_patterns:
+                matches = re.findall(pattern, html_content, re.IGNORECASE)
+                if matches:
+                    break
+            
+            if not matches:
+                logger.warning("⚠️ No PTR links found in HTML response")
+                return []
+            
+            logger.info(f"✅ Found {len(matches)} PTR links in results")
+            
+            # Process each match
+            for relative_path, name_text in matches:
+                try:
+                    # Clean up name
+                    name_text = name_text.strip()
+                    
+                    # Parse name components
+                    name_parts = self._parse_house_name(name_text)
+                    
+                    # Build full URL
+                    full_url = urljoin(self.HOUSE_BASE_URL + "/", relative_path)
+                    
+                    # Extract UUID from filename (without extension)
+                    filename = relative_path.split('/')[-1]
+                    uuid = filename.replace('.pdf', '')
+                    
+                    # Build output payload (similar to Senate structure)
+                    ptr_info = {
+                        'url': full_url,
+                        'formType': 'house_ptr',
+                        'source': 'house',
+                        'filer_name': name_text,
+                        'fname': name_parts['fname'],
+                        'mname': name_parts['mname'],
+                        'lname': name_parts['lname'],
+                        'uuid': uuid,
+                        'relative_path': relative_path
+                    }
+                    
+                    ptrs.append(ptr_info)
+                    logger.info(f"✅ Added House PTR: {name_text} - {uuid}")
+                    
+                except Exception as e:
+                    logger.warning(f"⚠️ Error processing House PTR match: {e}")
+                    continue
+            
+            logger.info(f"✅ Successfully extracted {len(ptrs)} House PTRs")
+            return ptrs
+            
+        except Exception as e:
+            logger.error(f"❌ Error fetching House PTRs: {e}")
             logger.error(f"Traceback: {tb.format_exc()}")
             return []
     

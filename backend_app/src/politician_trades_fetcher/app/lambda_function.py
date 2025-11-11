@@ -141,17 +141,34 @@ def lambda_handler(event, context):
         for date_index, target_date in enumerate(target_dates, 1):
             logger.info(f"📅 Processing date {date_index}/{len(target_dates)}: {target_date}")
             
+            # Initialize scraper (reused for both House and Senate)
+            scraper = CongressionalPTRScraper()
+            
             # Step 1: Fetch House PTRs
-            # NOTE: House PTRs are in XML format (annual filings), not individual PTR PDFs
-            # Skipping House PTRs for now - focus on Senate PTRs which have better filing system
-            logger.info("🏛️ Fetching House PTRs...")
-            logger.warning("⚠️ House PTRs are in XML format (annual filings) - skipping for now")
-            logger.info("💡 House PTRs would require XML parsing of annual disclosure files")
-            # House PTRs remain empty for all dates
+            # House PTRs are searched by filing year (not date)
+            # Extract year from target_date
+            target_year = target_date.split('-')[0] if '-' in target_date else str(datetime.now().year)
+            logger.info(f"🏛️ Fetching House PTRs for filing year: {target_year}...")
+            house_ptrs = scraper.fetch_house_ptrs(filing_year=target_year)
+            
+            # Return metadata for downloader Lambda
+            # The downloader will download them and use Textract to filter by actual filing date
+            for ptr_data in house_ptrs:
+                # Add source field if not present
+                if 'source' not in ptr_data:
+                    ptr_data['source'] = 'house'
+                # Ensure formType is set
+                if 'formType' not in ptr_data and 'form_type' not in ptr_data:
+                    ptr_data['formType'] = 'house_ptr'
+                    ptr_data['form_type'] = 'house_ptr'
+                
+                aggregate_results['housePTRs'].append(ptr_data)
+                aggregate_results['housePTRsFetched'] += 1
+            
+            logger.info(f"✅ Found {len(house_ptrs)} House PTRs for {target_year} (total so far: {aggregate_results['housePTRsFetched']})")
             
             # Step 2: Fetch Senate PTRs (metadata only - downloader will download them)
             logger.info(f"🏛️ Fetching Senate PTRs for {target_date}...")
-            scraper = CongressionalPTRScraper()
             senate_ptrs = scraper.fetch_senate_ptrs(target_date)
             
             # Return metadata for downloader Lambda
