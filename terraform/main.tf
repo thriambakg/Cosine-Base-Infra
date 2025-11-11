@@ -2269,7 +2269,17 @@ module "politician_trades_state_machine" {
                             }
                           }
                         }
-                        Next = "MatchSenate"
+                        Next = "SummarizeSenateDownloads"
+                      }
+                      SummarizeSenateDownloads = {
+                        Type    = "Pass"
+                        Comment = "Extract only s3Key from download results to reduce state size (needed for matching)"
+                        Parameters = {
+                          "date.$" : "$.date",
+                          "downloadResults.$" : "$.downloadResults[*].s3Key"
+                        }
+                        ResultPath = "$"
+                        Next       = "MatchSenate"
                       }
                       MatchSenate = {
                         Type           = "Map"
@@ -2278,11 +2288,9 @@ module "politician_trades_state_machine" {
                         MaxConcurrency = 10
                         ResultPath     = "$.matchResults"
                         Parameters = {
-                          "s3Key.$" : "$$.Map.Item.Value.s3Key",
-                          "filingDate.$" : "$$.Map.Item.Value.filingDate",
-                          "filer_name.$" : "$$.Map.Item.Value.filer_name",
-                          "formType.$" : "$$.Map.Item.Value.formType",
-                          "source.$" : "$$.Map.Item.Value.source"
+                          "s3Key.$" : "$$.Map.Item.Value",
+                          "formType" : "senate_ptr",
+                          "source" : "senate"
                         }
                         Iterator = {
                           StartAt = "MatchFileSenate"
@@ -2339,21 +2347,6 @@ module "politician_trades_state_machine" {
                         Comment    = "Save matched Senate trades directly to DynamoDB (no aggregation needed)"
                         ResultPath = "$.saveResults"
                         Next       = "SummarizeSenateResults"
-                        Retry = [
-                          {
-                            ErrorEquals     = ["States.ALL"]
-                            IntervalSeconds = 30
-                            MaxAttempts     = 3
-                            BackoffRate     = 2.0
-                          }
-                        ]
-                        Catch = [
-                          {
-                            ErrorEquals = ["States.ALL"]
-                            ResultPath  = "$.error"
-                            Next        = "SaveSenateTradesFailed"
-                          }
-                        ]
                       }
                       SummarizeSenateResults = {
                         Type    = "Pass"
@@ -2381,79 +2374,74 @@ module "politician_trades_state_machine" {
                     States = {
                       TransformHouse = {
                         Type    = "Pass"
-                        Comment = "Transform: Extract housePTRs array from fetchResults. Preserve date for later use."
+                        Comment = "Transform: Extract housePTRsMetadataS3Key from fetchResults. Preserve date for later use."
                         Parameters = {
                           "date.$" : "$.fetchResults.date", # Will be available at $.date in subsequent states
-                          "items.$" : "$.fetchResults.housePTRs",
+                          "metadataS3Key.$" : "$.fetchResults.housePTRsMetadataS3Key",
+                          "housePTRsCount.$" : "States.ArrayLength($.fetchResults.housePTRs)",
                           "source" : "house"
                         }
                         ResultPath = "$" # Replace entire state with transformed data
-                        Next       = "DownloadHouse"
+                        Next       = "CheckHousePTRs"
+                      }
+                      CheckHousePTRs = {
+                        Type    = "Choice"
+                        Comment = "Check if House PTRs array is empty (hash match - no downloads needed)"
+                        Choices = [
+                          {
+                            Variable      = "$.housePTRsCount"
+                            NumericEquals = 0
+                            Next          = "SkipHouseDownloads"
+                          }
+                        ]
+                        Default = "DownloadHouse"
+                      }
+                      SkipHouseDownloads = {
+                        Type    = "Pass"
+                        Comment = "Hash matched - no new House PTRs to download"
+                        Result = {
+                          "summary" : "House PTR downloads skipped - no changes detected",
+                          "folderName" : null,
+                          "count" : 0,
+                          "success" : true
+                        }
+                        ResultPath = "$.downloadResults"
+                        End        = true
                       }
                       DownloadHouse = {
-                        Type           = "Map"
-                        Comment        = "Download House PTRs in parallel - saves to trades/YYYY-MM-DD/house/*"
-                        ItemsPath      = "$.items"
-                        MaxConcurrency = 10
-                        ResultPath     = "$.downloadResults"
-                        Parameters = {
-                          "filingDate.$" : "$.date",
-                          "url.$" : "$$.Map.Item.Value.url",
-                          "formType.$" : "$$.Map.Item.Value.formType",
-                          "source.$" : "$$.Map.Item.Value.source",
-                          "filer_name.$" : "$$.Map.Item.Value.filer_name",
-                          "fname.$" : "$$.Map.Item.Value.fname",
-                          "mname.$" : "$$.Map.Item.Value.mname",
-                          "lname.$" : "$$.Map.Item.Value.lname",
-                          "uuid.$" : "$$.Map.Item.Value.uuid",
-                          "relative_path.$" : "$$.Map.Item.Value.relative_path"
-                        }
-                        Iterator = {
-                          StartAt = "DownloadHousePTR"
-                          States = {
-                            DownloadHousePTR = {
-                              Type     = "Task"
-                              Resource = module.politician_trades_downloader.function_arn
-                              Comment  = "Download a single House PTR"
-                              Retry = [
-                                {
-                                  ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
-                                  IntervalSeconds = 60
-                                  MaxAttempts     = 5
-                                  BackoffRate     = 2.0
-                                },
-                                {
-                                  ErrorEquals     = ["States.ALL"]
-                                  IntervalSeconds = 10
-                                  MaxAttempts     = 2
-                                  BackoffRate     = 2.0
-                                }
-                              ]
-                              Catch = [
-                                {
-                                  ErrorEquals = ["States.ALL"]
-                                  ResultPath  = "$.error"
-                                  Next        = "DownloadHousePTRFailed"
-                                }
-                              ]
-                              End = true
-                            }
-                            DownloadHousePTRFailed = {
-                              Type    = "Pass"
-                              Comment = "Continue even if download fails"
-                              Result  = { "success" : false, "error" : "Download failed" }
-                              End     = true
-                            }
+                        Type       = "Task"
+                        Resource   = module.politician_trades_downloader.function_arn
+                        Comment    = "Download House PTRs sequentially from S3 metadata - reads JSON from S3 and processes each file"
+                        ResultPath = "$.downloadResults"
+                        Next       = "SummarizeHouseDownloads"
+                        Retry = [
+                          {
+                            ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                            IntervalSeconds = 60
+                            MaxAttempts     = 5
+                            BackoffRate     = 2.0
+                          },
+                          {
+                            ErrorEquals     = ["States.ALL"]
+                            IntervalSeconds = 10
+                            MaxAttempts     = 2
+                            BackoffRate     = 2.0
                           }
-                        }
-                        Next = "SummarizeHouseDownloads"
+                        ]
+                        Catch = [
+                          {
+                            ErrorEquals = ["States.ALL"]
+                            ResultPath  = "$.error"
+                            Next        = "SummarizeHouseDownloads"
+                          }
+                        ]
                       }
                       SummarizeHouseDownloads = {
                         Type    = "Pass"
                         Comment = "Transform download results to minimal summary to avoid Step Functions size limit (256KB)"
-                        Result = {
-                          "summary" : "House PTR downloads completed",
-                          "note" : "Individual download results discarded to avoid state size limit"
+                        Parameters = {
+                          "summary.$" : "$.downloadResults.summary",
+                          "folderName.$" : "$.downloadResults.folderName"
                         }
                         ResultPath = "$.downloadResults"
                         End        = true

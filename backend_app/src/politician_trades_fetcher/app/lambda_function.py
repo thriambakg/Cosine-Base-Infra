@@ -9,9 +9,11 @@ Note: SEC forms are now handled by a separate Glue job.
 import json
 import os
 import logging
+import hashlib
 from typing import List, Dict, Any
 from datetime import datetime, timedelta
 import time
+import boto3
 
 # Configure logging (must be before imports that use logger)
 logger = logging.getLogger()
@@ -26,6 +28,9 @@ except ImportError as e:
 
 # Environment variables
 S3_BUCKET = os.environ.get('S3_BUCKET')
+
+# Initialize S3 client
+s3_client = boto3.client('s3')
 
 def get_today_date() -> str:
     """Get today's date in YYYY-MM-DD format"""
@@ -148,8 +153,8 @@ def lambda_handler(event, context):
         logger.info("💡 Note: House PTRs are fetched by year only (not date-specific). Downloader will filter by actual filing date.")
         house_ptrs = scraper.fetch_house_ptrs(filing_year=target_year)
         
-        # Return metadata for downloader Lambda
-        # The downloader will download them and use Textract to filter by actual filing date
+        # Build House PTR payload and prepare for S3 storage
+        house_ptrs_metadata = []
         for ptr_data in house_ptrs:
             # Add source field if not present
             if 'source' not in ptr_data:
@@ -159,10 +164,59 @@ def lambda_handler(event, context):
                 ptr_data['formType'] = 'house_ptr'
                 ptr_data['form_type'] = 'house_ptr'
             
-            aggregate_results['housePTRs'].append(ptr_data)
-            aggregate_results['housePTRsFetched'] += 1
+            house_ptrs_metadata.append(ptr_data)
         
-        logger.info(f"✅ Found {len(house_ptrs)} House PTRs for {target_year} (will be filtered by date in downloader)")
+        logger.info(f"✅ Found {len(house_ptrs_metadata)} House PTRs for {target_year}")
+        
+        # Convert to JSON and generate hash
+        house_ptrs_json = json.dumps(house_ptrs_metadata, sort_keys=True)
+        house_ptrs_hash = hashlib.sha256(house_ptrs_json.encode('utf-8')).hexdigest()
+        logger.info(f"🔐 Generated hash for House PTRs metadata: {house_ptrs_hash[:16]}...")
+        
+        # Check if metadata file exists in S3
+        metadata_s3_key = f"trades/house/{target_year}/metadata.json"
+        existing_hash = None
+        
+        try:
+            response = s3_client.get_object(Bucket=S3_BUCKET, Key=metadata_s3_key)
+            existing_metadata = json.loads(response['Body'].read().decode('utf-8'))
+            existing_hash = existing_metadata.get('sourceCodeHash')
+            logger.info(f"📦 Found existing metadata file in S3: {metadata_s3_key}")
+            logger.info(f"🔐 Existing hash: {existing_hash[:16] if existing_hash else 'None'}...")
+        except s3_client.exceptions.NoSuchKey:
+            logger.info(f"📦 No existing metadata file found in S3: {metadata_s3_key}")
+        except Exception as e:
+            logger.warning(f"⚠️ Error checking existing metadata: {e}")
+        
+        # Compare hashes
+        if existing_hash and existing_hash == house_ptrs_hash:
+            logger.info(f"✅ Hash matches existing file - no changes detected. Returning empty array.")
+            aggregate_results['housePTRs'] = []
+            aggregate_results['housePTRsFetched'] = 0
+            aggregate_results['housePTRsMetadataS3Key'] = None
+        else:
+            # Save metadata to S3
+            metadata_payload = {
+                'sourceCodeHash': house_ptrs_hash,
+                'year': target_year,
+                'fetchedAt': datetime.now().isoformat(),
+                'count': len(house_ptrs_metadata),
+                'housePTRs': house_ptrs_metadata
+            }
+            
+            metadata_json = json.dumps(metadata_payload, indent=2)
+            s3_client.put_object(
+                Bucket=S3_BUCKET,
+                Key=metadata_s3_key,
+                Body=metadata_json.encode('utf-8'),
+                ContentType='application/json'
+            )
+            logger.info(f"💾 Saved House PTRs metadata to S3: {metadata_s3_key}")
+            
+            # Return only the S3 key in housePTRs array (as object keys)
+            aggregate_results['housePTRs'] = [{'s3Key': metadata_s3_key}]
+            aggregate_results['housePTRsFetched'] = len(house_ptrs_metadata)
+            aggregate_results['housePTRsMetadataS3Key'] = metadata_s3_key
         
         # Step 2: Process each date for Senate PTRs (metadata only - downloader will download them)
         for date_index, target_date in enumerate(target_dates, 1):

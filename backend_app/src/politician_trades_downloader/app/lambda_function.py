@@ -694,6 +694,81 @@ def download_and_store_senate_ptr(ptr_data: Dict[str, Any], target_date: str) ->
         raise
 
 
+def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Download House PTRs sequentially from S3 metadata file
+    
+    Args:
+        metadata_s3_key: S3 key of the metadata JSON file
+        event: Event dict with date and other context
+        
+    Returns:
+        Summary dict with folderName and count
+    """
+    try:
+        logger.info(f"📦 Reading House PTRs metadata from S3: {metadata_s3_key}")
+        
+        # Read metadata from S3
+        response = s3_client.get_object(Bucket=S3_BUCKET, Key=metadata_s3_key)
+        metadata = json.loads(response['Body'].read().decode('utf-8'))
+        
+        house_ptrs = metadata.get('housePTRs', [])
+        year = metadata.get('year', datetime.now().strftime('%Y'))
+        
+        logger.info(f"📋 Found {len(house_ptrs)} House PTRs in metadata for year {year}")
+        
+        # Extract target date from event (for determining year if needed)
+        target_date_raw = event.get('date') or event.get('filingDate')
+        if target_date_raw:
+            try:
+                date_obj = datetime.strptime(target_date_raw, '%Y-%m-%d')
+                target_date = date_obj.strftime('%Y-%m-%d')
+            except:
+                target_date = None
+        else:
+            target_date = None
+        
+        # Process each House PTR sequentially
+        successful_downloads = 0
+        failed_downloads = 0
+        folder_name = f"trades/house/{year}"
+        
+        for idx, ptr_data in enumerate(house_ptrs, 1):
+            try:
+                logger.info(f"📥 Downloading House PTR {idx}/{len(house_ptrs)}: {ptr_data.get('filer_name', 'Unknown')}")
+                
+                # Use year from metadata for S3 key generation
+                year_for_s3 = year
+                s3_key = download_and_store_house_ptr(ptr_data, target_date or f"{year}-01-01")
+                
+                if s3_key:
+                    successful_downloads += 1
+                    logger.info(f"✅ Successfully downloaded House PTR {idx}/{len(house_ptrs)}")
+                else:
+                    failed_downloads += 1
+                    logger.warning(f"⚠️ Failed to download House PTR {idx}/{len(house_ptrs)}")
+                    
+            except Exception as e:
+                failed_downloads += 1
+                logger.error(f"❌ Error downloading House PTR {idx}/{len(house_ptrs)}: {e}")
+                # Continue with next PTR even if one fails
+        
+        logger.info(f"✅ Completed House PTR downloads: {successful_downloads} successful, {failed_downloads} failed")
+        
+        return {
+            "summary": "House PTR downloads completed",
+            "folderName": folder_name,
+            "count": successful_downloads,
+            "failed": failed_downloads,
+            "total": len(house_ptrs),
+            "success": True
+        }
+        
+    except Exception as e:
+        logger.error(f"❌ Error processing House PTRs from metadata: {e}")
+        raise
+
+
 def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> Optional[str]:
     """
     Download House PTR PDF from URL and store in S3
@@ -788,9 +863,16 @@ def lambda_handler(event, context):
     """
     Lambda handler for downloading PTR files (Senate and House)
     
-    Expected input (from Step Functions Map state):
+    Expected input (from Step Functions):
     
-    Senate PTR:
+    House PTR Batch (from S3 metadata):
+    {
+        "metadataS3Key": "trades/house/2025/metadata.json",
+        "date": "2025-11-07",
+        "source": "house"
+    }
+    
+    Senate PTR (individual):
     {
         "url": "https://efdsearch.senate.gov/search/view/ptr/{uuid}/",
         "view_url": "https://efdsearch.senate.gov/search/view/ptr/{uuid}/",
@@ -802,7 +884,7 @@ def lambda_handler(event, context):
         "transactions": [...]  # Optional: pre-extracted transactions
     }
     
-    House PTR:
+    House PTR (individual - legacy):
     {
         "url": "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20033394.pdf",
         "formType": "house_ptr",
@@ -813,6 +895,15 @@ def lambda_handler(event, context):
     }
     
     Returns:
+    House PTR Batch:
+    {
+        "summary": "House PTR downloads completed",
+        "folderName": "trades/house/2025",
+        "count": 150,
+        "success": true
+    }
+    
+    Individual PTR:
     {
         "success": true,
         "s3Key": "trades/senate/2025-11-07/senate-ptr-uuid.html",
@@ -829,6 +920,12 @@ def lambda_handler(event, context):
         raise ValueError("S3_BUCKET environment variable not set")
     
     try:
+        # Check if this is a House PTR batch request (from S3 metadata)
+        metadata_s3_key = event.get('metadataS3Key') or event.get('metadata_s3_key')
+        if metadata_s3_key:
+            logger.info(f"📦 House PTR batch mode: Reading metadata from S3: {metadata_s3_key}")
+            return download_house_ptrs_from_metadata(metadata_s3_key, event)
+        
         # Extract target date from event
         target_date_raw = event.get('filingDate') or event.get('filing_date') or event.get('date')
         if not target_date_raw:
