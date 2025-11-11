@@ -2269,17 +2269,7 @@ module "politician_trades_state_machine" {
                             }
                           }
                         }
-                        Next = "SummarizeSenateDownloads"
-                      }
-                      SummarizeSenateDownloads = {
-                        Type    = "Pass"
-                        Comment = "Extract only s3Key from download results to reduce state size (needed for matching)"
-                        Parameters = {
-                          "date.$" : "$.date",
-                          "downloadResults.$" : "$.downloadResults[*].s3Key"
-                        }
-                        ResultPath = "$"
-                        Next       = "MatchSenate"
+                        Next = "MatchSenate"
                       }
                       MatchSenate = {
                         Type           = "Map"
@@ -2287,11 +2277,6 @@ module "politician_trades_state_machine" {
                         ItemsPath      = "$.downloadResults"
                         MaxConcurrency = 10
                         ResultPath     = "$.matchResults"
-                        Parameters = {
-                          "s3Key.$" : "$$.Map.Item.Value",
-                          "formType" : "senate_ptr",
-                          "source" : "senate"
-                        }
                         Iterator = {
                           StartAt = "MatchFileSenate"
                           States = {
@@ -2346,7 +2331,7 @@ module "politician_trades_state_machine" {
                         Resource   = module.politician_trades_saver.function_arn
                         Comment    = "Save matched Senate trades directly to DynamoDB (no aggregation needed)"
                         ResultPath = "$.saveResults"
-                        Next       = "SummarizeSenateResults"
+                        End        = true
                         Retry = [
                           {
                             ErrorEquals     = ["States.ALL"]
@@ -2362,18 +2347,6 @@ module "politician_trades_state_machine" {
                             Next        = "SaveSenateTradesFailed"
                           }
                         ]
-                      }
-                      SummarizeSenateResults = {
-                        Type    = "Pass"
-                        Comment = "Return minimal summary to avoid Step Functions size limit (256KB)"
-                        Parameters = {
-                          "summary" : "Senate PTR processing completed",
-                          "date.$" : "$.date",
-                          "tradesSaved.$" : "$.saveResults.tradesSaved",
-                          "tradesSkipped.$" : "$.saveResults.tradesSkipped"
-                        }
-                        ResultPath = "$"
-                        End        = true
                       }
                       SaveSenateTradesFailed = {
                         Type    = "Pass"
