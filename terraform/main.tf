@@ -2377,6 +2377,18 @@ module "politician_trades_state_machine" {
                         ItemsPath      = "$.items"
                         MaxConcurrency = 10
                         ResultPath     = "$.downloadResults"
+                        Parameters = {
+                          "filingDate.$" : "$.date",
+                          "url.$" : "$$.Map.Item.Value.url",
+                          "formType.$" : "$$.Map.Item.Value.formType",
+                          "source.$" : "$$.Map.Item.Value.source",
+                          "filer_name.$" : "$$.Map.Item.Value.filer_name",
+                          "fname.$" : "$$.Map.Item.Value.fname",
+                          "mname.$" : "$$.Map.Item.Value.mname",
+                          "lname.$" : "$$.Map.Item.Value.lname",
+                          "uuid.$" : "$$.Map.Item.Value.uuid",
+                          "relative_path.$" : "$$.Map.Item.Value.relative_path"
+                        }
                         Iterator = {
                           StartAt = "DownloadHousePTR"
                           States = {
@@ -2415,54 +2427,7 @@ module "politician_trades_state_machine" {
                             }
                           }
                         }
-                        Next = "SkipMatchHouse"
-                      }
-                      SkipMatchHouse = {
-                        Type    = "Pass"
-                        Comment = "Skip House PTR matching - Textract implementation needed. Returns empty match results."
-                        Parameters = {
-                          "date.$" : "$.date",
-                          "matchResults" : []
-                        }
-                        ResultPath = "$"
-                        Next       = "SaveHouseTrades"
-                      }
-                      SaveHouseTrades = {
-                        Type    = "Pass"
-                        Comment = "Collect all matched trades from SkipMatchHouse (empty for now). Date preserved from TransformHouse."
-                        Parameters = {
-                          "date.$" : "$.date", # Date preserved from TransformHouse (before Map states)
-                          "matchedTrades" : []
-                        }
-                        Next = "SaveHouseTradesTask"
-                      }
-                      SaveHouseTradesTask = {
-                        Type       = "Task"
-                        Resource   = module.politician_trades_saver.function_arn
-                        Comment    = "Save matched House trades directly to DynamoDB (no aggregation needed) - currently empty until Textract implemented"
-                        ResultPath = "$.saveResults"
-                        End        = true
-                        Retry = [
-                          {
-                            ErrorEquals     = ["States.ALL"]
-                            IntervalSeconds = 30
-                            MaxAttempts     = 3
-                            BackoffRate     = 2.0
-                          }
-                        ]
-                        Catch = [
-                          {
-                            ErrorEquals = ["States.ALL"]
-                            ResultPath  = "$.error"
-                            Next        = "SaveHouseTradesFailed"
-                          }
-                        ]
-                      }
-                      SaveHouseTradesFailed = {
-                        Type    = "Pass"
-                        Comment = "Continue even if save fails"
-                        Result  = { "success" : false, "error" : "Save failed" }
-                        End     = true
+                        End = true
                       }
                     }
                   }
