@@ -2269,17 +2269,7 @@ module "politician_trades_state_machine" {
                             }
                           }
                         }
-                        Next = "SummarizeSenateDownloads"
-                      }
-                      SummarizeSenateDownloads = {
-                        Type    = "Pass"
-                        Comment = "Extract only s3Key from download results to reduce state size (needed for matching)"
-                        Parameters = {
-                          "date.$" : "$.date",
-                          "downloadResults.$" : "$.downloadResults[*].s3Key"
-                        }
-                        ResultPath = "$"
-                        Next       = "MatchSenate"
+                        Next = "MatchSenate"
                       }
                       MatchSenate = {
                         Type           = "Map"
@@ -2288,9 +2278,11 @@ module "politician_trades_state_machine" {
                         MaxConcurrency = 10
                         ResultPath     = "$.matchResults"
                         Parameters = {
-                          "s3Key.$" : "$$.Map.Item.Value",
-                          "formType" : "senate_ptr",
-                          "source" : "senate"
+                          "s3Key.$" : "$$.Map.Item.Value.s3Key",
+                          "filingDate.$" : "$$.Map.Item.Value.filingDate",
+                          "filer_name.$" : "$$.Map.Item.Value.filer_name",
+                          "formType.$" : "$$.Map.Item.Value.formType",
+                          "source.$" : "$$.Map.Item.Value.source"
                         }
                         Iterator = {
                           StartAt = "MatchFileSenate"
@@ -2347,6 +2339,21 @@ module "politician_trades_state_machine" {
                         Comment    = "Save matched Senate trades directly to DynamoDB (no aggregation needed)"
                         ResultPath = "$.saveResults"
                         Next       = "SummarizeSenateResults"
+                        Retry = [
+                          {
+                            ErrorEquals     = ["States.ALL"]
+                            IntervalSeconds = 30
+                            MaxAttempts     = 3
+                            BackoffRate     = 2.0
+                          }
+                        ]
+                        Catch = [
+                          {
+                            ErrorEquals = ["States.ALL"]
+                            ResultPath  = "$.error"
+                            Next        = "SaveSenateTradesFailed"
+                          }
+                        ]
                       }
                       SummarizeSenateResults = {
                         Type    = "Pass"
