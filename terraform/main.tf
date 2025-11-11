@@ -2347,6 +2347,21 @@ module "politician_trades_state_machine" {
                         Comment    = "Save matched Senate trades directly to DynamoDB (no aggregation needed)"
                         ResultPath = "$.saveResults"
                         Next       = "SummarizeSenateResults"
+                        Retry = [
+                          {
+                            ErrorEquals     = ["States.ALL"]
+                            IntervalSeconds = 30
+                            MaxAttempts     = 3
+                            BackoffRate     = 2.0
+                          }
+                        ]
+                        Catch = [
+                          {
+                            ErrorEquals = ["States.ALL"]
+                            ResultPath  = "$.error"
+                            Next        = "SaveSenateTradesFailed"
+                          }
+                        ]
                       }
                       SummarizeSenateResults = {
                         Type    = "Pass"
