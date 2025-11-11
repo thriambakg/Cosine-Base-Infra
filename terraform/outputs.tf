@@ -492,22 +492,23 @@ output "lambda_s3_chat_files_policy_arn" {
 }
 
 # OpenSearch Domain Outputs
-output "opensearch_domain_endpoint" {
-  description = "Endpoint of the OpenSearch domain for SEC filings"
-  value       = module.sec_filings_opensearch.domain_endpoint
-}
-
-output "opensearch_domain_arn" {
-  description = "ARN of the OpenSearch domain for SEC filings"
-  value       = module.sec_filings_opensearch.domain_arn
-}
-
-output "opensearch_domain_name" {
-  description = "Name of the OpenSearch domain for SEC filings"
-  value       = module.sec_filings_opensearch.domain_name
-}
-
-output "opensearch_dashboard_endpoint" {
-  description = "Dashboard endpoint of the OpenSearch domain for SEC filings"
-  value       = module.sec_filings_opensearch.dashboard_endpoint
-}
+# DISABLED FOR MVP - OpenSearch is not being used
+# output "opensearch_domain_endpoint" {
+#   description = "Endpoint of the OpenSearch domain for SEC filings"
+#   value       = module.sec_filings_opensearch.domain_endpoint
+# }
+#
+# output "opensearch_domain_arn" {
+#   description = "ARN of the OpenSearch domain for SEC filings"
+#   value       = module.sec_filings_opensearch.domain_arn
+# }
+#
+# output "opensearch_domain_name" {
+#   description = "Name of the OpenSearch domain for SEC filings"
+#   value       = module.sec_filings_opensearch.domain_name
+# }
+#
+# output "opensearch_dashboard_endpoint" {
+#   description = "Dashboard endpoint of the OpenSearch domain for SEC filings"
+#   value       = module.sec_filings_opensearch.dashboard_endpoint
+# }

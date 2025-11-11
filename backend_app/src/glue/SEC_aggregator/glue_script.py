@@ -144,12 +144,13 @@ for i, arg in enumerate(sys.argv):
         elif i + 1 < len(sys.argv):
             opensearch_index = sys.argv[i + 1]
 
-if opensearch_endpoint:
-    logger.info(f"🔍 OpenSearch enabled: Endpoint={opensearch_endpoint}, Index={opensearch_index or 'sec-filings'}")
-    print(f"🔍 OpenSearch enabled: Endpoint={opensearch_endpoint}, Index={opensearch_index or 'sec-filings'}", flush=True)
-else:
-    logger.info("⚠️ OpenSearch not configured - documents will only be stored to DynamoDB")
-    print("⚠️ OpenSearch not configured - documents will only be stored to DynamoDB", flush=True)
+# OpenSearch disabled for MVP - agent will use DynamoDB queries + S3 file reads instead
+# if opensearch_endpoint:
+#     logger.info(f"🔍 OpenSearch enabled: Endpoint={opensearch_endpoint}, Index={opensearch_index or 'sec-filings'}")
+#     print(f"🔍 OpenSearch enabled: Endpoint={opensearch_endpoint}, Index={opensearch_index or 'sec-filings'}", flush=True)
+# else:
+logger.info("ℹ️ OpenSearch disabled for MVP - documents stored to DynamoDB and S3 only")
+print("ℹ️ OpenSearch disabled for MVP - documents stored to DynamoDB and S3 only", flush=True)
 
 # Parse optional backdate argument manually (since getResolvedOptions requires all args)
 # Format: --backdate=2025-11-05 or --backdate 2025-11-05
@@ -183,12 +184,12 @@ elif target_date and target_date.strip() != '' and target_date.lower() != 'null'
     logger.info(f"📅 Processing SEC forms for date: {target_date}")
     print(f"📅 Processing SEC forms for date: {target_date}", flush=True)
 else:
-    # Default to yesterday if neither provided
-    yesterday = datetime.now() - timedelta(days=1)
-    target_date = yesterday.strftime('%Y-%m-%d')
+    # Default to today if neither provided (for scheduler - processes current day's filings)
+    today = datetime.now().date()
+    target_date = today.strftime('%Y-%m-%d')
     is_backdate_mode = False
-    logger.info(f"⚠️ No date/backdate provided (or was null/empty), defaulting to yesterday: {target_date}")
-    print(f"⚠️ No date/backdate provided (or was null/empty), defaulting to yesterday: {target_date}", flush=True)
+    logger.info(f"ℹ️ No date/backdate provided (or was null/empty), defaulting to today: {target_date}")
+    print(f"ℹ️ No date/backdate provided (or was null/empty), defaulting to today: {target_date}", flush=True)
 
 # Optional date range parameters (not currently used, but can be added via --additional-python-modules or custom parsing if needed)
 # start_date = args.get('start_date')  # Not currently used
@@ -3450,87 +3451,91 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         local_logger.info(f"         Write Time: {db_write_duration:.2f}s")
         
         # Index to OpenSearch if configured
+        # DISABLED FOR MVP - OpenSearch removed to save costs (~$200/month)
+        # Agent will use DynamoDB queries + S3 file reads instead
+        # Can be re-enabled when funding is available
         opensearch_success = False
-        if opensearch_endpoint:
-            try:
-                opensearch_index_start = datetime.now()
-                local_logger.info(f"      🔍 Indexing to OpenSearch...")
-                
-                # Prepare document for OpenSearch
-                # Include GSI fields for filtering + full HTML content for full-text search
-                # NOTE: The htmlContent field contains the complete HTML including all checkbox fields
-                # (noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported, etc.)
-                # which are not parsed but are searchable via full-text search in OpenSearch
-                opensearch_doc = {
-                    'tradeId': trade_id,
-                    'formType': parsed_data.get('formType'),
-                    'reportingPersonName': parsed_data.get('reportingPersonName'),
-                    'issuerName': parsed_data.get('issuerName'),
-                    'tickerSymbol': parsed_data.get('tickerSymbol'),
-                    'relationship': parsed_data.get('relationship'),
-                    'relationshipAdditionalText': parsed_data.get('relationshipAdditionalText'),
-                    'filingType': parsed_data.get('filingType'),
-                    'eventDate': parsed_data.get('eventDate'),
-                    'reportingDate': parsed_data.get('reportingDate'),
-                    'address': parsed_data.get('address'),
-                    'signatureName': parsed_data.get('signatureName'),
-                    'politician': parsed_data.get('politician', 0),  # Use 0/1 to match DynamoDB format
-                    'amendmentDate': parsed_data.get('amendmentDate'),  # Amendment date if form is an amendment
-                    'formS3Key': s3_key,
-                    # Include full HTML content for full-text search (AI agent can search this)
-                    'htmlContent': content_str,  # Full HTML content for OpenSearch full-text search
-                    # Add timestamp for indexing
-                    '@timestamp': datetime.now().isoformat()
-                }
-                
-                # Remove None values
-                opensearch_doc = {k: v for k, v in opensearch_doc.items() if v is not None}
-                
-                # Index document to OpenSearch using requests library
-                index_name = opensearch_index or 'sec-filings'
-                url = f"https://{opensearch_endpoint}/{index_name}/_doc/{trade_id}"
-                
-                # Use AWS SigV4 signing for authentication
-                from botocore.auth import SigV4Auth
-                from botocore.awsrequest import AWSRequest
-                import urllib3
-                
-                # Get AWS region
-                aws_region = boto3.Session().region_name or 'us-east-1'
-                
-                # Create request
-                request = AWSRequest(method='PUT', url=url, data=json.dumps(opensearch_doc), headers={'Content-Type': 'application/json'})
-                
-                # Sign request
-                credentials = boto3.Session().get_credentials()
-                SigV4Auth(credentials, 'es', aws_region).add_auth(request)
-                
-                # Send request
-                http = urllib3.PoolManager()
-                response = http.request(
-                    'PUT',
-                    url,
-                    body=json.dumps(opensearch_doc),
-                    headers=dict(request.headers)
-                )
-                
-                if response.status in [200, 201]:
-                    opensearch_success = True
-                    opensearch_duration = (datetime.now() - opensearch_index_start).total_seconds()
-                    local_logger.info(f"      ✅ OpenSearch indexed successfully in {opensearch_duration:.2f}s")
-                else:
-                    local_logger.warning(f"      ⚠️ OpenSearch indexing returned status {response.status}: {response.data.decode('utf-8')}")
-                    
-            except Exception as opensearch_error:
-                local_logger.warning(f"      ⚠️ OpenSearch indexing failed (non-fatal): {opensearch_error}")
-                # Don't fail the entire process if OpenSearch indexing fails
+        # if opensearch_endpoint:
+        #     try:
+        #         opensearch_index_start = datetime.now()
+        #         local_logger.info(f"      🔍 Indexing to OpenSearch...")
+        #         
+        #         # Prepare document for OpenSearch
+        #         # Include GSI fields for filtering + full HTML content for full-text search
+        #         # NOTE: The htmlContent field contains the complete HTML including all checkbox fields
+        #         # (noLongerSubjectToSection16, rule10b51c, form3HoldingsReported, form4TransactionsReported, etc.)
+        #         # which are not parsed but are searchable via full-text search in OpenSearch
+        #         opensearch_doc = {
+        #             'tradeId': trade_id,
+        #             'formType': parsed_data.get('formType'),
+        #             'reportingPersonName': parsed_data.get('reportingPersonName'),
+        #             'issuerName': parsed_data.get('issuerName'),
+        #             'tickerSymbol': parsed_data.get('tickerSymbol'),
+        #             'relationship': parsed_data.get('relationship'),
+        #             'relationshipAdditionalText': parsed_data.get('relationshipAdditionalText'),
+        #             'filingType': parsed_data.get('filingType'),
+        #             'eventDate': parsed_data.get('eventDate'),
+        #             'reportingDate': parsed_data.get('reportingDate'),
+        #             'address': parsed_data.get('address'),
+        #             'signatureName': parsed_data.get('signatureName'),
+        #             'politician': parsed_data.get('politician', 0),  # Use 0/1 to match DynamoDB format
+        #             'amendmentDate': parsed_data.get('amendmentDate'),  # Amendment date if form is an amendment
+        #             'formS3Key': s3_key,
+        #             # Include full HTML content for full-text search (AI agent can search this)
+        #             'htmlContent': content_str,  # Full HTML content for OpenSearch full-text search
+        #             # Add timestamp for indexing
+        #             '@timestamp': datetime.now().isoformat()
+        #         }
+        #         
+        #         # Remove None values
+        #         opensearch_doc = {k: v for k, v in opensearch_doc.items() if v is not None}
+        #         
+        #         # Index document to OpenSearch using requests library
+        #         index_name = opensearch_index or 'sec-filings'
+        #         url = f"https://{opensearch_endpoint}/{index_name}/_doc/{trade_id}"
+        #         
+        #         # Use AWS SigV4 signing for authentication
+        #         from botocore.auth import SigV4Auth
+        #         from botocore.awsrequest import AWSRequest
+        #         import urllib3
+        #         
+        #         # Get AWS region
+        #         aws_region = boto3.Session().region_name or 'us-east-1'
+        #         
+        #         # Create request
+        #         request = AWSRequest(method='PUT', url=url, data=json.dumps(opensearch_doc), headers={'Content-Type': 'application/json'})
+        #         
+        #         # Sign request
+        #         credentials = boto3.Session().get_credentials()
+        #         SigV4Auth(credentials, 'es', aws_region).add_auth(request)
+        #         
+        #         # Send request
+        #         http = urllib3.PoolManager()
+        #         response = http.request(
+        #             'PUT',
+        #             url,
+        #             body=json.dumps(opensearch_doc),
+        #             headers=dict(request.headers)
+        #         )
+        #         
+        #         if response.status in [200, 201]:
+        #             opensearch_success = True
+        #             opensearch_duration = (datetime.now() - opensearch_index_start).total_seconds()
+        #             local_logger.info(f"      ✅ OpenSearch indexed successfully in {opensearch_duration:.2f}s")
+        #         else:
+        #             local_logger.warning(f"      ⚠️ OpenSearch indexing returned status {response.status}: {response.data.decode('utf-8')}")
+        #             
+        #     except Exception as opensearch_error:
+        #         local_logger.warning(f"      ⚠️ OpenSearch indexing failed (non-fatal): {opensearch_error}")
+        #         # Don't fail the entire process if OpenSearch indexing fails
         
         store_duration = (datetime.now() - store_start).total_seconds()
         total_duration = (datetime.now() - form_start_time).total_seconds()
         
         local_logger.info(f"   ✅ STORED: TradeId={trade_id}, S3Key={s3_key} in {store_duration:.2f}s")
-        if opensearch_endpoint:
-            local_logger.info(f"   {'✅' if opensearch_success else '⚠️'} OpenSearch: {'Indexed' if opensearch_success else 'Failed (non-fatal)'}")
+        # OpenSearch logging disabled for MVP
+        # if opensearch_endpoint:
+        #     local_logger.info(f"   {'✅' if opensearch_success else '⚠️'} OpenSearch: {'Indexed' if opensearch_success else 'Failed (non-fatal)'}")
         local_logger.info(f"   ✅ Form processing complete: Total time {total_duration:.2f}s")
         local_logger.info(f"      Breakdown: Download={download_duration:.2f}s, Parse={parse_duration:.2f}s, Match={match_duration:.2f}s, Store={store_duration:.2f}s")
         
@@ -3540,7 +3545,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
             'politicianMatch': politician_match is not None,
             's3_key': s3_key,
             'formS3Key': s3_key,  # Also include for compatibility
-            'opensearch_indexed': opensearch_success if opensearch_endpoint else None
+            # 'opensearch_indexed': opensearch_success if opensearch_endpoint else None  # Disabled for MVP
         }
     
     except Exception as e:
@@ -3652,8 +3657,9 @@ try:
         target_date_broadcast = sc.broadcast(date_str)
         s3_bucket_broadcast = sc.broadcast(s3_bucket)
         dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
-        opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
-        opensearch_index_broadcast = sc.broadcast(opensearch_index)
+        # OpenSearch disabled for MVP
+        # opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
+        # opensearch_index_broadcast = sc.broadcast(opensearch_index)
         
         # Process each form (download, parse, check match, store)
         def process_form_wrapper(form_data):
@@ -3667,14 +3673,15 @@ try:
                 target_date_local = target_date_broadcast.value
                 s3_bucket_local = s3_bucket_broadcast.value
                 dynamodb_table_local = dynamodb_table_broadcast.value
-                opensearch_endpoint_local = opensearch_endpoint_broadcast.value
-                opensearch_index_local = opensearch_index_broadcast.value
+                # OpenSearch disabled for MVP
+                # opensearch_endpoint_local = opensearch_endpoint_broadcast.value
+                # opensearch_index_local = opensearch_index_broadcast.value
                 
                 cik = form_data.get('cik', 'unknown')
                 accession = form_data.get('accession_number', 'unknown')
                 
                 result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, 
-                                     dynamodb_table_local, opensearch_endpoint_local, opensearch_index_local)
+                                     dynamodb_table_local, None, None)  # OpenSearch disabled
                 
                 return result
             except Exception as e:
@@ -3691,8 +3698,9 @@ try:
         target_date_broadcast.destroy()
         s3_bucket_broadcast.destroy()
         dynamodb_table_broadcast.destroy()
-        opensearch_endpoint_broadcast.destroy()
-        opensearch_index_broadcast.destroy()
+        # OpenSearch disabled for MVP
+        # opensearch_endpoint_broadcast.destroy()
+        # opensearch_index_broadcast.destroy()
         
         stage3_duration = (datetime.now() - stage3_start).total_seconds()
         

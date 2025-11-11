@@ -27,10 +27,10 @@ except ImportError as e:
 # Environment variables
 S3_BUCKET = os.environ.get('S3_BUCKET')
 
-def get_yesterday_date() -> str:
-    """Get yesterday's date in YYYY-MM-DD format"""
-    yesterday = datetime.now() - timedelta(days=1)
-    return yesterday.strftime('%Y-%m-%d')
+def get_today_date() -> str:
+    """Get today's date in YYYY-MM-DD format"""
+    today = datetime.now().date()
+    return today.strftime('%Y-%m-%d')
 
 def lambda_handler(event, context):
     """
@@ -52,9 +52,10 @@ def lambda_handler(event, context):
     3. Default (from EventBridge daily scheduler):
     {
         "source": "scheduler-daily",
-        "timestamp": "2025-10-31T00:00:00Z"
+        "backdate": null,
+        "date": null
     }
-    # Defaults to yesterday's date
+    # Defaults to today's date (matches Glue job behavior)
     
     Returns:
     {
@@ -82,7 +83,7 @@ def lambda_handler(event, context):
     # Options:
     # 1. Backdate: {"backdate": "2025-11-05"} - fetches from today back to backdate
     # 2. Single date: {"date": "2025-10-30"}
-    # 3. Default: yesterday's date (for scheduled runs)
+    # 3. Default: today's date (for scheduled runs - matches Glue job behavior)
     target_dates = []
     
     if isinstance(event, dict):
@@ -112,13 +113,13 @@ def lambda_handler(event, context):
             target_dates = [event.get('date')]
             logger.info(f"📅 Single date mode: {target_dates[0]}")
         else:
-            # Default: yesterday for scheduled runs
-            target_dates = [get_yesterday_date()]
-            logger.info(f"📅 Default date mode (yesterday): {target_dates[0]}")
+            # Default: today for scheduled runs (matches Glue job behavior)
+            target_dates = [get_today_date()]
+            logger.info(f"📅 Default date mode (today): {target_dates[0]}")
     else:
-        # Default: yesterday for scheduled runs
-        target_dates = [get_yesterday_date()]
-        logger.info(f"📅 Default date mode (yesterday): {target_dates[0]}")
+        # Default: today for scheduled runs (matches Glue job behavior)
+        target_dates = [get_today_date()]
+        logger.info(f"📅 Default date mode (today): {target_dates[0]}")
     
     logger.info(f"📅 Processing {len(target_dates)} date(s): {target_dates[0] if len(target_dates) == 1 else f'{target_dates[0]} to {target_dates[-1]}'}")
     

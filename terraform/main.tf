@@ -2116,13 +2116,14 @@ module "politician_trades_state_machine" {
                 Parameters = {
                   JobName = module.politician_trades_sec_glue_job.job_name
                   Arguments = {
-                    "--backdate.$"          = "$.backdate" # Get backdate from top-level input (may be null/empty)
-                    "--date.$"              = "$.date"     # Get date from top-level input (may be null/empty - Glue will default to yesterday)
-                    "--s3_bucket"           = module.sec_filings_s3.bucket_id
-                    "--dynamodb_table"      = module.sec_filings_table.table_name
-                    "--opensearch_endpoint" = module.sec_filings_opensearch.domain_endpoint
-                    "--opensearch_index"    = "sec-filings"
-                    "--JOB_NAME"            = module.politician_trades_sec_glue_job.job_name
+                    "--backdate.$"     = "$.backdate" # Get backdate from top-level input (may be null/empty)
+                    "--date.$"         = "$.date"     # Get date from top-level input (may be null/empty - Glue will default to yesterday)
+                    "--s3_bucket"      = module.sec_filings_s3.bucket_id
+                    "--dynamodb_table" = module.sec_filings_table.table_name
+                    # OpenSearch disabled for MVP - agent will use DynamoDB + S3 instead
+                    # "--opensearch_endpoint" = module.sec_filings_opensearch.domain_endpoint
+                    # "--opensearch_index"    = "sec-filings"
+                    "--JOB_NAME" = module.politician_trades_sec_glue_job.job_name
                   }
                 }
                 Retry = [
@@ -2442,8 +2443,9 @@ module "politician_trades_scheduler" {
   target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
 
   target_input = jsonencode({
-    date   = null # Will default to yesterday in Lambda/Glue
-    source = "scheduler-daily"
+    backdate = null
+    date     = null # EventBridge cannot generate dynamic dates - Step Function/Glue will use current date (today)
+    source   = "scheduler-daily"
   })
 
   purpose     = "PoliticianTradesAggregation"
@@ -2548,95 +2550,98 @@ module "politician_trades_sec_glue_job" {
 }
 
 # OpenSearch Domain for SEC Filings Full-Text Search
-module "sec_filings_opensearch" {
-  source = "./modules/opensearch"
+# DISABLED FOR MVP - Agent will use DynamoDB queries + S3 file reads instead
+# Can be re-enabled when funding is available (~$200/month)
+# module "sec_filings_opensearch" {
+#   source = "./modules/opensearch"
+#
+#   project_name = var.project_name
+#   environment  = var.environment
+#   domain_name  = "sec" # Shortened to meet 28-char limit: cosine-sec-staging = 18 chars, cosine-sec-production = 21 chars
+#
+#   # Engine version
+#   engine_version = "OpenSearch_2.11"
+#
+#   # Cluster configuration - start small, scale as needed
+#   instance_type  = var.environment == "production" ? "r6g.large.search" : "t3.small.search"
+#   instance_count = var.environment == "production" ? 2 : 1
+#
+#   # Multi-AZ for production
+#   zone_awareness_enabled  = var.environment == "production"
+#   availability_zone_count = 2
 
-  project_name = var.project_name
-  environment  = var.environment
-  domain_name  = "sec" # Shortened to meet 28-char limit: cosine-sec-staging = 18 chars, cosine-sec-production = 21 chars
-
-  # Engine version
-  engine_version = "OpenSearch_2.11"
-
-  # Cluster configuration - start small, scale as needed
-  instance_type  = var.environment == "production" ? "r6g.large.search" : "t3.small.search"
-  instance_count = var.environment == "production" ? 2 : 1
-
-  # Multi-AZ for production
-  zone_awareness_enabled  = var.environment == "production"
-  availability_zone_count = 2
-
-  # EBS configuration
-  ebs_enabled     = true
-  ebs_volume_type = "gp3"
-  ebs_volume_size = var.environment == "production" ? 100 : 20
-
-  # Security
-  kms_key_arn                     = module.kms.main_key_arn
-  node_to_node_encryption_enabled = true
-  enforce_https                   = true
-  tls_security_policy             = "Policy-Min-TLS-1-2-2019-07"
-
-  # Advanced security (optional - can enable later for fine-grained access control)
-  advanced_security_enabled      = false
-  internal_user_database_enabled = false
-
-  # Access policy - allow Glue job and other services
-  access_policy_json = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          AWS = [
-            module.politician_trades_sec_glue_job.role_arn,
-            "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
-          ]
-        }
-        Action   = "es:*"
-        Resource = "arn:aws:es:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:domain/${var.project_name}-sec-${var.environment}/*"
-      }
-    ]
-  })
-
-  # Logging
-  log_publishing_options = []
-
-  # Advanced options
-  advanced_options = {}
-
-  common_tags = var.common_tags
-
-  depends_on = [
-    module.kms
-  ]
-}
+#   # EBS configuration
+#   ebs_enabled     = true
+#   ebs_volume_type = "gp3"
+#   ebs_volume_size = var.environment == "production" ? 100 : 20
+#
+#   # Security
+#   kms_key_arn                     = module.kms.main_key_arn
+#   node_to_node_encryption_enabled = true
+#   enforce_https                   = true
+#   tls_security_policy             = "Policy-Min-TLS-1-2-2019-07"
+#
+#   # Advanced security (optional - can enable later for fine-grained access control)
+#   advanced_security_enabled      = false
+#   internal_user_database_enabled = false
+#
+#   # Access policy - allow Glue job and other services
+#   access_policy_json = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = [
+#       {
+#         Effect = "Allow"
+#         Principal = {
+#           AWS = [
+#             module.politician_trades_sec_glue_job.role_arn,
+#             "arn:aws:iam::${data.aws_caller_identity.current.account_id}:root"
+#           ]
+#         }
+#         Action   = "es:*"
+#         Resource = "arn:aws:es:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:domain/${var.project_name}-sec-${var.environment}/*"
+#       }
+#     ]
+#   })
+#
+#   # Logging
+#   log_publishing_options = []
+#
+#   # Advanced options
+#   advanced_options = {}
+#
+#   common_tags = var.common_tags
+#
+#   depends_on = [
+#     module.kms
+#   ]
+# }
 
 # IAM Policy for Glue Job to access OpenSearch
-resource "aws_iam_role_policy" "glue_opensearch_access" {
-  name = "${var.project_name}-glue-opensearch-access-${var.environment}"
-  role = module.politician_trades_sec_glue_job.role_name
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "es:ESHttpPost",
-          "es:ESHttpPut",
-          "es:DescribeElasticsearchDomain",
-          "es:DescribeDomain",
-          "es:ESHttpGet"
-        ]
-        Resource = [
-          "${module.sec_filings_opensearch.domain_arn}/*",
-          module.sec_filings_opensearch.domain_arn
-        ]
-      }
-    ]
-  })
-}
+# DISABLED FOR MVP - OpenSearch is not being used
+# resource "aws_iam_role_policy" "glue_opensearch_access" {
+#   name = "${var.project_name}-glue-opensearch-access-${var.environment}"
+#   role = module.politician_trades_sec_glue_job.role_name
+#
+#   policy = jsonencode({
+#     Version = "2012-10-17"
+#     Statement = [
+#       {
+#         Effect = "Allow"
+#         Action = [
+#           "es:ESHttpPost",
+#           "es:ESHttpPut",
+#           "es:DescribeElasticsearchDomain",
+#           "es:DescribeDomain",
+#           "es:ESHttpGet"
+#         ]
+#         Resource = [
+#           "${module.sec_filings_opensearch.domain_arn}/*",
+#           module.sec_filings_opensearch.domain_arn
+#         ]
+#       }
+#     ]
+#   })
+# }
 
 # Note: KMS key policy is updated in the locals section below to include OpenSearch service
 
@@ -2685,28 +2690,29 @@ locals {
         }
       ],
       # OpenSearch service access (added for OpenSearch domain)
-      [
-        {
-          Sid    = "AllowOpenSearchService"
-          Effect = "Allow"
-          Principal = {
-            Service = "es.amazonaws.com"
-          }
-          Action = [
-            "kms:Encrypt",
-            "kms:Decrypt",
-            "kms:ReEncrypt*",
-            "kms:GenerateDataKey*",
-            "kms:DescribeKey"
-          ]
-          Resource = "*"
-          Condition = {
-            StringEquals = {
-              "kms:ViaService" = "es.${data.aws_region.current.name}.amazonaws.com"
-            }
-          }
-        }
-      ],
+      # DISABLED FOR MVP - OpenSearch is not being used
+      # [
+      #   {
+      #     Sid    = "AllowOpenSearchService"
+      #     Effect = "Allow"
+      #     Principal = {
+      #       Service = "es.amazonaws.com"
+      #     }
+      #     Action = [
+      #       "kms:Encrypt",
+      #       "kms:Decrypt",
+      #       "kms:ReEncrypt*",
+      #       "kms:GenerateDataKey*",
+      #       "kms:DescribeKey"
+      #     ]
+      #     Resource = "*"
+      #     Condition = {
+      #       StringEquals = {
+      #         "kms:ViaService" = "es.${data.aws_region.current.name}.amazonaws.com"
+      #       }
+      #     }
+      #   }
+      # ],
       # Glue role access (added here)
       [
         {
