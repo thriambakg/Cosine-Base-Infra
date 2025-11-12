@@ -23,9 +23,11 @@ logger.setLevel(logging.INFO)
 # AWS clients
 s3_client = boto3.client('s3')
 textract_client = boto3.client('textract')
+dynamodb = boto3.resource('dynamodb')
 
 # Environment variables
 S3_BUCKET = os.environ.get('S3_BUCKET')
+DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 
 # Name matching threshold (0.0 to 1.0)
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
@@ -523,6 +525,58 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
     
     return trades
 
+def check_if_filing_processed(s3_key: str) -> bool:
+    """
+    Check if a House PTR filing has already been processed by checking DynamoDB
+    
+    Args:
+        s3_key: S3 key of the House PTR PDF (e.g., "trades/house/2025/20033394.pdf")
+        
+    Returns:
+        True if filing has been processed, False otherwise
+    """
+    if not DYNAMODB_TABLE_NAME:
+        logger.warning("⚠️ DYNAMODB_TABLE_NAME not set - skipping duplicate check")
+        return False
+    
+    try:
+        # Extract UUID/filename from S3 key
+        # Format: "trades/house/2025/20033394.pdf" -> "20033394"
+        filename = s3_key.split('/')[-1]  # Get "20033394.pdf"
+        uuid = filename.replace('.pdf', '').replace('.PDF', '')  # Get "20033394"
+        
+        if not uuid or not uuid.isdigit():
+            logger.warning(f"⚠️ Could not extract valid UUID from S3 key: {s3_key}")
+            return False
+        
+        logger.info(f"🔍 Checking if House PTR {uuid} has already been processed...")
+        
+        # Get DynamoDB table
+        table = dynamodb.Table(DYNAMODB_TABLE_NAME)
+        
+        # Scan for tradeIds that contain this UUID
+        # House PTR tradeIds likely contain the UUID (e.g., "house_ptr_20033394_..." or "trade_2025-01-15_house_20033394")
+        # Use a filter expression to check if tradeId contains the UUID
+        response = table.scan(
+            FilterExpression='contains(tradeId, :uuid) AND formType = :formType',
+            ExpressionAttributeValues={
+                ':uuid': uuid,
+                ':formType': 'house_ptr'
+            },
+            Limit=1  # We only need to know if at least one exists
+        )
+        
+        if response.get('Items') and len(response.get('Items', [])) > 0:
+            logger.info(f"✅ House PTR {uuid} has already been processed (found {len(response['Items'])} existing trade(s))")
+            return True
+        
+        logger.info(f"📋 House PTR {uuid} has not been processed yet")
+        return False
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Error checking if filing was processed: {e}. Proceeding with processing.")
+        return False
+
 def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
     Parse House PTR PDF, extract trades, and match to politicians
@@ -535,6 +589,17 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]]) -> Di
         Dict with matchedTrades, unmatchedCount, s3Key, formType
     """
     logger.info(f"🔍 Matching House PTR trades: {s3_key}")
+    
+    # Check if this filing has already been processed
+    if check_if_filing_processed(s3_key):
+        logger.info(f"⏭️ Skipping House PTR {s3_key} - already processed")
+        return {
+            'matchedTrades': [],
+            'unmatchedCount': 0,
+            's3Key': s3_key,
+            'formType': 'house_ptr',
+            'skipped': True
+        }
     
     matched_trades = []
     unmatched_count = 0
@@ -621,32 +686,116 @@ def list_s3_files_by_prefix(prefix: str) -> List[str]:
 
 def lambda_handler(event, context):
     """
-    Lambda handler for aggregating matched trades from parallel processing
+    Lambda handler for matching House PTR trades and aggregating all matched trades
     
-    Expected input from Step Functions (after Map state):
-    {
-        "matchResults": [
-            {
-                "matchedTrades": [...],
-                "unmatchedCount": 0,
-                "s3Key": "...",
-                "formType": "..."
-            },
-            ...
-        ],
+    Expected input from Step Functions:
+    - For House PTR matching (direct call):
+      {
+        "downloadResults": {
+          "s3Keys": ["trades/house/2025/file1.pdf", ...],
+          "count": 5,
+          "success": true,
+          "summary": "...",
+          "folderName": "trades/house/2025"
+        },
+        "date": "2025-01-15",
+        "source": "house"
+      }
+    - For aggregation (from parallel branches):
+      {
+        "matchResults": [...],
         "date": "2024-01-15"
-    }
+      }
     
     Returns:
     {
-        "date": "2024-01-15",
         "matchedTrades": [...],
-        "totalMatched": 45,
-        "unmatchedForms": 3
+        "unmatchedCount": 0,
+        "date": "2024-01-15"
     }
     """
-    logger.info("🚀 Politician Trades Aggregator Lambda started")
+    logger.info("🚀 Politician Trades Matcher Lambda started")
     
+    # Check if this is a direct House PTR matching call (from Step Functions after download)
+    download_results = event.get('downloadResults')
+    if download_results:
+        logger.info("🔍 Processing House PTR matching from downloader output")
+        return handle_house_ptr_matching(event, download_results)
+    
+    # Otherwise, this is an aggregation call
+    logger.info("📊 Aggregating matched trades from parallel processing")
+    return handle_aggregation(event)
+
+def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle House PTR matching from downloader output
+    
+    Args:
+        event: Full event from Step Functions
+        download_results: Output from downloader lambda
+        
+    Returns:
+        Dict with matchedTrades and unmatchedCount
+    """
+    # Check if downloads were skipped
+    if download_results.get('error'):
+        logger.warning("⚠️ Downloader reported error - skipping matching")
+        return {
+            "matchedTrades": [],
+            "unmatchedCount": 0,
+            "date": event.get('date')
+        }
+    
+    if not download_results.get('success', False):
+        logger.warning("⚠️ Downloads not successful - skipping matching")
+        return {
+            "matchedTrades": [],
+            "unmatchedCount": 0,
+            "date": event.get('date')
+        }
+    
+    s3_keys = download_results.get('s3Keys', [])
+    if not s3_keys or len(s3_keys) == 0:
+        logger.info("✅ No House PTR files to match (downloads were skipped or no files downloaded)")
+        return {
+            "matchedTrades": [],
+            "unmatchedCount": 0,
+            "date": event.get('date')
+        }
+    
+    logger.info(f"🔍 Matching {len(s3_keys)} House PTR files")
+    
+    # Load politician list for matching
+    politicians = load_politician_list()
+    
+    # Process each House PTR file
+    all_matched_trades = []
+    total_unmatched = 0
+    
+    for s3_key in s3_keys:
+        match_result = match_house_ptr_trades(s3_key, politicians)
+        all_matched_trades.extend(match_result.get('matchedTrades', []))
+        total_unmatched += match_result.get('unmatchedCount', 0)
+    
+    logger.info(f"✅ Matched {len(all_matched_trades)} trades from {len(s3_keys)} House PTR files")
+    logger.info(f"⚠️ {total_unmatched} trades/files could not be matched")
+    
+    return {
+        "matchedTrades": all_matched_trades,
+        "unmatchedCount": total_unmatched,
+        "date": event.get('date')
+    }
+
+def handle_aggregation(event: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Handle aggregation of matched trades from parallel processing
+    
+    Args:
+        event: Event from Step Functions with match results
+        
+    Returns:
+        Aggregated results
+    """
     # Get match results from parallel processing
     # SEC results come from S3 (written by Glue job), Senate/House from Lambda outputs
     sec_glue_output = event.get('secGlueOutput', {})
@@ -686,32 +835,19 @@ def lambda_handler(event, context):
     except Exception as e:
         logger.error(f"❌ Error loading SEC results: {e}")
     
-    # Process House PTR results
+    # Process House PTR results (if any)
     logger.info(f"📋 Processing {len(house_match_results)} House PTR results")
     
-    # Load politician list for matching
-    politicians = load_politician_list()
-    
-    # Process House PTR files
     house_matched_trades = []
     house_unmatched_count = 0
     
-    # house_match_results should contain S3 keys of House PTR PDFs
+    # house_match_results should contain match results from House PTR matching
     for house_result in house_match_results:
         if isinstance(house_result, dict):
-            s3_key = house_result.get('s3Key') or house_result.get('s3_key')
-        else:
-            s3_key = house_result  # Assume it's a string S3 key
-        
-        if not s3_key:
-            logger.warning(f"⚠️ House result missing S3 key: {house_result}")
-            house_unmatched_count += 1
-            continue
-        
-        # Match House PTR trades
-        match_result = match_house_ptr_trades(s3_key, politicians)
-        house_matched_trades.extend(match_result.get('matchedTrades', []))
-        house_unmatched_count += match_result.get('unmatchedCount', 0)
+            matched_trades = house_result.get('matchedTrades', [])
+            unmatched_count = house_result.get('unmatchedCount', 0)
+            house_matched_trades.extend(matched_trades)
+            house_unmatched_count += unmatched_count
     
     # Get Senate results from Lambda outputs
     logger.info(f"📋 Processing {len(senate_match_results)} Senate results")

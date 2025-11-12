@@ -2025,7 +2025,8 @@ module "politician_trades_matcher" {
 
   # Environment variables
   environment_variables = {
-    S3_BUCKET = module.politician_trades_s3.bucket_id
+    S3_BUCKET           = module.politician_trades_s3.bucket_id
+    DYNAMODB_TABLE_NAME = module.politician_trades_table.table_name
   }
 
   # Lambda layers
@@ -2037,12 +2038,13 @@ module "politician_trades_matcher" {
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
     aws_iam_policy.lambda_politician_trades_textract_policy.arn,
+    module.politician_trades_table.table_policy_arn,
     module.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
 
-  depends_on = [module.politician_trades_s3]
+  depends_on = [module.politician_trades_s3, module.politician_trades_table]
 }
 
 # Lambda 5: Save Trades to Database
@@ -2382,7 +2384,7 @@ module "politician_trades_state_machine" {
                         Resource   = module.politician_trades_downloader.function_arn
                         Comment    = "Download House PTRs sequentially from S3 metadata - reads JSON from S3 and processes each file"
                         ResultPath = "$.downloadResults"
-                        Next       = "SummarizeHouseDownloads"
+                        Next       = "MatchHouse"
                         Retry = [
                           {
                             ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
@@ -2401,45 +2403,47 @@ module "politician_trades_state_machine" {
                           {
                             ErrorEquals = ["States.ALL"]
                             ResultPath  = "$.error"
-                            Next        = "SummarizeHouseDownloads"
+                            Next        = "MatchHouse"
                           }
                         ]
                       }
-                      SummarizeHouseDownloads = {
-                        Type    = "Choice"
-                        Comment = "Handle success or error case and return minimal summary"
-                        Choices = [
+                      MatchHouse = {
+                        Type       = "Task"
+                        Resource   = module.politician_trades_matcher.function_arn
+                        Comment    = "Match House PTR trades to politicians using Textract - handles skip cases internally"
+                        ResultPath = "$.matchResults"
+                        Retry = [
                           {
-                            Variable  = "$.error"
-                            IsPresent = true
-                            Next      = "SummarizeHouseError"
+                            ErrorEquals     = ["Lambda.TooManyRequestsException", "Lambda.ServiceException"]
+                            IntervalSeconds = 60
+                            MaxAttempts     = 5
+                            BackoffRate     = 2.0
+                          },
+                          {
+                            ErrorEquals     = ["States.ALL"]
+                            IntervalSeconds = 10
+                            MaxAttempts     = 2
+                            BackoffRate     = 2.0
                           }
                         ]
-                        Default = "SummarizeHouseSuccess"
+                        Catch = [
+                          {
+                            ErrorEquals = ["States.ALL"]
+                            ResultPath  = "$.error"
+                            Next        = "MatchHouseError"
+                          }
+                        ]
+                        End = true
                       }
-                      SummarizeHouseError = {
+                      MatchHouseError = {
                         Type    = "Pass"
-                        Comment = "Transform error to minimal summary"
+                        Comment = "Handle matcher errors gracefully"
                         Result = {
-                          "summary" : "House PTR downloads failed",
-                          "folderName" : null,
-                          "count" : 0,
-                          "success" : false,
-                          "error" : "Download failed"
+                          "matchedTrades" : [],
+                          "unmatchedCount" : 0,
+                          "error" : "House PTR matching failed"
                         }
-                        ResultPath = "$.downloadResults"
-                        End        = true
-                      }
-                      SummarizeHouseSuccess = {
-                        Type    = "Pass"
-                        Comment = "Transform download results to minimal summary to avoid Step Functions size limit (256KB)"
-                        Parameters = {
-                          "summary.$" : "$.downloadResults.summary",
-                          "folderName.$" : "$.downloadResults.folderName",
-                          "count.$" : "$.downloadResults.count",
-                          "success.$" : "$.downloadResults.success"
-                        }
-                        ResultPath = "$.downloadResults"
+                        ResultPath = "$.matchResults"
                         End        = true
                       }
                     }

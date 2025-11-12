@@ -727,7 +727,8 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
                 "count": 0,
                 "failed": 0,
                 "total": 0,
-                "success": True
+                "success": True,
+                "s3Keys": []  # Empty list when skipped
             }
         
         # Extract target date from event (for determining year if needed)
@@ -745,6 +746,7 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
         successful_downloads = 0
         failed_downloads = 0
         folder_name = f"trades/house/{year}"
+        s3_keys = []  # List of successfully downloaded S3 keys
         
         for idx, ptr_data in enumerate(house_ptrs, 1):
             try:
@@ -756,6 +758,7 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
                 
                 if s3_key:
                     successful_downloads += 1
+                    s3_keys.append(s3_key)
                     logger.info(f"✅ Successfully downloaded House PTR {idx}/{len(house_ptrs)}")
                 else:
                     failed_downloads += 1
@@ -774,7 +777,8 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
             "count": successful_downloads,
             "failed": failed_downloads,
             "total": len(house_ptrs),
-            "success": True
+            "success": True,
+            "s3Keys": s3_keys  # List of S3 keys for matcher
         }
         
                 except Exception as e:
