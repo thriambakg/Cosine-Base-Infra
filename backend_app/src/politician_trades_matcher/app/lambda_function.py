@@ -319,8 +319,17 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 logger.error(f"❌ Textract ClientError ({error_code}) for {s3_key}: {e}")
             return []
         except Exception as e:
-            logger.error(f"❌ Textract error for {s3_key}: {e}")
-            return []
+            # Catch UnsupportedDocumentException and other Textract-specific exceptions
+            # botocore.errorfactory.UnsupportedDocumentException is not a ClientError
+            error_type = type(e).__name__
+            error_str = str(e)
+            
+            if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+                logger.error(f"❌ Textract UnsupportedDocumentException for {s3_key}: File may be corrupted or in unsupported format.")
+                return []  # Return early to prevent outer handler from logging traceback
+            else:
+                logger.error(f"❌ Textract error for {s3_key}: {error_type}: {error_str}")
+                return []
         
         # Extract text and structured data
         text_lines = []
@@ -553,9 +562,18 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         logger.info(f"✅ Extracted {len(trades)} trades from House PTR: {s3_key}")
         
     except Exception as e:
-        logger.error(f"❌ Error parsing House PTR {s3_key}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
+        # Check if this is an UnsupportedDocumentException (already handled in inner try-except)
+        error_type = type(e).__name__
+        error_str = str(e)
+        
+        if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+            # Already logged in inner handler, just return empty list
+            logger.debug(f"UnsupportedDocumentException already handled for {s3_key}")
+        else:
+            # Log full traceback for unexpected errors
+            logger.error(f"❌ Error parsing House PTR {s3_key}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
     
     return trades
 
