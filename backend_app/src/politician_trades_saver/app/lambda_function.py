@@ -35,6 +35,7 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
     - FormTypeTradeDateIndex: hash_key=formType, range_key=transactionDate
     - TransactionTypeTradeDateIndex: hash_key=transactionType, range_key=transactionDate
     - AmountRangeTradeDateIndex: hash_key=amountMin, range_key=transactionDate
+    - StateDistrictTradeDateIndex: hash_key=stateDistrict, range_key=transactionDate
     
     Note: GSI hash keys cannot be null. If securitySymbol or amountMin is null, we exclude it
     so the item won't appear in those GSIs.
@@ -49,7 +50,7 @@ def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
     
     # GSI hash keys that cannot be null
     # Note: amountMin is numeric, others are strings
-    gsi_hash_keys_string = ['politicianName', 'party', 'position', 'securitySymbol', 'formType', 'transactionType']
+    gsi_hash_keys_string = ['politicianName', 'party', 'position', 'securitySymbol', 'formType', 'transactionType', 'stateDistrict']
     gsi_hash_keys_numeric = ['amountMin']
     
     # Extract amountMin from amountRange if present

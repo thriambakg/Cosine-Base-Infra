@@ -49,6 +49,42 @@ SENATE_PTR_RANGES = [
     (50000001, None)  # Over $50,000,000 - max is None/unbounded
 ]
 
+def format_state_district(politician: Dict[str, Any]) -> Optional[str]:
+    """
+    Format state/district for a politician
+    - Senators: Just state (e.g., "IL", "WA")
+    - House reps: State + district (e.g., "IL02", "TX31")
+    
+    Args:
+        politician: Politician dict with state and district fields
+        
+    Returns:
+        Formatted state/district string or None
+    """
+    state = politician.get('state', '').strip()
+    if not state:
+        return None
+    
+    position = politician.get('position', '').strip()
+    district = politician.get('district', '').strip()
+    
+    # Senators don't have districts
+    if position == 'Senate':
+        return state
+    
+    # House reps have districts
+    if position == 'House' and district:
+        # Format district with zero-padding if needed (e.g., "2" -> "02", "31" -> "31")
+        try:
+            district_num = int(district)
+            return f"{state}{district_num:02d}"
+        except (ValueError, TypeError):
+            # If district is not a number, just append it
+            return f"{state}{district}"
+    
+    # Fallback: just return state if we can't format properly
+    return state
+
 def find_standard_range(amount_value: float) -> tuple:
     """Find the standard Senate PTR range that contains the given amount"""
     # Handle zero or negative amounts (use first range)
@@ -1767,6 +1803,9 @@ def lambda_handler(event, context):
                     except:
                         pass
                 
+                # Format state/district for the politician
+                state_district = format_state_district(matched_politician)
+                
                 matched_trade = {
                     'tradeId': f"trade_{final_filing_date}_senate_{len(matched_trades)}",
                     'politicianName': matched_politician['name'],  # GSI: PoliticianTradeDateIndex
@@ -1796,7 +1835,8 @@ def lambda_handler(event, context):
                     'matchConfidence': matched_politician.get('matchScore', 1.0),
                     'source': 'senate',
                     'isUnparsed': is_unparsed,  # Flag indicating this filing could not be parsed automatically
-                    'requiresManualReview': is_unparsed  # Alternative flag for clarity
+                    'requiresManualReview': is_unparsed,  # Alternative flag for clarity
+                    'stateDistrict': state_district  # GSI: StateDistrictTradeDateIndex
                 }
                 
                 if is_unparsed:

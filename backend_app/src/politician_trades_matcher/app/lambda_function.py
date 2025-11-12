@@ -78,6 +78,9 @@ def get_asset_codes_mapping() -> Dict[str, str]:
         _ASSET_CODES_CACHE = {}  # Cache empty dict to avoid retrying on every call
         return {}
 
+# Module-level variable to store last error (for debugging)
+_last_politician_load_error: Optional[str] = None
+
 def load_politician_list() -> List[Dict[str, Any]]:
     """
     Load congress-legislators CSV from S3
@@ -85,7 +88,16 @@ def load_politician_list() -> List[Dict[str, Any]]:
     Returns:
         List of politician dicts with name, party, position, url, and alternativeNames
     """
-    logger.info("📋 Loading congress-legislators list from S3")
+    global _last_politician_load_error
+    _last_politician_load_error = None
+    
+    logger.info(f"📋 Loading congress-legislators list from S3: s3://{S3_BUCKET}/congress-legislators.csv")
+    
+    if not S3_BUCKET:
+        error_msg = "❌ S3_BUCKET environment variable is not set!"
+        logger.error(error_msg)
+        _last_politician_load_error = error_msg
+        return []
     
     try:
         # Download congress-legislators.csv from S3
@@ -94,11 +106,33 @@ def load_politician_list() -> List[Dict[str, Any]]:
             Key='congress-legislators.csv'
         )
         
-        csv_content = response['Body'].read().decode('utf-8')
+        csv_content = response['Body'].read().decode('utf-8-sig')  # Use utf-8-sig to automatically strip BOM
+        logger.info(f"📄 Downloaded CSV file ({len(csv_content)} bytes)")
+        
+        if not csv_content or len(csv_content.strip()) == 0:
+            error_msg = "❌ CSV file is empty!"
+            logger.error(error_msg)
+            _last_politician_load_error = error_msg
+            return []
+        
         csv_reader = csv.DictReader(StringIO(csv_content))
         
+        # Normalize column names to remove any BOM characters that might have slipped through
+        if csv_reader.fieldnames:
+            # Strip BOM and whitespace from all field names
+            normalized_fieldnames = []
+            for field in csv_reader.fieldnames:
+                normalized = field.strip().lstrip('\ufeff')  # Remove BOM if present
+                normalized_fieldnames.append(normalized)
+            csv_reader.fieldnames = normalized_fieldnames
+            logger.info(f"📋 CSV headers: {csv_reader.fieldnames[:10]}...")  # First 10 headers
+        
         politicians = []
+        rows_processed = 0
+        rows_skipped = 0
+        
         for row in csv_reader:
+            rows_processed += 1
             # Construct full name from components
             name_parts = []
             if row.get('first_name'):
@@ -135,8 +169,26 @@ def load_politician_list() -> List[Dict[str, Any]]:
             # Get website URL
             website_url = row.get('url', '').strip()
             
+            # Store name components for flexible matching
+            # CSV format: last_name,first_name,middle_name,suffix,...
+            first_name = row.get('first_name', '').strip()
+            middle_name = row.get('middle_name', '').strip()
+            last_name = row.get('last_name', '').strip()
+            suffix = row.get('suffix', '').strip()
+            
+            # Validate that we have at least first and last name
+            if not first_name or not last_name:
+                rows_skipped += 1
+                if rows_skipped <= 5:  # Only log first 5 skipped rows to avoid spam
+                    logger.warning(f"⚠️ Skipping politician with missing name components: first_name='{first_name}', last_name='{last_name}', full_name='{primary_name}'")
+                continue
+            
             politicians.append({
                 'name': primary_name,
+                'first_name': first_name,
+                'middle_name': middle_name,
+                'last_name': last_name,
+                'suffix': suffix,
                 'party': party,
                 'position': position,
                 'websiteUrl': website_url if website_url else None,
@@ -146,30 +198,305 @@ def load_politician_list() -> List[Dict[str, Any]]:
                 'district': row.get('district', '').strip() if row.get('district') else None
             })
         
-        logger.info(f"✅ Loaded {len(politicians)} legislators from CSV")
+        logger.info(f"✅ Loaded {len(politicians)} legislators from CSV (processed {rows_processed} rows, skipped {rows_skipped})")
+        if len(politicians) == 0:
+            error_msg = f"❌ No politicians loaded from CSV - file may be empty or malformed. Rows processed: {rows_processed}, Rows skipped: {rows_skipped}"
+            logger.error(error_msg)
+            # Log a sample row to help debug
+            if rows_processed > 0:
+                csv_reader_debug = csv.DictReader(StringIO(csv_content))
+                sample_row = next(csv_reader_debug, None)
+                if sample_row:
+                    logger.error(f"❌ Sample row data: {json.dumps({k: v for k, v in list(sample_row.items())[:5]})}")
+            _last_politician_load_error = error_msg
         return politicians
         
-    except Exception as e:
-        logger.error(f"❌ Error loading congress-legislators list: {e}")
+    except ClientError as e:
+        error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+        error_message = e.response.get('Error', {}).get('Message', str(e))
+        if error_code == 'NoSuchKey':
+            error_msg = f"❌ CSV file not found in S3: s3://{S3_BUCKET}/congress-legislators.csv. Please ensure the file is uploaded via Terraform."
+            logger.error(error_msg)
+        elif error_code == 'AccessDenied':
+            error_msg = f"❌ Access denied to S3 bucket: s3://{S3_BUCKET}/congress-legislators.csv. Check IAM permissions."
+            logger.error(error_msg)
+        else:
+            error_msg = f"❌ S3 ClientError loading congress-legislators list ({error_code}): {error_message}"
+            logger.error(error_msg)
+        logger.error(f"Full error details: {json.dumps(e.response.get('Error', {}), default=str)}")
+        _last_politician_load_error = error_msg
         return []
+    except Exception as e:
+        error_msg = f"❌ Unexpected error loading congress-legislators list: {type(e).__name__}: {str(e)}"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        _last_politician_load_error = error_msg
+        return []
+
+# Common name shortening mappings (full name -> common nicknames/shortenings)
+# This is bidirectional - both directions are checked
+NAME_SHORTENINGS = {
+    # Michael variations
+    'michael': ['mike', 'mikey', 'mick', 'mickey'],
+    'mike': ['michael', 'mikey', 'mick', 'mickey'],
+    'mikey': ['michael', 'mike'],
+    'mick': ['michael', 'mike'],
+    'mickey': ['michael', 'mike'],
+    
+    # William variations
+    'william': ['will', 'bill', 'billy', 'willy'],
+    'will': ['william', 'bill', 'billy'],
+    'bill': ['william', 'will', 'billy'],
+    'billy': ['william', 'will', 'bill'],
+    'willy': ['william', 'will'],
+    
+    # Robert variations
+    'robert': ['bob', 'rob', 'robby', 'bobby', 'bert'],
+    'bob': ['robert', 'rob', 'bobby'],
+    'rob': ['robert', 'bob', 'robby'],
+    'robby': ['robert', 'rob'],
+    'bobby': ['robert', 'bob'],
+    'bert': ['robert'],
+    
+    # Richard variations
+    'richard': ['rick', 'rich', 'dick', 'ricky'],
+    'rick': ['richard', 'rich', 'ricky'],
+    'rich': ['richard', 'rick'],
+    'dick': ['richard', 'rick'],
+    'ricky': ['richard', 'rick'],
+    
+    # James variations
+    'james': ['jim', 'jimmy', 'jamie'],
+    'jim': ['james', 'jimmy'],
+    'jimmy': ['james', 'jim'],
+    'jamie': ['james'],
+    
+    # John variations
+    'john': ['jack', 'johnny', 'jon'],
+    'jack': ['john', 'johnny'],
+    'johnny': ['john', 'jack'],
+    'jon': ['john'],
+    
+    # Joseph variations
+    'joseph': ['joe', 'joey'],
+    'joe': ['joseph', 'joey'],
+    'joey': ['joseph', 'joe'],
+    
+    # Charles variations
+    'charles': ['chuck', 'charlie', 'charley'],
+    'chuck': ['charles', 'charlie'],
+    'charlie': ['charles', 'chuck'],
+    'charley': ['charles', 'charlie'],
+    
+    # Thomas variations
+    'thomas': ['tom', 'tommy'],
+    'tom': ['thomas', 'tommy'],
+    'tommy': ['thomas', 'tom'],
+    
+    # Daniel variations
+    'daniel': ['dan', 'danny'],
+    'dan': ['daniel', 'danny'],
+    'danny': ['daniel', 'dan'],
+    
+    # Christopher variations
+    'christopher': ['chris', 'christy'],
+    'chris': ['christopher', 'christy'],
+    'christy': ['christopher', 'chris'],
+    
+    # Edward variations
+    'edward': ['ed', 'eddie', 'ted', 'ned'],
+    'ed': ['edward', 'eddie', 'ted'],
+    'eddie': ['edward', 'ed'],
+    'ted': ['edward', 'ed', 'theodore'],
+    'ned': ['edward', 'ed'],
+    
+    # Theodore variations
+    'theodore': ['ted', 'teddy'],
+    'teddy': ['theodore', 'ted'],
+    
+    # Matthew variations
+    'matthew': ['matt', 'matty'],
+    'matt': ['matthew', 'matty'],
+    'matty': ['matthew', 'matt'],
+    
+    # Andrew variations
+    'andrew': ['andy', 'drew'],
+    'andy': ['andrew', 'drew'],
+    'drew': ['andrew', 'andy'],
+    
+    # Anthony variations
+    'anthony': ['tony', 'ant'],
+    'tony': ['anthony', 'ant'],
+    'ant': ['anthony', 'tony'],
+    
+    # Benjamin variations
+    'benjamin': ['ben', 'benny'],
+    'ben': ['benjamin', 'benny'],
+    'benny': ['benjamin', 'ben'],
+    
+    # David variations
+    'david': ['dave', 'davey'],
+    'dave': ['david', 'davey'],
+    'davey': ['david', 'dave'],
+    
+    # Patrick variations
+    'patrick': ['pat', 'paddy'],
+    'pat': ['patrick', 'paddy'],
+    'paddy': ['patrick', 'pat'],
+    
+    # Timothy variations
+    'timothy': ['tim', 'timmy'],
+    'tim': ['timothy', 'timmy'],
+    'timmy': ['timothy', 'tim'],
+    
+    # Samuel variations
+    'samuel': ['sam', 'sammy'],
+    'sam': ['samuel', 'sammy'],
+    'sammy': ['samuel', 'sam'],
+    
+    # Alexander variations
+    'alexander': ['alex', 'al'],
+    'alex': ['alexander', 'al'],
+    'al': ['alexander', 'alex', 'albert', 'alfred', 'allen'],
+    
+    # Albert variations
+    'albert': ['al', 'bert'],
+    
+    # Alfred variations
+    'alfred': ['al', 'alfie'],
+    'alfie': ['alfred', 'al'],
+    
+    # Allen variations
+    'allen': ['al'],
+    
+    # Nicholas variations
+    'nicholas': ['nick', 'nickie'],
+    'nick': ['nicholas', 'nickie'],
+    'nickie': ['nicholas', 'nick'],
+    
+    # Jonathan variations
+    'jonathan': ['jon', 'johnny'],
+    
+    # Stephen/Steven variations
+    'stephen': ['steve', 'stevie'],
+    'steven': ['steve', 'stevie'],
+    'steve': ['stephen', 'steven', 'stevie'],
+    'stevie': ['stephen', 'steven', 'steve'],
+    
+    # Kenneth variations
+    'kenneth': ['ken', 'kenny'],
+    'ken': ['kenneth', 'kenny'],
+    'kenny': ['kenneth', 'ken'],
+    
+    # Joshua variations
+    'joshua': ['josh'],
+    'josh': ['joshua'],
+    
+    # Kevin variations
+    'kevin': ['kev'],
+    'kev': ['kevin'],
+    
+    # Brian variations
+    'brian': ['bryan'],
+    'bryan': ['brian'],
+    
+    # Gregory variations
+    'gregory': ['greg'],
+    'greg': ['gregory'],
+    
+    # Jeffrey variations
+    'jeffrey': ['jeff'],
+    'jeff': ['jeffrey'],
+    
+    # Raymond variations
+    'raymond': ['ray'],
+    'ray': ['raymond'],
+    
+    # Harold variations
+    'harold': ['harry', 'hal'],
+    'harry': ['harold', 'harry'],
+    'hal': ['harold'],
+}
+
+def get_name_variations(name: str) -> List[str]:
+    """
+    Get all variations of a name including common shortenings
+    
+    Args:
+        name: First name (e.g., "Michael", "Mike")
+        
+    Returns:
+        List of name variations including the original
+    """
+    if not name:
+        return ['']
+    
+    name_lower = name.lower().strip()
+    variations = [name_lower]  # Always include original
+    
+    # Add common shortenings if they exist
+    if name_lower in NAME_SHORTENINGS:
+        variations.extend(NAME_SHORTENINGS[name_lower])
+    
+    # Also check reverse - if this is a nickname, add the full name
+    for full_name, nicknames in NAME_SHORTENINGS.items():
+        if name_lower in nicknames:
+            variations.append(full_name)
+            break  # Only add one full name to avoid duplicates
+    
+    # Remove duplicates while preserving order
+    seen = set()
+    unique_variations = []
+    for var in variations:
+        if var not in seen:
+            seen.add(var)
+            unique_variations.append(var)
+    
+    return unique_variations
+
+def normalize_middle_name(middle_name: str) -> List[str]:
+    """
+    Generate variations of a middle name for matching
+    Returns list of: full name, first letter, first letter with period, empty string
+    """
+    if not middle_name:
+        return ['']
+    
+    middle = middle_name.strip()
+    variations = [middle.lower()]  # Full name
+    
+    if len(middle) > 0:
+        first_letter = middle[0].upper()
+        variations.append(first_letter.lower())  # "f"
+        variations.append(f"{first_letter.lower()}.")  # "f."
+    
+    variations.append('')  # No middle name
+    return variations
 
 def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     """
-    Fuzzy match a filer name to a politician using Levenshtein distance
+    Fuzzy match a filer name to a politician using flexible name matching with middle name support
     
     Args:
-        filer_name: Name from SEC form or PTR
-        politician: Politician dict with name and alternativeNames
+        filer_name: Name from SEC form or PTR (e.g., "Laurel Lee", "John A. Doe")
+        politician: Politician dict with name components and alternativeNames
         
     Returns:
         Similarity score (0.0 to 1.0)
     """
-    # Normalize names (lowercase, strip)
-    filer_normalized = filer_name.lower().strip()
-    politician_normalized = politician['name'].lower().strip()
+    # Normalize filer name (lowercase, strip, remove extra spaces)
+    filer_normalized = ' '.join(filer_name.lower().strip().split())
     
-    # Check exact match first
-    if filer_normalized == politician_normalized:
+    # Get politician name components
+    first_name = politician.get('first_name', '').lower().strip()
+    middle_name = politician.get('middle_name', '').lower().strip()
+    last_name = politician.get('last_name', '').lower().strip()
+    suffix = politician.get('suffix', '').lower().strip()
+    politician_full = politician['name'].lower().strip()
+    
+    # Check exact match with full name first
+    if filer_normalized == politician_full:
         return 1.0
     
     # Check alternative names
@@ -177,22 +504,164 @@ def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
         if filer_normalized == alt_name.lower().strip():
             return 1.0
     
-    # Calculate similarity using SequenceMatcher
-    similarity = SequenceMatcher(None, filer_normalized, politician_normalized).ratio()
+    # Try matching with different name combinations
+    # Parse filer name into components (try different patterns)
+    filer_parts = filer_normalized.split()
     
-    # Also check if names are subsets (e.g., "John Doe" vs "John A. Doe")
-    if filer_normalized in politician_normalized or politician_normalized in filer_normalized:
+    # Pattern 1: "First Last" (no middle name) - e.g., "Laurel Lee" should match "Laurel Frances Lee"
+    # Also handles name shortenings: "Michael Collins" should match "Mike Collins"
+    if len(filer_parts) >= 2:
+        filer_first = filer_parts[0]
+        filer_last = filer_parts[-1]  # Last part (might be last name or suffix)
+        
+        # Get name variations for both filer and politician first names
+        filer_first_variations = get_name_variations(filer_first)
+        politician_first_variations = get_name_variations(first_name)
+        
+        # Check if any variation of filer first name matches any variation of politician first name
+        first_name_matches = any(fv in politician_first_variations for fv in filer_first_variations)
+        
+        # Check if last part matches last name
+        if first_name_matches and filer_last == last_name:
+            logger.debug(f"✅ First+last match (with name variations): '{filer_name}' -> '{politician['name']}' (filer_first='{filer_first}', politician_first='{first_name}')")
+            return 1.0
+        
+        # Check if last part matches last name with suffix
+        if suffix and filer_last == f"{last_name}{suffix}":
+            if first_name_matches:
+                logger.debug(f"✅ First+last+suffix match (with name variations): '{filer_name}' -> '{politician['name']}'")
+                return 1.0
+    
+    # Pattern 2: "First Middle Last" or "First M. Last" or "First M Last"
+    # Also handles name shortenings: "Michael A. Collins" should match "Mike Allen Collins"
+    if len(filer_parts) >= 3:
+        filer_first = filer_parts[0]
+        filer_middle = filer_parts[1]
+        filer_last = filer_parts[-1]
+        
+        # Get name variations for both filer and politician first names
+        filer_first_variations = get_name_variations(filer_first)
+        politician_first_variations = get_name_variations(first_name)
+        first_name_matches = any(fv in politician_first_variations for fv in filer_first_variations)
+        
+        # Check if matches with middle name variations
+        if first_name_matches and filer_last == last_name:
+            # Generate middle name variations
+            middle_variations = normalize_middle_name(middle_name)
+            for middle_var in middle_variations:
+                middle_var_lower = middle_var.lower().strip()
+                if middle_var_lower and filer_middle == middle_var_lower:
+                    logger.debug(f"✅ First+middle+last match (with name variations): '{filer_name}' -> '{politician['name']}'")
+                    return 1.0
+                # Also check if middle is just first letter
+                if middle_var_lower and len(middle_var_lower) == 1 and filer_middle == middle_var_lower:
+                    logger.debug(f"✅ First+middle+last match (with name variations, middle initial): '{filer_name}' -> '{politician['name']}'")
+                    return 1.0
+                # Check with period
+                if middle_var_lower and filer_middle == middle_var_lower.replace('.', ''):
+                    logger.debug(f"✅ First+middle+last match (with name variations, middle with period): '{filer_name}' -> '{politician['name']}'")
+                    return 1.0
+    
+    # Pattern 3: "Last, First" or "Last, First Middle"
+    # Also handles name shortenings: "Collins, Michael" should match "Mike Collins"
+    if ',' in filer_normalized:
+        parts = [p.strip() for p in filer_normalized.split(',')]
+        if len(parts) >= 2:
+            filer_last_part = parts[0]
+            filer_first_part = parts[1].split()[0] if parts[1] else ''
+            
+            # Get name variations for both filer and politician first names
+            filer_first_variations = get_name_variations(filer_first_part)
+            politician_first_variations = get_name_variations(first_name)
+            first_name_matches = any(fv in politician_first_variations for fv in filer_first_variations)
+            
+            if filer_last_part == last_name and first_name_matches:
+                # Check middle name if present
+                if len(parts[1].split()) > 1:
+                    filer_middle_part = parts[1].split()[1]
+                    middle_variations = normalize_middle_name(middle_name)
+                    for middle_var in middle_variations:
+                        if filer_middle_part == middle_var.lower().strip():
+                            logger.debug(f"✅ Last,First+Middle match (with name variations): '{filer_name}' -> '{politician['name']}'")
+                            return 1.0
+                else:
+                    # No middle name in filer name - still match if politician has no middle or we're flexible
+                    logger.debug(f"✅ Last,First match (with name variations): '{filer_name}' -> '{politician['name']}'")
+                    return 0.95
+    
+    # Calculate similarity using SequenceMatcher on full names
+    similarity = SequenceMatcher(None, filer_normalized, politician_full).ratio()
+    
+    # Also check if names are subsets (e.g., "John Doe" vs "John A. Doe" or "Laurel Lee" vs "Laurel M. Lee")
+    if filer_normalized in politician_full or politician_full in filer_normalized:
         similarity = max(similarity, 0.9)
+    
+    # Try matching first + last name only (ignore middle) - this is critical for "Laurel Lee" -> "Laurel Frances Lee"
+    # Also handles name shortenings: "Michael Collins" -> "Mike Collins"
+    # This should return 1.0 since it's a perfect match (just missing middle name or using nickname)
+    if len(filer_parts) >= 2:
+        filer_first = filer_parts[0]
+        filer_last = filer_parts[-1]
+        
+        # Get name variations for both filer and politician first names
+        filer_first_variations = get_name_variations(filer_first)
+        politician_first_variations = get_name_variations(first_name)
+        first_name_matches = any(fv in politician_first_variations for fv in filer_first_variations)
+        
+        if first_name_matches and filer_last == last_name and first_name and last_name:
+            logger.debug(f"✅ First+last name match (ignoring middle, with name variations): '{filer_name}' -> '{politician['name']}' (score: 1.0)")
+            return 1.0  # Return 1.0 for perfect first+last match (even if middle name is missing or using nickname)
+    
+    # Log if we have a good match but it's below threshold
+    if similarity >= 0.8 and similarity < NAME_MATCH_THRESHOLD:
+        logger.debug(f"⚠️ Good match but below threshold: '{filer_name}' -> '{politician['name']}' (score: {similarity:.3f}, threshold: {NAME_MATCH_THRESHOLD})")
     
     return similarity
 
-def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def format_state_district(politician: Dict[str, Any]) -> Optional[str]:
+    """
+    Format state/district for a politician
+    - Senators: Just state (e.g., "IL", "WA")
+    - House reps: State + district (e.g., "IL02", "TX31")
+    
+    Args:
+        politician: Politician dict with state and district fields
+        
+    Returns:
+        Formatted state/district string or None
+    """
+    state = politician.get('state', '').strip()
+    if not state:
+        return None
+    
+    position = politician.get('position', '').strip()
+    district = politician.get('district', '').strip()
+    
+    # Senators don't have districts
+    if position == 'Senate':
+        return state
+    
+    # House reps have districts
+    if position == 'House' and district:
+        # Format district with zero-padding if needed (e.g., "2" -> "02", "31" -> "31")
+        try:
+            district_num = int(district)
+            return f"{state}{district_num:02d}"
+        except (ValueError, TypeError):
+            # If district is not a number, just append it
+            return f"{state}{district}"
+    
+    # Fallback: just return state if we can't format properly
+    return state
+
+def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]], position_filter: Optional[str] = None) -> Optional[Dict[str, Any]]:
     """
     Find best matching politician for a filer name
     
     Args:
         filer_name: Name from form
         politicians: List of politician dicts
+        position_filter: Optional position to filter by (e.g., "House", "Senate")
         
     Returns:
         Best matching politician dict or None
@@ -201,6 +670,12 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]])
     best_score = 0.0
     
     for politician in politicians:
+        # Filter by position if specified
+        if position_filter:
+            politician_position = politician.get('position', '').strip()
+            if politician_position != position_filter:
+                continue  # Skip politicians that don't match the position filter
+        
         score = fuzzy_match_name(filer_name, politician)
         if score > best_score:
             best_score = score
@@ -271,7 +746,7 @@ def extract_table_data_from_blocks(table_block: Dict[str, Any], all_blocks: List
     except Exception as e:
         logger.error(f"❌ Error extracting table data: {e}")
         return None
-
+    
 def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
     """
     Parse House PTR PDF using AWS Textract to extract trade data
@@ -518,17 +993,33 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         # Extract filer name from House PTR
         filer_name = None
         
-        # House format: "The Honorable [Name]" or "[Name] (House Representative)"
-        house_patterns = [
-            r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
-            r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)\s*\(House Representative\)',
-        ]
-        for pattern in house_patterns:
-            match = re.search(pattern, full_text)
-            if match:
-                filer_name = match.group(1).strip()
-                filer_name = re.sub(r'\b(Honorable|Hon\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
-                break
+        # First, try to extract from Table 1 (FILER INFORMATION table)
+        # Table 1 format: [['Name:', 'Hon. John McGuire'], ['Status:', 'Member'], ...]
+        for table in tables:
+            if len(table) >= 1:
+                # Check if this looks like the FILER INFORMATION table
+                first_row = table[0]
+                if len(first_row) >= 2 and first_row[0].strip().lower() == 'name:':
+                    name_value = first_row[1].strip()
+                    # Remove "Hon." prefix if present
+                    filer_name = re.sub(r'^Hon\.?\s+', '', name_value, flags=re.IGNORECASE).strip()
+                    logger.info(f"✅ Extracted filer name from FILER INFORMATION table: {filer_name}")
+                    break
+        
+        # If not found in table, try text patterns
+        if not filer_name:
+            # House format: "The Honorable [Name]" or "[Name] (House Representative)" or "Hon. [Name]"
+            house_patterns = [
+                r'Hon\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
+                r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
+                r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)\s*\(House Representative\)',
+            ]
+            for pattern in house_patterns:
+                match = re.search(pattern, full_text)
+                if match:
+                    filer_name = match.group(1).strip()
+                    filer_name = re.sub(r'\b(Honorable|Hon\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
+                    break
         
         # If not found in text, check form fields
         if not filer_name:
@@ -543,15 +1034,16 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         # Extract filing date from e-signature at bottom
         filing_date = None
         
-        # Look for date patterns near signature text
-        signature_date_patterns = [
-            r'(?:signed|signature|date)[:\s]+(\d{1,2}/\d{1,2}/\d{4})',
-            r'(\d{1,2}/\d{1,2}/\d{4})\s*(?:signed|signature)',
-            r'(\d{1,2}/\d{1,2}/\d{4})',  # Fallback: any date in MM/DD/YYYY format
+        # Look for "Digitally Signed: [Name] [Date]" pattern
+        signature_patterns = [
+            r'Digitally Signed:\s+[^,]+,\s*(\d{1,2}/\d{1,2}/\d{4})',  # "Digitally Signed: Name, MM/DD/YYYY"
+            r'Digitally Signed:\s+[^\d]+(\d{1,2}/\d{1,2}/\d{4})',    # "Digitally Signed: Name MM/DD/YYYY"
+            r'(?:signed|signature)[:\s]+[^,]+,\s*(\d{1,2}/\d{1,2}/\d{4})',
+            r'(?:signed|signature)[:\s]+[^\d]+(\d{1,2}/\d{1,2}/\d{4})',
         ]
         
         # Search in reverse order (bottom of document) for signature date
-        for pattern in signature_date_patterns:
+        for pattern in signature_patterns:
             matches = list(re.finditer(pattern, full_text, re.IGNORECASE))
             if matches:
                 # Take the last match (likely at bottom near signature)
@@ -559,15 +1051,36 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 date_str = match.group(1)
                 try:
                     filing_date = datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
+                    logger.info(f"✅ Extracted filing date from signature: {filing_date}")
                     break
                 except ValueError:
                     continue
         
+        # Fallback: any date in MM/DD/YYYY format at the end of the document
+        if not filing_date:
+            date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', full_text))
+            if date_matches:
+                # Take the last date found (likely signature date)
+                date_str = date_matches[-1].group(1)
+                try:
+                    filing_date = datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
+                    logger.info(f"✅ Extracted filing date (fallback): {filing_date}")
+                except ValueError:
+                    pass
+        
         # Parse tables for trade data
         # House PTR columns: ID, Owner, Asset, Transaction type (S/P), Date, Notification date, Amount, Cap gains
-        for table in tables:
+        # Skip Table 1 (FILER INFORMATION) - only process transaction tables
+        for table_idx, table in enumerate(tables):
             if len(table) < 2:  # Need at least header + data row
                 continue
+            
+            # Skip FILER INFORMATION table (Table 1) - it has "Name:" in first row
+            if len(table) > 0 and len(table[0]) >= 2:
+                first_cell = table[0][0].strip().lower()
+                if first_cell == 'name:':
+                    logger.debug(f"⏭️ Skipping FILER INFORMATION table (Table {table_idx + 1})")
+                    continue
             
             # Find header row
             header_row = table[0]
@@ -620,25 +1133,41 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                             continue
                 
                 # Extract asset information
+                # Asset column contains: "Company Name (TICKER) [ST] FILING STATUS: New SUBHOLDING OF: ..."
                 security_name = None
                 security_symbol = None
                 asset_type = None
                 
                 if asset_col is not None and asset_col < len(row):
                     asset_text = row[asset_col].strip()
-                    security_name = asset_text
                     
-                    # Try to extract ticker symbol (usually uppercase letters, 1-5 chars, in parentheses or after name)
-                    ticker_match = re.search(r'\(([A-Z]{1,5})\)|([A-Z]{1,5})\s*$', asset_text)
+                    # Remove common suffixes that aren't part of the security name
+                    # Remove "FILING STATUS: New" and "SUBHOLDING OF: ..."
+                    cleaned_asset = re.sub(r'\s*FILING STATUS:\s*\w+.*$', '', asset_text, flags=re.IGNORECASE)
+                    cleaned_asset = re.sub(r'\s*SUBHOLDING OF:\s*[^\[\]]*$', '', cleaned_asset, flags=re.IGNORECASE)
+                    
+                    # Extract ticker symbol (in parentheses, e.g., "(UNH)", "(GOOG)", "(AMZN)")
+                    ticker_match = re.search(r'\(([A-Z]{1,5})\)', cleaned_asset)
                     if ticker_match:
-                        security_symbol = ticker_match.group(1) or ticker_match.group(2)
+                        security_symbol = ticker_match.group(1)
+                        # Remove ticker from cleaned text to get security name
+                        cleaned_asset = re.sub(r'\s*\([A-Z]{1,5}\)\s*', '', cleaned_asset)
                     
-                    # Extract asset class code (usually 2-3 uppercase letters at start or end)
-                    asset_code_match = re.search(r'\b([A-Z]{2,3})\b', asset_text)
+                    # Extract asset type code (in brackets, e.g., "[ST]" for Stock)
+                    asset_code_match = re.search(r'\[([A-Z]{2,3})\]', cleaned_asset)
                     if asset_code_match:
                         code = asset_code_match.group(1)
                         if code in asset_codes:
                             asset_type = asset_codes[code]
+                        # Remove asset code from cleaned text
+                        cleaned_asset = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', cleaned_asset)
+                    
+                    # The remaining text is the security name
+                    security_name = cleaned_asset.strip()
+                    
+                    # If we still don't have a name, use the original (fallback)
+                    if not security_name:
+                        security_name = asset_text
                 
                 # Extract transaction type
                 transaction_type = None
@@ -648,6 +1177,13 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         transaction_type = 'Sale'
                     elif 'P' in type_str or 'purchase' in type_str.lower() or 'buy' in type_str.lower():
                         transaction_type = 'Purchase'
+                
+                # Extract owner (SP = Spouse, etc.)
+                owner = None
+                if owner_col is not None and owner_col < len(row):
+                    owner_str = row[owner_col].strip()
+                    if owner_str:
+                        owner = owner_str  # Could be "SP" (Spouse), "Self", etc.
                 
                 # Extract amount
                 amount = None
@@ -659,18 +1195,31 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     # Remove currency symbols and commas
                     amount_str = re.sub(r'[$,]', '', amount_str)
                     
-                    # Try to parse as number
-                    try:
-                        amount = float(amount_str)
-                        amount_min = amount
-                        amount_max = amount
-                    except ValueError:
-                        # Try to parse range (e.g., "$1,000 - $15,000")
-                        range_match = re.search(r'(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)', amount_str)
-                        if range_match:
-                            amount_min = float(range_match.group(1))
-                            amount_max = float(range_match.group(2))
+                    # Try to parse range first (e.g., "$1,001 - $15,000" or "$1,001 $15,000")
+                    range_match = re.search(r'(\d+(?:,\d{3})*(?:\.\d+)?)\s*[-–]\s*(\d+(?:,\d{3})*(?:\.\d+)?)', amount_str)
+                    if not range_match:
+                        # Try without dash (e.g., "$1,001 $15,000")
+                        range_match = re.search(r'(\d+(?:,\d{3})*(?:\.\d+)?)\s+(\d+(?:,\d{3})*(?:\.\d+)?)', amount_str)
+                    
+                    if range_match:
+                        # Remove commas from numbers
+                        min_str = range_match.group(1).replace(',', '')
+                        max_str = range_match.group(2).replace(',', '')
+                        try:
+                            amount_min = float(min_str)
+                            amount_max = float(max_str)
                             amount = (amount_min + amount_max) / 2  # Use midpoint
+                        except ValueError:
+                            pass
+                    else:
+                        # Try to parse as single number
+                        try:
+                            amount_str_clean = amount_str.replace(',', '')
+                            amount = float(amount_str_clean)
+                            amount_min = amount
+                            amount_max = amount
+                        except ValueError:
+                            pass
                 
                 # Only create trade if we have minimum required fields
                 if transaction_date and (security_name or security_symbol) and transaction_type and amount:
@@ -685,10 +1234,12 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         'amount': amount,
                         'amountMin': amount_min,
                         'amountMax': amount_max,
+                        'owner': owner,  # Add owner field
                         'formType': 'house_ptr',
                         'source': 'house'
                     }
                     trades.append(trade)
+                    logger.debug(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max}")
         
         logger.info(f"✅ Extracted {len(trades)} trades from House PTR: {s3_key}")
         
@@ -760,7 +1311,7 @@ def check_if_filing_processed(s3_key: str) -> bool:
     except Exception as e:
         logger.warning(f"⚠️ Error checking if filing was processed: {e}. Proceeding with processing.")
         return False
-
+    
 def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_duplicate_check: bool = False) -> Dict[str, Any]:
     """
     Parse House PTR PDF, extract trades, and match to politicians
@@ -803,26 +1354,107 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                 'formType': 'house_ptr'
             }
         
-        # Match each trade to a politician
-        for trade in trades:
+        # Get filing date from first trade (all trades from same filing have same filing date)
+        filing_date = trades[0].get('filingDate') if trades else None
+        if not filing_date:
+            logger.warning(f"⚠️ No filing date found in trades from {s3_key}")
+            filing_date = None
+        
+        # Match each trade to a politician and format like Senate output
+        # Filter politicians to only House members for House PTRs
+        house_politicians = [p for p in politicians if p.get('position', '').strip() == 'House']
+        logger.info(f"📋 Filtered to {len(house_politicians)} House politicians (out of {len(politicians)} total)")
+        
+        for idx, trade in enumerate(trades):
             filer_name = trade.get('filerName')
             if not filer_name:
                 unmatched_count += 1
                 continue
             
-            politician = find_matching_politician(filer_name, politicians)
+            # Only match to House politicians
+            politician = find_matching_politician(filer_name, house_politicians, position_filter='House')
             if politician:
-                # Add politician info to trade
+                # Convert transaction date to integer format (YYYYMMDD)
+                transaction_date_str = trade.get('transactionDate')
+                transaction_date_int = None
+                if transaction_date_str:
+                    try:
+                        # Parse YYYY-MM-DD format
+                        date_obj = datetime.strptime(transaction_date_str, '%Y-%m-%d')
+                        transaction_date_int = int(date_obj.strftime('%Y%m%d'))
+                    except (ValueError, TypeError):
+                        # Try other formats
+                        try:
+                            if isinstance(transaction_date_str, int):
+                                transaction_date_int = transaction_date_str
+                            else:
+                                date_obj = datetime.strptime(transaction_date_str, '%m/%d/%Y')
+                                transaction_date_int = int(date_obj.strftime('%Y%m%d'))
+                        except (ValueError, TypeError):
+                            logger.warning(f"⚠️ Could not parse transaction date: {transaction_date_str}")
+                
+                # Map owner codes to full names
+                owner = trade.get('owner')
+                if owner:
+                    owner_mapping = {
+                        'SP': 'Spouse',
+                        'S': 'Self',
+                        'J': 'Joint',
+                        'D': 'Dependent'
+                    }
+                    owner = owner_mapping.get(owner.upper(), owner)
+                else:
+                    owner = None
+                
+                # Build amountRange array
+                amount_min = trade.get('amountMin')
+                amount_max = trade.get('amountMax')
+                amount_range = None
+                if amount_min is not None and amount_max is not None:
+                    amount_range = [amount_min, amount_max]
+                
+                # Generate tradeId: trade_{filing_date}_house_{index}
+                trade_id = None
+                if filing_date:
+                    trade_id = f"trade_{filing_date}_house_{idx}"
+                else:
+                    # Fallback: use index only if no filing date
+                    trade_id = f"trade_house_{idx}"
+                
+                # Format state/district for the politician
+                state_district = format_state_district(politician)
+                
+                # Format matched trade to match Senate output structure
                 matched_trade = {
-                    **trade,
+                    'tradeId': trade_id,
                     'politicianName': politician.get('name'),
                     'party': politician.get('party'),
                     'position': politician.get('position'),
                     'websiteUrl': politician.get('websiteUrl'),
-                    'bioguideId': politician.get('bioguide_id'),
-                    'state': politician.get('state'),
-                    'district': politician.get('district'),
-                    'matchScore': politician.get('matchScore', 1.0)
+                    'formType': 'house_ptr',
+                    'filingDate': filing_date,
+                    'transactionDate': transaction_date_int,
+                    'transactionTime': None,
+                    'securitySymbol': trade.get('securitySymbol'),
+                    'securityName': trade.get('securityName'),
+                    'assetType': trade.get('assetType'),
+                    'transactionType': trade.get('transactionType'),
+                    'order': None,
+                    'shares': None,
+                    'pricePerShare': None,
+                    'totalAmount': trade.get('amount'),
+                    'amountMin': amount_min,
+                    'amountMax': amount_max,
+                    'amountRange': amount_range,
+                    'exactAmount': None,
+                    'owner': owner,
+                    'comment': '--',
+                    'formS3Key': s3_key,
+                    'matchConfidence': politician.get('matchScore', 1.0),
+                    'source': 'house',
+                    'isUnparsed': False,
+                    'requiresManualReview': False,
+                    'stateDistrict': state_district
                 }
                 matched_trades.append(matched_trade)
             else:
@@ -851,7 +1483,8 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
         'matchedTrades': matched_trades,
         'unmatchedCount': unmatched_count,
         's3Key': s3_key,
-        'formType': 'house_ptr'
+        'formType': 'house_ptr',
+        'source': 'house'
     }
 
 def list_s3_files_by_prefix(prefix: str) -> List[str]:
@@ -901,7 +1534,7 @@ def lambda_handler(event, context):
       {
         "matchResults": [...],
         "date": "2024-01-15"
-      }
+    }
     
     Returns:
     {
@@ -996,7 +1629,23 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
     
     # Load politician list for matching
     logger.info("📋 Loading politician list for matching")
-    politicians = load_politician_list()
+    try:
+        politicians = load_politician_list()
+    except Exception as e:
+        error_msg = f"❌ CRITICAL: Exception loading politician list from S3: {str(e)}. S3_BUCKET={S3_BUCKET}, Key=congress-legislators.csv"
+        logger.error(error_msg)
+        import traceback
+        logger.error(traceback.format_exc())
+        raise Exception(error_msg) from e
+    
+    if not politicians or len(politicians) == 0:
+        # Include the last error if available
+        error_details = f"Last error: {_last_politician_load_error}" if _last_politician_load_error else "No error logged (may be empty CSV or all rows skipped)"
+        error_msg = f"❌ CRITICAL: Failed to load politician list from S3 - returned empty list. S3_BUCKET={S3_BUCKET}, Key=congress-legislators.csv. {error_details}. Check CloudWatch logs for detailed error information."
+        logger.error(error_msg)
+        raise Exception(error_msg)
+    
+    logger.info(f"✅ Loaded {len(politicians)} total politicians for matching")
     
     # Process only the unprocessed files with Textract
     logger.info(f"🔍 Processing {len(unprocessed_keys)} new House PTR files with Textract...")

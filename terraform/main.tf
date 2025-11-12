@@ -1669,7 +1669,8 @@ module "politician_trades_table" {
     { name = "formType", type = "S" },
     { name = "transactionType", type = "S" },
     { name = "transactionDate", type = "N" },
-    { name = "amountMin", type = "N" }
+    { name = "amountMin", type = "N" },
+    { name = "stateDistrict", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -1724,6 +1725,14 @@ module "politician_trades_table" {
     {
       name            = "AmountRangeTradeDateIndex"
       hash_key        = "amountMin"
+      range_key       = "transactionDate"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "StateDistrictTradeDateIndex"
+      hash_key        = "stateDistrict"
       range_key       = "transactionDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
