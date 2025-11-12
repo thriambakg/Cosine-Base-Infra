@@ -292,20 +292,31 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         
         # Validate PDF format before sending to Textract
         if not pdf_content.startswith(b'%PDF'):
-            logger.error(f"❌ File {s3_key} is not a valid PDF (doesn't start with %PDF)")
-            return []
+            error_msg = f"File {s3_key} is not a valid PDF (doesn't start with %PDF)"
+            logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
         
         # Check minimum PDF size (very small files might be corrupted)
         if len(pdf_content) < 100:
-            logger.error(f"❌ File {s3_key} is too small ({len(pdf_content)} bytes) - likely corrupted")
-            return []
+            error_msg = f"File {s3_key} is too small ({len(pdf_content)} bytes) - likely corrupted"
+            logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
+        
+        # Check if PDF is multi-page (synchronous analyze_document only supports single-page PDFs)
+        # Count /Page objects in PDF - simple heuristic
+        page_count = pdf_content.count(b'/Type/Page') + pdf_content.count(b'/Type /Page')
+        if page_count > 1:
+            error_msg = f"PDF {s3_key} appears to be multi-page ({page_count} pages detected). Synchronous Textract (analyze_document) only supports single-page PDFs. Use asynchronous Textract (start_document_analysis) for multi-page PDFs."
+            logger.error(f"❌ {error_msg}")
+            raise Exception(error_msg)
         
         # Get asset codes mapping (cached at module level)
         asset_codes = get_asset_codes_mapping()
         
-        logger.info(f"📄 Using Textract to parse House PTR PDF ({len(pdf_content)} bytes)...")
+        logger.info(f"📄 Using Textract to parse House PTR PDF ({len(pdf_content)} bytes, {page_count} page(s))...")
         
         # Call Textract to extract text and forms/tables
+        # Note: analyze_document (synchronous) only supports single-page PDFs
         try:
             textract_response = textract_client.analyze_document(
                 Document={'Bytes': pdf_content},
