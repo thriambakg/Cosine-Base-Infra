@@ -2470,10 +2470,10 @@ module "politician_trades_state_machine" {
     module.politician_trades_fetcher.function_arn,
     module.politician_trades_downloader.function_arn,
     module.politician_trades_senate_matcher.function_arn,
+    module.politician_trades_matcher.function_arn,
     module.politician_trades_saver.function_arn
     # Note: 
     # - politician_trades_sec_matcher removed - SEC handled by Glue job
-    # - politician_trades_matcher (aggregator) removed - no aggregation needed, each pipeline saves directly
   ]
 
   # Glue job names for IAM permissions

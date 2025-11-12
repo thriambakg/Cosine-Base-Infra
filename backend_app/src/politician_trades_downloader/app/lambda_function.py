@@ -417,7 +417,7 @@ def download_and_store_senate_ptr(ptr_data: Dict[str, Any], target_date: str) ->
                     
                     # Small delay to ensure server has processed the agreement
                     time.sleep(0.1)
-                                        else:
+                else:
                     logger.warning(f"⚠️ Could not extract CSRF token from agreement form (attempt {attempt + 1})")
                     # Continue to next attempt - maybe the page changed
             
@@ -739,8 +739,9 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
                 target_date = date_obj.strftime('%Y-%m-%d')
             except:
                 target_date = None
-                else:
-            target_date = None
+            else:
+                logger.warning(f"⚠️ Failed to parse target date: {target_date_raw}")
+                target_date = None
         
         # Process each House PTR sequentially
         successful_downloads = 0
@@ -781,9 +782,9 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
             "s3Keys": s3_keys  # List of S3 keys for matcher
         }
         
-                except Exception as e:
+    except Exception as e:
         logger.error(f"❌ Error processing House PTRs from metadata: {e}")
-                    raise
+        raise
         
 
 def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> Optional[str]:
@@ -808,7 +809,7 @@ def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> 
             raise ValueError(error_msg)
         
         # Generate S3 key if not provided
-            if not s3_key:
+        if not s3_key:
             # Extract filename from URL (e.g., "20033394.pdf" from "public_disc/ptr-pdfs/2025/20033394.pdf")
             filename = url.split('/')[-1] or f'house-ptr-{uuid}.pdf' if uuid else 'house-ptr.pdf'
             # Extract year from target_date (YYYY-MM-DD format)
@@ -1026,11 +1027,11 @@ def lambda_handler(event, context):
             # Still download and store HTML for reference
             s3_key = download_and_store_senate_ptr(event, target_date)
                 
-                if not s3_key:
+            if not s3_key:
                 raise Exception("Failed to download Senate PTR - download_and_store_senate_ptr returned None")
                 
             # Return format that includes pre-extracted transactions if available
-                return {
+            return {
                     "s3Key": s3_key,
                 "formType": event.get('formType', 'senate_ptr'),
                 "source": "senate",
@@ -1044,11 +1045,11 @@ def lambda_handler(event, context):
             
             s3_key = download_and_store_house_ptr(event, target_date)
                 
-                if not s3_key:
+            if not s3_key:
                 raise Exception("Failed to download House PTR - download_and_store_house_ptr returned None")
                 
                 # Return format that matches matcher Lambda expectations
-                return {
+            return {
                     "s3Key": s3_key,
                 "formType": event.get('formType', 'house_ptr'),
                 "source": "house",
