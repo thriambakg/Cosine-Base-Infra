@@ -10,6 +10,7 @@ import os
 import logging
 import re
 import boto3
+from botocore.exceptions import ClientError
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import csv
@@ -289,16 +290,37 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
         pdf_content = response['Body'].read()
         
+        # Validate PDF format before sending to Textract
+        if not pdf_content.startswith(b'%PDF'):
+            logger.error(f"❌ File {s3_key} is not a valid PDF (doesn't start with %PDF)")
+            return []
+        
+        # Check minimum PDF size (very small files might be corrupted)
+        if len(pdf_content) < 100:
+            logger.error(f"❌ File {s3_key} is too small ({len(pdf_content)} bytes) - likely corrupted")
+            return []
+        
         # Get asset codes mapping (cached at module level)
         asset_codes = get_asset_codes_mapping()
         
-        logger.info("📄 Using Textract to parse House PTR PDF...")
+        logger.info(f"📄 Using Textract to parse House PTR PDF ({len(pdf_content)} bytes)...")
         
         # Call Textract to extract text and forms/tables
-        textract_response = textract_client.analyze_document(
-            Document={'Bytes': pdf_content},
-            FeatureTypes=['FORMS', 'TABLES']
-        )
+        try:
+            textract_response = textract_client.analyze_document(
+                Document={'Bytes': pdf_content},
+                FeatureTypes=['FORMS', 'TABLES']
+            )
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+            if error_code == 'UnsupportedDocumentException':
+                logger.error(f"❌ Textract UnsupportedDocumentException for {s3_key}: File may be corrupted or in unsupported format.")
+            else:
+                logger.error(f"❌ Textract ClientError ({error_code}) for {s3_key}: {e}")
+            return []
+        except Exception as e:
+            logger.error(f"❌ Textract error for {s3_key}: {e}")
+            return []
         
         # Extract text and structured data
         text_lines = []
@@ -815,14 +837,35 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
     logger.info(f"🔍 Processing {len(unprocessed_keys)} new House PTR files with Textract...")
     all_matched_trades = []
     total_unmatched = 0
+    successful_files = 0
+    failed_files = 0
+    files_with_no_trades = 0
+    files_with_no_filer_name = 0
     
     for s3_key in unprocessed_keys:
         match_result = match_house_ptr_trades(s3_key, politicians, skip_duplicate_check=True)
+        matched_count = len(match_result.get('matchedTrades', []))
+        unmatched_count = match_result.get('unmatchedCount', 0)
+        
         all_matched_trades.extend(match_result.get('matchedTrades', []))
-        total_unmatched += match_result.get('unmatchedCount', 0)
+        total_unmatched += unmatched_count
+        
+        # Track statistics
+        if matched_count > 0:
+            successful_files += 1
+        elif unmatched_count > 0:
+            failed_files += 1
+            # Check if it's because no trades were extracted or no filer name
+            if match_result.get('unmatchedCount', 0) == 1 and matched_count == 0:
+                files_with_no_trades += 1
+            elif 'filerName' in str(match_result):
+                files_with_no_filer_name += 1
     
-    logger.info(f"✅ Matched {len(all_matched_trades)} trades from {len(unprocessed_keys)} new House PTR files")
-    logger.info(f"⚠️ {total_unmatched} trades/files could not be matched")
+    logger.info(f"📊 Processing Summary:")
+    logger.info(f"   ✅ Successfully matched: {successful_files} files")
+    logger.info(f"   ❌ Failed/Unmatched: {failed_files} files")
+    logger.info(f"   📄 Total trades matched: {len(all_matched_trades)}")
+    logger.info(f"   ⚠️ Total unmatched trades/files: {total_unmatched}")
     
     return {
         "matchedTrades": all_matched_trades,
