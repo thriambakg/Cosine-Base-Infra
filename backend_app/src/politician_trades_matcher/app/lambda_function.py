@@ -10,6 +10,7 @@ import os
 import logging
 import re
 import boto3
+import time
 from botocore.exceptions import ClientError
 from typing import List, Dict, Any, Optional
 from datetime import datetime
@@ -305,10 +306,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         # Check if PDF is multi-page (synchronous analyze_document only supports single-page PDFs)
         # Count /Page objects in PDF - simple heuristic
         page_count = pdf_content.count(b'/Type/Page') + pdf_content.count(b'/Type /Page')
-        if page_count > 1:
-            error_msg = f"PDF {s3_key} appears to be multi-page ({page_count} pages detected). Synchronous Textract (analyze_document) only supports single-page PDFs. Use asynchronous Textract (start_document_analysis) for multi-page PDFs."
-            logger.error(f"❌ {error_msg}")
-            raise Exception(error_msg)
+        is_multi_page = page_count > 1
         
         # Get asset codes mapping (cached at module level)
         asset_codes = get_asset_codes_mapping()
@@ -316,41 +314,116 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         logger.info(f"📄 Using Textract to parse House PTR PDF ({len(pdf_content)} bytes, {page_count} page(s))...")
         
         # Call Textract to extract text and forms/tables
-        # Note: analyze_document (synchronous) only supports single-page PDFs
-        try:
-            textract_response = textract_client.analyze_document(
-                Document={'Bytes': pdf_content},
-                FeatureTypes=['FORMS', 'TABLES']
-            )
-        except ClientError as e:
-            error_code = e.response.get('Error', {}).get('Code', 'Unknown')
-            if error_code == 'UnsupportedDocumentException':
-                error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
-                logger.error(f"❌ {error_msg}")
-                raise Exception(error_msg)  # Fail completely instead of returning empty list
-            else:
-                logger.error(f"❌ Textract ClientError ({error_code}) for {s3_key}: {e}")
-                raise  # Re-raise other ClientErrors
-        except Exception as e:
-            # Catch UnsupportedDocumentException from botocore.errorfactory
-            # botocore.errorfactory.UnsupportedDocumentException is not a ClientError
-            error_type = type(e).__name__
-            error_str = str(e)
-            
-            if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
-                error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
-                logger.error(f"❌ {error_msg}")
-                raise Exception(error_msg)  # Fail completely instead of returning empty list
-            else:
-                logger.error(f"❌ Textract error for {s3_key}: {error_type}: {error_str}")
-                raise  # Re-raise other exceptions
+        # Use synchronous analyze_document for single-page PDFs, asynchronous for multi-page
+        all_blocks = []
+        
+        if is_multi_page:
+            # Asynchronous Textract for multi-page PDFs
+            logger.info(f"📄 Using asynchronous Textract for multi-page PDF ({page_count} pages)...")
+            try:
+                # Start asynchronous document analysis (requires S3, not bytes)
+                response = textract_client.start_document_analysis(
+                    DocumentLocation={
+                        'S3Object': {
+                            'Bucket': S3_BUCKET,
+                            'Name': s3_key
+                        }
+                    },
+                    FeatureTypes=['FORMS', 'TABLES']
+                )
+                job_id = response['JobId']
+                logger.info(f"📄 Started Textract job {job_id} for {s3_key}")
+                
+                # Poll for job completion (max 5 minutes = 60 iterations * 5 seconds)
+                max_iterations = 60
+                for i in range(max_iterations):
+                    time.sleep(5)  # Wait 5 seconds between polls
+                    response = textract_client.get_document_analysis(JobId=job_id)
+                    status = response['JobStatus']
+                    
+                    if status == 'SUCCEEDED':
+                        logger.info(f"✅ Textract job {job_id} completed successfully")
+                        all_blocks = response.get('Blocks', [])
+                        # Get all pages (pagination)
+                        next_token = response.get('NextToken')
+                        while next_token:
+                            response = textract_client.get_document_analysis(JobId=job_id, NextToken=next_token)
+                            all_blocks.extend(response.get('Blocks', []))
+                            next_token = response.get('NextToken')
+                        break
+                    elif status == 'FAILED':
+                        error_msg = f"Textract job {job_id} failed: {response.get('StatusMessage', 'Unknown error')}"
+                        logger.error(f"❌ {error_msg}")
+                        raise Exception(error_msg)
+                    elif status in ['IN_PROGRESS', 'PARTIAL_SUCCESS']:
+                        if i % 10 == 0:  # Log every 50 seconds
+                            logger.info(f"⏳ Textract job {job_id} still in progress... (iteration {i+1}/{max_iterations})")
+                    else:
+                        error_msg = f"Textract job {job_id} returned unexpected status: {status}"
+                        logger.error(f"❌ {error_msg}")
+                        raise Exception(error_msg)
+                else:
+                    # Loop completed without breaking (timeout)
+                    error_msg = f"Textract job {job_id} timed out after {max_iterations * 5} seconds"
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)
+                    
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                if error_code == 'UnsupportedDocumentException':
+                    error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)  # Fail completely instead of returning empty list
+                else:
+                    logger.error(f"❌ Textract ClientError ({error_code}) for {s3_key}: {e}")
+                    raise  # Re-raise other ClientErrors
+            except Exception as e:
+                # Catch UnsupportedDocumentException from botocore.errorfactory
+                error_type = type(e).__name__
+                error_str = str(e)
+                
+                if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+                    error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)  # Fail completely instead of returning empty list
+                else:
+                    logger.error(f"❌ Textract error for {s3_key}: {error_type}: {error_str}")
+                    raise  # Re-raise other exceptions
+        else:
+            # Synchronous Textract for single-page PDFs
+            logger.info(f"📄 Using synchronous Textract for single-page PDF...")
+            try:
+                textract_response = textract_client.analyze_document(
+                    Document={'Bytes': pdf_content},
+                    FeatureTypes=['FORMS', 'TABLES']
+                )
+                all_blocks = textract_response.get('Blocks', [])
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                if error_code == 'UnsupportedDocumentException':
+                    error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)  # Fail completely instead of returning empty list
+                else:
+                    logger.error(f"❌ Textract ClientError ({error_code}) for {s3_key}: {e}")
+                    raise  # Re-raise other ClientErrors
+            except Exception as e:
+                # Catch UnsupportedDocumentException from botocore.errorfactory
+                error_type = type(e).__name__
+                error_str = str(e)
+                
+                if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+                    error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)  # Fail completely instead of returning empty list
+                else:
+                    logger.error(f"❌ Textract error for {s3_key}: {error_type}: {error_str}")
+                    raise  # Re-raise other exceptions
         
         # Extract text and structured data
         text_lines = []
         form_fields = {}
         tables = []
-        
-        all_blocks = textract_response.get('Blocks', [])
         
         for block in all_blocks:
             block_type = block.get('BlockType')
