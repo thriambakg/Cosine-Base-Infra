@@ -2366,35 +2366,10 @@ module "politician_trades_state_machine" {
                         Parameters = {
                           "date.$" : "$.fetchResults.date", # Will be available at $.date in subsequent states
                           "metadataS3Key.$" : "$.fetchResults.housePTRsMetadataS3Key",
-                          "housePTRsCount.$" : "States.ArrayLength($.fetchResults.housePTRs)",
                           "source" : "house"
                         }
                         ResultPath = "$" # Replace entire state with transformed data
-                        Next       = "CheckHousePTRs"
-                      }
-                      CheckHousePTRs = {
-                        Type    = "Choice"
-                        Comment = "Check if House PTRs array is empty (hash match - no downloads needed)"
-                        Choices = [
-                          {
-                            Variable      = "$.housePTRsCount"
-                            NumericEquals = 0
-                            Next          = "SkipHouseDownloads"
-                          }
-                        ]
-                        Default = "DownloadHouse"
-                      }
-                      SkipHouseDownloads = {
-                        Type    = "Pass"
-                        Comment = "Hash matched - no new House PTRs to download, but still return folderName"
-                        Parameters = {
-                          "summary" : "House PTR downloads skipped - no changes detected",
-                          "folderName.$" : "States.Format('trades/house/{}', States.StringSplit($.date, '-')[0])",
-                          "count" : 0,
-                          "success" : true
-                        }
-                        ResultPath = "$.downloadResults"
-                        End        = true
+                        Next       = "DownloadHouse"
                       }
                       DownloadHouse = {
                         Type       = "Task"

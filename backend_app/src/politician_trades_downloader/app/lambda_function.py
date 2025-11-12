@@ -717,6 +717,19 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
         
         logger.info(f"📋 Found {len(house_ptrs)} House PTRs in metadata for year {year}")
         
+        # Check if housePTRs array is empty (hash matched - no downloads needed)
+        if not house_ptrs or len(house_ptrs) == 0:
+            logger.info(f"✅ House PTRs array is empty - hash matched, no downloads needed")
+            folder_name = f"trades/house/{year}"
+            return {
+                "summary": "House PTR downloads skipped - no changes detected",
+                "folderName": folder_name,
+                "count": 0,
+                "failed": 0,
+                "total": 0,
+                "success": True
+            }
+        
         # Extract target date from event (for determining year if needed)
         target_date_raw = event.get('date') or event.get('filingDate')
         if target_date_raw:
@@ -767,7 +780,7 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
     except Exception as e:
         logger.error(f"❌ Error processing House PTRs from metadata: {e}")
         raise
-
+        
 
 def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> Optional[str]:
     """
@@ -1010,10 +1023,10 @@ def lambda_handler(event, context):
                 "s3Key": s3_key,
                 "formType": event.get('formType', 'house_ptr'),
                 "source": "house",
-                "filingDate": target_date,
-                "filer_name": event.get('filer_name'),  # Always pass through filer_name if available
-                "success": True
-            }
+                    "filingDate": target_date,
+                    "filer_name": event.get('filer_name'),  # Always pass through filer_name if available
+                    "success": True
+                }
         else:
             raise ValueError(f"Unknown source: {source}. Expected 'house' or 'senate'")
         
