@@ -32,6 +32,50 @@ DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 # Name matching threshold (0.0 to 1.0)
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
 
+# Module-level cache for asset codes mapping (loaded once per lambda container)
+_ASSET_CODES_CACHE: Optional[Dict[str, str]] = None
+
+def get_asset_codes_mapping() -> Dict[str, str]:
+    """
+    Get House PTR asset codes mapping, loading from S3 if not already cached.
+    This is cached at module level to avoid reloading for each House PTR in a batch.
+    
+    Returns:
+        Dict mapping asset codes to asset names
+    """
+    global _ASSET_CODES_CACHE
+    
+    if _ASSET_CODES_CACHE is not None:
+        return _ASSET_CODES_CACHE
+    
+    logger.info("📋 Loading House PTR asset codes mapping from S3 (first time)")
+    
+    asset_codes = {}
+    
+    try:
+        response = s3_client.get_object(
+            Bucket=S3_BUCKET,
+            Key='house_ptr_asset_codes.csv'
+        )
+        
+        csv_content = response['Body'].read().decode('utf-8')
+        csv_reader = csv.DictReader(StringIO(csv_content))
+        
+        for row in csv_reader:
+            code = row.get('Asset Code', '').strip()
+            name = row.get('Asset Name', '').strip()
+            if code and name:
+                asset_codes[code] = name
+        
+        logger.info(f"✅ Loaded {len(asset_codes)} asset codes")
+        _ASSET_CODES_CACHE = asset_codes
+        return asset_codes
+        
+    except Exception as e:
+        logger.warning(f"⚠️ Error loading asset codes mapping: {e}. Continuing without asset code mapping.")
+        _ASSET_CODES_CACHE = {}  # Cache empty dict to avoid retrying on every call
+        return {}
+
 def load_politician_list() -> List[Dict[str, Any]]:
     """
     Load congress-legislators CSV from S3
@@ -169,38 +213,6 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]])
     
     return None
 
-def load_asset_codes_mapping() -> Dict[str, str]:
-    """
-    Load House PTR asset codes mapping from S3
-    
-    Returns:
-        Dict mapping asset codes to asset names
-    """
-    logger.info("📋 Loading House PTR asset codes mapping from S3")
-    
-    asset_codes = {}
-    
-    try:
-        response = s3_client.get_object(
-            Bucket=S3_BUCKET,
-            Key='house_ptr_asset_codes.csv'
-        )
-        
-        csv_content = response['Body'].read().decode('utf-8')
-        csv_reader = csv.DictReader(StringIO(csv_content))
-        
-        for row in csv_reader:
-            code = row.get('Asset Code', '').strip()
-            name = row.get('Asset Name', '').strip()
-            if code and name:
-                asset_codes[code] = name
-        
-        logger.info(f"✅ Loaded {len(asset_codes)} asset codes")
-        return asset_codes
-        
-    except Exception as e:
-        logger.warning(f"⚠️ Error loading asset codes mapping: {e}. Continuing without asset code mapping.")
-        return {}
 
 def extract_table_data_from_blocks(table_block: Dict[str, Any], all_blocks: List[Dict[str, Any]]) -> Optional[List[List[str]]]:
     """
@@ -277,8 +289,8 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
         pdf_content = response['Body'].read()
         
-        # Load asset codes mapping
-        asset_codes = load_asset_codes_mapping()
+        # Get asset codes mapping (cached at module level)
+        asset_codes = get_asset_codes_mapping()
         
         logger.info("📄 Using Textract to parse House PTR PDF...")
         
@@ -448,7 +460,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 # Extract asset information
                 security_name = None
                 security_symbol = None
-                asset_class = None
+                asset_type = None
                 
                 if asset_col is not None and asset_col < len(row):
                     asset_text = row[asset_col].strip()
@@ -464,7 +476,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     if asset_code_match:
                         code = asset_code_match.group(1)
                         if code in asset_codes:
-                            asset_class = asset_codes[code]
+                            asset_type = asset_codes[code]
                 
                 # Extract transaction type
                 transaction_type = None
@@ -506,7 +518,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         'transactionDate': transaction_date,
                         'securityName': security_name,
                         'securitySymbol': security_symbol,
-                        'assetClass': asset_class,
+                        'assetType': asset_type,
                         'transactionType': transaction_type,
                         'amount': amount,
                         'amountMin': amount_min,

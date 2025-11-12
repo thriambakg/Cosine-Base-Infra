@@ -1566,6 +1566,36 @@ def lambda_handler(event, context):
         filer_name_from_event = event.get('filer_name')
         filing_date_from_event = event.get('filingDate') or filing_date
         
+        # Ensure filing_date_from_event is in YYYY-MM-DD format and not empty
+        if filing_date_from_event:
+            try:
+                # Normalize to YYYY-MM-DD format
+                if '/' in filing_date_from_event:
+                    # MM/DD/YYYY format
+                    date_obj = datetime.strptime(filing_date_from_event, '%m/%d/%Y')
+                    filing_date_from_event = date_obj.strftime('%Y-%m-%d')
+                elif '-' in filing_date_from_event and len(filing_date_from_event) == 10:
+                    # Already YYYY-MM-DD format
+                    datetime.strptime(filing_date_from_event, '%Y-%m-%d')  # Validate format
+                else:
+                    # Try other formats
+                    try:
+                        date_obj = datetime.strptime(filing_date_from_event, '%Y%m%d')
+                        filing_date_from_event = date_obj.strftime('%Y-%m-%d')
+                    except:
+                        logger.warning(f"⚠️ Could not parse filing_date format: {filing_date_from_event}")
+                        filing_date_from_event = None
+            except ValueError as e:
+                logger.warning(f"⚠️ Error normalizing filing_date '{filing_date_from_event}': {e}")
+                filing_date_from_event = None
+        
+        # Use normalized filing_date_from_event, fallback to filing_date if needed
+        final_filing_date = filing_date_from_event or filing_date
+        
+        if not final_filing_date or final_filing_date == '':
+            logger.error(f"❌ No valid filing_date available for tradeId generation. Event: {json.dumps(event, default=str)}")
+            raise ValueError("filingDate is required and must be in YYYY-MM-DD format")
+        
         # Check if transactions are already extracted at fetcher level
         if event.get('transactions'):
             logger.info(f"✅ Using {len(event.get('transactions', []))} pre-extracted transactions from fetcher")
@@ -1605,7 +1635,7 @@ def lambda_handler(event, context):
                 # Use UNPARSED_AMOUNT_VALUE for amountMin/Max to allow "N/A" searches to map to this high value
                 placeholder_trade = {
                     'filerName': filer_name,
-                    'transactionDate': filing_date,  # Use filing date as placeholder
+                    'transactionDate': final_filing_date,  # Use filing date as placeholder
                     'securityName': None,
                     'securitySymbol': None,
                     'transactionType': None,  # Must be null for unparsed documents (no speculation)
@@ -1682,7 +1712,7 @@ def lambda_handler(event, context):
                 # For placeholder/unparsed trades, use filing date directly
                 if is_unparsed:
                     try:
-                        filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
+                        filing_date_obj = datetime.strptime(final_filing_date, '%Y-%m-%d').date()
                         transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
                     except:
                         pass
@@ -1723,7 +1753,7 @@ def lambda_handler(event, context):
                         logger.warning(f"⚠️ Error parsing transaction date '{transaction_date_str}': {e}")
                         # Fallback: use filing date as transaction date
                         try:
-                            filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
+                            filing_date_obj = datetime.strptime(final_filing_date, '%Y-%m-%d').date()
                             transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
                             logger.warning(f"   Using filing date as fallback: {transaction_date_num}")
                         except:
@@ -1732,19 +1762,19 @@ def lambda_handler(event, context):
                     # Use filing date if transaction date is missing
                     logger.warning(f"⚠️ No transaction date in trade, using filing date")
                     try:
-                        filing_date_obj = datetime.strptime(filing_date, '%Y-%m-%d').date()
+                        filing_date_obj = datetime.strptime(final_filing_date, '%Y-%m-%d').date()
                         transaction_date_num = int(filing_date_obj.strftime('%Y%m%d'))
                     except:
                         pass
                 
                 matched_trade = {
-                    'tradeId': f"trade_{filing_date}_senate_{len(matched_trades)}",
+                    'tradeId': f"trade_{final_filing_date}_senate_{len(matched_trades)}",
                     'politicianName': matched_politician['name'],  # GSI: PoliticianTradeDateIndex
                     'party': matched_politician['party'],  # GSI: PartyTradeDateIndex
                     'position': matched_politician['position'],  # GSI: PositionTradeDateIndex
                     'websiteUrl': matched_politician.get('websiteUrl'),  # Regular attribute (not GSI)
                     'formType': form_type or 'senate_ptr',  # GSI: FormTypeTradeDateIndex
-                    'filingDate': filing_date,
+                    'filingDate': final_filing_date,
                     'transactionDate': transaction_date_num,  # GSI range key (numeric: YYYYMMDD format)
                     'transactionTime': trade.get('transactionTime'),
                     'securitySymbol': trade.get('ticker') or trade.get('securitySymbol'),  # GSI: SecurityTradeDateIndex
