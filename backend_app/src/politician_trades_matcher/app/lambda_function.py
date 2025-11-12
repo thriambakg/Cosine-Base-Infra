@@ -565,18 +565,19 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         logger.info(f"✅ Extracted {len(trades)} trades from House PTR: {s3_key}")
         
     except Exception as e:
-        # Check if this is an UnsupportedDocumentException (already handled in inner try-except)
+        # Check if this is an UnsupportedDocumentException (should fail completely)
         error_type = type(e).__name__
         error_str = str(e)
         
         if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
-            # Already logged in inner handler, just return empty list
-            logger.debug(f"UnsupportedDocumentException already handled for {s3_key}")
+            # Re-raise to fail completely - already logged in inner handler
+            raise  # Fail completely instead of returning empty list
         else:
             # Log full traceback for unexpected errors
             logger.error(f"❌ Error parsing House PTR {s3_key}: {e}")
             import traceback
             logger.error(traceback.format_exc())
+            raise  # Re-raise to fail completely
     
     return trades
 
@@ -703,10 +704,20 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
         logger.info(f"✅ Matched {len(matched_trades)}/{len(trades)} trades from House PTR: {s3_key}")
         
     except Exception as e:
-        logger.error(f"❌ Error matching House PTR trades {s3_key}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        unmatched_count = 1
+        # Check if this is an UnsupportedDocumentException - should fail completely
+        error_type = type(e).__name__
+        error_str = str(e)
+        
+        if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+            # Re-raise to fail completely - already logged in parse_house_ptr_with_textract
+            logger.error(f"❌ Failing completely due to UnsupportedDocumentException for {s3_key}")
+            raise  # Fail completely instead of returning error dict
+        else:
+            # Log full traceback for unexpected errors and re-raise
+            logger.error(f"❌ Error matching House PTR trades {s3_key}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise  # Re-raise to fail completely
     
     return {
         'matchedTrades': matched_trades,
@@ -864,23 +875,39 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
     files_with_no_filer_name = 0
     
     for s3_key in unprocessed_keys:
-        match_result = match_house_ptr_trades(s3_key, politicians, skip_duplicate_check=True)
-        matched_count = len(match_result.get('matchedTrades', []))
-        unmatched_count = match_result.get('unmatchedCount', 0)
-        
-        all_matched_trades.extend(match_result.get('matchedTrades', []))
-        total_unmatched += unmatched_count
-        
-        # Track statistics
-        if matched_count > 0:
-            successful_files += 1
-        elif unmatched_count > 0:
-            failed_files += 1
-            # Check if it's because no trades were extracted or no filer name
-            if match_result.get('unmatchedCount', 0) == 1 and matched_count == 0:
-                files_with_no_trades += 1
-            elif 'filerName' in str(match_result):
-                files_with_no_filer_name += 1
+        try:
+            match_result = match_house_ptr_trades(s3_key, politicians, skip_duplicate_check=True)
+            matched_count = len(match_result.get('matchedTrades', []))
+            unmatched_count = match_result.get('unmatchedCount', 0)
+            
+            all_matched_trades.extend(match_result.get('matchedTrades', []))
+            total_unmatched += unmatched_count
+            
+            # Track statistics
+            if matched_count > 0:
+                successful_files += 1
+            elif unmatched_count > 0:
+                failed_files += 1
+                # Check if it's because no trades were extracted or no filer name
+                if match_result.get('unmatchedCount', 0) == 1 and matched_count == 0:
+                    files_with_no_trades += 1
+                elif 'filerName' in str(match_result):
+                    files_with_no_filer_name += 1
+        except Exception as e:
+            # Check if this is an UnsupportedDocumentException - should fail completely
+            error_type = type(e).__name__
+            error_str = str(e)
+            
+            if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+                # Fail completely - UnsupportedDocumentException means the file cannot be processed
+                logger.error(f"❌ Failing completely: UnsupportedDocumentException for {s3_key}. This file cannot be processed by Textract.")
+                raise  # Fail completely instead of continuing
+            else:
+                # For other errors, log and re-raise to fail completely
+                logger.error(f"❌ Error processing House PTR {s3_key}: {e}")
+                import traceback
+                logger.error(traceback.format_exc())
+                raise  # Fail completely
     
     logger.info(f"📊 Processing Summary:")
     logger.info(f"   ✅ Successfully matched: {successful_files} files")
