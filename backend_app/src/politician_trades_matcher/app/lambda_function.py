@@ -589,29 +589,31 @@ def check_if_filing_processed(s3_key: str) -> bool:
         logger.warning(f"⚠️ Error checking if filing was processed: {e}. Proceeding with processing.")
         return False
 
-def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]]) -> Dict[str, Any]:
+def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_duplicate_check: bool = False) -> Dict[str, Any]:
     """
     Parse House PTR PDF, extract trades, and match to politicians
     
     Args:
         s3_key: S3 key of the House PTR PDF
         politicians: List of politician dicts for matching
+        skip_duplicate_check: If True, skip the duplicate check (already done upstream)
         
     Returns:
         Dict with matchedTrades, unmatchedCount, s3Key, formType
     """
     logger.info(f"🔍 Matching House PTR trades: {s3_key}")
     
-    # Check if this filing has already been processed
-    if check_if_filing_processed(s3_key):
-        logger.info(f"⏭️ Skipping House PTR {s3_key} - already processed")
-        return {
-            'matchedTrades': [],
-            'unmatchedCount': 0,
-            's3Key': s3_key,
-            'formType': 'house_ptr',
-            'skipped': True
-        }
+    # Check if this filing has already been processed (unless check was already done)
+    if not skip_duplicate_check:
+        if check_if_filing_processed(s3_key):
+            logger.info(f"⏭️ Skipping House PTR {s3_key} - already processed")
+            return {
+                'matchedTrades': [],
+                'unmatchedCount': 0,
+                's3Key': s3_key,
+                'formType': 'house_ptr',
+                'skipped': True
+            }
     
     matched_trades = []
     unmatched_count = 0
@@ -740,56 +742,86 @@ def lambda_handler(event, context):
 
 def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Handle House PTR matching from downloader output
+    Handle House PTR matching by scanning entire year folder and processing only new files
     
     Args:
         event: Full event from Step Functions
-        download_results: Output from downloader lambda
+        download_results: Output from downloader lambda (contains folderName/year info)
         
     Returns:
         Dict with matchedTrades and unmatchedCount
     """
-    # Check if downloads were skipped
-    if download_results.get('error'):
-        logger.warning("⚠️ Downloader reported error - skipping matching")
+    # Extract year from download_results or event
+    folder_name = download_results.get('folderName', '')
+    if folder_name:
+        # Extract year from folder name like "trades/house/2025"
+        year = folder_name.split('/')[-1] if '/' in folder_name else folder_name
+    else:
+        # Fallback: try to get year from date in event
+        date = event.get('date') or download_results.get('date')
+        if date:
+            try:
+                year = datetime.strptime(date, '%Y-%m-%d').strftime('%Y')
+            except:
+                year = datetime.now().strftime('%Y')
+        else:
+            year = datetime.now().strftime('%Y')
+    
+    logger.info(f"📁 Scanning House PTR folder for year: {year}")
+    
+    # List all PDFs in the year folder
+    folder_prefix = f"trades/house/{year}/"
+    logger.info(f"🔍 Listing all PDFs in S3 folder: {folder_prefix}")
+    
+    all_s3_keys = list_s3_files_by_prefix(folder_prefix)
+    # Filter to only PDF files
+    pdf_keys = [key for key in all_s3_keys if key.lower().endswith('.pdf')]
+    
+    logger.info(f"📋 Found {len(pdf_keys)} PDF files in folder")
+    
+    if not pdf_keys:
+        logger.info("✅ No House PTR PDF files found in folder")
         return {
             "matchedTrades": [],
             "unmatchedCount": 0,
             "date": event.get('date')
         }
     
-    if not download_results.get('success', False):
-        logger.warning("⚠️ Downloads not successful - skipping matching")
+    # Check each file against DynamoDB to see if it's already processed
+    logger.info(f"🔍 Checking {len(pdf_keys)} files against DynamoDB to find unprocessed ones...")
+    unprocessed_keys = []
+    
+    for s3_key in pdf_keys:
+        if not check_if_filing_processed(s3_key):
+            unprocessed_keys.append(s3_key)
+        else:
+            logger.debug(f"⏭️ Skipping already processed file: {s3_key}")
+    
+    logger.info(f"📊 Found {len(unprocessed_keys)} unprocessed files out of {len(pdf_keys)} total files")
+    
+    if not unprocessed_keys:
+        logger.info("✅ All House PTR files have already been processed")
         return {
             "matchedTrades": [],
             "unmatchedCount": 0,
             "date": event.get('date')
         }
-    
-    s3_keys = download_results.get('s3Keys', [])
-    if not s3_keys or len(s3_keys) == 0:
-        logger.info("✅ No House PTR files to match (downloads were skipped or no files downloaded)")
-        return {
-            "matchedTrades": [],
-            "unmatchedCount": 0,
-            "date": event.get('date')
-        }
-    
-    logger.info(f"🔍 Matching {len(s3_keys)} House PTR files")
     
     # Load politician list for matching
+    logger.info("📋 Loading politician list for matching")
     politicians = load_politician_list()
     
-    # Process each House PTR file
+    # Process only the unprocessed files with Textract
+    logger.info(f"🔍 Processing {len(unprocessed_keys)} new House PTR files with Textract...")
     all_matched_trades = []
     total_unmatched = 0
     
-    for s3_key in s3_keys:
-        match_result = match_house_ptr_trades(s3_key, politicians)
+    for s3_key in unprocessed_keys:
+        match_result = match_house_ptr_trades(s3_key, politicians, skip_duplicate_check=True)
         all_matched_trades.extend(match_result.get('matchedTrades', []))
         total_unmatched += match_result.get('unmatchedCount', 0)
     
-    logger.info(f"✅ Matched {len(all_matched_trades)} trades from {len(s3_keys)} House PTR files")
+    logger.info(f"✅ Matched {len(all_matched_trades)} trades from {len(unprocessed_keys)} new House PTR files")
     logger.info(f"⚠️ {total_unmatched} trades/files could not be matched")
     
     return {
