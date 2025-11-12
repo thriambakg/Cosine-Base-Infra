@@ -469,7 +469,51 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             if table_data:
                 tables.append(table_data)
         
+        # Comprehensive logging of Textract output for debugging
+        logger.info(f"📊 Textract Output Summary for {s3_key}:")
+        logger.info(f"   Total blocks: {len(all_blocks)}")
+        
+        # Count block types
+        block_type_counts = {}
+        for block in all_blocks:
+            block_type = block.get('BlockType', 'UNKNOWN')
+            block_type_counts[block_type] = block_type_counts.get(block_type, 0) + 1
+        logger.info(f"   Block type counts: {json.dumps(block_type_counts, indent=2)}")
+        
+        logger.info(f"   Text lines extracted: {len(text_lines)}")
+        logger.info(f"   Form fields extracted: {len(form_fields)}")
+        logger.info(f"   Tables extracted: {len(tables)}")
+        
+        # Log all text lines (first 50 lines to avoid log spam)
+        logger.info(f"   First 50 text lines:")
+        for i, line in enumerate(text_lines[:50]):
+            logger.info(f"      [{i+1}] {line}")
+        if len(text_lines) > 50:
+            logger.info(f"      ... ({len(text_lines) - 50} more lines)")
+        
+        # Log all form fields
+        if form_fields:
+            logger.info(f"   Form fields:")
+            for key, value in form_fields.items():
+                logger.info(f"      '{key}': '{value}'")
+        else:
+            logger.info(f"   No form fields extracted")
+        
+        # Log all tables
+        if tables:
+            logger.info(f"   Tables extracted ({len(tables)} total):")
+            for table_idx, table in enumerate(tables):
+                logger.info(f"      Table {table_idx + 1} ({len(table)} rows):")
+                for row_idx, row in enumerate(table[:10]):  # First 10 rows per table
+                    logger.info(f"         Row {row_idx}: {row}")
+                if len(table) > 10:
+                    logger.info(f"         ... ({len(table) - 10} more rows)")
+        else:
+            logger.info(f"   No tables extracted")
+        
         full_text = ' '.join(text_lines)
+        logger.info(f"   Full text length: {len(full_text)} characters")
+        logger.info(f"   Full text (first 1000 chars): {full_text[:1000]}")
         
         # Extract filer name from House PTR
         filer_name = None
@@ -944,6 +988,11 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
             "unmatchedCount": 0,
             "date": event.get('date')
         }
+    
+    # Limit to first 10 files for processing
+    if len(unprocessed_keys) > 10:
+        logger.info(f"⚠️ Limiting processing to first 10 files (found {len(unprocessed_keys)} unprocessed files)")
+        unprocessed_keys = unprocessed_keys[:10]
     
     # Load politician list for matching
     logger.info("📋 Loading politician list for matching")
