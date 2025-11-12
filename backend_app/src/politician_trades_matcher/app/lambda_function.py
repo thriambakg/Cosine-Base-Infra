@@ -314,22 +314,25 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', 'Unknown')
             if error_code == 'UnsupportedDocumentException':
-                logger.error(f"❌ Textract UnsupportedDocumentException for {s3_key}: File may be corrupted or in unsupported format.")
+                error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                logger.error(f"❌ {error_msg}")
+                raise Exception(error_msg)  # Fail completely instead of returning empty list
             else:
                 logger.error(f"❌ Textract ClientError ({error_code}) for {s3_key}: {e}")
-            return []
+                raise  # Re-raise other ClientErrors
         except Exception as e:
-            # Catch UnsupportedDocumentException and other Textract-specific exceptions
+            # Catch UnsupportedDocumentException from botocore.errorfactory
             # botocore.errorfactory.UnsupportedDocumentException is not a ClientError
             error_type = type(e).__name__
             error_str = str(e)
             
             if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
-                logger.error(f"❌ Textract UnsupportedDocumentException for {s3_key}: File may be corrupted or in unsupported format.")
-                return []  # Return early to prevent outer handler from logging traceback
+                error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                logger.error(f"❌ {error_msg}")
+                raise Exception(error_msg)  # Fail completely instead of returning empty list
             else:
                 logger.error(f"❌ Textract error for {s3_key}: {error_type}: {error_str}")
-                return []
+                raise  # Re-raise other exceptions
         
         # Extract text and structured data
         text_lines = []
