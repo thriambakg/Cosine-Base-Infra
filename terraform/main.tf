@@ -2386,10 +2386,10 @@ module "politician_trades_state_machine" {
                       }
                       SkipHouseDownloads = {
                         Type    = "Pass"
-                        Comment = "Hash matched - no new House PTRs to download"
-                        Result = {
+                        Comment = "Hash matched - no new House PTRs to download, but still return folderName"
+                        Parameters = {
                           "summary" : "House PTR downloads skipped - no changes detected",
-                          "folderName" : null,
+                          "folderName.$" : "States.Format('trades/house/{}', States.StringSplit($.date, '-')[0])",
                           "count" : 0,
                           "success" : true
                         }
