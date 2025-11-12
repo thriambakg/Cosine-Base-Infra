@@ -825,18 +825,18 @@ def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> 
         })
         
         response = session.get(url, timeout=30)
-            response.raise_for_status()
-            
-            # Check if response is actually a PDF
-            content_type = response.headers.get('Content-Type', '').lower()
-            content_sample = response.content[:100]
-            
-            if 'application/pdf' in content_type or content_sample.startswith(b'%PDF'):
-                logger.info(f"✅ Downloaded PDF file ({len(response.content)} bytes)")
-                file_content = response.content
-                file_ext = 'pdf'
+        response.raise_for_status()
+        
+        # Check if response is actually a PDF
+        content_type = response.headers.get('Content-Type', '').lower()
+        content_sample = response.content[:100]
+        
+        if 'application/pdf' in content_type or content_sample.startswith(b'%PDF'):
+            logger.info(f"✅ Downloaded PDF file ({len(response.content)} bytes)")
+            file_content = response.content
+            file_ext = 'pdf'
             content_type = 'application/pdf'
-            else:
+        else:
                 # Determine file extension from URL or content type
                 if s3_key.endswith('.pdf'):
                     file_ext = 'pdf'
