@@ -2400,11 +2400,38 @@ module "politician_trades_state_machine" {
                         ]
                       }
                       SummarizeHouseDownloads = {
+                        Type    = "Choice"
+                        Comment = "Handle success or error case and return minimal summary"
+                        Choices = [
+                          {
+                            Variable  = "$.error"
+                            IsPresent = true
+                            Next      = "SummarizeHouseError"
+                          }
+                        ]
+                        Default = "SummarizeHouseSuccess"
+                      }
+                      SummarizeHouseError = {
+                        Type    = "Pass"
+                        Comment = "Transform error to minimal summary"
+                        Result = {
+                          "summary" : "House PTR downloads failed",
+                          "folderName" : null,
+                          "count" : 0,
+                          "success" : false,
+                          "error" : "Download failed"
+                        }
+                        ResultPath = "$.downloadResults"
+                        End        = true
+                      }
+                      SummarizeHouseSuccess = {
                         Type    = "Pass"
                         Comment = "Transform download results to minimal summary to avoid Step Functions size limit (256KB)"
                         Parameters = {
                           "summary.$" : "$.downloadResults.summary",
-                          "folderName.$" : "$.downloadResults.folderName"
+                          "folderName.$" : "$.downloadResults.folderName",
+                          "count.$" : "$.downloadResults.count",
+                          "success.$" : "$.downloadResults.success"
                         }
                         ResultPath = "$.downloadResults"
                         End        = true

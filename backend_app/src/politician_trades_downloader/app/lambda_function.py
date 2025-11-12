@@ -935,9 +935,34 @@ def lambda_handler(event, context):
     try:
         # Check if this is a House PTR batch request (from S3 metadata)
         metadata_s3_key = event.get('metadataS3Key') or event.get('metadata_s3_key')
-        if metadata_s3_key:
-            logger.info(f"📦 House PTR batch mode: Reading metadata from S3: {metadata_s3_key}")
-            return download_house_ptrs_from_metadata(metadata_s3_key, event)
+        source = event.get('source')
+        
+        # Handle House PTR batch mode
+        if source == 'house':
+            if metadata_s3_key:
+                logger.info(f"📦 House PTR batch mode: Reading metadata from S3: {metadata_s3_key}")
+                return download_house_ptrs_from_metadata(metadata_s3_key, event)
+            else:
+                # metadataS3Key is null - hash matched, no downloads needed
+                logger.info(f"✅ House PTR batch mode: metadataS3Key is null - hash matched, no downloads needed")
+                # Extract year from date if available, otherwise use current year
+                date_str = event.get('date') or event.get('filingDate')
+                if date_str:
+                    try:
+                        year = date_str.split('-')[0] if '-' in date_str else datetime.now().strftime('%Y')
+                    except:
+                        year = datetime.now().strftime('%Y')
+                else:
+                    year = datetime.now().strftime('%Y')
+                
+                return {
+                    "summary": "House PTR downloads skipped - no changes detected",
+                    "folderName": f"trades/house/{year}",
+                    "count": 0,
+                    "failed": 0,
+                    "total": 0,
+                    "success": True
+                }
         
         # Extract target date from event
         target_date_raw = event.get('filingDate') or event.get('filing_date') or event.get('date')
