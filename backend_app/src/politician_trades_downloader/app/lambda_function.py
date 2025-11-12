@@ -417,7 +417,7 @@ def download_and_store_senate_ptr(ptr_data: Dict[str, Any], target_date: str) ->
                     
                     # Small delay to ensure server has processed the agreement
                     time.sleep(0.1)
-                else:
+                                        else:
                     logger.warning(f"⚠️ Could not extract CSRF token from agreement form (attempt {attempt + 1})")
                     # Continue to next attempt - maybe the page changed
             
@@ -738,7 +738,7 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
                 target_date = date_obj.strftime('%Y-%m-%d')
             except:
                 target_date = None
-        else:
+                else:
             target_date = None
         
         # Process each House PTR sequentially
@@ -777,9 +777,9 @@ def download_house_ptrs_from_metadata(metadata_s3_key: str, event: Dict[str, Any
             "success": True
         }
         
-    except Exception as e:
+                except Exception as e:
         logger.error(f"❌ Error processing House PTRs from metadata: {e}")
-        raise
+                    raise
         
 
 def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> Optional[str]:
@@ -804,7 +804,7 @@ def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> 
             raise ValueError(error_msg)
         
         # Generate S3 key if not provided
-        if not s3_key:
+            if not s3_key:
             # Extract filename from URL (e.g., "20033394.pdf" from "public_disc/ptr-pdfs/2025/20033394.pdf")
             filename = url.split('/')[-1] or f'house-ptr-{uuid}.pdf' if uuid else 'house-ptr.pdf'
             # Extract year from target_date (YYYY-MM-DD format)
@@ -821,33 +821,33 @@ def download_and_store_house_ptr(ptr_data: Dict[str, Any], target_date: str) -> 
         })
         
         response = session.get(url, timeout=30)
-        response.raise_for_status()
-        
-        # Check if response is actually a PDF
-        content_type = response.headers.get('Content-Type', '').lower()
-        content_sample = response.content[:100]
-        
-        if 'application/pdf' in content_type or content_sample.startswith(b'%PDF'):
-            logger.info(f"✅ Downloaded PDF file ({len(response.content)} bytes)")
-            file_content = response.content
-            file_ext = 'pdf'
-            content_type = 'application/pdf'
-        else:
-            # Determine file extension from URL or content type
-            if s3_key.endswith('.pdf'):
-                file_ext = 'pdf'
-            elif url.endswith('.pdf'):
-                file_ext = 'pdf'
-            elif 'pdf' in content_type.lower():
-                file_ext = 'pdf'
-            else:
-                # Try to extract from URL
-                if '.' in url.split('/')[-1]:
-                    file_ext = url.split('/')[-1].split('.')[-1]
-                else:
-                    file_ext = 'pdf'  # Default for PTRs
+            response.raise_for_status()
             
-            file_content = response.content
+            # Check if response is actually a PDF
+            content_type = response.headers.get('Content-Type', '').lower()
+            content_sample = response.content[:100]
+            
+            if 'application/pdf' in content_type or content_sample.startswith(b'%PDF'):
+                logger.info(f"✅ Downloaded PDF file ({len(response.content)} bytes)")
+                file_content = response.content
+                file_ext = 'pdf'
+            content_type = 'application/pdf'
+            else:
+                # Determine file extension from URL or content type
+                if s3_key.endswith('.pdf'):
+                    file_ext = 'pdf'
+                elif url.endswith('.pdf'):
+                    file_ext = 'pdf'
+                elif 'pdf' in content_type.lower():
+                    file_ext = 'pdf'
+                else:
+                    # Try to extract from URL
+                    if '.' in url.split('/')[-1]:
+                        file_ext = url.split('/')[-1].split('.')[-1]
+                    else:
+                        file_ext = 'pdf'  # Default for PTRs
+                
+                file_content = response.content
         
         # Update s3_key with correct extension if needed
         if not s3_key.endswith(f'.{file_ext}'):
@@ -1021,31 +1021,31 @@ def lambda_handler(event, context):
             # For Senate PTRs, transactions may already be extracted at fetcher level
             # Still download and store HTML for reference
             s3_key = download_and_store_senate_ptr(event, target_date)
-            
-            if not s3_key:
+                
+                if not s3_key:
                 raise Exception("Failed to download Senate PTR - download_and_store_senate_ptr returned None")
-            
+                
             # Return format that includes pre-extracted transactions if available
-            return {
-                "s3Key": s3_key,
+                return {
+                    "s3Key": s3_key,
                 "formType": event.get('formType', 'senate_ptr'),
                 "source": "senate",
-                "filingDate": target_date,
-                "filer_name": event.get('filer_name'),  # Always pass through filer_name
+                    "filingDate": target_date,
+                    "filer_name": event.get('filer_name'),  # Always pass through filer_name
                 "transactions": event.get('transactions', []),  # Pass through pre-extracted transactions if available
-                "success": True
-            }
+                    "success": True
+                }
         elif source == 'house':
             logger.info(f"📋 Detected House PTR download request")
             
             s3_key = download_and_store_house_ptr(event, target_date)
-            
-            if not s3_key:
+                
+                if not s3_key:
                 raise Exception("Failed to download House PTR - download_and_store_house_ptr returned None")
-            
-            # Return format that matches matcher Lambda expectations
-            return {
-                "s3Key": s3_key,
+                
+                # Return format that matches matcher Lambda expectations
+                return {
+                    "s3Key": s3_key,
                 "formType": event.get('formType', 'house_ptr'),
                 "source": "house",
                     "filingDate": target_date,

@@ -1541,6 +1541,11 @@ module "politician_trades_s3" {
       source_path  = "${path.module}/../static-files/lists/congress-legislators.csv"
       s3_key       = "congress-legislators.csv"
       content_type = "text/csv"
+    },
+    {
+      source_path  = "${path.module}/../static-files/mappings/house_ptr_asset_codes.csv"
+      s3_key       = "house_ptr_asset_codes.csv"
+      content_type = "text/csv"
     }
   ]
 
@@ -2010,11 +2015,11 @@ module "politician_trades_matcher" {
   source = "./modules/lambda"
 
   function_name = "${var.project_name}-pol-trades-aggregator-${var.environment}"
-  description   = "Parses SEC forms and Congressional PTRs, matches trades to politicians using fuzzy name matching"
+  description   = "Parses Congressional PTRs, matches trades to politicians using fuzzy name matching"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
   timeout       = 900  # 15 minutes (max)
-  memory_size   = 2048 # Higher memory for PDF parsing and text processing
+  memory_size   = 2048 # Higher memory for PDF parsing, text processing, and Textract
 
   source_dir = "${path.module}/../backend_app/src/politician_trades_matcher/app"
 
@@ -2031,6 +2036,7 @@ module "politician_trades_matcher" {
   # IAM policies
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
+    aws_iam_policy.lambda_politician_trades_textract_policy.arn,
     module.kms.kms_access_policy_arn
   ]
 

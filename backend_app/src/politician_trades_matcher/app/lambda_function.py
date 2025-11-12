@@ -1,6 +1,6 @@
 """
 Politician Trades Matcher Lambda
-Parses SEC forms and Congressional PTRs, extracts trades, and matches to politicians
+Parses Congressional PTRs, extracts trades, and matches to politicians
 
 This is Step 2 of the 3-step politician trades aggregation workflow.
 """
@@ -8,12 +8,12 @@ This is Step 2 of the 3-step politician trades aggregation workflow.
 import json
 import os
 import logging
+import re
 import boto3
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import csv
 from io import StringIO
-import xml.etree.ElementTree as ET
 from difflib import SequenceMatcher
 
 # Configure logging
@@ -22,6 +22,7 @@ logger.setLevel(logging.INFO)
 
 # AWS clients
 s3_client = boto3.client('s3')
+textract_client = boto3.client('textract')
 
 # Environment variables
 S3_BUCKET = os.environ.get('S3_BUCKET')
@@ -166,109 +167,106 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]])
     
     return None
 
-def parse_sec_form_xml(s3_key: str) -> List[Dict[str, Any]]:
+def load_asset_codes_mapping() -> Dict[str, str]:
     """
-    Parse SEC Form XML and extract trade data
+    Load House PTR asset codes mapping from S3
     
-    Args:
-        s3_key: S3 key of the form XML
-        
     Returns:
-        List of trade dicts extracted from form
+        Dict mapping asset codes to asset names
     """
-    logger.info(f"📄 Parsing SEC form XML: {s3_key}")
+    logger.info("📋 Loading House PTR asset codes mapping from S3")
     
-    trades = []
+    asset_codes = {}
     
     try:
-        # Download XML from S3
-        response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
-        xml_content = response['Body'].read()
+        response = s3_client.get_object(
+            Bucket=S3_BUCKET,
+            Key='house_ptr_asset_codes.csv'
+        )
         
-        # Parse XML
-        root = ET.fromstring(xml_content)
+        csv_content = response['Body'].read().decode('utf-8')
+        csv_reader = csv.DictReader(StringIO(csv_content))
         
-        # SEC forms have complex XML structure
-        # Form 4 structure example:
-        # <ownershipDocument>
-        #   <reportingOwner>
-        #     <reportingOwnerId>
-        #       <rptOwnerName>
-        #   <nonDerivativeTable>
-        #     <nonDerivativeTransaction>
-        #       <transactionDate>
-        #       <transactionCode>
-        #       <securityTitle>
-        #       <transactionShares>
-        #       <transactionPricePerShare>
+        for row in csv_reader:
+            code = row.get('Asset Code', '').strip()
+            name = row.get('Asset Name', '').strip()
+            if code and name:
+                asset_codes[code] = name
         
-        # Extract filer name
-        filer_name = None
-        filer_name_elem = root.find('.//{http://www.sec.gov/edgar/document/edgardocument}rptOwnerName')
-        if filer_name_elem is not None:
-            filer_name = filer_name_elem.text.strip() if filer_name_elem.text else None
-        
-        if not filer_name:
-            logger.warning(f"⚠️ Could not extract filer name from {s3_key}")
-            return trades
-        
-        # Extract transactions
-        # Note: SEC XML is complex with namespaces - this is simplified
-        # Full implementation would need to handle all transaction types
-        # (Purchases, Sales, Grants, Exercises, Conversions, etc.)
-        
-        # For now, return placeholder structure
-        logger.info(f"✅ Extracted filer name: {filer_name}")
+        logger.info(f"✅ Loaded {len(asset_codes)} asset codes")
+        return asset_codes
         
     except Exception as e:
-        logger.error(f"❌ Error parsing SEC form XML {s3_key}: {e}")
-    
-    return trades
+        logger.warning(f"⚠️ Error loading asset codes mapping: {e}. Continuing without asset code mapping.")
+        return {}
 
-def parse_sec_form_pdf(s3_key: str) -> List[Dict[str, Any]]:
+def extract_table_data_from_blocks(table_block: Dict[str, Any], all_blocks: List[Dict[str, Any]]) -> Optional[List[List[str]]]:
     """
-    Parse SEC Form PDF and extract trade data
+    Extract table data from Textract blocks
     
     Args:
-        s3_key: S3 key of the form PDF
+        table_block: The TABLE block from Textract
+        all_blocks: All blocks from Textract response
         
     Returns:
-        List of trade dicts extracted from form
+        List of rows, each row is a list of cell values
     """
-    logger.info(f"📄 Parsing SEC form PDF: {s3_key}")
-    
-    trades = []
-    
     try:
-        # Download PDF from S3
-        response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
-        pdf_content = response['Body'].read()
+        # Create a mapping of block IDs to blocks for quick lookup
+        block_map = {block['Id']: block for block in all_blocks}
         
-        # Note: PDF parsing requires AWS Textract or pdf parsing library
-        # For now, this is a placeholder
-        # Full implementation would:
-        # 1. Use AWS Textract to extract text
-        # 2. Parse structured data from text
-        # 3. Extract filer name, transaction details, etc.
+        # Get all cells in the table
+        cells = []
+        for relationship in table_block.get('Relationships', []):
+            if relationship.get('Type') == 'CHILD':
+                for cell_id in relationship.get('Ids', []):
+                    if cell_id in block_map:
+                        cells.append(block_map[cell_id])
         
-        logger.warning("⚠️ PDF parsing not fully implemented - requires Textract or pdf library")
+        if not cells:
+            return None
+        
+        # Determine table dimensions
+        max_row = max(cell.get('RowIndex', 0) for cell in cells)
+        max_col = max(cell.get('ColumnIndex', 0) for cell in cells)
+        
+        # Create 2D array
+        table = [['' for _ in range(max_col)] for _ in range(max_row)]
+        
+        # Fill in cell values
+        for cell in cells:
+            row_idx = cell.get('RowIndex', 1) - 1
+            col_idx = cell.get('ColumnIndex', 1) - 1
+            
+            # Extract text from cell
+            cell_text = ''
+            for relationship in cell.get('Relationships', []):
+                if relationship.get('Type') == 'CHILD':
+                    for child_id in relationship.get('Ids', []):
+                        if child_id in block_map:
+                            child_block = block_map[child_id]
+                            if child_block.get('BlockType') == 'WORD':
+                                cell_text += child_block.get('Text', '') + ' '
+            
+            table[row_idx][col_idx] = cell_text.strip()
+        
+        return table
         
     except Exception as e:
-        logger.error(f"❌ Error parsing SEC form PDF {s3_key}: {e}")
-    
-    return trades
+        logger.error(f"❌ Error extracting table data: {e}")
+        return None
 
-def parse_house_ptr(s3_key: str) -> List[Dict[str, Any]]:
+def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
     """
-    Parse House PTR PDF and extract trade data
+    Parse House PTR PDF using AWS Textract to extract trade data
     
     Args:
         s3_key: S3 key of the House PTR PDF
         
     Returns:
-        List of trade dicts extracted from PTR
+        List of trade dicts with filerName, securitySymbol, transactionDate, amount, etc.
     """
-    logger.info(f"📄 Parsing House PTR: {s3_key}")
+    logger.info(f"📄 Parsing House PTR with Textract: {s3_key}")
     
     trades = []
     
@@ -277,45 +275,323 @@ def parse_house_ptr(s3_key: str) -> List[Dict[str, Any]]:
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
         pdf_content = response['Body'].read()
         
-        # Note: Similar to SEC PDF parsing - requires Textract or pdf library
-        # House PTRs have different format than SEC forms
-        # Would need to extract: representative name, transaction date, security, amount
+        # Load asset codes mapping
+        asset_codes = load_asset_codes_mapping()
         
-        logger.warning("⚠️ House PTR PDF parsing not fully implemented")
+        logger.info("📄 Using Textract to parse House PTR PDF...")
+        
+        # Call Textract to extract text and forms/tables
+        textract_response = textract_client.analyze_document(
+            Document={'Bytes': pdf_content},
+            FeatureTypes=['FORMS', 'TABLES']
+        )
+        
+        # Extract text and structured data
+        text_lines = []
+        form_fields = {}
+        tables = []
+        
+        all_blocks = textract_response.get('Blocks', [])
+        
+        for block in all_blocks:
+            block_type = block.get('BlockType')
+            
+            if block_type == 'LINE':
+                text = block.get('Text', '').strip()
+                if text:
+                    text_lines.append(text)
+            
+            elif block_type == 'KEY_VALUE_SET':
+                # Extract form field key-value pairs
+                entity_type = block.get('EntityTypes', [])
+                if 'KEY' in entity_type:
+                    key_text = ''
+                    for relationship in block.get('Relationships', []):
+                        if relationship.get('Type') == 'CHILD':
+                            for child_id in relationship.get('Ids', []):
+                                for child_block in all_blocks:
+                                    if child_block.get('Id') == child_id and child_block.get('BlockType') == 'WORD':
+                                        key_text += child_block.get('Text', '') + ' '
+                    key_text = key_text.strip()
+                    
+                    value_text = ''
+                    for relationship in block.get('Relationships', []):
+                        if relationship.get('Type') == 'VALUE':
+                            for value_id in relationship.get('Ids', []):
+                                for value_block in all_blocks:
+                                    if value_block.get('Id') == value_id:
+                                        if value_block.get('BlockType') == 'WORD':
+                                            value_text += value_block.get('Text', '') + ' '
+                                        elif value_block.get('BlockType') == 'SELECTION_ELEMENT':
+                                            if value_block.get('SelectionStatus') == 'SELECTED':
+                                                value_text = 'Yes'
+                    value_text = value_text.strip()
+                    
+                    if key_text and value_text:
+                        form_fields[key_text.lower()] = value_text
+        
+        # Extract tables
+        table_blocks = [b for b in all_blocks if b.get('BlockType') == 'TABLE']
+        for table_block in table_blocks:
+            table_data = extract_table_data_from_blocks(table_block, all_blocks)
+            if table_data:
+                tables.append(table_data)
+        
+        full_text = ' '.join(text_lines)
+        
+        # Extract filer name from House PTR
+        filer_name = None
+        
+        # House format: "The Honorable [Name]" or "[Name] (House Representative)"
+        house_patterns = [
+            r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
+            r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)\s*\(House Representative\)',
+        ]
+        for pattern in house_patterns:
+            match = re.search(pattern, full_text)
+            if match:
+                filer_name = match.group(1).strip()
+                filer_name = re.sub(r'\b(Honorable|Hon\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
+                break
+        
+        # If not found in text, check form fields
+        if not filer_name:
+            for key, value in form_fields.items():
+                if 'name' in key or 'filer' in key or 'representative' in key:
+                    filer_name = value
+                    break
+        
+        if not filer_name:
+            logger.warning(f"⚠️ Could not extract filer name from House PTR: {s3_key}")
+        
+        # Extract filing date from e-signature at bottom
+        filing_date = None
+        
+        # Look for date patterns near signature text
+        signature_date_patterns = [
+            r'(?:signed|signature|date)[:\s]+(\d{1,2}/\d{1,2}/\d{4})',
+            r'(\d{1,2}/\d{1,2}/\d{4})\s*(?:signed|signature)',
+            r'(\d{1,2}/\d{1,2}/\d{4})',  # Fallback: any date in MM/DD/YYYY format
+        ]
+        
+        # Search in reverse order (bottom of document) for signature date
+        for pattern in signature_date_patterns:
+            matches = list(re.finditer(pattern, full_text, re.IGNORECASE))
+            if matches:
+                # Take the last match (likely at bottom near signature)
+                match = matches[-1]
+                date_str = match.group(1)
+                try:
+                    filing_date = datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
+                    break
+                except ValueError:
+                    continue
+        
+        # Parse tables for trade data
+        # House PTR columns: ID, Owner, Asset, Transaction type (S/P), Date, Notification date, Amount, Cap gains
+        for table in tables:
+            if len(table) < 2:  # Need at least header + data row
+                continue
+            
+            # Find header row
+            header_row = table[0]
+            
+            # Map column indices
+            id_col = None
+            owner_col = None
+            asset_col = None
+            transaction_type_col = None
+            date_col = None
+            notification_date_col = None
+            amount_col = None
+            cap_gains_col = None
+            
+            for idx, cell in enumerate(header_row):
+                cell_lower = cell.lower().strip()
+                if cell_lower == 'id' or 'id' in cell_lower:
+                    id_col = idx
+                elif 'owner' in cell_lower:
+                    owner_col = idx
+                elif 'asset' in cell_lower:
+                    asset_col = idx
+                elif 'transaction type' in cell_lower or ('type' in cell_lower and 'transaction' in cell_lower):
+                    transaction_type_col = idx
+                elif 'date' in cell_lower and 'notification' not in cell_lower:
+                    date_col = idx
+                elif 'notification date' in cell_lower or ('notification' in cell_lower and 'date' in cell_lower):
+                    notification_date_col = idx
+                elif 'amount' in cell_lower or 'value' in cell_lower:
+                    amount_col = idx
+                elif 'cap gain' in cell_lower or 'capital gain' in cell_lower:
+                    cap_gains_col = idx
+            
+            # Parse data rows
+            for row in table[1:]:
+                # Skip if row is too short - check required columns
+                required_cols = [c for c in [asset_col, transaction_type_col, date_col, amount_col] if c is not None]
+                if not required_cols or len(row) < max(required_cols) + 1:
+                    continue
+                
+                # Extract transaction date
+                transaction_date = None
+                if date_col is not None and date_col < len(row):
+                    date_str = row[date_col].strip()
+                    for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d', '%m/%d/%y']:
+                        try:
+                            transaction_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+                            break
+                        except ValueError:
+                            continue
+                
+                # Extract asset information
+                security_name = None
+                security_symbol = None
+                asset_class = None
+                
+                if asset_col is not None and asset_col < len(row):
+                    asset_text = row[asset_col].strip()
+                    security_name = asset_text
+                    
+                    # Try to extract ticker symbol (usually uppercase letters, 1-5 chars, in parentheses or after name)
+                    ticker_match = re.search(r'\(([A-Z]{1,5})\)|([A-Z]{1,5})\s*$', asset_text)
+                    if ticker_match:
+                        security_symbol = ticker_match.group(1) or ticker_match.group(2)
+                    
+                    # Extract asset class code (usually 2-3 uppercase letters at start or end)
+                    asset_code_match = re.search(r'\b([A-Z]{2,3})\b', asset_text)
+                    if asset_code_match:
+                        code = asset_code_match.group(1)
+                        if code in asset_codes:
+                            asset_class = asset_codes[code]
+                
+                # Extract transaction type
+                transaction_type = None
+                if transaction_type_col is not None and transaction_type_col < len(row):
+                    type_str = row[transaction_type_col].strip().upper()
+                    if 'S' in type_str or 'sale' in type_str.lower():
+                        transaction_type = 'Sale'
+                    elif 'P' in type_str or 'purchase' in type_str.lower() or 'buy' in type_str.lower():
+                        transaction_type = 'Purchase'
+                
+                # Extract amount
+                amount = None
+                amount_min = None
+                amount_max = None
+                
+                if amount_col is not None and amount_col < len(row):
+                    amount_str = row[amount_col].strip()
+                    # Remove currency symbols and commas
+                    amount_str = re.sub(r'[$,]', '', amount_str)
+                    
+                    # Try to parse as number
+                    try:
+                        amount = float(amount_str)
+                        amount_min = amount
+                        amount_max = amount
+                    except ValueError:
+                        # Try to parse range (e.g., "$1,000 - $15,000")
+                        range_match = re.search(r'(\d+(?:\.\d+)?)\s*-\s*(\d+(?:\.\d+)?)', amount_str)
+                        if range_match:
+                            amount_min = float(range_match.group(1))
+                            amount_max = float(range_match.group(2))
+                            amount = (amount_min + amount_max) / 2  # Use midpoint
+                
+                # Only create trade if we have minimum required fields
+                if transaction_date and (security_name or security_symbol) and transaction_type and amount:
+                    trade = {
+                        'filerName': filer_name,
+                        'filingDate': filing_date,
+                        'transactionDate': transaction_date,
+                        'securityName': security_name,
+                        'securitySymbol': security_symbol,
+                        'assetClass': asset_class,
+                        'transactionType': transaction_type,
+                        'amount': amount,
+                        'amountMin': amount_min,
+                        'amountMax': amount_max,
+                        'formType': 'house_ptr',
+                        'source': 'house'
+                    }
+                    trades.append(trade)
+        
+        logger.info(f"✅ Extracted {len(trades)} trades from House PTR: {s3_key}")
         
     except Exception as e:
         logger.error(f"❌ Error parsing House PTR {s3_key}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
     
     return trades
 
-def parse_senate_ptr(s3_key: str) -> List[Dict[str, Any]]:
+def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
-    Parse Senate PTR PDF and extract trade data
+    Parse House PTR PDF, extract trades, and match to politicians
     
     Args:
-        s3_key: S3 key of the Senate PTR PDF
+        s3_key: S3 key of the House PTR PDF
+        politicians: List of politician dicts for matching
         
     Returns:
-        List of trade dicts extracted from PTR
+        Dict with matchedTrades, unmatchedCount, s3Key, formType
     """
-    logger.info(f"📄 Parsing Senate PTR: {s3_key}")
+    logger.info(f"🔍 Matching House PTR trades: {s3_key}")
     
-    trades = []
+    matched_trades = []
+    unmatched_count = 0
     
     try:
-        # Download PDF from S3
-        response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
-        pdf_content = response['Body'].read()
+        # Parse House PTR with Textract
+        trades = parse_house_ptr_with_textract(s3_key)
         
-        # Note: Similar to House PTR parsing
-        # Senate PTRs have different format
+        if not trades:
+            logger.warning(f"⚠️ No trades extracted from House PTR: {s3_key}")
+            return {
+                'matchedTrades': [],
+                'unmatchedCount': 1,
+                's3Key': s3_key,
+                'formType': 'house_ptr'
+            }
         
-        logger.warning("⚠️ Senate PTR PDF parsing not fully implemented")
+        # Match each trade to a politician
+        for trade in trades:
+            filer_name = trade.get('filerName')
+            if not filer_name:
+                unmatched_count += 1
+                continue
+            
+            politician = find_matching_politician(filer_name, politicians)
+            if politician:
+                # Add politician info to trade
+                matched_trade = {
+                    **trade,
+                    'politicianName': politician.get('name'),
+                    'party': politician.get('party'),
+                    'position': politician.get('position'),
+                    'websiteUrl': politician.get('websiteUrl'),
+                    'bioguideId': politician.get('bioguide_id'),
+                    'state': politician.get('state'),
+                    'district': politician.get('district'),
+                    'matchScore': politician.get('matchScore', 1.0)
+                }
+                matched_trades.append(matched_trade)
+            else:
+                unmatched_count += 1
+                logger.warning(f"⚠️ Could not match filer '{filer_name}' to any politician")
+        
+        logger.info(f"✅ Matched {len(matched_trades)}/{len(trades)} trades from House PTR: {s3_key}")
         
     except Exception as e:
-        logger.error(f"❌ Error parsing Senate PTR {s3_key}: {e}")
+        logger.error(f"❌ Error matching House PTR trades {s3_key}: {e}")
+        import traceback
+        logger.error(traceback.format_exc())
+        unmatched_count = 1
     
-    return trades
+    return {
+        'matchedTrades': matched_trades,
+        'unmatchedCount': unmatched_count,
+        's3Key': s3_key,
+        'formType': 'house_ptr'
+    }
 
 def list_s3_files_by_prefix(prefix: str) -> List[str]:
     """
@@ -410,6 +686,33 @@ def lambda_handler(event, context):
     except Exception as e:
         logger.error(f"❌ Error loading SEC results: {e}")
     
+    # Process House PTR results
+    logger.info(f"📋 Processing {len(house_match_results)} House PTR results")
+    
+    # Load politician list for matching
+    politicians = load_politician_list()
+    
+    # Process House PTR files
+    house_matched_trades = []
+    house_unmatched_count = 0
+    
+    # house_match_results should contain S3 keys of House PTR PDFs
+    for house_result in house_match_results:
+        if isinstance(house_result, dict):
+            s3_key = house_result.get('s3Key') or house_result.get('s3_key')
+        else:
+            s3_key = house_result  # Assume it's a string S3 key
+        
+        if not s3_key:
+            logger.warning(f"⚠️ House result missing S3 key: {house_result}")
+            house_unmatched_count += 1
+            continue
+        
+        # Match House PTR trades
+        match_result = match_house_ptr_trades(s3_key, politicians)
+        house_matched_trades.extend(match_result.get('matchedTrades', []))
+        house_unmatched_count += match_result.get('unmatchedCount', 0)
+    
     # Get Senate results from Lambda outputs
     logger.info(f"📋 Processing {len(senate_match_results)} Senate results")
     
@@ -428,11 +731,11 @@ def lambda_handler(event, context):
         senate_unmatched_count += unmatched_count
     
     # Combine all results
-    all_matched_trades = sec_matched_trades + senate_matched_trades
-    total_unmatched = sec_unmatched_count + senate_unmatched_count
+    all_matched_trades = sec_matched_trades + senate_matched_trades + house_matched_trades
+    total_unmatched = sec_unmatched_count + senate_unmatched_count + house_unmatched_count
     
-    logger.info(f"📊 Total: {len(all_matched_trades)} matched trades ({len(sec_matched_trades)} SEC, {len(senate_matched_trades)} Senate)")
-    logger.info(f"⚠️ {total_unmatched} files/trades could not be matched ({sec_unmatched_count} SEC, {senate_unmatched_count} Senate)")
+    logger.info(f"📊 Total: {len(all_matched_trades)} matched trades ({len(sec_matched_trades)} SEC, {len(senate_matched_trades)} Senate, {len(house_matched_trades)} House)")
+    logger.info(f"⚠️ {total_unmatched} files/trades could not be matched ({sec_unmatched_count} SEC, {senate_unmatched_count} Senate, {house_unmatched_count} House)")
     
     logger.info(f"✅ Aggregated {len(all_matched_trades)} matched trades")
     logger.info(f"⚠️ {total_unmatched} files/trades could not be matched")
