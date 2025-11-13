@@ -1358,13 +1358,14 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
         # Table format can vary:
         # Option 1: [['Name:', 'Hon. John McGuire'], ['Status:', 'Member'], ...]
         # Option 2: [['Name:', 'Rob Bresnahan', 'Status'], ['Status:', 'Member'], ...]
-        # Option 3: Multiple rows with Name: in first column
+        # Option 3: [['Name:', 'Rob Bresnahan'], ['Status:', 'Member'], ...] where "Status" is in adjacent row
+        # Option 4: [['Name:', 'Rob Bresnahan Status'], ...] where "Status" is concatenated
         for table in tables:
             if len(table) < 1:
                 continue
             
             # Search through all rows to find the "Name:" row
-            for row in table:
+            for row_idx, row in enumerate(table):
                 if not row or len(row) < 2:
                     continue
                 
@@ -1373,10 +1374,31 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
                     # Get the name from the second cell
                     name_value = str(row[1]).strip() if len(row) > 1 and row[1] else ''
                     
-                    # If name is empty or contains "Status", try next cell
+                    # Check if "Status" is in the same row (adjacent cell)
+                    # If name_value contains "Status" or is empty, check adjacent cells
                     if not name_value or 'status' in name_value.lower():
-                        if len(row) > 2:
-                            name_value = str(row[2]).strip() if row[2] else ''
+                        # Try next cell in same row
+                        if len(row) > 2 and row[2]:
+                            next_cell = str(row[2]).strip()
+                            # If next cell is "Status", skip it and use name_value (if it exists)
+                            if next_cell.lower() == 'status':
+                                # name_value should be the name, but if it's empty, we need to look elsewhere
+                                if not name_value:
+                                    # Check previous row or next row
+                                    continue
+                            else:
+                                # Next cell might be the name
+                                name_value = next_cell
+                    
+                    # Also check if the next row has "Status:" - if so, the name might be split
+                    if row_idx + 1 < len(table):
+                        next_row = table[row_idx + 1]
+                        if next_row and len(next_row) > 0:
+                            next_first_cell = str(next_row[0]).strip().lower() if next_row[0] else ''
+                            if next_first_cell == 'status:':
+                                # The name is in the current row, second cell
+                                if not name_value and len(row) > 1:
+                                    name_value = str(row[1]).strip() if row[1] else ''
                     
                     if name_value:
                         # Remove "Hon." prefix if present
@@ -1391,6 +1413,9 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
                         # Pattern: "Name Status" -> "Name"
                         filer_name = re.sub(r'\s+Status\s*$', '', filer_name, flags=re.IGNORECASE).strip()
                         
+                        # Remove any trailing punctuation or whitespace
+                        filer_name = filer_name.rstrip('.,;: ')
+                        
                         logger.info(f"✅ Extracted filer name from FILER INFORMATION table: {filer_name}")
                         break
             
@@ -1399,20 +1424,41 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
         
         # If not found in table, try text patterns
         if not filer_name:
-            # House format: "The Honorable [Name]" or "[Name] (House Representative)" or "Hon. [Name]"
-            house_patterns = [
-                r'Hon\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)(?:\s+Status|\s+Member|$)',  # Stop at "Status" or "Member"
-                r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)(?:\s+Status|\s+Member|$)',
-                r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)\s*\(House Representative\)',
-            ]
-            for pattern in house_patterns:
-                match = re.search(pattern, full_text)
-                if match:
-                    filer_name = match.group(1).strip()
-                    filer_name = re.sub(r'\b(Honorable|Hon\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
+            # First, try to find "Name: [Name]" pattern in text lines
+            for line in text_lines:
+                # Pattern: "Name: Hon. John McGuire" or "Name: John McGuire"
+                name_match = re.search(r'Name:\s+(.+?)(?:\s+Status|\s+Member|$)', line, re.IGNORECASE)
+                if name_match:
+                    name_value = name_match.group(1).strip()
+                    # Remove "Hon." prefix if present
+                    filer_name = re.sub(r'^Hon\.?\s+', '', name_value, flags=re.IGNORECASE).strip()
                     # Remove "Status" suffix if present
                     filer_name = re.sub(r'\s+Status\s*$', '', filer_name, flags=re.IGNORECASE).strip()
-                    break
+                    # Remove any trailing punctuation
+                    filer_name = filer_name.rstrip('.,;: ')
+                    if filer_name:
+                        logger.info(f"✅ Extracted filer name from text line: {filer_name}")
+                        break
+            
+            # If still not found, try other patterns
+            if not filer_name:
+                # House format: "The Honorable [Name]" or "[Name] (House Representative)" or "Hon. [Name]"
+                house_patterns = [
+                    r'Hon\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)(?:\s+Status|\s+Member|$)',  # Stop at "Status" or "Member"
+                    r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)(?:\s+Status|\s+Member|$)',
+                    r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)\s*\(House Representative\)',
+                ]
+                for pattern in house_patterns:
+                    match = re.search(pattern, full_text)
+                    if match:
+                        filer_name = match.group(1).strip()
+                        filer_name = re.sub(r'\b(Honorable|Hon\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
+                        # Remove "Status" suffix if present
+                        filer_name = re.sub(r'\s+Status\s*$', '', filer_name, flags=re.IGNORECASE).strip()
+                        # Remove any trailing punctuation
+                        filer_name = filer_name.rstrip('.,;: ')
+                        if filer_name:
+                            break
         
         if not filer_name:
             logger.warning(f"⚠️ Could not extract filer name from House PTR: {s3_key}")
@@ -1548,6 +1594,128 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
                 if not row:
                     continue
                 
+                # Check if all data is in a single cell (concatenated format)
+                # This happens when pdfplumber can't properly split the table
+                # Format: "SP UnitedHealth Group Incorporated P 04/10/2025 05/15/2025 $1,001 - $15,000\nCommon Stock (UNH) [ST]..."
+                first_cell_has_all_data = False
+                if len(row) > 0 and row[0]:
+                    first_cell_text = str(row[0]).strip()
+                    # Check if first cell contains multiple data elements (owner, company, type, dates, amount)
+                    # Pattern: Owner code + Company name + Transaction type + Dates + Amount
+                    if re.search(r'^[A-Z]{1,3}\s+[A-Z][^P]*[PS]\s+\d{1,2}/\d{1,2}/\d{4}', first_cell_text):
+                        first_cell_has_all_data = True
+                        logger.debug(f"📋 Detected concatenated data format in first cell for table {table_idx + 1}")
+                
+                # If data is concatenated in first cell, parse it specially
+                if first_cell_has_all_data:
+                    concatenated_text = first_cell_text
+                    
+                    # Extract owner code (e.g., "SP", "JT", "Self") - usually 1-3 uppercase letters at start
+                    owner_match = re.match(r'^([A-Z]{1,3})\s+', concatenated_text)
+                    owner = owner_match.group(1) if owner_match else None
+                    
+                    # Extract transaction type (P or S) - usually appears before dates
+                    type_match = re.search(r'\s([PS])\s+\d{1,2}/\d{1,2}/\d{4}', concatenated_text)
+                    transaction_type = 'Purchase' if type_match and type_match.group(1) == 'P' else ('Sale' if type_match and type_match.group(1) == 'S' else None)
+                    
+                    # Extract transaction date (first date after transaction type)
+                    date_match = re.search(r'[PS]\s+(\d{1,2}/\d{1,2}/\d{4})', concatenated_text)
+                    transaction_date = None
+                    if date_match:
+                        date_str = date_match.group(1)
+                        try:
+                            transaction_date = datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
+                        except ValueError:
+                            pass
+                    
+                    # Extract amount (usually after notification date)
+                    # Pattern: "$X,XXX - $X,XXX" or "$X,XXX $X,XXX"
+                    amount_match = re.search(r'\$\s*(\d{1,3}(?:,\d{3})*)\s*[-–]?\s*\$\s*(\d{1,3}(?:,\d{3})*)', concatenated_text)
+                    amount = None
+                    amount_min = None
+                    amount_max = None
+                    if amount_match:
+                        min_str = amount_match.group(1).replace(',', '')
+                        max_str = amount_match.group(2).replace(',', '')
+                        try:
+                            amount_min = float(min_str)
+                            amount_max = float(max_str)
+                            amount = (amount_min + amount_max) / 2
+                        except ValueError:
+                            pass
+                    
+                    # Extract security information from the text (usually on new lines)
+                    # Look for patterns like "Company Name (TICKER) [ST]" or just "(TICKER) [ST]"
+                    security_name = None
+                    security_symbol = None
+                    asset_type = None
+                    
+                    # Extract ticker symbol (in parentheses)
+                    ticker_match = re.search(r'\(([A-Z]{1,5})\)', concatenated_text)
+                    if ticker_match:
+                        security_symbol = ticker_match.group(1)
+                    
+                    # Extract asset type code (in brackets)
+                    asset_code_match = re.search(r'\[([A-Z]{2,3})\]', concatenated_text)
+                    if asset_code_match:
+                        code = asset_code_match.group(1)
+                        if code in asset_codes:
+                            asset_type = asset_codes[code]
+                    
+                    # Extract company name - it's usually between owner code and transaction type
+                    # Or it might be on a separate line after the first line
+                    if owner_match:
+                        # Remove owner code from start
+                        name_text = concatenated_text[len(owner_match.group(0)):].strip()
+                        # Remove transaction type and dates
+                        name_text = re.sub(r'\s+[PS]\s+\d{1,2}/\d{1,2}/\d{4}.*$', '', name_text, flags=re.MULTILINE)
+                        # Remove ticker and asset code if present
+                        name_text = re.sub(r'\s*\([A-Z]{1,5}\)\s*', '', name_text)
+                        name_text = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', name_text)
+                        # Remove common suffixes
+                        name_text = re.sub(r'\s*FILING STATUS:.*$', '', name_text, flags=re.IGNORECASE | re.MULTILINE)
+                        name_text = re.sub(r'\s*SUBHOLDING OF:.*$', '', name_text, flags=re.IGNORECASE | re.MULTILINE)
+                        # Clean up whitespace
+                        security_name = ' '.join(name_text.split()).strip()
+                    
+                    # If we still don't have a name, try to extract from lines
+                    if not security_name:
+                        lines = concatenated_text.split('\n')
+                        for line in lines:
+                            # Look for line with company name (not starting with owner codes or dates)
+                            if not re.match(r'^[A-Z]{1,3}\s|^\d{1,2}/\d{1,2}/\d{4}|^\$|^F\s|^S\s|^D\s', line.strip()):
+                                # This might be the company name line
+                                line_clean = line.strip()
+                                # Remove ticker and asset code
+                                line_clean = re.sub(r'\s*\([A-Z]{1,5}\)\s*', '', line_clean)
+                                line_clean = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', line_clean)
+                                if line_clean and len(line_clean) > 3:
+                                    security_name = line_clean
+                                    break
+                    
+                    # Only create trade if we have minimum required fields
+                    if transaction_date and (security_name or security_symbol) and transaction_type and amount:
+                        trade = {
+                            'filerName': filer_name,
+                            'filingDate': filing_date,
+                            'transactionDate': transaction_date,
+                            'securityName': security_name,
+                            'securitySymbol': security_symbol,
+                            'assetType': asset_type,
+                            'transactionType': transaction_type,
+                            'amount': amount,
+                            'amountMin': amount_min,
+                            'amountMax': amount_max,
+                            'owner': owner,
+                            'formType': 'house_ptr',
+                            'source': 'house'
+                        }
+                        trades.append(trade)
+                        trades_from_table += 1
+                        logger.debug(f"   ✅ Extracted trade from concatenated format: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max}")
+                    continue  # Skip normal parsing for this row
+                
+                # Normal column-based parsing
                 # Skip if row is too short - check required columns
                 required_cols = [c for c in [asset_col, transaction_type_col, date_col, amount_col] if c is not None]
                 if not required_cols or len(row) < max(required_cols) + 1:
