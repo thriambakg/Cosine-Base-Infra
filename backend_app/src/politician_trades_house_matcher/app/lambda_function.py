@@ -1355,33 +1355,63 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
         filer_name = None
         
         # First, try to extract from Table 1 (FILER INFORMATION table)
-        # Table 1 format: [['Name:', 'Hon. John McGuire'], ['Status:', 'Member'], ...]
+        # Table format can vary:
+        # Option 1: [['Name:', 'Hon. John McGuire'], ['Status:', 'Member'], ...]
+        # Option 2: [['Name:', 'Rob Bresnahan', 'Status'], ['Status:', 'Member'], ...]
+        # Option 3: Multiple rows with Name: in first column
         for table in tables:
-            if len(table) >= 1:
-                # Check if this looks like the FILER INFORMATION table
-                first_row = table[0]
-                if first_row and len(first_row) >= 2:
-                    first_cell = first_row[0].strip() if first_row[0] else ''
-                    if first_cell.lower() == 'name:':
-                        name_value = first_row[1].strip() if first_row[1] else ''
+            if len(table) < 1:
+                continue
+            
+            # Search through all rows to find the "Name:" row
+            for row in table:
+                if not row or len(row) < 2:
+                    continue
+                
+                first_cell = str(row[0]).strip() if row[0] else ''
+                if first_cell.lower() == 'name:':
+                    # Get the name from the second cell
+                    name_value = str(row[1]).strip() if len(row) > 1 and row[1] else ''
+                    
+                    # If name is empty or contains "Status", try next cell
+                    if not name_value or 'status' in name_value.lower():
+                        if len(row) > 2:
+                            name_value = str(row[2]).strip() if row[2] else ''
+                    
+                    if name_value:
                         # Remove "Hon." prefix if present
                         filer_name = re.sub(r'^Hon\.?\s+', '', name_value, flags=re.IGNORECASE).strip()
+                        
+                        # Remove common suffixes that might be in the same cell
+                        # Strip "Status", "Member", "Representative", etc. from the end
+                        filer_name = re.sub(r'\s+(Status|Member|Representative|Rep\.?|Senator|Sen\.?)$', '', filer_name, flags=re.IGNORECASE).strip()
+                        
+                        # Also remove if "Status" appears anywhere in the name (likely concatenated)
+                        # But be careful - only remove if it's clearly a suffix, not part of the name
+                        # Pattern: "Name Status" -> "Name"
+                        filer_name = re.sub(r'\s+Status\s*$', '', filer_name, flags=re.IGNORECASE).strip()
+                        
                         logger.info(f"✅ Extracted filer name from FILER INFORMATION table: {filer_name}")
                         break
+            
+            if filer_name:
+                break
         
         # If not found in table, try text patterns
         if not filer_name:
             # House format: "The Honorable [Name]" or "[Name] (House Representative)" or "Hon. [Name]"
             house_patterns = [
-                r'Hon\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
-                r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
-                r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)\s*\(House Representative\)',
+                r'Hon\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)(?:\s+Status|\s+Member|$)',  # Stop at "Status" or "Member"
+                r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)(?:\s+Status|\s+Member|$)',
+                r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)\s*\(House Representative\)',
             ]
             for pattern in house_patterns:
                 match = re.search(pattern, full_text)
                 if match:
                     filer_name = match.group(1).strip()
                     filer_name = re.sub(r'\b(Honorable|Hon\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
+                    # Remove "Status" suffix if present
+                    filer_name = re.sub(r'\s+Status\s*$', '', filer_name, flags=re.IGNORECASE).strip()
                     break
         
         if not filer_name:
@@ -1429,17 +1459,46 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
         # Skip Table 1 (FILER INFORMATION) - only process transaction tables
         for table_idx, table in enumerate(tables):
             if len(table) < 2:  # Need at least header + data row
+                logger.debug(f"⏭️ Skipping table {table_idx + 1} - too few rows ({len(table)})")
                 continue
             
-            # Skip FILER INFORMATION table (Table 1) - it has "Name:" in first row
-            if len(table) > 0 and table[0]:
-                first_cell = table[0][0].strip().lower() if table[0][0] else ''
-                if first_cell == 'name:':
-                    logger.debug(f"⏭️ Skipping FILER INFORMATION table (Table {table_idx + 1})")
-                    continue
+            # Skip FILER INFORMATION table - it has "Name:" in any row
+            is_filer_info_table = False
+            for row in table[:3]:  # Check first 3 rows
+                if row and len(row) > 0:
+                    first_cell = str(row[0]).strip().lower() if row[0] else ''
+                    if first_cell == 'name:':
+                        is_filer_info_table = True
+                        break
             
-            # Find header row
+            if is_filer_info_table:
+                logger.debug(f"⏭️ Skipping FILER INFORMATION table (Table {table_idx + 1})")
+                continue
+            
+            # Find header row - look for row with common column names
+            header_row_idx = 0
             header_row = table[0]
+            
+            # Try to find the best header row by looking for multiple column indicators
+            for row_idx, row in enumerate(table[:3]):  # Check first 3 rows
+                if not row:
+                    continue
+                # Count how many transaction-related columns we find in this row
+                column_indicators = 0
+                for cell in row:
+                    if not cell:
+                        continue
+                    cell_lower = str(cell).lower().strip()
+                    if any(keyword in cell_lower for keyword in ['asset', 'transaction', 'date', 'amount', 'owner', 'type']):
+                        column_indicators += 1
+                
+                # If this row has multiple transaction-related columns, it's likely the header
+                if column_indicators >= 3:
+                    header_row_idx = row_idx
+                    header_row = row
+                    break
+            
+            logger.debug(f"📋 Using row {header_row_idx} as header for table {table_idx + 1}: {header_row[:5]}...")
             
             # Map column indices
             id_col = None
@@ -1455,7 +1514,7 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
                 if not cell:
                     continue
                 cell_lower = str(cell).lower().strip()
-                if cell_lower == 'id' or 'id' in cell_lower:
+                if cell_lower == 'id' or (cell_lower.startswith('id') and len(cell_lower) <= 3):
                     id_col = idx
                 elif 'owner' in cell_lower:
                     owner_col = idx
@@ -1463,7 +1522,7 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
                     asset_col = idx
                 elif 'transaction type' in cell_lower or ('type' in cell_lower and 'transaction' in cell_lower):
                     transaction_type_col = idx
-                elif 'date' in cell_lower and 'notification' not in cell_lower:
+                elif 'date' in cell_lower and 'notification' not in cell_lower and 'transaction' not in cell_lower:
                     date_col = idx
                 elif 'notification date' in cell_lower or ('notification' in cell_lower and 'date' in cell_lower):
                     notification_date_col = idx
@@ -1472,8 +1531,20 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
                 elif 'cap gain' in cell_lower or 'capital gain' in cell_lower:
                     cap_gains_col = idx
             
+            # Log column mapping for debugging
+            logger.debug(f"📊 Table {table_idx + 1} column mapping: asset={asset_col}, type={transaction_type_col}, date={date_col}, amount={amount_col}, owner={owner_col}")
+            
+            # Check if we found required columns
+            if asset_col is None and transaction_type_col is None and date_col is None:
+                logger.warning(f"⚠️ Table {table_idx + 1} doesn't appear to be a transaction table (missing key columns)")
+                continue
+            
+            # Parse data rows (skip header row)
+            data_start_idx = header_row_idx + 1
+            trades_from_table = 0
+            
             # Parse data rows
-            for row in table[1:]:
+            for row in table[data_start_idx:]:
                 if not row:
                     continue
                 
@@ -1600,9 +1671,16 @@ def parse_house_ptr_with_pdfplumber(s3_key: str) -> List[Dict[str, Any]]:
                         'source': 'house'
                     }
                     trades.append(trade)
+                    trades_from_table += 1
                     logger.debug(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max}")
+            
+            if trades_from_table > 0:
+                logger.info(f"📊 Table {table_idx + 1} contributed {trades_from_table} trades")
         
-        logger.info(f"✅ Extracted {len(trades)} trades from House PTR using pdfplumber: {s3_key}")
+        if len(trades) == 0:
+            logger.warning(f"⚠️ No trades extracted from House PTR: {s3_key}. Found {len(tables)} tables, but none contained valid trade data.")
+        else:
+            logger.info(f"✅ Extracted {len(trades)} trades from House PTR using pdfplumber: {s3_key}")
         
     except Exception as e:
         # Log full traceback for errors
