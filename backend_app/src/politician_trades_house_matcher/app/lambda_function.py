@@ -1360,6 +1360,15 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
             logger.warning(f"⚠️ No filing date found in trades from {s3_key}")
             filing_date = None
         
+        # Extract UUID from S3 key (filename without extension)
+        # Format: "trades/house/2025/20026533.pdf" -> "20026533"
+        filename = s3_key.split('/')[-1]  # Get "20026533.pdf"
+        uuid = filename.replace('.pdf', '').replace('.PDF', '') if filename else None
+        
+        if not uuid or not uuid.isdigit():
+            logger.warning(f"⚠️ Could not extract valid UUID from S3 key: {s3_key}, using filename as fallback")
+            uuid = filename.replace('.pdf', '').replace('.PDF', '') if filename else 'unknown'
+        
         # Match each trade to a politician and format like Senate output
         # Filter politicians to only House members for House PTRs
         house_politicians = [p for p in politicians if p.get('position', '').strip() == 'House']
@@ -1413,12 +1422,16 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                 if amount_min is not None and amount_max is not None:
                     amount_range = [amount_min, amount_max]
                 
-                # Generate tradeId: trade_{filing_date}_house_{index}
+                # Generate tradeId: trade_{filing_date}_house_{uuid}_{index}
                 trade_id = None
-                if filing_date:
+                if filing_date and uuid:
+                    trade_id = f"trade_{filing_date}_house_{uuid}_{idx}"
+                elif filing_date:
                     trade_id = f"trade_{filing_date}_house_{idx}"
+                elif uuid:
+                    trade_id = f"trade_house_{uuid}_{idx}"
                 else:
-                    # Fallback: use index only if no filing date
+                    # Fallback: use index only
                     trade_id = f"trade_house_{idx}"
                 
                 # Format state/district for the politician
