@@ -1,0 +1,7 @@
+# Document Processing Dependencies Layer
+# For PDF processing in Lambda functions
+# Used by: politician_trades_house_matcher (for parsing House PTR PDFs)
+
+# PDF processing
+pypdf>=3.0.0,<5.0.0
+

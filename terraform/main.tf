@@ -802,6 +802,22 @@ module "document_processing_layer" {
   depends_on = [module.static_hosting_bucket]
 }
 
+# Document Processing (PDF) Dependencies Layer for Lambda functions
+module "docprocessing_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "docprocessing"
+  layer_description   = "PDF document processing dependencies (pypdf for parsing House PTR PDFs)"
+  requirements_file   = "docprocessing-dependencies.txt"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.static_hosting_bucket.bucket_id
+  python_command      = "python3.11"
+
+  depends_on = [module.static_hosting_bucket]
+}
+
 # SQS Queue for News Processing
 module "news_queue" {
   source = "./modules/sqs"
@@ -1995,7 +2011,7 @@ module "politician_trades_house_matcher" {
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
   timeout       = 900  # 15 minutes (max)
-  memory_size   = 2048 # Higher memory for PDF parsing, text processing, and Textract
+  memory_size   = 2048 # Higher memory for PDF parsing and text processing
 
   source_dir = "${path.module}/../backend_app/src/politician_trades_house_matcher/app"
 
@@ -2007,7 +2023,8 @@ module "politician_trades_house_matcher" {
 
   # Lambda layers
   layers = [
-    module.core_layer.layer_arn
+    module.core_layer.layer_arn,
+    module.docprocessing_layer.layer_arn
   ]
 
   # IAM policies
@@ -2020,7 +2037,7 @@ module "politician_trades_house_matcher" {
 
   tags = var.common_tags
 
-  depends_on = [module.politician_trades_s3, module.politician_trades_table]
+  depends_on = [module.politician_trades_s3, module.politician_trades_table, module.docprocessing_layer]
 }
 
 # Lambda 5: Save Trades to Database

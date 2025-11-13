@@ -15,9 +15,8 @@ from botocore.exceptions import ClientError
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 import csv
-from io import StringIO, BytesIO
+from io import StringIO
 from difflib import SequenceMatcher
-from pypdf import PdfReader
 
 # Configure logging
 logger = logging.getLogger()
@@ -25,6 +24,7 @@ logger.setLevel(logging.INFO)
 
 # AWS clients
 s3_client = boto3.client('s3')
+textract_client = boto3.client('textract')
 dynamodb = boto3.resource('dynamodb')
 
 # Environment variables
@@ -691,9 +691,65 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]],
     return None
 
 
+def extract_table_data_from_blocks(table_block: Dict[str, Any], all_blocks: List[Dict[str, Any]]) -> Optional[List[List[str]]]:
+    """
+    Extract table data from Textract blocks
+    
+    Args:
+        table_block: The TABLE block from Textract
+        all_blocks: All blocks from Textract response
+        
+    Returns:
+        List of rows, each row is a list of cell values
+    """
+    try:
+        # Create a mapping of block IDs to blocks for quick lookup
+        block_map = {block['Id']: block for block in all_blocks}
+        
+        # Get all cells in the table
+        cells = []
+        for relationship in table_block.get('Relationships', []):
+            if relationship.get('Type') == 'CHILD':
+                for cell_id in relationship.get('Ids', []):
+                    if cell_id in block_map:
+                        cells.append(block_map[cell_id])
+        
+        if not cells:
+            return None
+        
+        # Determine table dimensions
+        max_row = max(cell.get('RowIndex', 0) for cell in cells)
+        max_col = max(cell.get('ColumnIndex', 0) for cell in cells)
+        
+        # Create 2D array
+        table = [['' for _ in range(max_col)] for _ in range(max_row)]
+        
+        # Fill in cell values
+        for cell in cells:
+            row_idx = cell.get('RowIndex', 1) - 1
+            col_idx = cell.get('ColumnIndex', 1) - 1
+            
+            # Extract text from cell
+            cell_text = ''
+            for relationship in cell.get('Relationships', []):
+                if relationship.get('Type') == 'CHILD':
+                    for child_id in relationship.get('Ids', []):
+                        if child_id in block_map:
+                            child_block = block_map[child_id]
+                            if child_block.get('BlockType') == 'WORD':
+                                cell_text += child_block.get('Text', '') + ' '
+            
+            table[row_idx][col_idx] = cell_text.strip()
+        
+        return table
+        
+    except Exception as e:
+        logger.error(f"❌ Error extracting table data: {e}")
+        return None
+    
 def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
     """
-    Parse House PTR PDF using PyPDF to extract trade data
+    Parse House PTR PDF using AWS Textract to extract trade data
     
     Args:
         s3_key: S3 key of the House PTR PDF
@@ -701,7 +757,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
     Returns:
         List of trade dicts with filerName, securitySymbol, transactionDate, amount, etc.
     """
-    logger.info(f"📄 Parsing House PTR with PyPDF: {s3_key}")
+    logger.info(f"📄 Parsing House PTR with Textract: {s3_key}")
     
     trades = []
     
@@ -710,7 +766,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         response = s3_client.get_object(Bucket=S3_BUCKET, Key=s3_key)
         pdf_content = response['Body'].read()
         
-        # Validate PDF format
+        # Validate PDF format before sending to Textract
         if not pdf_content.startswith(b'%PDF'):
             error_msg = f"File {s3_key} is not a valid PDF (doesn't start with %PDF)"
             logger.error(f"❌ {error_msg}")
@@ -722,79 +778,254 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             logger.error(f"❌ {error_msg}")
             raise Exception(error_msg)
         
+        # Check if PDF is multi-page (synchronous analyze_document only supports single-page PDFs)
+        # Count /Page objects in PDF - simple heuristic
+        page_count = pdf_content.count(b'/Type/Page') + pdf_content.count(b'/Type /Page')
+        is_multi_page = page_count > 1
+        
         # Get asset codes mapping (cached at module level)
         asset_codes = get_asset_codes_mapping()
         
-        # Parse PDF with PyPDF
-        logger.info(f"📄 Using PyPDF to parse House PTR PDF ({len(pdf_content)} bytes)...")
+        logger.info(f"📄 Using Textract to parse House PTR PDF ({len(pdf_content)} bytes, {page_count} page(s))...")
         
-        pdf_file = BytesIO(pdf_content)
-        pdf_reader = PdfReader(pdf_file)
-        page_count = len(pdf_reader.pages)
+        # Call Textract to extract text and forms/tables
+        # Use synchronous analyze_document for single-page PDFs, asynchronous for multi-page
+        all_blocks = []
         
-        logger.info(f"📄 PDF has {page_count} page(s)")
-        
-        # Extract text from all pages
-        full_text = ''
-        text_lines = []
-        
-        for page_num, page in enumerate(pdf_reader.pages):
+        if is_multi_page:
+            # Asynchronous Textract for multi-page PDFs
+            logger.info(f"📄 Using asynchronous Textract for multi-page PDF ({page_count} pages)...")
             try:
-                page_text = page.extract_text()
-                if page_text:
-                    full_text += page_text + '\n'
-                    # Split into lines for easier parsing
-                    page_lines = page_text.split('\n')
-                    text_lines.extend([line.strip() for line in page_lines if line.strip()])
+                # Start asynchronous document analysis (requires S3, not bytes)
+                response = textract_client.start_document_analysis(
+                    DocumentLocation={
+                        'S3Object': {
+                            'Bucket': S3_BUCKET,
+                            'Name': s3_key
+                        }
+                    },
+                    FeatureTypes=['FORMS', 'TABLES']
+                )
+                job_id = response['JobId']
+                logger.info(f"📄 Started Textract job {job_id} for {s3_key}")
+                
+                # Poll for job completion (max 5 minutes = 60 iterations * 5 seconds)
+                max_iterations = 60
+                for i in range(max_iterations):
+                    time.sleep(5)  # Wait 5 seconds between polls
+                    response = textract_client.get_document_analysis(JobId=job_id)
+                    status = response['JobStatus']
+                    
+                    if status == 'SUCCEEDED':
+                        logger.info(f"✅ Textract job {job_id} completed successfully")
+                        all_blocks = response.get('Blocks', [])
+                        # Get all pages (pagination)
+                        next_token = response.get('NextToken')
+                        while next_token:
+                            response = textract_client.get_document_analysis(JobId=job_id, NextToken=next_token)
+                            all_blocks.extend(response.get('Blocks', []))
+                            next_token = response.get('NextToken')
+                        break
+                    elif status == 'FAILED':
+                        error_msg = f"Textract job {job_id} failed: {response.get('StatusMessage', 'Unknown error')}"
+                        logger.error(f"❌ {error_msg}")
+                        raise Exception(error_msg)
+                    elif status in ['IN_PROGRESS', 'PARTIAL_SUCCESS']:
+                        if i % 10 == 0:  # Log every 50 seconds
+                            logger.info(f"⏳ Textract job {job_id} still in progress... (iteration {i+1}/{max_iterations})")
+                    else:
+                        error_msg = f"Textract job {job_id} returned unexpected status: {status}"
+                        logger.error(f"❌ {error_msg}")
+                        raise Exception(error_msg)
+                else:
+                    # Loop completed without breaking (timeout)
+                    error_msg = f"Textract job {job_id} timed out after {max_iterations * 5} seconds"
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)
+                    
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                if error_code == 'UnsupportedDocumentException':
+                    error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)  # Fail completely instead of returning empty list
+                else:
+                    logger.error(f"❌ Textract ClientError ({error_code}) for {s3_key}: {e}")
+                    raise  # Re-raise other ClientErrors
             except Exception as e:
-                logger.warning(f"⚠️ Error extracting text from page {page_num + 1}: {e}")
-                continue
+                # Catch UnsupportedDocumentException from botocore.errorfactory
+                error_type = type(e).__name__
+                error_str = str(e)
+                
+                if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+                    error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)  # Fail completely instead of returning empty list
+                else:
+                    logger.error(f"❌ Textract error for {s3_key}: {error_type}: {error_str}")
+                    raise  # Re-raise other exceptions
+        else:
+            # Synchronous Textract for single-page PDFs
+            logger.info(f"📄 Using synchronous Textract for single-page PDF...")
+            try:
+                textract_response = textract_client.analyze_document(
+                    Document={'Bytes': pdf_content},
+                    FeatureTypes=['FORMS', 'TABLES']
+                )
+                all_blocks = textract_response.get('Blocks', [])
+            except ClientError as e:
+                error_code = e.response.get('Error', {}).get('Code', 'Unknown')
+                if error_code == 'UnsupportedDocumentException':
+                    error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)  # Fail completely instead of returning empty list
+                else:
+                    logger.error(f"❌ Textract ClientError ({error_code}) for {s3_key}: {e}")
+                    raise  # Re-raise other ClientErrors
+            except Exception as e:
+                # Catch UnsupportedDocumentException from botocore.errorfactory
+                error_type = type(e).__name__
+                error_str = str(e)
+                
+                if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+                    error_msg = f"Textract UnsupportedDocumentException for {s3_key}: File may be corrupted, encrypted, password-protected, or in unsupported format. Textract supports PNG, JPEG, PDF, or TIFF formats."
+                    logger.error(f"❌ {error_msg}")
+                    raise Exception(error_msg)  # Fail completely instead of returning empty list
+                else:
+                    logger.error(f"❌ Textract error for {s3_key}: {error_type}: {error_str}")
+                    raise  # Re-raise other exceptions
         
-        # Comprehensive logging of extracted text for debugging
-        logger.info(f"📊 PyPDF Output Summary for {s3_key}:")
-        logger.info(f"   Total pages: {page_count}")
+        # Extract text and structured data
+        text_lines = []
+        form_fields = {}
+        tables = []
+        
+        for block in all_blocks:
+            block_type = block.get('BlockType')
+            
+            if block_type == 'LINE':
+                text = block.get('Text', '').strip()
+                if text:
+                    text_lines.append(text)
+            
+            elif block_type == 'KEY_VALUE_SET':
+                # Extract form field key-value pairs
+                entity_type = block.get('EntityTypes', [])
+                if 'KEY' in entity_type:
+                    key_text = ''
+                    for relationship in block.get('Relationships', []):
+                        if relationship.get('Type') == 'CHILD':
+                            for child_id in relationship.get('Ids', []):
+                                for child_block in all_blocks:
+                                    if child_block.get('Id') == child_id and child_block.get('BlockType') == 'WORD':
+                                        key_text += child_block.get('Text', '') + ' '
+                    key_text = key_text.strip()
+                    
+                    value_text = ''
+                    for relationship in block.get('Relationships', []):
+                        if relationship.get('Type') == 'VALUE':
+                            for value_id in relationship.get('Ids', []):
+                                for value_block in all_blocks:
+                                    if value_block.get('Id') == value_id:
+                                        if value_block.get('BlockType') == 'WORD':
+                                            value_text += value_block.get('Text', '') + ' '
+                                        elif value_block.get('BlockType') == 'SELECTION_ELEMENT':
+                                            if value_block.get('SelectionStatus') == 'SELECTED':
+                                                value_text = 'Yes'
+                    value_text = value_text.strip()
+                    
+                    if key_text and value_text:
+                        form_fields[key_text.lower()] = value_text
+        
+        # Extract tables
+        table_blocks = [b for b in all_blocks if b.get('BlockType') == 'TABLE']
+        for table_block in table_blocks:
+            table_data = extract_table_data_from_blocks(table_block, all_blocks)
+            if table_data:
+                tables.append(table_data)
+        
+        # Comprehensive logging of Textract output for debugging
+        logger.info(f"📊 Textract Output Summary for {s3_key}:")
+        logger.info(f"   Total blocks: {len(all_blocks)}")
+        
+        # Count block types
+        block_type_counts = {}
+        for block in all_blocks:
+            block_type = block.get('BlockType', 'UNKNOWN')
+            block_type_counts[block_type] = block_type_counts.get(block_type, 0) + 1
+        logger.info(f"   Block type counts: {json.dumps(block_type_counts, indent=2)}")
+        
         logger.info(f"   Text lines extracted: {len(text_lines)}")
-        logger.info(f"   Full text length: {len(full_text)} characters")
+        logger.info(f"   Form fields extracted: {len(form_fields)}")
+        logger.info(f"   Tables extracted: {len(tables)}")
         
-        # Log first 50 text lines
+        # Log all text lines (first 50 lines to avoid log spam)
         logger.info(f"   First 50 text lines:")
         for i, line in enumerate(text_lines[:50]):
             logger.info(f"      [{i+1}] {line}")
         if len(text_lines) > 50:
             logger.info(f"      ... ({len(text_lines) - 50} more lines)")
         
+        # Log all form fields
+        if form_fields:
+            logger.info(f"   Form fields:")
+            for key, value in form_fields.items():
+                logger.info(f"      '{key}': '{value}'")
+        else:
+            logger.info(f"   No form fields extracted")
+        
+        # Log all tables
+        if tables:
+            logger.info(f"   Tables extracted ({len(tables)} total):")
+            for table_idx, table in enumerate(tables):
+                logger.info(f"      Table {table_idx + 1} ({len(table)} rows):")
+                for row_idx, row in enumerate(table[:10]):  # First 10 rows per table
+                    logger.info(f"         Row {row_idx}: {row}")
+                if len(table) > 10:
+                    logger.info(f"         ... ({len(table) - 10} more rows)")
+        else:
+            logger.info(f"   No tables extracted")
+        
+        full_text = ' '.join(text_lines)
+        logger.info(f"   Full text length: {len(full_text)} characters")
         logger.info(f"   Full text (first 1000 chars): {full_text[:1000]}")
         
         # Extract filer name from House PTR
         filer_name = None
         
-        # Look for FILER INFORMATION section
-        # Pattern: "Name:" followed by name on same or next line
-        name_patterns = [
-            r'Name:\s*(?:Hon\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
-            r'FILER INFORMATION\s+Name:\s*(?:Hon\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
-        ]
+        # First, try to extract from Table 1 (FILER INFORMATION table)
+        # Table 1 format: [['Name:', 'Hon. John McGuire'], ['Status:', 'Member'], ...]
+        for table in tables:
+            if len(table) >= 1:
+                # Check if this looks like the FILER INFORMATION table
+                first_row = table[0]
+                if len(first_row) >= 2 and first_row[0].strip().lower() == 'name:':
+                    name_value = first_row[1].strip()
+                    # Remove "Hon." prefix if present
+                    filer_name = re.sub(r'^Hon\.?\s+', '', name_value, flags=re.IGNORECASE).strip()
+                    logger.info(f"✅ Extracted filer name from FILER INFORMATION table: {filer_name}")
+                    break
         
-        for pattern in name_patterns:
-            match = re.search(pattern, full_text, re.IGNORECASE | re.MULTILINE)
-            if match:
-                filer_name = match.group(1).strip()
-                # Remove "Hon." prefix if present
-                filer_name = re.sub(r'^Hon\.?\s+', '', filer_name, flags=re.IGNORECASE).strip()
-                logger.info(f"✅ Extracted filer name from FILER INFORMATION: {filer_name}")
-                break
-        
-        # If not found, try other patterns
+        # If not found in table, try text patterns
         if not filer_name:
+            # House format: "The Honorable [Name]" or "[Name] (House Representative)" or "Hon. [Name]"
             house_patterns = [
                 r'Hon\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
                 r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
+                r'([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)\s*\(House Representative\)',
             ]
             for pattern in house_patterns:
                 match = re.search(pattern, full_text)
                 if match:
                     filer_name = match.group(1).strip()
                     filer_name = re.sub(r'\b(Honorable|Hon\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
+                    break
+        
+        # If not found in text, check form fields
+        if not filer_name:
+            for key, value in form_fields.items():
+                if 'name' in key or 'filer' in key or 'representative' in key:
+                    filer_name = value
                     break
         
         if not filer_name:
@@ -837,131 +1068,158 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 except ValueError:
                     pass
         
-        # Parse transaction tables
-        # House PTR format: Table with columns: ID, Owner, Asset, Transaction Type, Date, Notification Date, Amount, Cap Gains
-        # Look for TRANSACTIONS section
-        transactions_section = None
-        transactions_match = re.search(r'TRANSACTIONS', full_text, re.IGNORECASE)
-        if transactions_match:
-            # Get text after TRANSACTIONS header
-            transactions_start = transactions_match.end()
-            transactions_section = full_text[transactions_start:]
-        else:
-            # If no TRANSACTIONS header, use full text
-            transactions_section = full_text
-        
-        # Parse table rows - look for patterns that match trade data
-        # Pattern: Owner code (SP, JT, etc.) followed by asset name, transaction type (P/S), dates, amount
-        # Try to find table-like structures in the text
-        
-        # Split into lines and look for table-like patterns
-        lines = transactions_section.split('\n')
-        
-        # Find header row (contains "Owner", "Asset", "Transaction", "Date", "Amount")
-        header_line_idx = None
-        for i, line in enumerate(lines):
-            line_lower = line.lower()
-            if ('owner' in line_lower and 'asset' in line_lower and 
-                ('transaction' in line_lower or 'type' in line_lower) and
-                'date' in line_lower and 'amount' in line_lower):
-                header_line_idx = i
-                break
-        
-        if header_line_idx is not None:
-            logger.info(f"✅ Found transaction table header at line {header_line_idx}")
+        # Parse tables for trade data
+        # House PTR columns: ID, Owner, Asset, Transaction type (S/P), Date, Notification date, Amount, Cap gains
+        # Skip Table 1 (FILER INFORMATION) - only process transaction tables
+        for table_idx, table in enumerate(tables):
+            if len(table) < 2:  # Need at least header + data row
+                continue
             
-            # Parse data rows after header
-            for line_idx in range(header_line_idx + 1, len(lines)):
-                line = lines[line_idx].strip()
-                if not line or len(line) < 10:  # Skip very short lines
+            # Skip FILER INFORMATION table (Table 1) - it has "Name:" in first row
+            if len(table) > 0 and len(table[0]) >= 2:
+                first_cell = table[0][0].strip().lower()
+                if first_cell == 'name:':
+                    logger.debug(f"⏭️ Skipping FILER INFORMATION table (Table {table_idx + 1})")
+                    continue
+            
+            # Find header row
+            header_row = table[0]
+            
+            # Map column indices
+            id_col = None
+            owner_col = None
+            asset_col = None
+            transaction_type_col = None
+            date_col = None
+            notification_date_col = None
+            amount_col = None
+            cap_gains_col = None
+            
+            for idx, cell in enumerate(header_row):
+                cell_lower = cell.lower().strip()
+                if cell_lower == 'id' or 'id' in cell_lower:
+                    id_col = idx
+                elif 'owner' in cell_lower:
+                    owner_col = idx
+                elif 'asset' in cell_lower:
+                    asset_col = idx
+                elif 'transaction type' in cell_lower or ('type' in cell_lower and 'transaction' in cell_lower):
+                    transaction_type_col = idx
+                elif 'date' in cell_lower and 'notification' not in cell_lower:
+                    date_col = idx
+                elif 'notification date' in cell_lower or ('notification' in cell_lower and 'date' in cell_lower):
+                    notification_date_col = idx
+                elif 'amount' in cell_lower or 'value' in cell_lower:
+                    amount_col = idx
+                elif 'cap gain' in cell_lower or 'capital gain' in cell_lower:
+                    cap_gains_col = idx
+            
+            # Parse data rows
+            for row in table[1:]:
+                # Skip if row is too short - check required columns
+                required_cols = [c for c in [asset_col, transaction_type_col, date_col, amount_col] if c is not None]
+                if not required_cols or len(row) < max(required_cols) + 1:
                     continue
                 
-                # Try to extract trade data from line
-                # Pattern: Owner Asset TransactionType Date NotificationDate Amount
-                # Example: "SP UnitedHealth Group Incorporated Common Stock (UNH) [ST] P 04/10/2025 05/15/2025 $1,001 - $15,000"
-                
-                # Extract owner (first 1-3 characters, typically SP, JT, S, etc.)
-                owner_match = re.match(r'^([A-Z]{1,3})\s+', line)
-                owner = owner_match.group(1) if owner_match else None
-                
-                # Extract transaction type (P or S, usually after asset name)
-                transaction_type = None
-                if re.search(r'\s+[PS]\s+', line):
-                    type_match = re.search(r'\s+([PS])\s+', line)
-                    if type_match:
-                        transaction_type = 'Purchase' if type_match.group(1) == 'P' else 'Sale'
-                
-                # Extract dates (MM/DD/YYYY format)
-                date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', line))
+                # Extract transaction date
                 transaction_date = None
-                if date_matches:
-                    try:
-                        transaction_date = datetime.strptime(date_matches[0].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
-                    except ValueError:
-                        pass
-                
-                # Extract amount (range like "$1,001 - $15,000" or "$1,001 $15,000")
-                amount = None
-                amount_min = None
-                amount_max = None
-                amount_match = re.search(r'\$?([\d,]+)\s*[-–]?\s*\$?([\d,]+)', line)
-                if amount_match:
-                    try:
-                        min_str = amount_match.group(1).replace(',', '')
-                        max_str = amount_match.group(2).replace(',', '')
-                        amount_min = float(min_str)
-                        amount_max = float(max_str)
-                        amount = (amount_min + amount_max) / 2
-                    except ValueError:
-                        pass
-                else:
-                    # Try single amount
-                    single_amount_match = re.search(r'\$?([\d,]+)', line)
-                    if single_amount_match:
+                if date_col is not None and date_col < len(row):
+                    date_str = row[date_col].strip()
+                    for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d', '%m/%d/%y']:
                         try:
-                            amount_str = single_amount_match.group(1).replace(',', '')
-                            amount = float(amount_str)
-                            amount_min = amount
-                            amount_max = amount
+                            transaction_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+                            break
                         except ValueError:
-                            pass
+                            continue
                 
-                # Extract asset information (security name, symbol, asset type)
-                # Remove owner, transaction type, dates, and amount to get asset text
-                asset_text = line
-                if owner:
-                    asset_text = re.sub(r'^' + re.escape(owner) + r'\s+', '', asset_text)
-                asset_text = re.sub(r'\s+[PS]\s+', ' ', asset_text)  # Remove transaction type
-                asset_text = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', asset_text)  # Remove dates
-                asset_text = re.sub(r'\$?[\d,]+\s*[-–]?\s*\$?[\d,]+', '', asset_text)  # Remove amounts
-                asset_text = asset_text.strip()
-                
+                # Extract asset information
+                # Asset column contains: "Company Name (TICKER) [ST] FILING STATUS: New SUBHOLDING OF: ..."
                 security_name = None
                 security_symbol = None
                 asset_type = None
                 
-                if asset_text:
-                    # Remove common suffixes
+                if asset_col is not None and asset_col < len(row):
+                    asset_text = row[asset_col].strip()
+                    
+                    # Remove common suffixes that aren't part of the security name
+                    # Remove "FILING STATUS: New" and "SUBHOLDING OF: ..."
                     cleaned_asset = re.sub(r'\s*FILING STATUS:\s*\w+.*$', '', asset_text, flags=re.IGNORECASE)
                     cleaned_asset = re.sub(r'\s*SUBHOLDING OF:\s*[^\[\]]*$', '', cleaned_asset, flags=re.IGNORECASE)
                     
-                    # Extract ticker symbol (in parentheses)
+                    # Extract ticker symbol (in parentheses, e.g., "(UNH)", "(GOOG)", "(AMZN)")
                     ticker_match = re.search(r'\(([A-Z]{1,5})\)', cleaned_asset)
                     if ticker_match:
                         security_symbol = ticker_match.group(1)
+                        # Remove ticker from cleaned text to get security name
                         cleaned_asset = re.sub(r'\s*\([A-Z]{1,5}\)\s*', '', cleaned_asset)
                     
-                    # Extract asset type code (in brackets)
+                    # Extract asset type code (in brackets, e.g., "[ST]" for Stock)
                     asset_code_match = re.search(r'\[([A-Z]{2,3})\]', cleaned_asset)
                     if asset_code_match:
                         code = asset_code_match.group(1)
                         if code in asset_codes:
                             asset_type = asset_codes[code]
+                        # Remove asset code from cleaned text
                         cleaned_asset = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', cleaned_asset)
                     
+                    # The remaining text is the security name
                     security_name = cleaned_asset.strip()
+                    
+                    # If we still don't have a name, use the original (fallback)
                     if not security_name:
                         security_name = asset_text
+                
+                # Extract transaction type
+                transaction_type = None
+                if transaction_type_col is not None and transaction_type_col < len(row):
+                    type_str = row[transaction_type_col].strip().upper()
+                    if 'S' in type_str or 'sale' in type_str.lower():
+                        transaction_type = 'Sale'
+                    elif 'P' in type_str or 'purchase' in type_str.lower() or 'buy' in type_str.lower():
+                        transaction_type = 'Purchase'
+                
+                # Extract owner (SP = Spouse, etc.)
+                owner = None
+                if owner_col is not None and owner_col < len(row):
+                    owner_str = row[owner_col].strip()
+                    if owner_str:
+                        owner = owner_str  # Could be "SP" (Spouse), "Self", etc.
+                
+                # Extract amount
+                amount = None
+                amount_min = None
+                amount_max = None
+                
+                if amount_col is not None and amount_col < len(row):
+                    amount_str = row[amount_col].strip()
+                    # Remove currency symbols and commas
+                    amount_str = re.sub(r'[$,]', '', amount_str)
+                    
+                    # Try to parse range first (e.g., "$1,001 - $15,000" or "$1,001 $15,000")
+                    range_match = re.search(r'(\d+(?:,\d{3})*(?:\.\d+)?)\s*[-–]\s*(\d+(?:,\d{3})*(?:\.\d+)?)', amount_str)
+                    if not range_match:
+                        # Try without dash (e.g., "$1,001 $15,000")
+                        range_match = re.search(r'(\d+(?:,\d{3})*(?:\.\d+)?)\s+(\d+(?:,\d{3})*(?:\.\d+)?)', amount_str)
+                    
+                    if range_match:
+                        # Remove commas from numbers
+                        min_str = range_match.group(1).replace(',', '')
+                        max_str = range_match.group(2).replace(',', '')
+                        try:
+                            amount_min = float(min_str)
+                            amount_max = float(max_str)
+                            amount = (amount_min + amount_max) / 2  # Use midpoint
+                        except ValueError:
+                            pass
+                    else:
+                        # Try to parse as single number
+                        try:
+                            amount_str_clean = amount_str.replace(',', '')
+                            amount = float(amount_str_clean)
+                            amount_min = amount
+                            amount_max = amount
+                        except ValueError:
+                            pass
                 
                 # Only create trade if we have minimum required fields
                 if transaction_date and (security_name or security_symbol) and transaction_type and amount:
@@ -976,138 +1234,29 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         'amount': amount,
                         'amountMin': amount_min,
                         'amountMax': amount_max,
-                        'owner': owner,
+                        'owner': owner,  # Add owner field
                         'formType': 'house_ptr',
                         'source': 'house'
                     }
                     trades.append(trade)
                     logger.debug(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max}")
         
-        # Alternative parsing: Look for multi-line trade entries
-        # Some PDFs may have trades spread across multiple lines
-        if len(trades) == 0:
-            logger.info("📋 Trying alternative parsing method for multi-line trades...")
-            # Look for patterns like:
-            # "SP" or "JT" followed by company name on same or next line
-            # Then transaction type, dates, amount
-            
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-                
-                # Check if line starts with owner code
-                owner_match = re.match(r'^([A-Z]{1,3})\s+', line)
-                if owner_match:
-                    owner = owner_match.group(1)
-                    # Try to extract trade from this line and following lines
-                    trade_text = line
-                    j = i + 1
-                    # Collect next few lines that might be part of this trade
-                    while j < len(lines) and j < i + 5:
-                        next_line = lines[j].strip()
-                        if next_line and not re.match(r'^[A-Z]{1,3}\s+', next_line):  # Not a new owner code
-                            trade_text += ' ' + next_line
-                            j += 1
-                        else:
-                            break
-                    
-                    # Parse the collected trade text
-                    # Extract transaction type
-                    transaction_type = None
-                    if re.search(r'\s+[PS]\s+', trade_text):
-                        type_match = re.search(r'\s+([PS])\s+', trade_text)
-                        if type_match:
-                            transaction_type = 'Purchase' if type_match.group(1) == 'P' else 'Sale'
-                    
-                    # Extract dates
-                    date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', trade_text))
-                    transaction_date = None
-                    if date_matches:
-                        try:
-                            transaction_date = datetime.strptime(date_matches[0].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
-                        except ValueError:
-                            pass
-                    
-                    # Extract amount
-                    amount = None
-                    amount_min = None
-                    amount_max = None
-                    amount_match = re.search(r'\$?([\d,]+)\s*[-–]?\s*\$?([\d,]+)', trade_text)
-                    if amount_match:
-                        try:
-                            min_str = amount_match.group(1).replace(',', '')
-                            max_str = amount_match.group(2).replace(',', '')
-                            amount_min = float(min_str)
-                            amount_max = float(max_str)
-                            amount = (amount_min + amount_max) / 2
-                        except ValueError:
-                            pass
-                    
-                    # Extract asset info
-                    asset_text = trade_text
-                    if owner:
-                        asset_text = re.sub(r'^' + re.escape(owner) + r'\s+', '', asset_text)
-                    asset_text = re.sub(r'\s+[PS]\s+', ' ', asset_text)
-                    asset_text = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', asset_text)
-                    asset_text = re.sub(r'\$?[\d,]+\s*[-–]?\s*\$?[\d,]+', '', asset_text)
-                    asset_text = asset_text.strip()
-                    
-                    security_name = None
-                    security_symbol = None
-                    asset_type = None
-                    
-                    if asset_text:
-                        cleaned_asset = re.sub(r'\s*FILING STATUS:\s*\w+.*$', '', asset_text, flags=re.IGNORECASE)
-                        cleaned_asset = re.sub(r'\s*SUBHOLDING OF:\s*[^\[\]]*$', '', cleaned_asset, flags=re.IGNORECASE)
-                        
-                        ticker_match = re.search(r'\(([A-Z]{1,5})\)', cleaned_asset)
-                        if ticker_match:
-                            security_symbol = ticker_match.group(1)
-                            cleaned_asset = re.sub(r'\s*\([A-Z]{1,5}\)\s*', '', cleaned_asset)
-                        
-                        asset_code_match = re.search(r'\[([A-Z]{2,3})\]', cleaned_asset)
-                        if asset_code_match:
-                            code = asset_code_match.group(1)
-                            if code in asset_codes:
-                                asset_type = asset_codes[code]
-                            cleaned_asset = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', cleaned_asset)
-                        
-                        security_name = cleaned_asset.strip()
-                        if not security_name:
-                            security_name = asset_text
-                    
-                    # Create trade if we have required fields
-                    if transaction_date and (security_name or security_symbol) and transaction_type and amount:
-                        trade = {
-                            'filerName': filer_name,
-                            'filingDate': filing_date,
-                            'transactionDate': transaction_date,
-                            'securityName': security_name,
-                            'securitySymbol': security_symbol,
-                            'assetType': asset_type,
-                            'transactionType': transaction_type,
-                            'amount': amount,
-                            'amountMin': amount_min,
-                            'amountMax': amount_max,
-                            'owner': owner,
-                            'formType': 'house_ptr',
-                            'source': 'house'
-                        }
-                        trades.append(trade)
-                        logger.debug(f"   ✅ Extracted trade (multi-line): {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max}")
-                    
-                    i = j  # Skip processed lines
-                else:
-                    i += 1
-        
         logger.info(f"✅ Extracted {len(trades)} trades from House PTR: {s3_key}")
         
     except Exception as e:
-        # Log full traceback for errors
-        logger.error(f"❌ Error parsing House PTR {s3_key}: {e}")
-        import traceback
-        logger.error(traceback.format_exc())
-        raise  # Re-raise to fail completely
+        # Check if this is an UnsupportedDocumentException (should fail completely)
+        error_type = type(e).__name__
+        error_str = str(e)
+        
+        if 'UnsupportedDocumentException' in error_type or 'UnsupportedDocumentException' in error_str:
+            # Re-raise to fail completely - already logged in inner handler
+            raise  # Fail completely instead of returning empty list
+        else:
+            # Log full traceback for unexpected errors
+            logger.error(f"❌ Error parsing House PTR {s3_key}: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise  # Re-raise to fail completely
     
     return trades
 
