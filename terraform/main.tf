@@ -2409,7 +2409,7 @@ module "politician_trades_state_machine" {
                             Next        = "MatchHouseError"
                           }
                         ]
-                        End = true
+                        Next = "SaveHouseTrades"
                       }
                       MatchHouseError = {
                         Type    = "Pass"
@@ -2420,7 +2420,44 @@ module "politician_trades_state_machine" {
                           "error" : "House PTR matching failed"
                         }
                         ResultPath = "$.matchResults"
+                        Next       = "SaveHouseTrades"
+                      }
+                      SaveHouseTrades = {
+                        Type    = "Pass"
+                        Comment = "Format matched House trades for saver. Date preserved from TransformHouse."
+                        Parameters = {
+                          "date.$" : "$.date",
+                          "matchedTrades.$" : "$.matchResults.matchedTrades"
+                        }
+                        Next = "SaveHouseTradesTask"
+                      }
+                      SaveHouseTradesTask = {
+                        Type       = "Task"
+                        Resource   = module.politician_trades_saver.function_arn
+                        Comment    = "Save matched House trades directly to DynamoDB"
+                        ResultPath = "$.saveResults"
                         End        = true
+                        Retry = [
+                          {
+                            ErrorEquals     = ["States.ALL"]
+                            IntervalSeconds = 30
+                            MaxAttempts     = 3
+                            BackoffRate     = 2.0
+                          }
+                        ]
+                        Catch = [
+                          {
+                            ErrorEquals = ["States.ALL"]
+                            ResultPath  = "$.error"
+                            Next        = "SaveHouseTradesFailed"
+                          }
+                        ]
+                      }
+                      SaveHouseTradesFailed = {
+                        Type    = "Pass"
+                        Comment = "Continue even if save fails"
+                        Result  = { "success" : false, "error" : "Save failed" }
+                        End     = true
                       }
                     }
                   }
@@ -2436,7 +2473,7 @@ module "politician_trades_state_machine" {
         # No aggregation step - each pipeline saves directly to DynamoDB:
         # - SEC Glue job: Saves internally (no output to aggregator)
         # - Senate pipeline: Saves via SaveSenateTrades Lambda at end of chain
-        # - House pipeline: Placeholder (will save when implemented)
+        # - House pipeline: Saves via SaveHouseTrades Lambda at end of chain
       }
     }
   })
