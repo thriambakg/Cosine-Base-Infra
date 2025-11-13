@@ -37,4 +37,4 @@ terraform apply
 **Terraform Upload:**
 The file is automatically uploaded to S3 bucket `cosine-politician-trades-{env}` via the `politician_trades_s3` module's `static_files` parameter.
 
-**Note:** The Lambda functions (`politician_trades_matcher`) will read this file from S3 to match trades to politicians.
+**Note:** The Lambda functions (`politician_trades_house_matcher` and `politician_trades_senate_matcher`) will read this file from S3 to match trades to politicians.
