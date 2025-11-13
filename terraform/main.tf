@@ -2007,7 +2007,8 @@ module "politician_trades_house_matcher" {
 
   # Lambda layers
   layers = [
-    module.core_layer.layer_arn
+    module.core_layer.layer_arn,
+    module.document_processing_layer.layer_arn
   ]
 
   # IAM policies
@@ -2020,7 +2021,7 @@ module "politician_trades_house_matcher" {
 
   tags = var.common_tags
 
-  depends_on = [module.politician_trades_s3, module.politician_trades_table]
+  depends_on = [module.politician_trades_s3, module.politician_trades_table, module.document_processing_layer]
 }
 
 # Lambda 5: Save Trades to Database
