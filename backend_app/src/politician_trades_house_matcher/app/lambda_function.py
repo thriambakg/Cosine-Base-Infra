@@ -1,8 +1,8 @@
 """
-Politician Trades Matcher Lambda
-Parses Congressional PTRs, extracts trades, and matches to politicians
+Politician Trades House Matcher Lambda
+Parses House PTRs, extracts trades, and matches to politicians
 
-This is Step 2 of the 3-step politician trades aggregation workflow.
+This Lambda handles House PTR matching only.
 """
 
 import json
@@ -1515,45 +1515,38 @@ def list_s3_files_by_prefix(prefix: str) -> List[str]:
 
 def lambda_handler(event, context):
     """
-    Lambda handler for matching House PTR trades and aggregating all matched trades
+    Lambda handler for matching House PTR trades
     
     Expected input from Step Functions:
-    - For House PTR matching (direct call):
-      {
+    {
         "downloadResults": {
-          "s3Keys": ["trades/house/2025/file1.pdf", ...],
-          "count": 5,
-          "success": true,
-          "summary": "...",
-          "folderName": "trades/house/2025"
+            "s3Keys": ["trades/house/2025/file1.pdf", ...],
+            "count": 5,
+            "success": true,
+            "summary": "...",
+            "folderName": "trades/house/2025"
         },
         "date": "2025-01-15",
         "source": "house"
-      }
-    - For aggregation (from parallel branches):
-      {
-        "matchResults": [...],
-        "date": "2024-01-15"
     }
     
     Returns:
     {
         "matchedTrades": [...],
         "unmatchedCount": 0,
-        "date": "2024-01-15"
+        "date": "2025-01-15",
+        "source": "house"
     }
     """
-    logger.info("🚀 Politician Trades Matcher Lambda started")
+    logger.info("🚀 Politician Trades House Matcher Lambda started")
     
-    # Check if this is a direct House PTR matching call (from Step Functions after download)
+    # Process House PTR matching
     download_results = event.get('downloadResults')
-    if download_results:
-        logger.info("🔍 Processing House PTR matching from downloader output")
-        return handle_house_ptr_matching(event, download_results)
+    if not download_results:
+        raise ValueError("downloadResults not provided in event")
     
-    # Otherwise, this is an aggregation call
-    logger.info("📊 Aggregating matched trades from parallel processing")
-    return handle_aggregation(event)
+    logger.info("🔍 Processing House PTR matching from downloader output")
+    return handle_house_ptr_matching(event, download_results)
 
 def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -1703,104 +1696,4 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
         "date": event.get('date')
     }
 
-def handle_aggregation(event: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Handle aggregation of matched trades from parallel processing
-    
-    Args:
-        event: Event from Step Functions with match results
-        
-    Returns:
-        Aggregated results
-    """
-    # Get match results from parallel processing
-    # SEC results come from S3 (written by Glue job), Senate/House from Lambda outputs
-    sec_glue_output = event.get('secGlueOutput', {})
-    senate_match_results = event.get('senateMatchResults', [])
-    house_match_results = event.get('houseMatchResults', [])
-    s3_bucket = event.get('s3Bucket', S3_BUCKET)
-    
-    date = event.get('date') or event.get('fetchResults', {}).get('date')
-    
-    if not date:
-        raise ValueError("Date not provided in event")
-    
-    logger.info(f"📅 Aggregating results for date: {date}")
-    
-    # Load SEC results from S3 (written by Glue job)
-    sec_matched_trades = []
-    sec_unmatched_count = 0
-    sec_forms_fetched = 0
-    
-    try:
-        sec_summary_key = f"temp/sec-results-{date}.json"
-        logger.info(f"📋 Reading SEC summary from S3: s3://{s3_bucket}/{sec_summary_key}")
-        
-        try:
-            response = s3_client.get_object(Bucket=s3_bucket, Key=sec_summary_key)
-            sec_summary = json.loads(response['Body'].read().decode('utf-8'))
-            
-            sec_matched_trades = sec_summary.get('matchedTrades', [])
-            sec_unmatched_count = sec_summary.get('unmatchedCount', 0)
-            sec_forms_fetched = sec_summary.get('secFormsFetched', 0)
-            
-            logger.info(f"✅ Loaded SEC results: {len(sec_matched_trades)} matched trades, {sec_unmatched_count} unmatched, {sec_forms_fetched} forms fetched")
-        except s3_client.exceptions.NoSuchKey:
-            logger.warning(f"⚠️ SEC summary not found in S3: {sec_summary_key}. Glue job may have failed or not completed yet.")
-        except Exception as e:
-            logger.error(f"❌ Error reading SEC summary from S3: {e}")
-    except Exception as e:
-        logger.error(f"❌ Error loading SEC results: {e}")
-    
-    # Process House PTR results (if any)
-    logger.info(f"📋 Processing {len(house_match_results)} House PTR results")
-    
-    house_matched_trades = []
-    house_unmatched_count = 0
-    
-    # house_match_results should contain match results from House PTR matching
-    for house_result in house_match_results:
-        if isinstance(house_result, dict):
-            matched_trades = house_result.get('matchedTrades', [])
-            unmatched_count = house_result.get('unmatchedCount', 0)
-            house_matched_trades.extend(matched_trades)
-            house_unmatched_count += unmatched_count
-    
-    # Get Senate results from Lambda outputs
-    logger.info(f"📋 Processing {len(senate_match_results)} Senate results")
-    
-    # Filter out failed downloads (success: false)
-    valid_senate_results = [r for r in senate_match_results if r.get('success') is not False]
-    
-    # Aggregate Senate matched trades and count unmatched
-    senate_matched_trades = []
-    senate_unmatched_count = 0
-    
-    for result in valid_senate_results:
-        matched_trades = result.get('matchedTrades', [])
-        unmatched_count = result.get('unmatchedCount', 0)
-        
-        senate_matched_trades.extend(matched_trades)
-        senate_unmatched_count += unmatched_count
-    
-    # Combine all results
-    all_matched_trades = sec_matched_trades + senate_matched_trades + house_matched_trades
-    total_unmatched = sec_unmatched_count + senate_unmatched_count + house_unmatched_count
-    
-    logger.info(f"📊 Total: {len(all_matched_trades)} matched trades ({len(sec_matched_trades)} SEC, {len(senate_matched_trades)} Senate, {len(house_matched_trades)} House)")
-    logger.info(f"⚠️ {total_unmatched} files/trades could not be matched ({sec_unmatched_count} SEC, {senate_unmatched_count} Senate, {house_unmatched_count} House)")
-    
-    logger.info(f"✅ Aggregated {len(all_matched_trades)} matched trades")
-    logger.info(f"⚠️ {total_unmatched} files/trades could not be matched")
-    
-    try:
-        return {
-            "date": date,
-            "matchedTrades": all_matched_trades,
-            "totalMatched": len(all_matched_trades),
-            "unmatchedForms": total_unmatched
-        }
-    except Exception as e:
-        logger.error(f"❌ Fatal error in aggregator Lambda: {e}")
-        raise
 

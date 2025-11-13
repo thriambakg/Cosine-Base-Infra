@@ -1949,41 +1949,8 @@ module "politician_trades_downloader" {
   depends_on = [module.politician_trades_s3]
 }
 
-# Lambda 3a: Match SEC Trades to Politicians (single file, parallel processing)
-module "politician_trades_sec_matcher" {
-  source = "./modules/lambda"
-
-  function_name = "${var.project_name}-pol-trades-sec-matcher-${var.environment}"
-  description   = "Matches trades from a single SEC form to politicians (invoked in parallel)"
-  runtime       = "python3.11"
-  handler       = "lambda_function.lambda_handler"
-  timeout       = 300  # 5 minutes per file (for PDF parsing)
-  memory_size   = 2048 # Higher memory for PDF parsing and text processing
-
-  source_dir = "${path.module}/../backend_app/src/politician_trades_sec_matcher/app"
-
-  # Environment variables
-  environment_variables = {
-    S3_BUCKET = module.politician_trades_s3.bucket_id
-  }
-
-  # Lambda layers
-  layers = [
-    module.core_layer.layer_arn
-  ]
-
-  # IAM policies
-  additional_policy_arns = [
-    aws_iam_policy.lambda_politician_trades_s3_policy.arn,
-    module.kms.kms_access_policy_arn
-  ]
-
-  tags = var.common_tags
-
-  depends_on = [module.politician_trades_s3]
-}
-
-# Lambda 3b: Match Senate PTR Trades to Politicians (single file, parallel processing)
+# Lambda 3: Match Senate PTR Trades to Politicians (single file, parallel processing)
+# Note: SEC matching is handled by Glue job (SEC_aggregator), not a Lambda
 module "politician_trades_senate_matcher" {
   source = "./modules/lambda"
 
@@ -2019,18 +1986,18 @@ module "politician_trades_senate_matcher" {
   depends_on = [module.politician_trades_s3, module.document_processing_layer]
 }
 
-# Lambda 4: Aggregate Matched Trades
-module "politician_trades_matcher" {
+# Lambda 4: Match House PTR Trades
+module "politician_trades_house_matcher" {
   source = "./modules/lambda"
 
-  function_name = "${var.project_name}-pol-trades-aggregator-${var.environment}"
-  description   = "Parses Congressional PTRs, matches trades to politicians using fuzzy name matching"
+  function_name = "${var.project_name}-pol-trades-house-matcher-${var.environment}"
+  description   = "Parses House PTRs, matches trades to politicians using fuzzy name matching"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
   timeout       = 900  # 15 minutes (max)
   memory_size   = 2048 # Higher memory for PDF parsing, text processing, and Textract
 
-  source_dir = "${path.module}/../backend_app/src/politician_trades_matcher/app"
+  source_dir = "${path.module}/../backend_app/src/politician_trades_house_matcher/app"
 
   # Environment variables
   environment_variables = {
@@ -2418,7 +2385,7 @@ module "politician_trades_state_machine" {
                       }
                       MatchHouse = {
                         Type       = "Task"
-                        Resource   = module.politician_trades_matcher.function_arn
+                        Resource   = module.politician_trades_house_matcher.function_arn
                         Comment    = "Match House PTR trades to politicians using Textract - handles skip cases internally"
                         ResultPath = "$.matchResults"
                         Retry = [
@@ -2479,7 +2446,7 @@ module "politician_trades_state_machine" {
     module.politician_trades_fetcher.function_arn,
     module.politician_trades_downloader.function_arn,
     module.politician_trades_senate_matcher.function_arn,
-    module.politician_trades_matcher.function_arn,
+    module.politician_trades_house_matcher.function_arn,
     module.politician_trades_saver.function_arn
     # Note: 
     # - politician_trades_sec_matcher removed - SEC handled by Glue job
