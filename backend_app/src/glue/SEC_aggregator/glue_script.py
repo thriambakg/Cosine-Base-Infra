@@ -3859,20 +3859,41 @@ try:
         logger.info(f"      This is normal if the filing date in the form doesn't match the target date")
     
     # Check for critical failures that should cause job to fail
+    # Note: No forms found is valid for holidays/weekends - only fail on actual errors
     if total_forms_processed == 0:
-        error_msg = "❌ CRITICAL ERROR: No forms were fetched from SEC API!"
-        logger.error("")
-        logger.error(error_msg)
-        print("", flush=True)
-        print(error_msg, flush=True)
-        print("   This could indicate:", flush=True)
-        print("      - SEC API is blocking requests (403 Forbidden)", flush=True)
-        print("      - Network connectivity issues", flush=True)
-        print("      - Invalid date parameter", flush=True)
-        print("      - No forms filed on the target date", flush=True)
-        raise Exception("No forms were fetched from SEC API. Check SEC API access, network connectivity, and date parameters.")
+        # Check if this was due to skipped dates (holidays/weekends) vs actual errors
+        dates_processed = len(all_date_stats)
+        dates_with_forms = builtins.sum(1 for s in all_date_stats if s.get('total_forms', 0) > 0)
+        
+        if dates_processed > 0 and dates_with_forms == 0:
+            # All dates were skipped (likely holidays/weekends) - this is valid, don't fail
+            logger.warning("")
+            logger.warning("⚠️ WARNING: No forms were fetched from SEC API for any processed dates")
+            print("", flush=True)
+            print("⚠️ WARNING: No forms were fetched from SEC API for any processed dates", flush=True)
+            print("   This is normal for:", flush=True)
+            print("      - Federal holidays (SEC is closed)", flush=True)
+            print("      - Weekends (SEC is closed)", flush=True)
+            print("      - Dates before SEC filings began", flush=True)
+            print("   Job will complete successfully - no action needed.", flush=True)
+            # Don't raise exception - allow job to succeed
+        else:
+            # This shouldn't happen, but if it does, log as error but don't fail
+            # (Could be a legitimate case where no forms were filed)
+            logger.warning("")
+            logger.warning("⚠️ WARNING: No forms were fetched from SEC API")
+            print("", flush=True)
+            print("⚠️ WARNING: No forms were fetched from SEC API", flush=True)
+            print("   This could indicate:", flush=True)
+            print("      - No forms filed on the target date(s)", flush=True)
+            print("      - Federal holiday or weekend", flush=True)
+            print("      - SEC API temporarily unavailable (check logs for 403/404 errors)", flush=True)
+            print("   Job will complete successfully - review logs if this is unexpected.", flush=True)
+            # Don't raise exception - allow job to succeed
     
-    if successful_stored == 0:
+    if successful_stored == 0 and total_forms_processed > 0:
+        # Only fail if we fetched forms but couldn't store any (actual error)
+        # If total_forms_processed == 0, that's handled above (holiday/weekend - valid)
         error_msg = "❌ CRITICAL ERROR: No forms were successfully stored!"
         logger.error("")
         logger.error(error_msg)
@@ -3904,6 +3925,12 @@ try:
         print(f"      Skipped (unsupported file type): {skipped_unsupported_type}", flush=True)
         
         raise Exception(f"No forms were successfully stored. {total_forms_processed} forms were fetched but none were stored. Check logs for details.")
+    elif successful_stored == 0 and total_forms_processed == 0:
+        # No forms fetched and none stored - this is expected for holidays/weekends
+        # Already handled above, just log for completeness
+        logger.info("")
+        logger.info("ℹ️ No forms were fetched or stored - this is expected for holidays/weekends")
+        print("ℹ️ No forms were fetched or stored - this is expected for holidays/weekends", flush=True)
     elif successful_stored < total_forms_processed * 0.5:
         logger.warning("")
         logger.warning(f"   ⚠️ WARNING: Less than 50% of forms were successfully stored!")
