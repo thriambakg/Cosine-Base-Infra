@@ -979,14 +979,16 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             # Combine trade data lines into single text for parsing
             trade_text = ' '.join(trade_data_lines)
             
-            # SIMPLIFIED: Iteratively search forward from AFTER the trade data, collecting F S, S O, D lines
-            # Start from right after the trade data line (i+1) and search forward
-            # Skip continuation lines that are part of trade data (they don't have metadata patterns)
-            # Stop when we hit the next trade (has asset type bracket and owner code)
-            # This works across page breaks since we're searching the full lines array
+            # SIMPLIFIED: Collect all lines between this trade and the next trade's metadata as a blob
+            # Then extract metadata from that blob
+            # Stop when we see the next trade's metadata (F S, S O, D) - that indicates the next trade has started
             k = i + 1  # Start from right after the trade data line
-            logger.debug(f"   Searching for metadata starting from line {k+1} (trade data at line {i+1}, will search forward until next trade)")
+            metadata_lines = []  # Collect all lines between trades
+            found_next_trade_data = False  # Track if we've seen the next trade's data line
             
+            logger.debug(f"   Collecting metadata blob starting from line {k+1} (trade data at line {i+1})")
+            
+            # Collect all lines until we hit the next trade's metadata (F S, S O, D after next trade data)
             while k < len(lines):
                 meta_line = lines[k].strip()
                 if not meta_line:
@@ -998,38 +1000,49 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     k += 1
                     continue
                 
-                # Check for metadata patterns FIRST - extract the value after the colon
-                if re.match(r'^FILING\s+STATUS:\s*', meta_line, re.IGNORECASE):
-                    value = re.sub(r'^FILING\s+STATUS:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    trade_metadata['filing_status'] = value if value else 'New'
-                    logger.info(f"   ✅ Found filing_status metadata at line {k+1}: '{trade_metadata['filing_status']}'")
-                elif re.match(r'^F\s+S:\s*', meta_line, re.IGNORECASE):
-                    value = re.sub(r'^F\s+S:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    trade_metadata['filing_status'] = value if value else 'New'
-                    logger.info(f"   ✅ Found filing_status metadata at line {k+1}: '{trade_metadata['filing_status']}'")
-                elif re.match(r'^SUBHOLDING\s+OF:\s*', meta_line, re.IGNORECASE):
-                    value = re.sub(r'^SUBHOLDING\s+OF:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    trade_metadata['subholding_of'] = value
-                    logger.info(f"   ✅ Found subholding_of metadata at line {k+1}: '{trade_metadata['subholding_of']}'")
-                elif re.match(r'^S\s+O:\s*', meta_line, re.IGNORECASE):
-                    value = re.sub(r'^S\s+O:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    trade_metadata['subholding_of'] = value
-                    logger.info(f"   ✅ Found subholding_of metadata at line {k+1}: '{trade_metadata['subholding_of']}'")
-                elif re.match(r'^DESCRIPTION:\s*', meta_line, re.IGNORECASE):
-                    value = re.sub(r'^DESCRIPTION:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    trade_metadata['description'] = value
-                    logger.info(f"   ✅ Found description metadata at line {k+1}: '{trade_metadata['description']}'")
-                elif re.match(r'^D:\s*', meta_line, re.IGNORECASE):
-                    value = re.sub(r'^D:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    trade_metadata['description'] = value
-                    logger.info(f"   ✅ Found description metadata at line {k+1}: '{trade_metadata['description']}'")
-                elif re.search(r'\[([A-Z]{2,3})\]', meta_line) and re.match(r'^[A-Z]{1,3}\s+', meta_line):  # Next trade data, stop
-                    # Found next trade, stop looking for metadata
-                    logger.debug(f"   Stopped metadata search at line {k+1} - found next trade: {meta_line[:60]}")
+                # Check if this is the next trade's data line (has asset type bracket and owner code)
+                if re.search(r'\[([A-Z]{2,3})\]', meta_line) and re.match(r'^[A-Z]{1,3}\s+', meta_line):
+                    found_next_trade_data = True
+                    # Don't break yet - continue to collect until we see the next trade's metadata
+                    k += 1
+                    continue
+                
+                # If we've seen the next trade's data, and now we see metadata (F S, S O, D), stop
+                # This means we've collected all metadata for the current trade
+                if found_next_trade_data and re.match(r'^(F\s+S:|S\s+O:|D:)\s*', meta_line, re.IGNORECASE):
+                    # Found next trade's metadata, stop collecting (we've got all metadata for current trade)
+                    logger.debug(f"   Stopped metadata collection at line {k+1} - found next trade's metadata: {meta_line[:60]}")
                     break
-                # If we haven't matched anything and we've gone too far, stop
-                # (safety check - shouldn't happen if logic is correct)
+                
+                # Add this line to the metadata blob
+                metadata_lines.append(meta_line)
                 k += 1
+            
+            # Now extract metadata from the collected blob
+            metadata_blob = '\n'.join(metadata_lines)
+            logger.debug(f"   Collected {len(metadata_lines)} lines for metadata blob: {metadata_blob[:200]}")
+            
+            # Extract metadata patterns from the blob
+            # F S: or FILING STATUS:
+            filing_status_match = re.search(r'(?:FILING\s+STATUS|F\s+S):\s*([^\n]+)', metadata_blob, re.IGNORECASE)
+            if filing_status_match:
+                value = filing_status_match.group(1).strip()
+                trade_metadata['filing_status'] = value if value else 'New'
+                logger.info(f"   ✅ Found filing_status metadata: '{trade_metadata['filing_status']}'")
+            
+            # S O: or SUBHOLDING OF:
+            subholding_match = re.search(r'(?:SUBHOLDING\s+OF|S\s+O):\s*([^\n]+)', metadata_blob, re.IGNORECASE)
+            if subholding_match:
+                value = subholding_match.group(1).strip()
+                trade_metadata['subholding_of'] = value
+                logger.info(f"   ✅ Found subholding_of metadata: '{trade_metadata['subholding_of']}'")
+            
+            # D: or DESCRIPTION:
+            description_match = re.search(r'(?:DESCRIPTION|D):\s*([^\n]+)', metadata_blob, re.IGNORECASE)
+            if description_match:
+                value = description_match.group(1).strip()
+                trade_metadata['description'] = value
+                logger.info(f"   ✅ Found description metadata: '{trade_metadata['description']}'")
             
             # Log extracted metadata for debugging
             if trade_metadata['filing_status'] or trade_metadata['subholding_of'] or trade_metadata['description']:
