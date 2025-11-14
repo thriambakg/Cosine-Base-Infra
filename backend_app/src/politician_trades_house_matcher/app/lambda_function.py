@@ -769,10 +769,11 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         filer_name = None
         
         # Look for FILER INFORMATION section
-        # Pattern: "Name:" followed by name on same or next line
+        # Pattern: "Name:" followed by name, stopping before "Status:"
+        # Example: "Name: Hon. Virginia Foxx Status: Member"
         name_patterns = [
-            r'Name:\s*(?:Hon\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
-            r'FILER INFORMATION\s+Name:\s*(?:Hon\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
+            r'Name:\s*(?:Hon\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)(?:\s+Status:)',  # Stop before "Status:"
+            r'Name:\s*(?:Hon\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',  # Fallback without Status
         ]
         
         for pattern in name_patterns:
@@ -781,6 +782,8 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 filer_name = match.group(1).strip()
                 # Remove "Hon." prefix if present
                 filer_name = re.sub(r'^Hon\.?\s+', '', filer_name, flags=re.IGNORECASE).strip()
+                # Remove any trailing "Status" that might have been captured
+                filer_name = re.sub(r'\s+Status\s*$', '', filer_name, flags=re.IGNORECASE).strip()
                 logger.info(f"✅ Extracted filer name from FILER INFORMATION: {filer_name}")
                 break
         
@@ -837,268 +840,183 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 except ValueError:
                     pass
         
-        # Parse transaction tables
-        # House PTR format: Table with columns: ID, Owner, Asset, Transaction Type, Date, Notification Date, Amount, Cap Gains
-        # Look for TRANSACTIONS section
-        transactions_section = None
-        transactions_match = re.search(r'TRANSACTIONS', full_text, re.IGNORECASE)
-        if transactions_match:
-            # Get text after TRANSACTIONS header
-            transactions_start = transactions_match.end()
-            transactions_section = full_text[transactions_start:]
-        else:
-            # If no TRANSACTIONS header, use full text
-            transactions_section = full_text
+        # Parse transaction tables using pattern matching
+        # House PTR format: Owner (optional) Asset [Type] TransactionType Date NotificationDate Amount
+        # Examples:
+        #   "JT Dallas Tex Area Rapid 5.00% 12/01/25 [GS]E 12/02/2024 01/06/2025 $1,001 - $15,000"
+        #   "Coca-Cola Company (KO) [ST] P 12/16/2024 01/06/2025 $1,001 - $15,000"
+        #   "JT Alibaba Group Holding Limited American Depositary Shares each representing eight Ordinary share (BABA) [ST]S 12/16/2024 01/07/2025 $1,001 - $15,000"
         
-        # Parse table rows - look for patterns that match trade data
-        # Pattern: Owner code (SP, JT, etc.) followed by asset name, transaction type (P/S), dates, amount
-        # Try to find table-like structures in the text
+        # Look for trade patterns in the full text
+        # Pattern: (optional owner) asset name (optional ticker) [asset type] transaction_type date date amount
+        # Transaction types: P (Purchase), S (Sale), E (Exercise), etc.
         
-        # Split into lines and look for table-like patterns
-        lines = transactions_section.split('\n')
+        # Split into lines for processing
+        lines = full_text.split('\n')
         
-        # Find header row (contains "Owner", "Asset", "Transaction", "Date", "Amount")
-        header_line_idx = None
-        for i, line in enumerate(lines):
+        # Look for lines that contain trade data patterns
+        # A trade line typically has: dates (MM/DD/YYYY), amount ($X,XXX - $X,XXX), and transaction type
+        i = 0
+        while i < len(lines):
+            line = lines[i].strip()
+            
+            # Skip header lines and very short lines
+            if not line or len(line) < 20:
+                i += 1
+                continue
+            
+            # Skip lines that are clearly headers or metadata
             line_lower = line.lower()
-            if ('owner' in line_lower and 'asset' in line_lower and 
-                ('transaction' in line_lower or 'type' in line_lower) and
-                'date' in line_lower and 'amount' in line_lower):
-                header_line_idx = i
-                break
-        
-        if header_line_idx is not None:
-            logger.info(f"✅ Found transaction table header at line {header_line_idx}")
+            if any(skip in line_lower for skip in ['ownerasset', 'transaction', 'notification', 'cap. gains', 'filing id', 'digitally signed', 'certify']):
+                i += 1
+                continue
             
-            # Parse data rows after header
-            for line_idx in range(header_line_idx + 1, len(lines)):
-                line = lines[line_idx].strip()
-                if not line or len(line) < 10:  # Skip very short lines
-                    continue
-                
-                # Try to extract trade data from line
-                # Pattern: Owner Asset TransactionType Date NotificationDate Amount
-                # Example: "SP UnitedHealth Group Incorporated Common Stock (UNH) [ST] P 04/10/2025 05/15/2025 $1,001 - $15,000"
-                
-                # Extract owner (first 1-3 characters, typically SP, JT, S, etc.)
-                owner_match = re.match(r'^([A-Z]{1,3})\s+', line)
-                owner = owner_match.group(1) if owner_match else None
-                
-                # Extract transaction type (P or S, usually after asset name)
-                transaction_type = None
-                if re.search(r'\s+[PS]\s+', line):
-                    type_match = re.search(r'\s+([PS])\s+', line)
+            # Check if this line looks like a trade (has dates and amount)
+            has_dates = bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line))
+            has_amount = bool(re.search(r'\$\d+', line))
+            
+            if not (has_dates and has_amount):
+                i += 1
+                continue
+            
+            # Try to extract trade from this line and potentially next lines (multi-line trades)
+            trade_text = line
+            j = i + 1
+            # Collect next few lines that might be part of this trade (asset name can span lines)
+            while j < len(lines) and j < i + 3:
+                next_line = lines[j].strip()
+                # Stop if next line looks like a new trade (has dates/amount) or is metadata
+                if not next_line:
+                    break
+                if re.search(r'\d{1,2}/\d{1,2}/\d{4}', next_line) and re.search(r'\$\d+', next_line):
+                    # This looks like a new trade
+                    break
+                if any(skip in next_line.lower() for skip in ['f s:', 's o:', 'd:', 'filing id']):
+                    # Metadata line, stop collecting
+                    break
+                # Add to trade text
+                trade_text += ' ' + next_line
+                j += 1
+            
+            # Parse the collected trade text
+            owner = None
+            transaction_type = None
+            transaction_date = None
+            amount = None
+            amount_min = None
+            amount_max = None
+            security_name = None
+            security_symbol = None
+            asset_type = None
+            
+            # Extract owner (optional, first 1-3 uppercase letters at start)
+            owner_match = re.match(r'^([A-Z]{1,3})\s+', trade_text)
+            if owner_match:
+                owner = owner_match.group(1)
+            
+            # Extract transaction type (single letter: P, S, E, etc., usually before dates)
+            # Look for pattern: [asset type] TransactionType Date
+            type_match = re.search(r'\[([A-Z]{2,3})\]\s*([A-Z])\s+\d{1,2}/\d{1,2}/\d{4}', trade_text)
+            if type_match:
+                type_char = type_match.group(2)  # Second group is the transaction type
+            else:
+                # Try without asset type bracket: ) TransactionType Date
+                type_match = re.search(r'\)\s*([A-Z])\s+\d{1,2}/\d{1,2}/\d{4}', trade_text)
+                if type_match:
+                    type_char = type_match.group(1)
+                else:
+                    # Try just letter before date
+                    type_match = re.search(r'\s+([PS])\s+\d{1,2}/\d{1,2}/\d{4}', trade_text)
                     if type_match:
-                        transaction_type = 'Purchase' if type_match.group(1) == 'P' else 'Sale'
-                
-                # Extract dates (MM/DD/YYYY format)
-                date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', line))
-                transaction_date = None
-                if date_matches:
-                    try:
-                        transaction_date = datetime.strptime(date_matches[0].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
-                    except ValueError:
-                        pass
-                
-                # Extract amount (range like "$1,001 - $15,000" or "$1,001 $15,000")
-                amount = None
-                amount_min = None
-                amount_max = None
-                amount_match = re.search(r'\$?([\d,]+)\s*[-–]?\s*\$?([\d,]+)', line)
-                if amount_match:
-                    try:
-                        min_str = amount_match.group(1).replace(',', '')
-                        max_str = amount_match.group(2).replace(',', '')
-                        amount_min = float(min_str)
-                        amount_max = float(max_str)
-                        amount = (amount_min + amount_max) / 2
-                    except ValueError:
-                        pass
-                else:
-                    # Try single amount
-                    single_amount_match = re.search(r'\$?([\d,]+)', line)
-                    if single_amount_match:
-                        try:
-                            amount_str = single_amount_match.group(1).replace(',', '')
-                            amount = float(amount_str)
-                            amount_min = amount
-                            amount_max = amount
-                        except ValueError:
-                            pass
-                
-                # Extract asset information (security name, symbol, asset type)
-                # Remove owner, transaction type, dates, and amount to get asset text
-                asset_text = line
-                if owner:
-                    asset_text = re.sub(r'^' + re.escape(owner) + r'\s+', '', asset_text)
-                asset_text = re.sub(r'\s+[PS]\s+', ' ', asset_text)  # Remove transaction type
-                asset_text = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', asset_text)  # Remove dates
-                asset_text = re.sub(r'\$?[\d,]+\s*[-–]?\s*\$?[\d,]+', '', asset_text)  # Remove amounts
-                asset_text = asset_text.strip()
-                
-                security_name = None
-                security_symbol = None
-                asset_type = None
-                
-                if asset_text:
-                    # Remove common suffixes
-                    cleaned_asset = re.sub(r'\s*FILING STATUS:\s*\w+.*$', '', asset_text, flags=re.IGNORECASE)
-                    cleaned_asset = re.sub(r'\s*SUBHOLDING OF:\s*[^\[\]]*$', '', cleaned_asset, flags=re.IGNORECASE)
-                    
-                    # Extract ticker symbol (in parentheses)
-                    ticker_match = re.search(r'\(([A-Z]{1,5})\)', cleaned_asset)
-                    if ticker_match:
-                        security_symbol = ticker_match.group(1)
-                        cleaned_asset = re.sub(r'\s*\([A-Z]{1,5}\)\s*', '', cleaned_asset)
-                    
-                    # Extract asset type code (in brackets)
-                    asset_code_match = re.search(r'\[([A-Z]{2,3})\]', cleaned_asset)
-                    if asset_code_match:
-                        code = asset_code_match.group(1)
-                        if code in asset_codes:
-                            asset_type = asset_codes[code]
-                        cleaned_asset = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', cleaned_asset)
-                    
-                    security_name = cleaned_asset.strip()
-                    if not security_name:
-                        security_name = asset_text
-                
-                # Only create trade if we have minimum required fields
-                if transaction_date and (security_name or security_symbol) and transaction_type and amount:
-                    trade = {
-                        'filerName': filer_name,
-                        'filingDate': filing_date,
-                        'transactionDate': transaction_date,
-                        'securityName': security_name,
-                        'securitySymbol': security_symbol,
-                        'assetType': asset_type,
-                        'transactionType': transaction_type,
-                        'amount': amount,
-                        'amountMin': amount_min,
-                        'amountMax': amount_max,
-                        'owner': owner,
-                        'formType': 'house_ptr',
-                        'source': 'house'
-                    }
-                    trades.append(trade)
-                    logger.debug(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max}")
-        
-        # Alternative parsing: Look for multi-line trade entries
-        # Some PDFs may have trades spread across multiple lines
-        if len(trades) == 0:
-            logger.info("📋 Trying alternative parsing method for multi-line trades...")
-            # Look for patterns like:
-            # "SP" or "JT" followed by company name on same or next line
-            # Then transaction type, dates, amount
+                        type_char = type_match.group(1)
+                    else:
+                        type_char = None
             
-            i = 0
-            while i < len(lines):
-                line = lines[i].strip()
-                
-                # Check if line starts with owner code
-                owner_match = re.match(r'^([A-Z]{1,3})\s+', line)
-                if owner_match:
-                    owner = owner_match.group(1)
-                    # Try to extract trade from this line and following lines
-                    trade_text = line
-                    j = i + 1
-                    # Collect next few lines that might be part of this trade
-                    while j < len(lines) and j < i + 5:
-                        next_line = lines[j].strip()
-                        if next_line and not re.match(r'^[A-Z]{1,3}\s+', next_line):  # Not a new owner code
-                            trade_text += ' ' + next_line
-                            j += 1
-                        else:
-                            break
-                    
-                    # Parse the collected trade text
-                    # Extract transaction type
-                    transaction_type = None
-                    if re.search(r'\s+[PS]\s+', trade_text):
-                        type_match = re.search(r'\s+([PS])\s+', trade_text)
-                        if type_match:
-                            transaction_type = 'Purchase' if type_match.group(1) == 'P' else 'Sale'
-                    
-                    # Extract dates
-                    date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', trade_text))
-                    transaction_date = None
-                    if date_matches:
-                        try:
-                            transaction_date = datetime.strptime(date_matches[0].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
-                        except ValueError:
-                            pass
-                    
-                    # Extract amount
-                    amount = None
-                    amount_min = None
-                    amount_max = None
-                    amount_match = re.search(r'\$?([\d,]+)\s*[-–]?\s*\$?([\d,]+)', trade_text)
-                    if amount_match:
-                        try:
-                            min_str = amount_match.group(1).replace(',', '')
-                            max_str = amount_match.group(2).replace(',', '')
-                            amount_min = float(min_str)
-                            amount_max = float(max_str)
-                            amount = (amount_min + amount_max) / 2
-                        except ValueError:
-                            pass
-                    
-                    # Extract asset info
-                    asset_text = trade_text
-                    if owner:
-                        asset_text = re.sub(r'^' + re.escape(owner) + r'\s+', '', asset_text)
-                    asset_text = re.sub(r'\s+[PS]\s+', ' ', asset_text)
-                    asset_text = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', asset_text)
-                    asset_text = re.sub(r'\$?[\d,]+\s*[-–]?\s*\$?[\d,]+', '', asset_text)
-                    asset_text = asset_text.strip()
-                    
-                    security_name = None
-                    security_symbol = None
-                    asset_type = None
-                    
-                    if asset_text:
-                        cleaned_asset = re.sub(r'\s*FILING STATUS:\s*\w+.*$', '', asset_text, flags=re.IGNORECASE)
-                        cleaned_asset = re.sub(r'\s*SUBHOLDING OF:\s*[^\[\]]*$', '', cleaned_asset, flags=re.IGNORECASE)
-                        
-                        ticker_match = re.search(r'\(([A-Z]{1,5})\)', cleaned_asset)
-                        if ticker_match:
-                            security_symbol = ticker_match.group(1)
-                            cleaned_asset = re.sub(r'\s*\([A-Z]{1,5}\)\s*', '', cleaned_asset)
-                        
-                        asset_code_match = re.search(r'\[([A-Z]{2,3})\]', cleaned_asset)
-                        if asset_code_match:
-                            code = asset_code_match.group(1)
-                            if code in asset_codes:
-                                asset_type = asset_codes[code]
-                            cleaned_asset = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', cleaned_asset)
-                        
-                        security_name = cleaned_asset.strip()
-                        if not security_name:
-                            security_name = asset_text
-                    
-                    # Create trade if we have required fields
-                    if transaction_date and (security_name or security_symbol) and transaction_type and amount:
-                        trade = {
-                            'filerName': filer_name,
-                            'filingDate': filing_date,
-                            'transactionDate': transaction_date,
-                            'securityName': security_name,
-                            'securitySymbol': security_symbol,
-                            'assetType': asset_type,
-                            'transactionType': transaction_type,
-                            'amount': amount,
-                            'amountMin': amount_min,
-                            'amountMax': amount_max,
-                            'owner': owner,
-                            'formType': 'house_ptr',
-                            'source': 'house'
-                        }
-                        trades.append(trade)
-                        logger.debug(f"   ✅ Extracted trade (multi-line): {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max}")
-                    
-                    i = j  # Skip processed lines
+            if type_char:
+                if type_char == 'P':
+                    transaction_type = 'Purchase'
+                elif type_char == 'S':
+                    transaction_type = 'Sale'
+                elif type_char == 'E':
+                    transaction_type = 'Exercise'
                 else:
-                    i += 1
+                    transaction_type = type_char  # Keep as-is for other types
+            
+            # Extract dates (MM/DD/YYYY format)
+            date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', trade_text))
+            if date_matches and len(date_matches) >= 1:
+                try:
+                    transaction_date = datetime.strptime(date_matches[0].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
+                except ValueError:
+                    pass
+            
+            # Extract amount (range like "$1,001 - $15,000" or "$1,001 $15,000")
+            amount_match = re.search(r'\$([\d,]+)\s*[-–]?\s*\$?([\d,]+)', trade_text)
+            if amount_match:
+                try:
+                    min_str = amount_match.group(1).replace(',', '')
+                    max_str = amount_match.group(2).replace(',', '')
+                    amount_min = float(min_str)
+                    amount_max = float(max_str)
+                    amount = (amount_min + amount_max) / 2
+                except ValueError:
+                    pass
+            
+            # Extract asset information
+            asset_text = trade_text
+            if owner:
+                asset_text = re.sub(r'^' + re.escape(owner) + r'\s+', '', asset_text)
+            
+            # Remove transaction type, dates, and amounts
+            if transaction_type:
+                asset_text = re.sub(r'\s+[PS]\s+', ' ', asset_text)
+            asset_text = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', asset_text)
+            asset_text = re.sub(r'\$\d+[\d,]*\s*[-–]?\s*\$?\d+[\d,]*', '', asset_text)
+            asset_text = re.sub(r'\s*FILING STATUS:\s*\w+.*$', '', asset_text, flags=re.IGNORECASE)
+            asset_text = re.sub(r'\s*SUBHOLDING OF:\s*[^\[\]]*$', '', asset_text, flags=re.IGNORECASE)
+            asset_text = re.sub(r'\s*F S:\s*\w+.*$', '', asset_text, flags=re.IGNORECASE)
+            asset_text = re.sub(r'\s*S O:\s*[^D]*', '', asset_text, flags=re.IGNORECASE)
+            asset_text = re.sub(r'\s*D:\s*.*$', '', asset_text, flags=re.IGNORECASE)
+            asset_text = asset_text.strip()
+            
+            if asset_text:
+                # Extract ticker symbol (in parentheses)
+                ticker_match = re.search(r'\(([A-Z]{1,5})\)', asset_text)
+                if ticker_match:
+                    security_symbol = ticker_match.group(1)
+                    asset_text = re.sub(r'\s*\([A-Z]{1,5}\)\s*', '', asset_text)
+                
+                # Extract asset type code (in brackets)
+                asset_code_match = re.search(r'\[([A-Z]{2,3})\]', asset_text)
+                if asset_code_match:
+                    code = asset_code_match.group(1)
+                    if code in asset_codes:
+                        asset_type = asset_codes[code]
+                    asset_text = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', asset_text)
+                
+                security_name = asset_text.strip()
+            
+            # Only create trade if we have minimum required fields
+            if transaction_date and (security_name or security_symbol) and transaction_type and amount:
+                trade = {
+                    'filerName': filer_name,
+                    'filingDate': filing_date,
+                    'transactionDate': transaction_date,
+                    'securityName': security_name,
+                    'securitySymbol': security_symbol,
+                    'assetType': asset_type,
+                    'transactionType': transaction_type,
+                    'amount': amount,
+                    'amountMin': amount_min,
+                    'amountMax': amount_max,
+                    'owner': owner,
+                    'formType': 'house_ptr',
+                    'source': 'house'
+                }
+                trades.append(trade)
+                logger.info(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max}")
+            
+            i = j  # Skip processed lines
         
         logger.info(f"✅ Extracted {len(trades)} trades from House PTR: {s3_key}")
         
@@ -1479,10 +1397,10 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
             "date": event.get('date')
         }
     
-    # Limit to first 10 files for processing
-    if len(unprocessed_keys) > 10:
-        logger.info(f"⚠️ Limiting processing to first 10 files (found {len(unprocessed_keys)} unprocessed files)")
-        unprocessed_keys = unprocessed_keys[:10]
+    # Limit to first 1 file for processing (testing)
+    if len(unprocessed_keys) > 1:
+        logger.info(f"⚠️ Limiting processing to first 1 file (found {len(unprocessed_keys)} unprocessed files)")
+        unprocessed_keys = unprocessed_keys[:1]
     
     # Load politician list for matching
     logger.info("📋 Loading politician list for matching")

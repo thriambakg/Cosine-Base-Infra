@@ -2544,7 +2544,7 @@ module "politician_trades_scheduler" {
 
   target_input = jsonencode({
     backdate = null
-    date     = null # EventBridge cannot generate dynamic dates - Step Function/Glue will use current date (today)
+    date     = null # EventBridge cannot generate dynamic dates - Glue will default to yesterday (previous day's filings)
     source   = "scheduler-daily"
   })
 

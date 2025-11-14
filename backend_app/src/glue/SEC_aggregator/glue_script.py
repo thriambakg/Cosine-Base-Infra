@@ -106,26 +106,14 @@ job = Job(glueContext)
 
 # Get job parameters
 # Note: getResolvedOptions requires ALL listed arguments to be provided
-# Only include required arguments here
-# Parse date manually first to check if backdate mode is active
-# If backdate is provided, date can be null/optional
-backdate_provided = False
-for i, arg in enumerate(sys.argv):
-    if arg == '--backdate' or arg.startswith('--backdate='):
-        backdate_provided = True
-        break
-
-# Only require date if backdate is not provided
+# Only include truly required arguments here (date is optional - will be parsed manually)
 required_args = ['JOB_NAME', 's3_bucket', 'dynamodb_table']
-if not backdate_provided:
-    required_args.append('date')  # Only require date if not in backdate mode
 
 args = getResolvedOptions(sys.argv, required_args)
 
 job.init(args['JOB_NAME'], args)
 
 # Extract required parameters
-target_date = args.get('date')  # May be None if backdate mode
 s3_bucket = args.get('s3_bucket')
 dynamodb_table = args.get('dynamodb_table')
 
@@ -152,12 +140,28 @@ for i, arg in enumerate(sys.argv):
 logger.info("ℹ️ OpenSearch disabled for MVP - documents stored to DynamoDB and S3 only")
 print("ℹ️ OpenSearch disabled for MVP - documents stored to DynamoDB and S3 only", flush=True)
 
-# Parse optional backdate argument manually (since getResolvedOptions requires all args)
-# Format: --backdate=2025-11-05 or --backdate 2025-11-05
-# Step Functions may pass null as --backdate=null or --backdate null
+# Parse optional date and backdate arguments manually (since getResolvedOptions requires all args)
+# Format: --date=2025-11-05 or --date 2025-11-05
+# Step Functions may pass null as --date=null or --date null
+target_date = None
 backdate = None
+
 for i, arg in enumerate(sys.argv):
-    if arg == '--backdate' or arg.startswith('--backdate='):
+    # Parse date argument
+    if arg == '--date' or arg.startswith('--date='):
+        if '=' in arg:
+            date_value = arg.split('=', 1)[1]
+        elif i + 1 < len(sys.argv):
+            date_value = sys.argv[i + 1]
+        else:
+            continue
+        
+        # Filter out null, empty string, or string "null"
+        if date_value and date_value.strip() != '' and date_value.lower() != 'null':
+            target_date = date_value
+    
+    # Parse backdate argument
+    elif arg == '--backdate' or arg.startswith('--backdate='):
         if '=' in arg:
             backdate_value = arg.split('=', 1)[1]
         elif i + 1 < len(sys.argv):
@@ -168,7 +172,6 @@ for i, arg in enumerate(sys.argv):
         # Filter out null, empty string, or string "null"
         if backdate_value and backdate_value.strip() != '' and backdate_value.lower() != 'null':
             backdate = backdate_value
-        break
 
 # Determine mode: backdate mode or normal date mode
 # If backdate is provided, use it; otherwise use date (or default to yesterday)
@@ -184,12 +187,13 @@ elif target_date and target_date.strip() != '' and target_date.lower() != 'null'
     logger.info(f"📅 Processing SEC forms for date: {target_date}")
     print(f"📅 Processing SEC forms for date: {target_date}", flush=True)
 else:
-    # Default to today if neither provided (for scheduler - processes current day's filings)
-    today = datetime.now().date()
-    target_date = today.strftime('%Y-%m-%d')
+    # Default to yesterday if neither provided (for scheduler - processes previous day's filings)
+    # This is the typical use case: scheduler runs daily to process yesterday's filings
+    yesterday = (datetime.now().date() - timedelta(days=1))
+    target_date = yesterday.strftime('%Y-%m-%d')
     is_backdate_mode = False
-    logger.info(f"ℹ️ No date/backdate provided (or was null/empty), defaulting to today: {target_date}")
-    print(f"ℹ️ No date/backdate provided (or was null/empty), defaulting to today: {target_date}", flush=True)
+    logger.info(f"ℹ️ No date/backdate provided (or was null/empty), defaulting to yesterday: {target_date}")
+    print(f"ℹ️ No date/backdate provided (or was null/empty), defaulting to yesterday: {target_date}", flush=True)
 
 # Optional date range parameters (not currently used, but can be added via --additional-python-modules or custom parsing if needed)
 # start_date = args.get('start_date')  # Not currently used
