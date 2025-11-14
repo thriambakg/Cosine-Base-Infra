@@ -927,6 +927,8 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             
             # Add the current line (which has asset type and dates/amount)
             trade_data_lines.append(line)
+            # Track where the trade data line ends (for metadata search)
+            trade_data_end_idx = i
             j = i + 1
             
             # Collect continuation lines (multi-line asset names, amount on separate line)
@@ -977,26 +979,26 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             # Combine trade data lines into single text for parsing
             trade_text = ' '.join(trade_data_lines)
             
-            # SIMPLIFIED: Immediately collect metadata from the next few lines after trade data
-            # Metadata (F S, S O, D) appears right after trade data
-            # Start from j (where we stopped collecting trade data - this should be the metadata line if we broke on it)
-            k = j
-            look_ahead_limit = 8  # Look ahead up to 8 lines for metadata (usually 2-3 lines: F S, S O, optional D)
+            # SIMPLIFIED: Iteratively search forward from AFTER the trade data, collecting F S, S O, D lines
+            # Start from right after the trade data line (i+1) and search forward
+            # Skip continuation lines that are part of trade data (they don't have metadata patterns)
+            # Stop when we hit the next trade (has asset type bracket and owner code)
+            # This works across page breaks since we're searching the full lines array
+            k = i + 1  # Start from right after the trade data line
+            logger.debug(f"   Searching for metadata starting from line {k+1} (trade data at line {i+1}, will search forward until next trade)")
             
-            logger.debug(f"   Collecting metadata starting from line {k+1} (trade data ended at line {j}, trade started at line {i+1})")
-            
-            while k < len(lines) and k < j + look_ahead_limit:
+            while k < len(lines):
                 meta_line = lines[k].strip()
                 if not meta_line:
                     k += 1
                     continue
                 
-                # Skip headers that might appear between pages
-                if any(header in meta_line.lower() for header in ['id ownerasset', 'transaction', 'type date', 'dateamount', 'cap. gains', '$200?']):
+                # Skip table headers (they're all the same, so we can ignore them)
+                if any(header in meta_line.lower() for header in ['id ownerasset', 'transaction', 'type date', 'dateamount', 'cap. gains', '$200?', 'gains >']):
                     k += 1
                     continue
                 
-                # Check for metadata patterns - extract the value after the colon
+                # Check for metadata patterns FIRST - extract the value after the colon
                 if re.match(r'^FILING\s+STATUS:\s*', meta_line, re.IGNORECASE):
                     value = re.sub(r'^FILING\s+STATUS:\s*', '', meta_line, flags=re.IGNORECASE).strip()
                     trade_metadata['filing_status'] = value if value else 'New'
@@ -1023,7 +1025,10 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     logger.info(f"   ✅ Found description metadata at line {k+1}: '{trade_metadata['description']}'")
                 elif re.search(r'\[([A-Z]{2,3})\]', meta_line) and re.match(r'^[A-Z]{1,3}\s+', meta_line):  # Next trade data, stop
                     # Found next trade, stop looking for metadata
+                    logger.debug(f"   Stopped metadata search at line {k+1} - found next trade: {meta_line[:60]}")
                     break
+                # If we haven't matched anything and we've gone too far, stop
+                # (safety check - shouldn't happen if logic is correct)
                 k += 1
             
             # Log extracted metadata for debugging
@@ -1035,7 +1040,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 for debug_k in range(k, min(k + 5, len(lines))):
                     if debug_k < len(lines):
                         looked_at_lines.append(f"line {debug_k+1}: '{lines[debug_k][:60]}'")
-                logger.warning(f"   ⚠️ No metadata found for trade at line {i+1} (looked ahead from line {k+1} to {min(j + look_ahead_limit, len(lines))}, j={j}). Looked at: {', '.join(looked_at_lines)}")
+                logger.warning(f"   ⚠️ No metadata found for trade at line {i+1} (searched from line {k+1} to {min(k + 10, len(lines))}, j={j}). Looked at: {', '.join(looked_at_lines)}")
             
             # Parse the collected trade text
             owner = None
