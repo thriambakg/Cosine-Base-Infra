@@ -1118,7 +1118,6 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                 # Extract amount (could be range like "$100,001 - $250,000")
                 shares = None
                 price_per_share = None
-                total_amount = None
                 amount_min = None
                 amount_max = None
                 
@@ -1139,24 +1138,18 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                         try:
                             amount_min = float(re.sub(r'[^\d.]', '', range_match.group(1)))
                             amount_max = float(re.sub(r'[^\d.]', '', range_match.group(2)))
-                            # Use midpoint of range as estimate
-                            total_amount = (amount_min + amount_max) / 2
-                        except:
-                            pass
-                    else:
-                        # Single amount format
-                        try:
-                            total_amount = float(re.sub(r'[^\d.]', '', amount_str))
                         except:
                             pass
                     
-                    # Calculate price per share if we have shares and total amount
-                    if shares and shares > 0 and total_amount:
-                        price_per_share = total_amount / shares
+                    # Calculate price per share if we have shares and amount range
+                    if shares and shares > 0 and amount_min and amount_max:
+                        # Use midpoint of range for price per share calculation
+                        midpoint = (amount_min + amount_max) / 2
+                        price_per_share = midpoint / shares
                 
                 # Only create trade if we have minimum required data
                 # Don't create trade if transactionType is invalid (looks like amount)
-                if (transaction_date or security_name or security_symbol or total_amount) and transaction_type is not None:
+                if (transaction_date or security_name or security_symbol or amount_min) and transaction_type is not None:
                     # Map amount range to standard Senate PTR ranges if we have amounts
                     amount_range = None
                     if amount_min is not None and amount_max is not None:
@@ -1179,7 +1172,6 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                         'order': transaction_type,  # Map to order field for compatibility
                         'shares': shares,
                         'pricePerShare': price_per_share,
-                        'totalAmount': total_amount,
                         'amountMin': amount_min,  # For range amounts
                         'amountMax': amount_max,  # For range amounts
                         'amountRange': amount_range if amount_range else ([amount_min, amount_max] if amount_min is not None and amount_max is not None else None),
@@ -1275,6 +1267,41 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
             text = re.sub(r'\s+', ' ', text)
             return text
         
+        # Extract metadata from asset name cell (e.g., Rate/Coupon, Matures)
+        def extract_asset_metadata(cell_html):
+            """
+            Extract metadata from the asset name cell.
+            Looks for <div class="text-muted"> with <em> tags containing key-value pairs.
+            Returns a dictionary with extracted metadata.
+            """
+            metadata = {}
+            if not cell_html:
+                return metadata
+            
+            # Find the text-muted div
+            text_muted_match = re.search(r'<div[^>]*class="text-muted"[^>]*>(.*?)</div>', cell_html, re.IGNORECASE | re.DOTALL)
+            if not text_muted_match:
+                return metadata
+            
+            text_muted_content = text_muted_match.group(1)
+            
+            # Extract key-value pairs from <em>Key:</em> Value format
+            # Pattern: <em>Key:</em> Value<br> or <em>Key:</em> Value</div> or <em>Key:</em> Value (end of string)
+            # Examples: <em>Rate/Coupon:</em> 5%<br> <em>Matures:</em> 12/01/2030
+            # Handle both cases: with <br> separator and without (just whitespace)
+            pattern = r'<em>([^<]+):</em>\s*([^<]+?)(?=<em>|</div>|$|<br)'
+            matches = re.finditer(pattern, text_muted_content, re.IGNORECASE | re.DOTALL)
+            
+            for match in matches:
+                key = clean_html(match.group(1)).strip().rstrip(':')
+                value = clean_html(match.group(2)).strip()
+                if key and value:
+                    # Normalize key (remove extra spaces, make consistent)
+                    key_normalized = re.sub(r'\s+', ' ', key).strip()
+                    metadata[key_normalized] = value
+            
+            return metadata
+        
         for row_num, row_match in enumerate(rows, start=1):
             row_html = row_match.group(1)
             
@@ -1308,12 +1335,14 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                         break
                 
                 # Extract columns - use smart mapping if we found amount, otherwise sequential
+                asset_name_cell_html = None  # Store raw HTML for metadata extraction
                 if amount_index is not None and amount_index >= 6:
                     # Smart mapping: work backwards from Amount column
                     transaction_date_str = clean_html(cells[amount_index - 6]) if amount_index >= 6 else ''
                     owner = clean_html(cells[amount_index - 5]) if amount_index >= 5 else ''
                     ticker = clean_html(cells[amount_index - 4]) if amount_index >= 4 else ''
-                    asset_name = clean_html(cells[amount_index - 3]) if amount_index >= 3 else ''
+                    asset_name_cell_html = cells[amount_index - 3] if amount_index >= 3 else ''
+                    asset_name = clean_html(asset_name_cell_html) if asset_name_cell_html else ''
                     asset_type = clean_html(cells[amount_index - 2]) if amount_index >= 2 else ''
                     transaction_type = clean_html(cells[amount_index - 1]) if amount_index >= 1 else ''
                     amount_str = clean_html(cells[amount_index])
@@ -1325,7 +1354,8 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                     transaction_date_str = clean_html(cells[start_idx + 0]) if len(cells) > start_idx + 0 else ''
                     owner = clean_html(cells[start_idx + 1]) if len(cells) > start_idx + 1 else ''
                     ticker = clean_html(cells[start_idx + 2]) if len(cells) > start_idx + 2 else ''
-                    asset_name = clean_html(cells[start_idx + 3]) if len(cells) > start_idx + 3 else ''
+                    asset_name_cell_html = cells[start_idx + 3] if len(cells) > start_idx + 3 else ''
+                    asset_name = clean_html(asset_name_cell_html) if asset_name_cell_html else ''
                     asset_type = clean_html(cells[start_idx + 4]) if len(cells) > start_idx + 4 else ''
                     transaction_type = clean_html(cells[start_idx + 5]) if len(cells) > start_idx + 5 else ''
                     amount_str = clean_html(cells[start_idx + 6]) if len(cells) > start_idx + 6 else ''
@@ -1333,6 +1363,9 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 
                 # Clean asset name - remove extra whitespace from nested HTML
                 asset_name = ' '.join(asset_name.split()) if asset_name else ''
+                
+                # Extract metadata from asset name cell (Rate/Coupon, Matures, etc.)
+                asset_metadata = extract_asset_metadata(asset_name_cell_html) if asset_name_cell_html else {}
                 
                 # Validate that we got essential fields
                 if not transaction_type or not amount_str or amount_str in ['--', '']:
@@ -1353,7 +1386,6 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 
                 amount_min = None
                 amount_max = None
-                total_amount = None
                 exact_amount = None  # For exact amounts (not a GSI)
                 amount_range = None  # List of two integers [min, max] for the standard range
                 
@@ -1374,8 +1406,6 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                                 amount_min = int(raw_min)
                                 amount_max = int(raw_max)
                                 amount_range = [amount_min, amount_max]  # Use provided range
-                                
-                                total_amount = (raw_min + raw_max) / 2
                             except:
                                 pass
                     else:
@@ -1397,7 +1427,6 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                             # Also set amountMin/amountMax to the exact value for backwards compatibility
                             amount_min = int(exact_value)
                             amount_max = int(exact_value)
-                            total_amount = exact_value
                         except:
                             pass
                 
@@ -1424,14 +1453,14 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                     'securityName': asset_name,
                     'assetType': asset_type,
                     'transactionType': transaction_type,
-                    'amount': total_amount,
                     'amountMin': amount_min,
                     'amountMax': amount_max,
                     'amountRange': amount_range,  # List of two integers [min, max] for standard Senate PTR range
                     'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI)
                     'shares': None,  # Not provided in Senate PTR HTML
                     'comment': comment,
-                    'filerName': filer_name  # Include filer name from HTML for matching
+                    'filerName': filer_name,  # Include filer name from HTML for matching
+                    'filingMetadata': asset_metadata if asset_metadata else None  # Flexible JSON blob for asset metadata
                 }
                 
                 trades.append(trade)
@@ -1724,7 +1753,7 @@ def lambda_handler(event, context):
                 
                 # Map Senate PTR transaction fields to standard format
                 # Senate PTRs use: securityName, assetType, order, amount
-                # Standard format uses: securityName, transactionType, totalAmount
+                # Standard format uses: securityName, transactionType, amountMin/amountMax
                 # For unparsed trades, transactionType must be None (not speculation)
                 if is_unparsed:
                     transaction_type = None
@@ -1823,13 +1852,13 @@ def lambda_handler(event, context):
                     'order': trade.get('order'),  # Keep original "order" field
                     'shares': trade.get('shares'),
                     'pricePerShare': trade.get('pricePerShare'),
-                    'totalAmount': trade.get('amount') or trade.get('totalAmount'),
                     # For unparsed trades, use UNPARSED_AMOUNT_VALUE for amounts; otherwise use trade values
                     'amountMin': UNPARSED_AMOUNT_VALUE if is_unparsed else trade.get('amountMin'),  # High value for unparsed, allows "N/A" search
                     'amountMax': UNPARSED_AMOUNT_VALUE if is_unparsed else trade.get('amountMax'),  # High value for unparsed, allows "N/A" search
                     'amountRange': amount_range,  # [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE] for unparsed, [min, max] for valid trades
                     'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI) - None for unparsed
                     'owner': trade.get('owner'),
+                    'filingMetadata': trade.get('filingMetadata'),  # Flexible JSON blob for asset metadata (e.g., Rate/Coupon, Matures)
                     'comment': trade.get('comment'),
                     'formS3Key': s3_key,  # Critical: S3 key for downloading original filing
                     'matchConfidence': matched_politician.get('matchScore', 1.0),

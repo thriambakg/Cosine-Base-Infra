@@ -1455,7 +1455,6 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'order': None,
                     'shares': None,
                     'pricePerShare': None,
-                    'totalAmount': trade.get('amount'),
                     'amountMin': amount_min,
                     'amountMax': amount_max,
                     'amountRange': amount_range,

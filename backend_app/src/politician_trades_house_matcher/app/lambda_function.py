@@ -975,16 +975,36 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 'description': None
             }
             
-            # Look ahead for F S and S O lines
+            # Look ahead for F S, S O, and D lines
+            # Also check for full format: "FILING STATUS:", "SUBHOLDING OF:", "DESCRIPTION:"
             k = j
             while k < len(lines) and k < j + 5:  # Look ahead a few lines for metadata
                 meta_line = lines[k].strip()
-                if re.match(r'^F\s+S:\s*New', meta_line, re.IGNORECASE):
-                    trade_metadata['filing_status'] = meta_line
+                # Check for full format first (FILING STATUS:, SUBHOLDING OF:, DESCRIPTION:)
+                if re.match(r'^FILING\s+STATUS:\s*', meta_line, re.IGNORECASE):
+                    # Extract value after "FILING STATUS:"
+                    value = re.sub(r'^FILING\s+STATUS:\s*', '', meta_line, flags=re.IGNORECASE).strip()
+                    trade_metadata['filing_status'] = value if value else 'New'
+                elif re.match(r'^F\s+S:\s*', meta_line, re.IGNORECASE):
+                    # Extract value after "F S:" or "F S: New"
+                    value = re.sub(r'^F\s+S:\s*', '', meta_line, flags=re.IGNORECASE).strip()
+                    trade_metadata['filing_status'] = value if value else 'New'
+                elif re.match(r'^SUBHOLDING\s+OF:\s*', meta_line, re.IGNORECASE):
+                    # Extract value after "SUBHOLDING OF:"
+                    value = re.sub(r'^SUBHOLDING\s+OF:\s*', '', meta_line, flags=re.IGNORECASE).strip()
+                    trade_metadata['subholding_of'] = value
                 elif re.match(r'^S\s+O:\s*', meta_line, re.IGNORECASE):
-                    trade_metadata['subholding_of'] = meta_line
+                    # Extract value after "S O:"
+                    value = re.sub(r'^S\s+O:\s*', '', meta_line, flags=re.IGNORECASE).strip()
+                    trade_metadata['subholding_of'] = value
+                elif re.match(r'^DESCRIPTION:\s*', meta_line, re.IGNORECASE):
+                    # Extract value after "DESCRIPTION:"
+                    value = re.sub(r'^DESCRIPTION:\s*', '', meta_line, flags=re.IGNORECASE).strip()
+                    trade_metadata['description'] = value
                 elif re.match(r'^D:\s*', meta_line, re.IGNORECASE):
-                    trade_metadata['description'] = meta_line
+                    # Extract value after "D:"
+                    value = re.sub(r'^D:\s*', '', meta_line, flags=re.IGNORECASE).strip()
+                    trade_metadata['description'] = value
                 elif re.search(r'\[([A-Z]{2,3})\]', meta_line):  # Next trade data, stop
                     break
                 k += 1
@@ -1172,7 +1192,12 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     'amountMax': amount_max,
                     'owner': owner,
                     'formType': 'house_ptr',
-                    'source': 'house'
+                    'source': 'house',
+                    'filingMetadata': {
+                        'filingStatus': trade_metadata.get('filing_status'),
+                        'subholdingOf': trade_metadata.get('subholding_of'),
+                        'description': trade_metadata.get('description')
+                    }
                 }
                 trades.append(trade)
                 logger.info(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max} (name: '{security_name}')")
@@ -1397,7 +1422,6 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'order': None,
                     'shares': None,
                     'pricePerShare': None,
-                    'totalAmount': trade.get('amount'),
                     'amountMin': amount_min,
                     'amountMax': amount_max,
                     'amountRange': amount_range,
@@ -1409,7 +1433,12 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'source': 'house',
                     'isUnparsed': False,
                     'requiresManualReview': False,
-                    'stateDistrict': state_district
+                    'stateDistrict': state_district,
+                    'filingMetadata': trade.get('filingMetadata', {
+                        'filingStatus': None,
+                        'subholdingOf': None,
+                        'description': None
+                    })
                 }
                 matched_trades.append(matched_trade)
             else:
