@@ -788,7 +788,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             match = re.search(pattern, full_text, re.IGNORECASE | re.MULTILINE)
             if match:
                 filer_name = match.group(1).strip()
-                # Remove "Hon." prefix if present
+                    # Remove "Hon." prefix if present
                 filer_name = re.sub(r'^Hon\.?\s+', '', filer_name, flags=re.IGNORECASE).strip()
                 # Remove any trailing "Status" that might have been captured
                 filer_name = re.sub(r'\s+Status\s*$', '', filer_name, flags=re.IGNORECASE).strip()
@@ -875,7 +875,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             if any(skip in line_lower for skip in ['ownerasset', 'transaction', 'notification', 'cap. gains', 'filing id', 'digitally signed', 'certify', 'id owner', 'type date', 'dateamount', 'gains >', '$200?']):
                 i += 1
                 continue
-            
+                
             # Skip metadata lines (F S, S O, D) - we'll collect these after finding trade data
             if re.match(r'^(F\s+S:|S\s+O:|D:)\s*', line, re.IGNORECASE):
                 i += 1
@@ -940,22 +940,22 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 # FIRST: Check if we hit metadata (F S, S O, D) - these mark the end of trade data
                 if re.match(r'^(F\s+S:|S\s+O:|D:)\s*', next_line, re.IGNORECASE):
                     # Stop collecting trade data - metadata starts here
-                    break
-                
+                        break
+            
                 # Stop if we hit next trade data (has asset type and dates/amount and owner code)
                 if re.search(r'\[([A-Z]{2,3})\]', next_line) and re.match(r'^[A-Z]{1,3}\s+', next_line):
                     break
-                
+        
                 # Stop if we hit a header
                 if any(header in next_line.lower() for header in ['ownerasset', 'transaction', 'notification', 'id owner', 'type date', 'dateamount', 'filing id']):
-                    break
-                
+                        break
+            
                 # If this is amount continuation (just starts with $ and no dates)
                 if re.match(r'^\$\d+', next_line) and not re.search(r'\d{1,2}/\d{1,2}/\d{4}', next_line):
                     trade_data_lines.append(next_line)
                     j += 1
                     break
-                
+        
                 # If this could be part of multi-line asset name (no asset type bracket yet)
                 if not re.search(r'\[([A-Z]{2,3})\]', next_line):
                     # Check if it has owner code - might be start of next trade
@@ -1035,7 +1035,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 for debug_k in range(k, min(k + 5, len(lines))):
                     if debug_k < len(lines):
                         looked_at_lines.append(f"line {debug_k+1}: '{lines[debug_k][:60]}'")
-                logger.warning(f"   ⚠️ No metadata found for trade at line {i+1} (looked ahead from line {k+1} to {min(end_limit, len(lines))}, metadata_start_idx={metadata_start_idx}, j={j}). Looked at: {', '.join(looked_at_lines)}")
+                logger.warning(f"   ⚠️ No metadata found for trade at line {i+1} (looked ahead from line {k+1} to {min(end_limit, len(lines))}, j={j}). Looked at: {', '.join(looked_at_lines)}")
             
             # Parse the collected trade text
             owner = None
@@ -1115,7 +1115,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     transaction_date = datetime.strptime(date_matches[0].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
                 except ValueError:
                     pass
-            
+                    
             # Extract amount (range like "$1,001 - $15,000" or "$1,001 $15,000")
             amount_match = re.search(r'\$([\d,]+)\s*[-–]?\s*\$?([\d,]+)', trade_text)
             if amount_match:
@@ -1165,15 +1165,15 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 # Search for ticker in the portion before asset type
                 text_before_asset_type = asset_text[:asset_type_pos]
                 ticker_match = re.search(r'\(([A-Z]{1,5})\)', text_before_asset_type)
-            
-            if ticker_match:
-                security_symbol = ticker_match.group(1)
-                ticker_pos = asset_text.find(ticker_match.group(0))
-                # Asset name is everything before the ticker parentheses
-                security_name = asset_text[:ticker_pos].strip()
-            else:
+        
+                if ticker_match:
+                    security_symbol = ticker_match.group(1)
+                    ticker_pos = asset_text.find(ticker_match.group(0))
+                    # Asset name is everything before the ticker parentheses
+                    security_name = asset_text[:ticker_pos].strip()
+                else:
                 # No ticker found - asset name is everything before the asset type bracket
-                security_name = asset_text[:asset_type_pos].strip()
+                    security_name = asset_text[:asset_type_pos].strip()
             
             # Clean up security name - remove transaction data that might have been captured
             if security_name:
