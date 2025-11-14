@@ -1019,131 +1019,14 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 metadata_lines.append(meta_line)
                 k += 1
             
-            # Store all collected lines as metadata blob, then parse it
+            # Store all collected lines as metadata blob (no parsing, just dump it)
             metadata_blob = '\n'.join(metadata_lines).strip()
             if metadata_blob:
-                # Parse metadata blob to extract structured fields
-                # Look for patterns: F S:, S O:, D:, C: (with colons)
-                # Map: F S: or anything with S: → Filing Status
-                #      O: → Subholding Of
-                #      D: → Description
-                #      C: → Comments
-                
-                # Initialize parsed fields
-                filing_status = None
-                subholding_of = None
-                description = None
-                comments = None
-                
-                # Pattern to find all metadata markers: F S:, S O:, D:, C:, or any word ending with S:
-                # We'll search for these patterns and extract values until the next marker
-                # Split by lines first, then process
-                lines_to_parse = metadata_blob.split('\n')
-                current_field = None
-                current_value = []
-                
-                # Helper function to save current field
-                def save_current_field():
-                    nonlocal filing_status, subholding_of, description, comments
-                    if current_field == 'filing_status':
-                        filing_status = '\n'.join(current_value).strip() if current_value else None
-                    elif current_field == 'subholding_of':
-                        subholding_of = '\n'.join(current_value).strip() if current_value else None
-                    elif current_field == 'description':
-                        description = '\n'.join(current_value).strip() if current_value else None
-                    elif current_field == 'comments':
-                        comments = '\n'.join(current_value).strip() if current_value else None
-                
-                for line in lines_to_parse:
-                    line = line.strip()
-                    if not line:
-                        if current_field and current_value:
-                            # Add blank line to current value if we're collecting
-                            current_value.append('')
-                        continue
-                    
-                    # Check for metadata markers (order matters - check specific patterns first)
-                    # S O: or SUBHOLDING OF: → Subholding Of (check this BEFORE S: to avoid false matches)
-                    if re.match(r'^(S\s+O:|SUBHOLDING\s+OF:)\s*', line, re.IGNORECASE):
-                        # Save previous field
-                        save_current_field()
-                        current_field = 'subholding_of'
-                        # Extract value after marker
-                        value = re.sub(r'^(S\s+O:|SUBHOLDING\s+OF:)\s*', '', line, flags=re.IGNORECASE).strip()
-                        current_value = [value] if value else []
-                    # F S: or FILING STATUS: → Filing Status
-                    elif re.match(r'^(F\s+S:|FILING\s+STATUS:)\s*', line, re.IGNORECASE):
-                        # Save previous field
-                        save_current_field()
-                        current_field = 'filing_status'
-                        # Extract value after marker
-                        value = re.sub(r'^(F\s+S:|FILING\s+STATUS:)\s*', '', line, flags=re.IGNORECASE).strip()
-                        current_value = [value] if value else []
-                    # D: or DESCRIPTION: → Description
-                    elif re.match(r'^(D:|DESCRIPTION:)\s*', line, re.IGNORECASE):
-                        # Save previous field
-                        save_current_field()
-                        current_field = 'description'
-                        # Extract value after marker
-                        value = re.sub(r'^(D:|DESCRIPTION:)\s*', '', line, flags=re.IGNORECASE).strip()
-                        current_value = [value] if value else []
-                    # C: or COMMENTS: → Comments
-                    elif re.match(r'^(C:|COMMENTS?:)\s*', line, re.IGNORECASE):
-                        # Save previous field
-                        save_current_field()
-                        current_field = 'comments'
-                        # Extract value after marker
-                        value = re.sub(r'^(C:|COMMENTS?:)\s*', '', line, flags=re.IGNORECASE).strip()
-                        current_value = [value] if value else []
-                    # Check for any pattern with S: (for Filing Status variations) - must come AFTER S O: check
-                    elif re.search(r'\b\w+\s+S:\s*', line, re.IGNORECASE):
-                        # This might be a Filing Status variation (e.g., "FILING S:", "STATUS S:")
-                        # Save previous field
-                        save_current_field()
-                        current_field = 'filing_status'
-                        # Extract value after S:
-                        match = re.search(r'\b\w+\s+S:\s*(.+)', line, re.IGNORECASE)
-                        value = match.group(1).strip() if match else ''
-                        current_value = [value] if value else []
-                    # Check for O: (Subholding Of) - must come AFTER S O: check
-                    elif re.match(r'^O:\s*', line, re.IGNORECASE):
-                        # Save previous field
-                        save_current_field()
-                        current_field = 'subholding_of'
-                        # Extract value after marker
-                        value = re.sub(r'^O:\s*', '', line, flags=re.IGNORECASE).strip()
-                        current_value = [value] if value else []
-                    else:
-                        # Continuation of current field value
-                        if current_field:
-                            current_value.append(line)
-                
-                # Save the last field
-                if current_field == 'filing_status':
-                    filing_status = '\n'.join(current_value).strip() if current_value else None
-                elif current_field == 'subholding_of':
-                    subholding_of = '\n'.join(current_value).strip() if current_value else None
-                elif current_field == 'description':
-                    description = '\n'.join(current_value).strip() if current_value else None
-                elif current_field == 'comments':
-                    comments = '\n'.join(current_value).strip() if current_value else None
-                
-                # Store parsed metadata
-                parsed_metadata = {}
-                if filing_status:
-                    parsed_metadata['filingStatus'] = filing_status
-                if subholding_of:
-                    parsed_metadata['subholdingOf'] = subholding_of
-                if description:
-                    parsed_metadata['description'] = description
-                if comments:
-                    parsed_metadata['comments'] = comments
-                
-                trade_metadata['metadata'] = parsed_metadata if parsed_metadata else None
-                logger.info(f"   ✅ Parsed metadata for trade at line {i+1}: {parsed_metadata}")
+                # Store the raw blob in metadata field - simplified schema
+                trade_metadata['metadata'] = metadata_blob
+                logger.info(f"   ✅ Collected {len(metadata_lines)} lines of metadata for trade at line {i+1}: {metadata_blob[:100]}...")
             else:
                 logger.debug(f"   No metadata found for trade at line {i+1}")
-                trade_metadata['metadata'] = None
             
             # Parse the collected trade text
             owner = None

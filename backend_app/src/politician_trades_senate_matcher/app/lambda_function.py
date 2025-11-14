@@ -659,7 +659,7 @@ def parse_table_as_senate_transactions(table_data: List[List[str]], full_text: s
             return trades
         
         # First row is typically headers
-        headers = [h.strip().lower() for h in table_data[0]]
+        headers = [h.strip().lower() if h else '' for h in table_data[0]]
         logger.info(f"📋 Table headers: {headers}")
         
         # Find column indices
@@ -1041,7 +1041,7 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
             shares_col = None
             
             for idx, cell in enumerate(header_row):
-                cell_lower = cell.lower().strip()
+                cell_lower = cell.lower().strip() if cell else ''
                 if 'transaction date' in cell_lower or ('date' in cell_lower and 'transaction' in cell_lower):
                     date_col = idx
                 elif 'owner' in cell_lower:
@@ -1277,6 +1277,8 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
         
         # Clean HTML helper function (defined once before loop)
         def clean_html(text):
+            if not text:
+                return ''
             # Remove HTML tags
             text = re.sub(r'<[^>]+>', '', text)
             # Decode HTML entities
@@ -1358,28 +1360,28 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 asset_name_cell_html = None  # Store raw HTML for metadata extraction
                 if amount_index is not None and amount_index >= 6:
                     # Smart mapping: work backwards from Amount column
-                    transaction_date_str = clean_html(cells[amount_index - 6]) if amount_index >= 6 else ''
-                    owner = clean_html(cells[amount_index - 5]) if amount_index >= 5 else ''
-                    ticker = clean_html(cells[amount_index - 4]) if amount_index >= 4 else ''
-                    asset_name_cell_html = cells[amount_index - 3] if amount_index >= 3 else ''
+                    transaction_date_str = clean_html(cells[amount_index - 6] if amount_index >= 6 and amount_index - 6 < len(cells) and cells[amount_index - 6] else None) or ''
+                    owner = clean_html(cells[amount_index - 5] if amount_index >= 5 and amount_index - 5 < len(cells) and cells[amount_index - 5] else None) or ''
+                    ticker = clean_html(cells[amount_index - 4] if amount_index >= 4 and amount_index - 4 < len(cells) and cells[amount_index - 4] else None) or ''
+                    asset_name_cell_html = cells[amount_index - 3] if amount_index >= 3 and amount_index - 3 < len(cells) else None
                     asset_name = clean_html(asset_name_cell_html) if asset_name_cell_html else ''
-                    asset_type = clean_html(cells[amount_index - 2]) if amount_index >= 2 else ''
-                    transaction_type = clean_html(cells[amount_index - 1]) if amount_index >= 1 else ''
-                    amount_str = clean_html(cells[amount_index])
-                    comment = clean_html(cells[amount_index + 1]) if amount_index + 1 < len(cells) else ''
+                    asset_type = clean_html(cells[amount_index - 2] if amount_index >= 2 and amount_index - 2 < len(cells) and cells[amount_index - 2] else None) or ''
+                    transaction_type = clean_html(cells[amount_index - 1] if amount_index >= 1 and amount_index - 1 < len(cells) and cells[amount_index - 1] else None) or ''
+                    amount_str = clean_html(cells[amount_index] if amount_index < len(cells) and cells[amount_index] else None) or ''
+                    comment = clean_html(cells[amount_index + 1] if amount_index + 1 < len(cells) and cells[amount_index + 1] else None) or ''
                 else:
                     # Sequential mapping (standard case)
                     # Skip first cell if it's just a row number
-                    start_idx = 1 if (len(cells) > 0 and re.match(r'^\s*\d+\s*$', clean_html(cells[0]))) else 0
-                    transaction_date_str = clean_html(cells[start_idx + 0]) if len(cells) > start_idx + 0 else ''
-                    owner = clean_html(cells[start_idx + 1]) if len(cells) > start_idx + 1 else ''
-                    ticker = clean_html(cells[start_idx + 2]) if len(cells) > start_idx + 2 else ''
-                    asset_name_cell_html = cells[start_idx + 3] if len(cells) > start_idx + 3 else ''
+                    start_idx = 1 if (len(cells) > 0 and cells[0] and re.match(r'^\s*\d+\s*$', clean_html(cells[0]))) else 0
+                    transaction_date_str = clean_html(cells[start_idx + 0] if len(cells) > start_idx + 0 and cells[start_idx + 0] else None) or ''
+                    owner = clean_html(cells[start_idx + 1] if len(cells) > start_idx + 1 and cells[start_idx + 1] else None) or ''
+                    ticker = clean_html(cells[start_idx + 2] if len(cells) > start_idx + 2 and cells[start_idx + 2] else None) or ''
+                    asset_name_cell_html = cells[start_idx + 3] if len(cells) > start_idx + 3 else None
                     asset_name = clean_html(asset_name_cell_html) if asset_name_cell_html else ''
-                    asset_type = clean_html(cells[start_idx + 4]) if len(cells) > start_idx + 4 else ''
-                    transaction_type = clean_html(cells[start_idx + 5]) if len(cells) > start_idx + 5 else ''
-                    amount_str = clean_html(cells[start_idx + 6]) if len(cells) > start_idx + 6 else ''
-                    comment = clean_html(cells[start_idx + 7]) if len(cells) > start_idx + 7 else ''
+                    asset_type = clean_html(cells[start_idx + 4] if len(cells) > start_idx + 4 and cells[start_idx + 4] else None) or ''
+                    transaction_type = clean_html(cells[start_idx + 5] if len(cells) > start_idx + 5 and cells[start_idx + 5] else None) or ''
+                    amount_str = clean_html(cells[start_idx + 6] if len(cells) > start_idx + 6 and cells[start_idx + 6] else None) or ''
+                    comment = clean_html(cells[start_idx + 7] if len(cells) > start_idx + 7 and cells[start_idx + 7] else None) or ''
                 
                 # Clean asset name - remove extra whitespace from nested HTML
                 asset_name = ' '.join(asset_name.split()) if asset_name else ''
