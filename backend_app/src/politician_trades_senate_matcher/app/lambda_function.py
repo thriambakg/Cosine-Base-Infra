@@ -1364,7 +1364,15 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                     owner = clean_html(cells[amount_index - 5] if amount_index >= 5 and amount_index - 5 < len(cells) and cells[amount_index - 5] else None) or ''
                     ticker = clean_html(cells[amount_index - 4] if amount_index >= 4 and amount_index - 4 < len(cells) and cells[amount_index - 4] else None) or ''
                     asset_name_cell_html = cells[amount_index - 3] if amount_index >= 3 and amount_index - 3 < len(cells) else None
-                    asset_name = clean_html(asset_name_cell_html) if asset_name_cell_html else ''
+                    # Extract metadata from asset name cell BEFORE cleaning (so we can remove it from asset name)
+                    asset_metadata = extract_asset_metadata(asset_name_cell_html) if asset_name_cell_html else {}
+                    # Remove the metadata div from asset name before cleaning
+                    if asset_name_cell_html:
+                        # Remove the <div class="text-muted"> section from the HTML before cleaning
+                        asset_name_html_clean = re.sub(r'<div[^>]*class="text-muted"[^>]*>.*?</div>', '', asset_name_cell_html, flags=re.IGNORECASE | re.DOTALL)
+                        asset_name = clean_html(asset_name_html_clean) if asset_name_html_clean else ''
+                    else:
+                        asset_name = ''
                     asset_type = clean_html(cells[amount_index - 2] if amount_index >= 2 and amount_index - 2 < len(cells) and cells[amount_index - 2] else None) or ''
                     transaction_type = clean_html(cells[amount_index - 1] if amount_index >= 1 and amount_index - 1 < len(cells) and cells[amount_index - 1] else None) or ''
                     amount_str = clean_html(cells[amount_index] if amount_index < len(cells) and cells[amount_index] else None) or ''
@@ -1377,7 +1385,15 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                     owner = clean_html(cells[start_idx + 1] if len(cells) > start_idx + 1 and cells[start_idx + 1] else None) or ''
                     ticker = clean_html(cells[start_idx + 2] if len(cells) > start_idx + 2 and cells[start_idx + 2] else None) or ''
                     asset_name_cell_html = cells[start_idx + 3] if len(cells) > start_idx + 3 else None
-                    asset_name = clean_html(asset_name_cell_html) if asset_name_cell_html else ''
+                    # Extract metadata from asset name cell BEFORE cleaning (so we can remove it from asset name)
+                    asset_metadata = extract_asset_metadata(asset_name_cell_html) if asset_name_cell_html else {}
+                    # Remove the metadata div from asset name before cleaning
+                    if asset_name_cell_html:
+                        # Remove the <div class="text-muted"> section from the HTML before cleaning
+                        asset_name_html_clean = re.sub(r'<div[^>]*class="text-muted"[^>]*>.*?</div>', '', asset_name_cell_html, flags=re.IGNORECASE | re.DOTALL)
+                        asset_name = clean_html(asset_name_html_clean) if asset_name_html_clean else ''
+                    else:
+                        asset_name = ''
                     asset_type = clean_html(cells[start_idx + 4] if len(cells) > start_idx + 4 and cells[start_idx + 4] else None) or ''
                     transaction_type = clean_html(cells[start_idx + 5] if len(cells) > start_idx + 5 and cells[start_idx + 5] else None) or ''
                     amount_str = clean_html(cells[start_idx + 6] if len(cells) > start_idx + 6 and cells[start_idx + 6] else None) or ''
@@ -1385,9 +1401,6 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 
                 # Clean asset name - remove extra whitespace from nested HTML
                 asset_name = ' '.join(asset_name.split()) if asset_name else ''
-                
-                # Extract metadata from asset name cell (Rate/Coupon, Matures, etc.)
-                asset_metadata = extract_asset_metadata(asset_name_cell_html) if asset_name_cell_html else {}
                 
                 # Validate that we got essential fields
                 if not transaction_type or not amount_str or amount_str in ['--', '']:
