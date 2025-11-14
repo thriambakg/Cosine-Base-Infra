@@ -848,141 +848,121 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 except ValueError:
                     pass
         
-        # Parse transaction tables using pattern matching
-        # House PTR format: Owner (optional) Asset [Type] TransactionType Date NotificationDate Amount
-        # Examples:
-        #   "JT Dallas Tex Area Rapid 5.00% 12/01/25 [GS]E 12/02/2024 01/06/2025 $1,001 - $15,000"
-        #   "Coca-Cola Company (KO) [ST] P 12/16/2024 01/06/2025 $1,001 - $15,000"
-        #   "JT Alibaba Group Holding Limited American Depositary Shares each representing eight Ordinary share (BABA) [ST]S 12/16/2024 01/07/2025 $1,001 - $15,000"
-        
-        # Look for trade patterns in the full text
-        # Pattern: (optional owner) asset name (optional ticker) [asset type] transaction_type date date amount
-        # Transaction types: P (Purchase), S (Sale), E (Exercise), etc.
+        # Parse transaction tables using structured approach
+        # House PTR format: Each trade entry starts with "F S: New" (Filing Status)
+        # Structure:
+        #   F S: New (Filing Status - marks start of trade)
+        #   S O: [account name] (Subholding Of)
+        #   D: [description] (optional - Description, e.g., call options details)
+        #   Trade data line(s): Asset name + (optional ticker) + [asset type] + Transaction type + Dates + Amount
+        #
+        # Asset parsing:
+        #   - Asset name = text before parentheses (or before brackets if no ticker)
+        #   - Ticker = characters in parentheses (optional, can be null for bonds)
+        #   - Asset type = characters in brackets (always present)
         
         # Split into lines for processing
-        lines = full_text.split('\n')
+        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
         
-        # Look for lines that contain trade data patterns
-        # A trade line typically has: dates (MM/DD/YYYY), amount ($X,XXX - $X,XXX), and transaction type
+        # Find all trade entries by looking for "F S: New" markers
         i = 0
         while i < len(lines):
             line = lines[i].strip()
             
-            # Skip header lines and very short lines
-            if not line or len(line) < 20:
-                i += 1
-                continue
-            
-            # Skip lines that are clearly headers or metadata
+            # Skip header lines
             line_lower = line.lower()
-            if any(skip in line_lower for skip in ['ownerasset', 'transaction', 'notification', 'cap. gains', 'filing id', 'digitally signed', 'certify']):
+            if any(skip in line_lower for skip in ['ownerasset', 'transaction', 'notification', 'cap. gains', 'filing id', 'digitally signed', 'certify', 'id owner', 'type date', 'dateamount', 'gains >', '$200?']):
                 i += 1
                 continue
             
-            # Check if this line looks like it could be part of a trade
-            # It might be the start of a trade (owner code) or have transaction data (dates + amount)
-            # Or it could be an asset name without owner code (e.g., "Coca-Cola Company (KO) [ST] S ...")
-            has_dates = bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line))
-            has_amount = bool(re.search(r'\$\d+', line))
-            has_owner_code = bool(re.match(r'^[A-Z]{1,3}\s+', line))
-            has_ticker = bool(re.search(r'\([A-Z]{1,5}\)', line))  # Has ticker symbol
-            
-            # Skip if it's clearly not a trade line
-            # A trade line should have: (owner code) OR (dates + amount) OR (ticker + dates/amount) OR (dates OR amount)
-            # We're more lenient now - if it has dates OR amount, it might be part of a trade
-            is_potential_trade = (
-                (has_dates and has_amount) or  # Complete transaction data
-                has_owner_code or  # Starts with owner code
-                (has_ticker and (has_dates or has_amount)) or  # Has ticker with dates/amount
-                (has_dates and not has_amount) or  # Has dates (amount might be on next line)
-                (has_amount and not has_dates)  # Has amount (dates might be on next line)
-            )
-            
-            if not is_potential_trade:
+            # Look for "F S: New" to identify start of a trade entry
+            if not re.match(r'^F\s+S:\s*New', line, re.IGNORECASE):
                 i += 1
                 continue
             
-            # Try to extract trade from this line and potentially next lines (multi-line trades)
-            # Strategy: Collect lines until we find the transaction data (dates + amount on same line)
-            trade_text = line
+            # Found start of trade entry - collect the trade
+            logger.debug(f"   Found trade entry starting at line {i+1}: {line}")
+            
+            # Collect trade entry: F S, S O, optional D, and trade data line(s)
+            trade_metadata = {
+                'filing_status': line,  # "F S: New"
+                'subholding_of': None,   # "S O: ..."
+                'description': None     # "D: ..." (optional)
+            }
+            
             j = i + 1
-            found_transaction_data = False
+            trade_data_lines = []  # Will collect the actual trade data line(s)
             
-            # Check if current line already has transaction data
-            if re.search(r'\d{1,2}/\d{1,2}/\d{4}', line) and re.search(r'\$\d+', line):
-                found_transaction_data = True
+            # Collect S O: line (should be next)
+            if j < len(lines) and re.match(r'^S\s+O:\s*', lines[j], re.IGNORECASE):
+                trade_metadata['subholding_of'] = lines[j]
+                j += 1
             
-            # Collect next lines until we find transaction data or hit a clear boundary
-            # Strategy: Collect lines that might contain dates OR amounts separately, then combine
-            collected_dates = False
-            collected_amount = False
-            while j < len(lines) and j < i + 15:  # Increased limit further for complex multi-line trades
+            # Collect optional D: line
+            if j < len(lines) and re.match(r'^D:\s*', lines[j], re.IGNORECASE):
+                trade_metadata['description'] = lines[j]
+                j += 1
+            
+            # Collect trade data line(s) - these contain the actual trade information
+            # Trade data line has: Asset name + (optional ticker) + [asset type] + Transaction type + Dates + Amount
+            # Stop when we hit next "F S: New" or header or end of file
+            while j < len(lines):
                 next_line = lines[j].strip()
                 if not next_line:
                     j += 1
                     continue
                 
-                # Check if this line has transaction data components
+                # Stop if we hit next trade entry
+                if re.match(r'^F\s+S:\s*New', next_line, re.IGNORECASE):
+                    break
+                
+                # Stop if we hit a header
+                if any(header in next_line.lower() for header in ['ownerasset', 'transaction', 'notification', 'id owner', 'type date', 'dateamount']):
+                    break
+                
+                # Check if this line looks like trade data (has asset type in brackets and dates/amount)
+                has_asset_type = bool(re.search(r'\[([A-Z]{2,3})\]', next_line))
                 has_dates = bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', next_line))
                 has_amount = bool(re.search(r'\$\d+', next_line))
                 
-                # If we find both dates and amount on same line, we have complete transaction data
-                if has_dates and has_amount:
-                    trade_text += ' ' + next_line
-                    found_transaction_data = True
-                    collected_dates = True
-                    collected_amount = True
-                    j += 1
-                    break
-                
-                # If we find dates or amount separately, collect them (they might be on different lines)
-                if has_dates:
-                    trade_text += ' ' + next_line
-                    collected_dates = True
-                    j += 1
-                    continue
-                
-                if has_amount:
-                    trade_text += ' ' + next_line
-                    collected_amount = True
-                    # If we now have both dates and amount (even on different lines), we're done
-                    if collected_dates:
-                        found_transaction_data = True
+                # If this line has asset type and dates/amount, it's likely the trade data line
+                if has_asset_type and (has_dates or has_amount):
+                    trade_data_lines.append(next_line)
+                    # If we have both dates and amount, this might be the complete line
+                    # But continue collecting in case amount is on next line
+                    if has_dates and has_amount:
                         j += 1
+                        # Check if next line is just amount continuation
+                        if j < len(lines) and re.search(r'^\$\d+', lines[j]):
+                            trade_data_lines.append(lines[j])
+                            j += 1
                         break
                     j += 1
                     continue
                 
-                # Stop if we hit clear metadata that comes after transaction data
-                if found_transaction_data and any(skip in next_line.lower() for skip in ['f s:', 's o:', 'd:', 'filing id']):
-                    # We already have transaction data, this is post-trade metadata
+                # If we already collected a trade data line with dates and amount, stop
+                if trade_data_lines and any(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line) and re.search(r'\$\d+', line) for line in trade_data_lines):
+                    # Check if this is just amount continuation on next line
+                    if re.search(r'^\$\d+', next_line):
+                        trade_data_lines.append(next_line)
+                        j += 1
                     break
                 
-                # Stop if this looks like a new trade starting (has owner code and dates/amount)
-                if re.match(r'^[A-Z]{1,3}\s+', next_line) and has_dates and has_amount:
-                    # New trade starting
-                    break
-                
-                # Stop if we hit a header row
-                if any(header in next_line.lower() for header in ['ownerasset', 'transaction', 'notification', 'id owner']):
-                    break
-                
-                # If we have dates but no amount yet, keep collecting (amount might be on next line)
-                # If we have amount but no dates yet, keep collecting (dates might be on next line)
-                # If we have neither but started with owner code, keep collecting (might be multi-line asset name)
-                if collected_dates or collected_amount or has_owner_code:
-                    trade_text += ' ' + next_line
+                # If this could be part of multi-line asset name (no asset type yet), collect it
+                if not has_asset_type and (has_dates or has_amount or re.match(r'^[A-Z]{1,3}\s+', next_line)):
+                    trade_data_lines.append(next_line)
                     j += 1
                     continue
                 
-                # If we don't have dates or amount yet and no owner code, this might not be a trade
-                # But give it a few more lines in case it's a complex format
-                if j < i + 5:
-                    trade_text += ' ' + next_line
+                # If we haven't found trade data yet, this might be continuation or we're done
+                if not trade_data_lines:
                     j += 1
                     continue
                 else:
                     break
+            
+            # Combine trade data lines into single text for parsing
+            trade_text = ' '.join(trade_data_lines)
             
             # Parse the collected trade text
             owner = None
@@ -1048,61 +1028,50 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 except ValueError:
                     pass
             
-            # Extract asset information
-            # Strategy: Find the ticker in parentheses, then extract everything before it as the security name
-            # Format: Owner AssetName (TICKER) [TYPE] TransactionType Date Date Amount
-            # Example: "SP UnitedHealth Group Incorporated Common Stock (UNH) [ST]P 04/10/2025 05/15/2025 $1,001 - $15,000"
+            # Extract asset information according to the structured format
+            # Format: Asset name + (optional ticker) + [asset type] + Transaction type + Dates + Amount
+            # Rules:
+            #   - Asset name = text before parentheses (or before brackets if no ticker)
+            #   - Ticker = characters in parentheses (optional, can be null for bonds)
+            #   - Asset type = characters in brackets (always present)
+            
+            # Remove owner code if present (JT, SP, etc.)
             asset_text = trade_text
             if owner:
                 asset_text = re.sub(r'^' + re.escape(owner) + r'\s+', '', asset_text)
             
-            # Extract ticker symbol (in parentheses) - this marks the end of the security name
-            ticker_match = re.search(r'\(([A-Z]{1,5})\)', asset_text)
-            if ticker_match:
-                security_symbol = ticker_match.group(1)
-                # Get everything before the ticker as the security name
-                ticker_pos = asset_text.find(ticker_match.group(0))
-                security_name = asset_text[:ticker_pos].strip()
-            else:
-                # No ticker found, need to extract from the full text
-                # Find where the transaction data starts (usually [TYPE] followed by transaction type)
-                # Pattern: [TYPE]TransactionType or just TransactionType before dates
-                security_name = asset_text
-                
-                # Try to find where transaction data starts (look for [TYPE]P or [TYPE]S pattern)
-                type_transaction_match = re.search(r'\[([A-Z]{2,3})\]\s*([A-Z])\s+\d{1,2}/\d{1,2}/\d{4}', security_name)
-                if type_transaction_match:
-                    # Everything before [TYPE] is the security name
-                    type_pos = security_name.find(type_transaction_match.group(0))
-                    security_name = security_name[:type_pos].strip()
-                else:
-                    # Fallback: remove transaction type, dates, amounts, and metadata
-                    if transaction_type:
-                        security_name = re.sub(r'\s+[PS]\s+', ' ', security_name)
-                    security_name = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', security_name)
-                    security_name = re.sub(r'\$\d+[\d,]*\s*[-–]?\s*\$?\d+[\d,]*', '', security_name)
-                    security_name = re.sub(r'\s*FILING STATUS:\s*\w+.*$', '', security_name, flags=re.IGNORECASE)
-                    security_name = re.sub(r'\s*SUBHOLDING OF:\s*[^\[\]]*$', '', security_name, flags=re.IGNORECASE)
-                    security_name = re.sub(r'\s*F S:\s*\w+.*$', '', security_name, flags=re.IGNORECASE)
-                    security_name = re.sub(r'\s*S O:\s*[^D]*', '', security_name, flags=re.IGNORECASE)
-                    security_name = re.sub(r'\s*D:\s*.*$', '', security_name, flags=re.IGNORECASE)
-                    security_name = security_name.strip()
-            
-            # Extract asset type code (in brackets) from the original trade_text
-            asset_code_match = re.search(r'\[([A-Z]{2,3})\]', trade_text)
+            # Extract asset type code (in brackets) - always present
+            asset_code_match = re.search(r'\[([A-Z]{2,3})\]', asset_text)
             if asset_code_match:
                 code = asset_code_match.group(1)
                 if code in asset_codes:
                     asset_type = asset_codes[code]
+                # Find position of asset type bracket
+                asset_type_pos = asset_text.find(asset_code_match.group(0))
+            else:
+                asset_type_pos = len(asset_text)  # If no asset type found, use end of text
             
-            # Clean up security name - remove any remaining asset type codes, normalize whitespace
+            # Extract ticker symbol (in parentheses) - optional
+            ticker_match = re.search(r'\(([A-Z]{1,5})\)', asset_text)
+            if ticker_match:
+                security_symbol = ticker_match.group(1)
+                ticker_pos = asset_text.find(ticker_match.group(0))
+                # Asset name is everything before the ticker parentheses
+                security_name = asset_text[:ticker_pos].strip()
+            else:
+                # No ticker found - asset name is everything before the asset type bracket
+                security_name = asset_text[:asset_type_pos].strip()
+            
+            # Clean up security name
             if security_name:
-                # Remove asset type codes that might appear before or after the name
-                security_name = re.sub(r'\s*\[[A-Z]{2,3}\]\s*', '', security_name)
+                # Remove owner codes that might have been missed
+                security_name = re.sub(r'^[A-Z]{1,3}\s+', '', security_name)
                 # Remove any trailing commas
                 security_name = re.sub(r',\s*$', '', security_name)
                 # Remove transaction type letters that might have been captured (P, S, E, etc.)
                 security_name = re.sub(r'\s+[PS]\s*$', '', security_name)
+                # Remove "(partial)" if present
+                security_name = re.sub(r'\s*\(partial\)\s*', '', security_name, flags=re.IGNORECASE)
                 # Normalize whitespace (multiple spaces/newlines to single space)
                 security_name = re.sub(r'\s+', ' ', security_name)
                 security_name = security_name.strip()
