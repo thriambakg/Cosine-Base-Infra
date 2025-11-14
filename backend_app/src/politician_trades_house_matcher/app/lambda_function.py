@@ -940,22 +940,22 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 # FIRST: Check if we hit metadata (F S, S O, D) - these mark the end of trade data
                 if re.match(r'^(F\s+S:|S\s+O:|D:)\s*', next_line, re.IGNORECASE):
                     # Stop collecting trade data - metadata starts here
-                        break
-            
+                    break
+                
                 # Stop if we hit next trade data (has asset type and dates/amount and owner code)
                 if re.search(r'\[([A-Z]{2,3})\]', next_line) and re.match(r'^[A-Z]{1,3}\s+', next_line):
                     break
-        
+                
                 # Stop if we hit a header
                 if any(header in next_line.lower() for header in ['ownerasset', 'transaction', 'notification', 'id owner', 'type date', 'dateamount', 'filing id']):
-                        break
-            
+                    break
+                
                 # If this is amount continuation (just starts with $ and no dates)
                 if re.match(r'^\$\d+', next_line) and not re.search(r'\d{1,2}/\d{1,2}/\d{4}', next_line):
                     trade_data_lines.append(next_line)
                     j += 1
                     break
-        
+                
                 # If this could be part of multi-line asset name (no asset type bracket yet)
                 if not re.search(r'\[([A-Z]{2,3})\]', next_line):
                     # Check if it has owner code - might be start of next trade
@@ -965,13 +965,13 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     trade_data_lines.append(next_line)
                     j += 1
                     continue
-        
+                
                 # If we already have asset type and dates/amount in collected lines, this is probably next trade
                 collected_text = ' '.join(trade_data_lines)
                 if re.search(r'\[([A-Z]{2,3})\]', collected_text) and re.search(r'\d{1,2}/\d{1,2}/\d{4}', collected_text) and re.search(r'\$\d+', collected_text):
                     # We have complete trade data, stop
                     break
-            
+                
                 j += 1
             
             # Combine trade data lines into single text for parsing
@@ -979,11 +979,24 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             
             # SIMPLIFIED: Look ahead for F S, S O, and D lines immediately after the trade data
             # Metadata appears right after the trade data, so start from j (where we stopped collecting trade data)
+            # If we broke on next trade, metadata might be right before it, so check backwards first
             k = j
             look_ahead_limit = 10  # Look ahead up to 10 lines for metadata (handles cross-page cases)
-            end_limit = k + look_ahead_limit
             
-            logger.debug(f"   Looking for metadata starting from line {k+1} (after trade data ended at line {j})")
+            # If we stopped because we hit next trade/header, check backwards a few lines for metadata first
+            # (metadata should be right before the next trade)
+            if k > i + 1:
+                # Check backwards up to 5 lines for metadata
+                for back_k in range(max(i + 1, k - 5), k):
+                    back_line = lines[back_k].strip() if back_k < len(lines) else ''
+                    if back_line and re.match(r'^(F\s+S:|S\s+O:|D:)\s*', back_line, re.IGNORECASE):
+                        # Found metadata before the next trade, start from here
+                        k = back_k
+                        logger.debug(f"   Found metadata backwards at line {k+1}, starting extraction from there")
+                        break
+            
+            end_limit = k + look_ahead_limit
+            logger.debug(f"   Looking for metadata starting from line {k+1} (after trade data ended at line {j}, trade started at line {i+1})")
             
             while k < len(lines) and k < end_limit:
                 meta_line = lines[k].strip()
