@@ -977,28 +977,15 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             # Combine trade data lines into single text for parsing
             trade_text = ' '.join(trade_data_lines)
             
-            # SIMPLIFIED: Look ahead for F S, S O, and D lines immediately after the trade data
-            # Metadata appears right after the trade data, so start from j (where we stopped collecting trade data)
-            # If we broke on next trade, metadata might be right before it, so check backwards first
+            # SIMPLIFIED: Immediately collect metadata from the next few lines after trade data
+            # Metadata (F S, S O, D) appears right after trade data
+            # Start from j (where we stopped collecting trade data - this should be the metadata line if we broke on it)
             k = j
-            look_ahead_limit = 10  # Look ahead up to 10 lines for metadata (handles cross-page cases)
+            look_ahead_limit = 8  # Look ahead up to 8 lines for metadata (usually 2-3 lines: F S, S O, optional D)
             
-            # If we stopped because we hit next trade/header, check backwards a few lines for metadata first
-            # (metadata should be right before the next trade)
-            if k > i + 1:
-                # Check backwards up to 5 lines for metadata
-                for back_k in range(max(i + 1, k - 5), k):
-                    back_line = lines[back_k].strip() if back_k < len(lines) else ''
-                    if back_line and re.match(r'^(F\s+S:|S\s+O:|D:)\s*', back_line, re.IGNORECASE):
-                        # Found metadata before the next trade, start from here
-                        k = back_k
-                        logger.debug(f"   Found metadata backwards at line {k+1}, starting extraction from there")
-                        break
+            logger.debug(f"   Collecting metadata starting from line {k+1} (trade data ended at line {j}, trade started at line {i+1})")
             
-            end_limit = k + look_ahead_limit
-            logger.debug(f"   Looking for metadata starting from line {k+1} (after trade data ended at line {j}, trade started at line {i+1})")
-            
-            while k < len(lines) and k < end_limit:
+            while k < len(lines) and k < j + look_ahead_limit:
                 meta_line = lines[k].strip()
                 if not meta_line:
                     k += 1
@@ -1009,7 +996,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     k += 1
                     continue
                 
-                # Check for full format first (FILING STATUS:, SUBHOLDING OF:, DESCRIPTION:)
+                # Check for metadata patterns - extract the value after the colon
                 if re.match(r'^FILING\s+STATUS:\s*', meta_line, re.IGNORECASE):
                     value = re.sub(r'^FILING\s+STATUS:\s*', '', meta_line, flags=re.IGNORECASE).strip()
                     trade_metadata['filing_status'] = value if value else 'New'
@@ -1048,7 +1035,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 for debug_k in range(k, min(k + 5, len(lines))):
                     if debug_k < len(lines):
                         looked_at_lines.append(f"line {debug_k+1}: '{lines[debug_k][:60]}'")
-                logger.warning(f"   ⚠️ No metadata found for trade at line {i+1} (looked ahead from line {k+1} to {min(end_limit, len(lines))}, j={j}). Looked at: {', '.join(looked_at_lines)}")
+                logger.warning(f"   ⚠️ No metadata found for trade at line {i+1} (looked ahead from line {k+1} to {min(j + look_ahead_limit, len(lines))}, j={j}). Looked at: {', '.join(looked_at_lines)}")
             
             # Parse the collected trade text
             owner = None
