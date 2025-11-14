@@ -939,8 +939,11 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     j += 1
                     continue
                 
-                # Stop if we hit metadata (F S, S O, D) - these mark the end of trade data
-                # But remember this position so we can collect the metadata
+                # Debug: log what we're checking
+                logger.debug(f"   Checking line {j+1} for metadata/trade continuation: '{next_line[:60]}'")
+                
+                # FIRST: Check if we hit metadata (F S, S O, D) - these mark the end of trade data
+                # This check must come FIRST before other checks that might match
                 if re.match(r'^(F\s+S:|S\s+O:|D:)\s*', next_line, re.IGNORECASE):
                     metadata_start_idx = j  # Remember where metadata starts (j is the index of the metadata line)
                     logger.info(f"   ✅ Found metadata start at line {j+1}: '{next_line[:50]}'")
