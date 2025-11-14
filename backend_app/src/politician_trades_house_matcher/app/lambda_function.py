@@ -895,56 +895,23 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             # Found potential trade data - collect it and following metadata
             logger.debug(f"   Found trade data at line {i+1}: {line[:100]}")
             
-            # First, look backwards to collect metadata (F S, S O, D) that might be before the trade data
-            # Metadata can appear before the trade data line in some PDFs
+            # Initialize metadata - metadata appears at the END of trade entries, so we'll look ahead
             trade_metadata = {
                 'filing_status': None,
                 'subholding_of': None,
                 'description': None
             }
             
-            # Look backwards up to 5 lines for metadata
-            lookback_start = max(0, i - 5)
-            for back_idx in range(lookback_start, i):
-                back_line = lines[back_idx].strip()
-                if not back_line:
-                    continue
-                
-                # Check for full format first (FILING STATUS:, SUBHOLDING OF:, DESCRIPTION:)
-                if re.match(r'^FILING\s+STATUS:\s*', back_line, re.IGNORECASE):
-                    value = re.sub(r'^FILING\s+STATUS:\s*', '', back_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['filing_status']:  # Only set if not already found
-                        trade_metadata['filing_status'] = value if value else 'New'
-                elif re.match(r'^F\s+S:\s*', back_line, re.IGNORECASE):
-                    value = re.sub(r'^F\s+S:\s*', '', back_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['filing_status']:
-                        trade_metadata['filing_status'] = value if value else 'New'
-                elif re.match(r'^SUBHOLDING\s+OF:\s*', back_line, re.IGNORECASE):
-                    value = re.sub(r'^SUBHOLDING\s+OF:\s*', '', back_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['subholding_of']:
-                        trade_metadata['subholding_of'] = value
-                elif re.match(r'^S\s+O:\s*', back_line, re.IGNORECASE):
-                    value = re.sub(r'^S\s+O:\s*', '', back_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['subholding_of']:
-                        trade_metadata['subholding_of'] = value
-                elif re.match(r'^DESCRIPTION:\s*', back_line, re.IGNORECASE):
-                    value = re.sub(r'^DESCRIPTION:\s*', '', back_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['description']:
-                        trade_metadata['description'] = value
-                elif re.match(r'^D:\s*', back_line, re.IGNORECASE):
-                    value = re.sub(r'^D:\s*', '', back_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['description']:
-                        trade_metadata['description'] = value
-            
             # Look backwards to collect asset name if it's on previous line(s)
             # Sometimes the asset name is on a line before the asset type bracket
+            # NOTE: We skip metadata lines here - metadata appears at the END of trades, not before
             trade_data_lines = []
             lookback_start = max(0, i - 3)  # Look back up to 3 lines
             for back_idx in range(lookback_start, i):
                 back_line = lines[back_idx].strip()
                 if not back_line:
-                continue
-                # Skip if it's metadata or header
+                    continue
+                # Skip if it's metadata or header - metadata is at the END of trades, not before
                 if re.match(r'^(F\s+S:|S\s+O:|D:)\s*', back_line, re.IGNORECASE):
                     continue
                 if any(header in back_line.lower() for header in ['ownerasset', 'transaction', 'notification', 'id owner', 'type date', 'dateamount', 'filing id']):
@@ -1009,7 +976,9 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             # Combine trade data lines into single text for parsing
             trade_text = ' '.join(trade_data_lines)
             
-            # Look ahead for F S, S O, and D lines (if not already found looking backwards)
+            # Look ahead for F S, S O, and D lines
+            # IMPORTANT: Metadata appears at the END of trade entries, so it comes AFTER the trade data
+            # When we see F S, S O, or D, it applies to the trade data ABOVE it
             # Also check for full format: "FILING STATUS:", "SUBHOLDING OF:", "DESCRIPTION:"
             k = j
             while k < len(lines) and k < j + 5:  # Look ahead a few lines for metadata
@@ -1018,33 +987,27 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 if re.match(r'^FILING\s+STATUS:\s*', meta_line, re.IGNORECASE):
                     # Extract value after "FILING STATUS:"
                     value = re.sub(r'^FILING\s+STATUS:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['filing_status']:  # Only set if not already found
-                        trade_metadata['filing_status'] = value if value else 'New'
+                    trade_metadata['filing_status'] = value if value else 'New'
                 elif re.match(r'^F\s+S:\s*', meta_line, re.IGNORECASE):
                     # Extract value after "F S:" or "F S: New"
                     value = re.sub(r'^F\s+S:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['filing_status']:
-                        trade_metadata['filing_status'] = value if value else 'New'
+                    trade_metadata['filing_status'] = value if value else 'New'
                 elif re.match(r'^SUBHOLDING\s+OF:\s*', meta_line, re.IGNORECASE):
                     # Extract value after "SUBHOLDING OF:"
                     value = re.sub(r'^SUBHOLDING\s+OF:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['subholding_of']:
-                        trade_metadata['subholding_of'] = value
+                    trade_metadata['subholding_of'] = value
                 elif re.match(r'^S\s+O:\s*', meta_line, re.IGNORECASE):
                     # Extract value after "S O:"
                     value = re.sub(r'^S\s+O:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['subholding_of']:
-                        trade_metadata['subholding_of'] = value
+                    trade_metadata['subholding_of'] = value
                 elif re.match(r'^DESCRIPTION:\s*', meta_line, re.IGNORECASE):
                     # Extract value after "DESCRIPTION:"
                     value = re.sub(r'^DESCRIPTION:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['description']:
-                        trade_metadata['description'] = value
+                    trade_metadata['description'] = value
                 elif re.match(r'^D:\s*', meta_line, re.IGNORECASE):
                     # Extract value after "D:"
                     value = re.sub(r'^D:\s*', '', meta_line, flags=re.IGNORECASE).strip()
-                    if not trade_metadata['description']:
-                        trade_metadata['description'] = value
+                    trade_metadata['description'] = value
                 elif re.search(r'\[([A-Z]{2,3})\]', meta_line):  # Next trade data, stop
                     break
                 k += 1
