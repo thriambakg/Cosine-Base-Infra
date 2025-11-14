@@ -979,14 +979,14 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             # Combine trade data lines into single text for parsing
             trade_text = ' '.join(trade_data_lines)
             
-            # SIMPLIFIED: Collect ALL lines between this trade and the next trade as a blob
-            # Just dump everything (except headers) into metadata - no regex parsing
+            # SIMPLIFIED: Collect lines between this trade and the next trade as a blob
+            # Stop when we see the start of the next trade (owner code + asset type bracket, possibly on adjacent lines)
             k = i + 1  # Start from right after the trade data line
             metadata_lines = []  # Collect all lines between trades
             
             logger.debug(f"   Collecting metadata blob starting from line {k+1} (trade data at line {i+1})")
             
-            # Collect all lines until we hit the next trade (has asset type bracket and owner code)
+            # Collect all lines until we hit the next trade
             while k < len(lines):
                 meta_line = lines[k].strip()
                 if not meta_line:
@@ -998,9 +998,20 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     k += 1
                     continue
                 
-                # Check if this is the next trade's data line (has asset type bracket and owner code)
-                if re.search(r'\[([A-Z]{2,3})\]', meta_line) and re.match(r'^[A-Z]{1,3}\s+', meta_line):
-                    # Found next trade, stop collecting
+                # Check if this is the start of the next trade
+                # Next trade starts with owner code (JT, SP, etc.) and has asset type bracket
+                # They might be on the same line or adjacent lines
+                has_owner_code = bool(re.match(r'^[A-Z]{1,3}\s+', meta_line))
+                has_asset_type = bool(re.search(r'\[([A-Z]{2,3})\]', meta_line))
+                
+                # Also check next line for asset type if current line has owner code
+                if has_owner_code and not has_asset_type and k + 1 < len(lines):
+                    next_line = lines[k + 1].strip() if k + 1 < len(lines) else ''
+                    has_asset_type = bool(re.search(r'\[([A-Z]{2,3})\]', next_line))
+                
+                # If we have owner code and asset type (on same or adjacent lines), this is the next trade
+                if has_owner_code and has_asset_type:
+                    # Found next trade, stop collecting BEFORE adding this line
                     logger.debug(f"   Stopped metadata collection at line {k+1} - found next trade: {meta_line[:60]}")
                     break
                 
@@ -1009,10 +1020,10 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 k += 1
             
             # Store all collected lines as metadata blob (no parsing, just dump it)
-            metadata_blob = '\n'.join(metadata_lines)
-            if metadata_blob.strip():
-                # Store the raw blob in description field - dump everything as-is
-                trade_metadata['description'] = metadata_blob.strip()
+            metadata_blob = '\n'.join(metadata_lines).strip()
+            if metadata_blob:
+                # Store the raw blob in metadata field - simplified schema
+                trade_metadata['metadata'] = metadata_blob
                 logger.info(f"   ✅ Collected {len(metadata_lines)} lines of metadata for trade at line {i+1}: {metadata_blob[:100]}...")
             else:
                 logger.debug(f"   No metadata found for trade at line {i+1}")
@@ -1201,11 +1212,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     'owner': owner,
                         'formType': 'house_ptr',
                     'source': 'house',
-                    'filingMetadata': {
-                        'filingStatus': trade_metadata.get('filing_status'),
-                        'subholdingOf': trade_metadata.get('subholding_of'),
-                        'description': trade_metadata.get('description')
-                    }
+                    'metadata': trade_metadata.get('metadata')
                     }
                     trades.append(trade)
                 logger.info(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max} (name: '{security_name}')")
@@ -1442,11 +1449,7 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'isUnparsed': False,
                     'requiresManualReview': False,
                     'stateDistrict': state_district,
-                    'filingMetadata': trade.get('filingMetadata', {
-                        'filingStatus': None,
-                        'subholdingOf': None,
-                        'description': None
-                    })
+                    'metadata': trade.get('metadata')
                 }
                 matched_trades.append(matched_trade)
             else:
