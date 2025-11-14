@@ -737,31 +737,39 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         # Extract text from all pages
         full_text = ''
         text_lines = []
+        page_texts = []  # Store text per page for logging
         
         for page_num, page in enumerate(pdf_reader.pages):
             try:
                 page_text = page.extract_text()
                 if page_text:
+                    page_texts.append(page_text)
                     full_text += page_text + '\n'
                     # Split into lines for easier parsing
                     page_lines = page_text.split('\n')
                     text_lines.extend([line.strip() for line in page_lines if line.strip()])
+                else:
+                    page_texts.append('')  # Empty page
             except Exception as e:
                 logger.warning(f"⚠️ Error extracting text from page {page_num + 1}: {e}")
+                page_texts.append('')  # Error page
                 continue
         
-        # Comprehensive logging of extracted text for debugging
+        # Comprehensive logging of extracted text for debugging - per page
         logger.info(f"📊 PyPDF Output Summary for {s3_key}:")
         logger.info(f"   Total pages: {page_count}")
         logger.info(f"   Text lines extracted: {len(text_lines)}")
         logger.info(f"   Full text length: {len(full_text)} characters")
         
-        # Log first 50 text lines
-        logger.info(f"   First 50 text lines:")
-        for i, line in enumerate(text_lines[:50]):
-            logger.info(f"      [{i+1}] {line}")
-        if len(text_lines) > 50:
-            logger.info(f"      ... ({len(text_lines) - 50} more lines)")
+        # Log each page separately
+        for page_num, page_text in enumerate(page_texts):
+            page_lines = [line.strip() for line in page_text.split('\n') if line.strip()]
+            logger.info(f"   Page {page_num + 1} ({len(page_lines)} lines, {len(page_text)} chars):")
+            # Log all lines from this page
+            for i, line in enumerate(page_lines):
+                logger.info(f"      [{i+1}] {line}")
+            if not page_text.strip():
+                logger.info(f"      (empty page)")
         
         logger.info(f"   Full text (first 1000 chars): {full_text[:1000]}")
         
@@ -880,8 +888,17 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             has_ticker = bool(re.search(r'\([A-Z]{1,5}\)', line))  # Has ticker symbol
             
             # Skip if it's clearly not a trade line
-            # A trade line should have: (owner code) OR (dates + amount) OR (ticker + dates/amount)
-            if not (has_dates and has_amount) and not has_owner_code and not (has_ticker and (has_dates or has_amount)):
+            # A trade line should have: (owner code) OR (dates + amount) OR (ticker + dates/amount) OR (dates OR amount)
+            # We're more lenient now - if it has dates OR amount, it might be part of a trade
+            is_potential_trade = (
+                (has_dates and has_amount) or  # Complete transaction data
+                has_owner_code or  # Starts with owner code
+                (has_ticker and (has_dates or has_amount)) or  # Has ticker with dates/amount
+                (has_dates and not has_amount) or  # Has dates (amount might be on next line)
+                (has_amount and not has_dates)  # Has amount (dates might be on next line)
+            )
+            
+            if not is_potential_trade:
                 i += 1
                 continue
             
@@ -896,22 +913,45 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 found_transaction_data = True
             
             # Collect next lines until we find transaction data or hit a clear boundary
-            while j < len(lines) and j < i + 10:  # Increased limit to handle longer asset names
+            # Strategy: Collect lines that might contain dates OR amounts separately, then combine
+            collected_dates = False
+            collected_amount = False
+            while j < len(lines) and j < i + 15:  # Increased limit further for complex multi-line trades
                 next_line = lines[j].strip()
                 if not next_line:
                     j += 1
                     continue
                 
-                # Check if this line has transaction data (dates + amount)
+                # Check if this line has transaction data components
                 has_dates = bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', next_line))
                 has_amount = bool(re.search(r'\$\d+', next_line))
                 
+                # If we find both dates and amount on same line, we have complete transaction data
                 if has_dates and has_amount:
-                    # Found transaction data - add it and stop
                     trade_text += ' ' + next_line
                     found_transaction_data = True
+                    collected_dates = True
+                    collected_amount = True
                     j += 1
                     break
+                
+                # If we find dates or amount separately, collect them (they might be on different lines)
+                if has_dates:
+                    trade_text += ' ' + next_line
+                    collected_dates = True
+                    j += 1
+                    continue
+                
+                if has_amount:
+                    trade_text += ' ' + next_line
+                    collected_amount = True
+                    # If we now have both dates and amount (even on different lines), we're done
+                    if collected_dates:
+                        found_transaction_data = True
+                        j += 1
+                        break
+                    j += 1
+                    continue
                 
                 # Stop if we hit clear metadata that comes after transaction data
                 if found_transaction_data and any(skip in next_line.lower() for skip in ['f s:', 's o:', 'd:', 'filing id']):
@@ -927,9 +967,22 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 if any(header in next_line.lower() for header in ['ownerasset', 'transaction', 'notification', 'id owner']):
                     break
                 
-                # Add line to trade text (could be part of asset name or transaction data)
-                trade_text += ' ' + next_line
-                j += 1
+                # If we have dates but no amount yet, keep collecting (amount might be on next line)
+                # If we have amount but no dates yet, keep collecting (dates might be on next line)
+                # If we have neither but started with owner code, keep collecting (might be multi-line asset name)
+                if collected_dates or collected_amount or has_owner_code:
+                    trade_text += ' ' + next_line
+                    j += 1
+                    continue
+                
+                # If we don't have dates or amount yet and no owner code, this might not be a trade
+                # But give it a few more lines in case it's a complex format
+                if j < i + 5:
+                    trade_text += ' ' + next_line
+                    j += 1
+                    continue
+                else:
+                    break
             
             # Parse the collected trade text
             owner = None
@@ -1084,7 +1137,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     missing.append('transaction_type')
                 if not amount:
                     missing.append('amount')
-                logger.debug(f"   ⚠️ Skipped potential trade (missing: {', '.join(missing)}): {trade_text[:100]}")
+                logger.info(f"   ⚠️ Skipped potential trade (missing: {', '.join(missing)}): {trade_text[:150]}")
             
             i = j  # Skip processed lines
         
