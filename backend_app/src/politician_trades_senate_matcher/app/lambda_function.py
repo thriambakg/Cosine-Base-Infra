@@ -691,22 +691,28 @@ def parse_table_as_senate_transactions(table_data: List[List[str]], full_text: s
                 
                 # Extract fields
                 if 'owner' in col_indices:
-                    trade['owner'] = row[col_indices['owner']].strip()
+                    owner_val = row[col_indices['owner']]
+                    trade['owner'] = owner_val.strip() if owner_val else None
                 if 'asset' in col_indices:
-                    asset = row[col_indices['asset']].strip()
+                    asset_val = row[col_indices['asset']]
+                    asset = asset_val.strip() if asset_val else ''
                     trade['securityName'] = asset
                     # Try to extract ticker if present
-                    ticker_match = re.search(r'\(([A-Z]{1,5})\)', asset)
-                    if ticker_match:
-                        trade['securitySymbol'] = ticker_match.group(1)
+                    if asset:
+                        ticker_match = re.search(r'\(([A-Z]{1,5})\)', asset)
+                        if ticker_match:
+                            trade['securitySymbol'] = ticker_match.group(1)
                 if 'transaction_type' in col_indices:
-                    trans_type = row[col_indices['transaction_type']].strip()
+                    trans_val = row[col_indices['transaction_type']]
+                    trans_type = trans_val.strip() if trans_val else None
                     trade['transactionType'] = trans_type
                 if 'date' in col_indices:
-                    date_str = row[col_indices['date']].strip()
+                    date_val = row[col_indices['date']]
+                    date_str = date_val.strip() if date_val else None
                     trade['transactionDate'] = date_str
                 if 'amount' in col_indices:
-                    amount_str = row[col_indices['amount']].strip()
+                    amount_val = row[col_indices['amount']]
+                    amount_str = amount_val.strip() if amount_val else None
                     # Parse amount range
                     amount_range = parse_amount_range(amount_str)
                     if amount_range:
@@ -742,6 +748,8 @@ def parse_amount_range(amount_str: str) -> Optional[List[int]]:
     Returns:
         [min, max] as list of integers, or None if parsing fails
     """
+    if not amount_str:
+        return None
     try:
         # Remove currency symbols and whitespace
         amount_str = re.sub(r'[\$,\s]', '', amount_str)
@@ -1061,59 +1069,68 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                 # Extract transaction date
                 transaction_date = None
                 if date_col is not None and date_col < len(row):
-                    date_str = row[date_col].strip()
-                    # Senate format: MM/DD/YYYY
-                    for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d', '%m/%d/%y']:
-                        try:
-                            transaction_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
-                            break
-                        except ValueError:
-                            continue
+                    date_val = row[date_col]
+                    date_str = date_val.strip() if date_val else None
+                    if date_str:
+                        # Senate format: MM/DD/YYYY
+                        for fmt in ['%m/%d/%Y', '%m-%d-%Y', '%Y-%m-%d', '%m/%d/%y']:
+                            try:
+                                transaction_date = datetime.strptime(date_str, fmt).strftime('%Y-%m-%d')
+                                break
+                            except ValueError:
+                                continue
                 
                 # Extract owner (Self, Joint, Spouse, Dependent Child)
                 owner = None
                 if owner_col is not None and owner_col < len(row):
-                    owner = row[owner_col].strip()
+                    owner_val = row[owner_col]
+                    owner = owner_val.strip() if owner_val else None
                 
                 # Extract asset name and symbol
                 security_name = None
                 security_symbol = None
                 
                 if asset_col is not None and asset_col < len(row):
-                    asset_text = row[asset_col].strip()
-                    security_name = asset_text
-                    # Try to extract ticker symbol if present (usually uppercase letters, 1-5 chars)
-                    symbol_match = re.search(r'\b([A-Z]{1,5})\b', asset_text)
-                    if symbol_match:
-                        security_symbol = symbol_match.group(1)
+                    asset_val = row[asset_col]
+                    asset_text = asset_val.strip() if asset_val else None
+                    if asset_text:
+                        security_name = asset_text
+                        # Try to extract ticker symbol if present (usually uppercase letters, 1-5 chars)
+                        symbol_match = re.search(r'\b([A-Z]{1,5})\b', asset_text)
+                        if symbol_match:
+                            security_symbol = symbol_match.group(1)
                 
                 if symbol_col is not None and symbol_col < len(row):
-                    symbol_text = row[symbol_col].strip()
+                    symbol_val = row[symbol_col]
+                    symbol_text = symbol_val.strip() if symbol_val else None
                     if symbol_text and symbol_text != '--':
                         security_symbol = symbol_text
                 
                 # Extract asset type (Stock, Bond, Municipal Security, etc.)
                 asset_type = None
                 if asset_type_col is not None and asset_type_col < len(row):
-                    asset_type = row[asset_type_col].strip()
+                    asset_type_val = row[asset_type_col]
+                    asset_type = asset_type_val.strip() if asset_type_val else None
                 
                 # Extract transaction type
                 transaction_type = None
                 if type_col is not None and type_col < len(row):
-                    trans_text = row[type_col].strip()
-                    trans_text_upper = trans_text.upper()
-                    # If the text looks like an amount (contains "$" or digits with dashes), skip it
-                    if '$' in trans_text or re.search(r'\d+.*[-–—].*\d+', trans_text):
-                        logger.debug(f"   Skipping invalid transaction type (looks like amount): '{trans_text}'")
-                        transaction_type = None
-                    elif 'PURCHASE' in trans_text_upper or 'BUY' in trans_text_upper:
-                        transaction_type = 'Purchase'
-                    elif 'SALE' in trans_text_upper or 'SELL' in trans_text_upper:
-                        transaction_type = 'Sale'
-                    elif trans_text and len(trans_text) < 50:  # Only use if it's a reasonable transaction type
-                        transaction_type = trans_text.strip()
-                    else:
-                        transaction_type = None
+                    trans_val = row[type_col]
+                    trans_text = trans_val.strip() if trans_val else None
+                    if trans_text:
+                        trans_text_upper = trans_text.upper()
+                        # If the text looks like an amount (contains "$" or digits with dashes), skip it
+                        if '$' in trans_text or re.search(r'\d+.*[-–—].*\d+', trans_text):
+                            logger.debug(f"   Skipping invalid transaction type (looks like amount): '{trans_text}'")
+                            transaction_type = None
+                        elif 'PURCHASE' in trans_text_upper or 'BUY' in trans_text_upper:
+                            transaction_type = 'Purchase'
+                        elif 'SALE' in trans_text_upper or 'SELL' in trans_text_upper:
+                            transaction_type = 'Sale'
+                        elif len(trans_text) < 50:  # Only use if it's a reasonable transaction type
+                            transaction_type = trans_text
+                        else:
+                            transaction_type = None
                 
                 # Extract amount (could be range like "$100,001 - $250,000")
                 shares = None
@@ -1122,7 +1139,8 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                 amount_max = None
                 
                 if shares_col is not None and shares_col < len(row):
-                    shares_str = row[shares_col].strip()
+                    shares_val = row[shares_col]
+                    shares_str = shares_val.strip() if shares_val else None
                     # Remove commas, parse number
                     try:
                         shares = int(re.sub(r'[^\d]', '', shares_str))
@@ -1130,16 +1148,18 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                         pass
                 
                 if amount_col is not None and amount_col < len(row):
-                    amount_str = row[amount_col].strip()
+                    amount_val = row[amount_col]
+                    amount_str = amount_val.strip() if amount_val else None
                     
                     # Handle range format: "$100,001 - $250,000" or "$1,000 - $15,000"
-                    range_match = re.search(r'\$([\d,]+)\s*-\s*\$([\d,]+)', amount_str)
-                    if range_match:
-                        try:
-                            amount_min = float(re.sub(r'[^\d.]', '', range_match.group(1)))
-                            amount_max = float(re.sub(r'[^\d.]', '', range_match.group(2)))
-                        except:
-                            pass
+                    if amount_str:
+                        range_match = re.search(r'\$([\d,]+)\s*-\s*\$([\d,]+)', amount_str)
+                        if range_match:
+                            try:
+                                amount_min = float(re.sub(r'[^\d.]', '', range_match.group(1)))
+                                amount_max = float(re.sub(r'[^\d.]', '', range_match.group(2)))
+                            except:
+                                pass
                     
                     # Calculate price per share if we have shares and amount range
                     if shares and shares > 0 and amount_min and amount_max:
