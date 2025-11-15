@@ -61,12 +61,12 @@ def format_state_district(politician: Dict[str, Any]) -> Optional[str]:
     Returns:
         Formatted state/district string or None
     """
-    state = politician.get('state', '').strip()
+    state = (politician.get('state') or '').strip()
     if not state:
         return None
     
-    position = politician.get('position', '').strip()
-    district = politician.get('district', '').strip()
+    position = (politician.get('position') or '').strip()
+    district = (politician.get('district') or '').strip()
     
     # Senators don't have districts
     if position == 'Senate':
