@@ -1495,7 +1495,7 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                     'shares': None,  # Not provided in Senate PTR HTML
                     'comment': comment,
                     'filerName': filer_name,  # Include filer name from HTML for matching
-                    'filingMetadata': asset_metadata if asset_metadata else None  # Flexible JSON blob for asset metadata
+                    'metadata': asset_metadata if asset_metadata else None  # Flexible JSON blob for asset metadata
                 }
                 
                 trades.append(trade)
@@ -1893,7 +1893,7 @@ def lambda_handler(event, context):
                     'amountRange': amount_range,  # [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE] for unparsed, [min, max] for valid trades
                     'exactAmount': exact_amount,  # Exact dollar amount if provided (not a GSI) - None for unparsed
                     'owner': trade.get('owner'),
-                    'filingMetadata': trade.get('filingMetadata'),  # Flexible JSON blob for asset metadata (e.g., Rate/Coupon, Matures)
+                    'metadata': trade.get('metadata'),  # Flexible JSON blob for asset metadata (e.g., Rate/Coupon, Matures)
                     'comment': trade.get('comment'),
                     'formS3Key': s3_key,  # Critical: S3 key for downloading original filing
                     'matchConfidence': matched_politician.get('matchScore', 1.0),
