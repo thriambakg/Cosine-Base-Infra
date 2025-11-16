@@ -1782,11 +1782,16 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         # Pattern 1: Look for table after (Street) that contains city, state, zip in FormData spans
         city_state_zip_patterns = [
             # Pattern: (Street) ... <table><tr><td><span class="FormData">CITY</span></td><td><span class="FormData">STATE</span></td><td><span class="FormData">ZIP</span></td></tr></table>
+            # Updated to handle </span> tag after (Street)
+            r'\(Street\)[^<]*</span><table[^>]*border="0"[^>]*width="100%"[^>]*>.*?<tr>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>',
+            # Pattern: More flexible - table after (Street) with FormData spans (handles </span> tag)
+            r'\(Street\)[^<]*</span><table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>',
+            # Pattern: Look for table between (Street) and (City) labels (handles </span> tag)
+            r'\(Street\)[^<]*</span><table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>[^<]*<hr[^>]*>[^<]*\(City\)',
+            # Fallback: Pattern without requiring </span> (for forms that don't have it)
             r'\(Street\)[^<]*<table[^>]*border="0"[^>]*width="100%"[^>]*>.*?<tr>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>',
-            # More flexible pattern without width attributes
+            # Fallback: More flexible pattern without width attributes
             r'\(Street\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>',
-            # Pattern: Look for table between (Street) and (City) labels
-            r'\(Street\)[^<]*<table[^>]*>.*?<tr>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?</tr>.*?</table>[^<]*<hr[^>]*>[^<]*\(City\)',
         ]
         
         csv_match = None
@@ -1799,9 +1804,11 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             city = unescape(csv_match.group(1)).strip()
             state = unescape(csv_match.group(2)).strip()
             zip_code = unescape(csv_match.group(3)).strip()
-            # Store city and state in "city, state" format
+            # Store city and state in "city, state" format with proper capitalization
             if city and state:
-                result['address'] = f"{city}, {state}".upper()  # Store as "CITY, STATE" (e.g., "SIOUX FALLS, SD")
+                # Title case for city (e.g., "Seattle" not "SEATTLE"), uppercase for state (e.g., "WA")
+                city_title = city.title() if city.isupper() else city
+                result['address'] = f"{city_title}, {state.upper()}"  # Store as "City, STATE" (e.g., "Seattle, WA")
                 local_logger.info(f"   ✅ Extracted address (city, state): {result['address']}")
             elif state:
                 result['address'] = state.upper()  # Fallback to state only if city is missing
@@ -1817,7 +1824,9 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                 city = unescape(city_state_match.group(1)).strip()
                 state = unescape(city_state_match.group(2)).strip().upper()
                 if city and state and len(state) == 2:
-                    result['address'] = f"{city}, {state}".upper()
+                    # Title case for city, uppercase for state
+                    city_title = city.title() if city.isupper() else city
+                    result['address'] = f"{city_title}, {state}"
                     local_logger.info(f"   ✅ Extracted address (city, state, fallback): {result['address']}")
                 elif state and len(state) == 2:
                     result['address'] = state
