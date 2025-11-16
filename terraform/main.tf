@@ -2497,7 +2497,7 @@ module "politician_trades_scheduler" {
 module "politician_trades_sec_state_machine" {
   source = "./modules/step-functions"
 
-  state_machine_name = "${var.project_name}-politician-trades-sec-${var.environment}"
+  state_machine_name = "${var.project_name}-sec-filings-${var.environment}"
   environment        = var.environment
 
   # Step Functions definition: Input Normalizer → SEC Glue Job
