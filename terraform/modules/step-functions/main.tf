@@ -69,6 +69,8 @@ resource "aws_iam_role" "step_functions" {
 
 # IAM Policy for Step Functions to invoke Lambda
 resource "aws_iam_role_policy" "step_functions_lambda" {
+  count = length(var.lambda_function_arns) > 0 ? 1 : 0
+
   name = "${var.state_machine_name}-lambda-policy"
   role = aws_iam_role.step_functions.id
 
