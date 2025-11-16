@@ -1765,17 +1765,40 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         address_parts = []
         
         # Extract all street lines from the table before (Street) label
-        # Pattern: Find the table before (Street) label, extract all FormData spans
-        street_table_pattern = r'<table[^>]*border="0"[^>]*width="100%"[^>]*>(.*?)</table>[^<]*(?:<hr|\(Street\))'
-        street_table_match = re.search(street_table_pattern, html_content, re.IGNORECASE | re.DOTALL)
-        if street_table_match:
-            street_table_content = street_table_match.group(1)
-            # Extract all street lines (each in a <tr><td><span class="FormData">...</span></td></tr>)
-            street_lines = re.findall(r'<tr><td><span[^>]*class="FormData"[^>]*>([^<]+)</span></td></tr>', street_table_content, re.IGNORECASE | re.DOTALL)
-            for street_line in street_lines:
-                street = unescape(street_line).strip()
-                if street:
-                    address_parts.append(street)
+        # Find the section between the name link and (Street) label
+        name_to_street_section = re.search(
+            r'<a[^>]*href="[^"]*cgi-bin/browse-edgar[^"]*CIK=\d+[^"]*">[^<]+</a>.*?</table>(.*?)<hr[^>]*>\s*<span[^>]*>\(Street\)',
+            html_content, re.IGNORECASE | re.DOTALL
+        )
+        
+        if name_to_street_section:
+            section = name_to_street_section.group(1)
+            # Find all tables in this section
+            all_tables = list(re.finditer(
+                r'<table[^>]*border="0"[^>]*width="100%"[^>]*>(.*?)</table>',
+                section, re.IGNORECASE | re.DOTALL
+            ))
+            
+            # Find the last table that contains FormData (this should be the street table)
+            # Skip tables that contain (Last), (First), (Middle) labels
+            street_table_content = None
+            for table_match in reversed(all_tables):  # Start from the last table
+                table_content = table_match.group(1)
+                # Check if this table has FormData and is not the name/Last/First/Middle table
+                if 'FormData' in table_content and '(Last)' not in table_content and '(First)' not in table_content:
+                    street_table_content = table_content
+                    break
+            
+            if street_table_content:
+                # Extract all street lines from this table
+                street_lines = re.findall(
+                    r'<tr><td><span[^>]*class="FormData"[^>]*>([^<]*)</span></td></tr>',
+                    street_table_content, re.IGNORECASE | re.DOTALL
+                )
+                for street_line in street_lines:
+                    street = unescape(street_line).strip()
+                    if street:  # Only add non-empty street lines
+                        address_parts.append(street)
         
         # City, State, Zip - they're in a table row after (Street) label and before (City) (State) (Zip) labels
         # HTML structure: <span class="MedSmallFormText">(Street)</span><table><tr><td><span>CITY</span></td><td><span>STATE</span></td><td><span>ZIP</span></td></tr></table><hr><table><tr><td>(City)</td><td>(State)</td><td>(Zip)</td></tr></table>
@@ -1804,17 +1827,13 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             city = unescape(csv_match.group(1)).strip()
             state = unescape(csv_match.group(2)).strip()
             zip_code = unescape(csv_match.group(3)).strip()
-            # Store city and state in "city, state" format with proper capitalization
-            if city and state:
-                # Title case for city (e.g., "Seattle" not "SEATTLE"), uppercase for state (e.g., "WA")
-                city_title = city.title() if city.isupper() else city
-                result['address'] = f"{city_title}, {state.upper()}"  # Store as "City, STATE" (e.g., "Seattle, WA")
-                local_logger.info(f"   ✅ Extracted address (city, state): {result['address']}")
-            elif state:
-                result['address'] = state.upper()  # Fallback to state only if city is missing
-                local_logger.info(f"   ✅ Extracted address (state only): {result['address']}")
-            else:
-                result['address'] = None
+            # Add city, state, zip to address parts
+            if city:
+                address_parts.append(city)
+            if state:
+                address_parts.append(state)
+            if zip_code:
+                address_parts.append(zip_code)
         else:
             # Fallback: try to find city and state in other patterns
             # First try to get both city and state from table row with three FormData cells
@@ -1824,13 +1843,10 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                 city = unescape(city_state_match.group(1)).strip()
                 state = unescape(city_state_match.group(2)).strip().upper()
                 if city and state and len(state) == 2:
-                    # Title case for city, uppercase for state
-                    city_title = city.title() if city.isupper() else city
-                    result['address'] = f"{city_title}, {state}"
-                    local_logger.info(f"   ✅ Extracted address (city, state, fallback): {result['address']}")
+                    address_parts.append(city)
+                    address_parts.append(state)
                 elif state and len(state) == 2:
-                    result['address'] = state
-                    local_logger.info(f"   ✅ Extracted address (state only, fallback): {result['address']}")
+                    address_parts.append(state)
             else:
                 # Fallback: try to find state only in other patterns
                 state_patterns = [
@@ -1845,13 +1861,16 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                     if state_match:
                         state = unescape(state_match.group(1)).strip().upper()
                         if state and len(state) == 2:  # Ensure it's a 2-letter state code
-                            result['address'] = state
-                            local_logger.info(f"   ✅ Extracted address (state only, fallback): {result['address']}")
+                            address_parts.append(state)
                             break
                 
-                if not result.get('address'):
-                    result['address'] = None
-                    local_logger.warning(f"   ⚠️ Could not extract address (city, state) from HTML")
+        # Combine all address parts into full address string
+        if address_parts:
+            result['address'] = ", ".join(address_parts)
+            local_logger.info(f"   ✅ Extracted full address: {result['address']}")
+        else:
+            result['address'] = None
+            local_logger.warning(f"   ⚠️ Could not extract address from HTML")
         
         # Extract reporting date (accepted date from form_data or extract from HTML)
         # Note: Event date extraction is form-specific and handled in form-specific functions
