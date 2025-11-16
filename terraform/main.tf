@@ -1507,7 +1507,8 @@ resource "aws_iam_role_policy" "eventbridge_stepfunctions_policy" {
         Resource = [
           module.eod_aggregator_state_machine.state_machine_arn,
           module.stock_data_historical_loader_state_machine.state_machine_arn,
-          module.politician_trades_state_machine.state_machine_arn
+          module.politician_trades_state_machine.state_machine_arn,
+          module.politician_trades_sec_state_machine.state_machine_arn
         ]
       }
     ]
@@ -2098,74 +2099,15 @@ module "politician_trades_state_machine" {
         # Transform: if backdate exists, set date to null; otherwise keep date as is
         # This is handled by the Pass state - both fields will be present (one may be null)
         ResultPath = "$"
-        Next       = "ParallelPipelines"
+        Next       = "CongressionalPTRsPipeline"
       }
 
-      # Top-level parallel: SEC (Glue) and Congressional PTRs (Fetcher → nested parallel Senate/House)
-      ParallelPipelines = {
+      # Congressional PTRs Pipeline: Fetcher → Nested Parallel (Senate/House)
+      CongressionalPTRsPipeline = {
         Type    = "Parallel"
-        Comment = "Top-level parallel: SEC (Glue, standalone) and Congressional PTRs (Fetcher → nested parallel Senate/House)"
+        Comment = "Congressional PTRs Pipeline: Fetcher → Nested Parallel (Senate/House)"
         Branches = [
           {
-            # SEC Pipeline (Glue Job) - Standalone, no output to aggregator
-            StartAt = "ProcessSECFilings"
-            States = {
-              ProcessSECFilings = {
-                Type     = "Task"
-                Resource = "arn:aws:states:::glue:startJobRun.sync"
-                Comment  = "SEC ETL Glue Job: Standalone pipeline. Gets date from top-level input. Fetches, downloads, parses, matches, and saves directly to DynamoDB. No output to aggregator."
-                Parameters = {
-                  JobName = module.politician_trades_sec_glue_job.job_name
-                  Arguments = {
-                    "--backdate.$"     = "$.backdate" # Get backdate from top-level input (may be null/empty)
-                    "--date.$"         = "$.date"     # Get date from top-level input (may be null/empty - Glue will default to yesterday)
-                    "--s3_bucket"      = module.sec_filings_s3.bucket_id
-                    "--dynamodb_table" = module.sec_filings_table.table_name
-                    # OpenSearch disabled for MVP - agent will use DynamoDB + S3 instead
-                    # "--opensearch_endpoint" = module.sec_filings_opensearch.domain_endpoint
-                    # "--opensearch_index"    = "sec-filings"
-                    "--JOB_NAME" = module.politician_trades_sec_glue_job.job_name
-                  }
-                }
-                Retry = [
-                  {
-                    ErrorEquals     = ["Glue.ConcurrentRunsExceededException"]
-                    IntervalSeconds = 300 # Wait 5 minutes for concurrent runs to complete
-                    MaxAttempts     = 12  # Retry up to 12 times (60 minutes total with exponential backoff)
-                    BackoffRate     = 1.5 # Exponential backoff: 5min, 7.5min, 11.25min, etc.
-                  },
-                  {
-                    ErrorEquals     = ["Glue.ServiceException"]
-                    IntervalSeconds = 60
-                    MaxAttempts     = 5
-                    BackoffRate     = 2.0
-                  },
-                  {
-                    ErrorEquals     = ["States.ALL"]
-                    IntervalSeconds = 30
-                    MaxAttempts     = 3
-                    BackoffRate     = 2.0
-                  }
-                ]
-                Catch = [
-                  {
-                    ErrorEquals = ["States.ALL"]
-                    ResultPath  = "$.error"
-                    Next        = "SECProcessingFailed"
-                  }
-                ]
-                End = true
-              }
-              SECProcessingFailed = {
-                Type    = "Fail"
-                Comment = "SEC Glue job failed - execution should fail"
-                Error   = "SECGlueJobFailed"
-                Cause   = "SEC Glue job execution failed. Check Glue job logs for details."
-              }
-            }
-          },
-          {
-            # Congressional PTRs Pipeline: Fetcher → Nested Parallel (Senate/House)
             StartAt = "FetchFormMetadata"
             States = {
               FetchFormMetadata = {
@@ -2488,7 +2430,6 @@ module "politician_trades_state_machine" {
         ResultPath = "$.pipelineResults"
         End        = true
         # No aggregation step - each pipeline saves directly to DynamoDB:
-        # - SEC Glue job: Saves internally (no output to aggregator)
         # - Senate pipeline: Saves via SaveSenateTrades Lambda at end of chain
         # - House pipeline: Saves via SaveHouseTrades Lambda at end of chain
       }
@@ -2506,10 +2447,8 @@ module "politician_trades_state_machine" {
     # - politician_trades_sec_matcher removed - SEC handled by Glue job
   ]
 
-  # Glue job names for IAM permissions
-  glue_job_names = [
-    module.politician_trades_sec_glue_job.job_name
-  ]
+  # Glue job names for IAM permissions (none - SEC Glue job moved to separate step function)
+  glue_job_names = []
 
   # Logging configuration
   log_level              = var.environment == "production" ? "ERROR" : "ALL"
@@ -2520,8 +2459,7 @@ module "politician_trades_state_machine" {
 
   depends_on = [
     module.politician_trades_fetcher,
-    module.politician_trades_saver,
-    module.politician_trades_sec_glue_job
+    module.politician_trades_saver
   ]
 }
 
@@ -2553,6 +2491,109 @@ module "politician_trades_scheduler" {
   tags        = var.common_tags
 
   depends_on = [module.politician_trades_state_machine]
+}
+
+# Step Functions State Machine for SEC Forms ETL (Glue Job)
+module "politician_trades_sec_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-politician-trades-sec-${var.environment}"
+  environment        = var.environment
+
+  # Step Functions definition: Input Normalizer → SEC Glue Job
+  definition = jsonencode({
+    Comment = "SEC Forms ETL Pipeline - Normalize input and run Glue job. Pass {'date': 'YYYY-MM-DD'} to process a specific date, or omit for default (yesterday)."
+    StartAt = "NormalizeInput"
+    States = {
+      # Step 0: Normalize input - handle 'backdate' or 'date' fields
+      NormalizeInput = {
+        Type    = "Pass"
+        Comment = "Normalize input: if backdate provided, set date to null and pass backdate. Otherwise pass date and source."
+        Parameters = {
+          "backdate.$" = "$.backdate"
+          "date.$"     = "$.date"
+          "source.$"   = "$.source"
+        }
+        # Transform: if backdate exists, set date to null; otherwise keep date as is
+        # This is handled by the Pass state - both fields will be present (one may be null)
+        ResultPath = "$"
+        Next       = "ProcessSECFilings"
+      }
+
+      # SEC Pipeline (Glue Job) - Standalone, no output to aggregator
+      ProcessSECFilings = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Comment  = "SEC ETL Glue Job: Standalone pipeline. Gets date from top-level input. Fetches, downloads, parses, matches, and saves directly to DynamoDB. No output to aggregator."
+        Parameters = {
+          JobName = module.politician_trades_sec_glue_job.job_name
+          Arguments = {
+            "--backdate.$"     = "$.backdate" # Get backdate from top-level input (may be null/empty)
+            "--date.$"         = "$.date"     # Get date from top-level input (may be null/empty - Glue will default to yesterday)
+            "--s3_bucket"      = module.sec_filings_s3.bucket_id
+            "--dynamodb_table" = module.sec_filings_table.table_name
+            # OpenSearch disabled for MVP - agent will use DynamoDB + S3 instead
+            # "--opensearch_endpoint" = module.sec_filings_opensearch.domain_endpoint
+            # "--opensearch_index"    = "sec-filings"
+            "--JOB_NAME" = module.politician_trades_sec_glue_job.job_name
+          }
+        }
+        Retry = [
+          {
+            ErrorEquals     = ["Glue.ConcurrentRunsExceededException"]
+            IntervalSeconds = 300 # Wait 5 minutes for concurrent runs to complete
+            MaxAttempts     = 12  # Retry up to 12 times (60 minutes total with exponential backoff)
+            BackoffRate     = 1.5 # Exponential backoff: 5min, 7.5min, 11.25min, etc.
+          },
+          {
+            ErrorEquals     = ["Glue.ServiceException"]
+            IntervalSeconds = 60
+            MaxAttempts     = 5
+            BackoffRate     = 2.0
+          },
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 30
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "SECProcessingFailed"
+          }
+        ]
+        End = true
+      }
+      SECProcessingFailed = {
+        Type    = "Fail"
+        Comment = "SEC Glue job failed - execution should fail"
+        Error   = "SECGlueJobFailed"
+        Cause   = "SEC Glue job execution failed. Check Glue job logs for details."
+      }
+    }
+  })
+
+  # Lambda ARNs for IAM permissions (none - this step function only invokes Glue job)
+  lambda_function_arns = []
+
+  # Glue job names for IAM permissions
+  glue_job_names = [
+    module.politician_trades_sec_glue_job.job_name
+  ]
+
+  # Logging configuration
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.politician_trades_sec_glue_job
+  ]
 }
 
 # IAM Policy for Glue to access SEC filings S3 bucket
