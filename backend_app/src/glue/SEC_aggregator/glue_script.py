@@ -1799,35 +1799,50 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             city = unescape(csv_match.group(1)).strip()
             state = unescape(csv_match.group(2)).strip()
             zip_code = unescape(csv_match.group(3)).strip()
-            # Store only the state abbreviation (2-letter code) for GSI
-            if state:
-                result['address'] = state.upper()  # Store state in uppercase (e.g., "SD", "NY", "CA")
+            # Store city and state in "city, state" format
+            if city and state:
+                result['address'] = f"{city}, {state}".upper()  # Store as "CITY, STATE" (e.g., "SIOUX FALLS, SD")
+                local_logger.info(f"   ✅ Extracted address (city, state): {result['address']}")
+            elif state:
+                result['address'] = state.upper()  # Fallback to state only if city is missing
                 local_logger.info(f"   ✅ Extracted address (state only): {result['address']}")
             else:
                 result['address'] = None
         else:
-            # Fallback: try to find state in other patterns
-            state_patterns = [
-                # Look for state in table row with three FormData cells (city, state, zip)
-                r'<td[^>]*><span[^>]*class="FormData"[^>]*>[^<]+</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>[^<]+</span></td>',
-                # Look for state after (State) label
-                r'\(State\)[^<]*<table[^>]*>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
-                # Look for state in table cell with width="33%"
-                r'<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
-            ]
-            state_match = None
-            for pattern in state_patterns:
-                state_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
-                if state_match:
-                    state = unescape(state_match.group(1)).strip().upper()
-                    if state and len(state) == 2:  # Ensure it's a 2-letter state code
-                        result['address'] = state
-                        local_logger.info(f"   ✅ Extracted address (state only, fallback): {result['address']}")
-                        break
-            
-            if not result.get('address'):
-                result['address'] = None
-                local_logger.warning(f"   ⚠️ Could not extract address (state) from HTML")
+            # Fallback: try to find city and state in other patterns
+            # First try to get both city and state from table row with three FormData cells
+            city_state_pattern = r'<td[^>]*><span[^>]*class="FormData"[^>]*>([^<]+)</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>[^<]+</span></td>'
+            city_state_match = re.search(city_state_pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if city_state_match:
+                city = unescape(city_state_match.group(1)).strip()
+                state = unescape(city_state_match.group(2)).strip().upper()
+                if city and state and len(state) == 2:
+                    result['address'] = f"{city}, {state}".upper()
+                    local_logger.info(f"   ✅ Extracted address (city, state, fallback): {result['address']}")
+                elif state and len(state) == 2:
+                    result['address'] = state
+                    local_logger.info(f"   ✅ Extracted address (state only, fallback): {result['address']}")
+            else:
+                # Fallback: try to find state only in other patterns
+                state_patterns = [
+                    # Look for state after (State) label
+                    r'\(State\)[^<]*<table[^>]*>.*?<td[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
+                    # Look for state in table cell with width="33%"
+                    r'<td[^>]*width="33%"[^>]*><span[^>]*class="FormData"[^>]*>([A-Z]{2})</span></td>',
+                ]
+                state_match = None
+                for pattern in state_patterns:
+                    state_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+                    if state_match:
+                        state = unescape(state_match.group(1)).strip().upper()
+                        if state and len(state) == 2:  # Ensure it's a 2-letter state code
+                            result['address'] = state
+                            local_logger.info(f"   ✅ Extracted address (state only, fallback): {result['address']}")
+                            break
+                
+                if not result.get('address'):
+                    result['address'] = None
+                    local_logger.warning(f"   ⚠️ Could not extract address (city, state) from HTML")
         
         # Extract reporting date (accepted date from form_data or extract from HTML)
         # Note: Event date extraction is form-specific and handled in form-specific functions
