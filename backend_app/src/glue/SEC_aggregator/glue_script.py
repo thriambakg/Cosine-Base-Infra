@@ -308,23 +308,32 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 if response.status_code == 200:
                     break
                 elif response.status_code == 403:
-                    weekday = target_date_obj.weekday()
-                    if weekday >= 5:
+                    # SEC returns 403 for non-existent index files (weekends/holidays/future dates)
+                    # Check if it's a weekend first
+                    weekday = target_date_obj.weekday()  # 0=Monday, 6=Sunday
+                    if weekday >= 5:  # Saturday (5) or Sunday (6)
                         logger.info(f"   ⏭️ Skipping {date_str} (weekend - no filings)")
                         print(f"   ⏭️ Skipping {date_str} (weekend - no filings)", flush=True)
-                        response = None
+                        response = None  # Mark as skipped
                         break
                     elif attempt < max_retries - 1:
-                        wait_time = retry_delay * (2 ** attempt)
-                        logger.warning(f"   ⚠️ 403 Forbidden (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...")
-                        print(f"   ⚠️ 403 Forbidden (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...", flush=True)
+                        # Might be temporary rate limit, retry
+                        wait_time = retry_delay * (2 ** attempt)  # Exponential backoff
+                        logger.warning(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...")
+                        print(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...", flush=True)
                         time.sleep(wait_time)
                         continue
                     else:
-                        logger.info(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists)")
-                        print(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists)", flush=True)
-                        response = None
+                        # Last attempt failed - likely no index file exists (holiday or not available yet)
+                        logger.info(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)")
+                        print(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)", flush=True)
+                        response = None  # Mark as skipped
                         break
+                elif response.status_code == 404:
+                    logger.info(f"   ⏭️ Skipping {date_str} (404 - no index file, may be weekend/holiday)")
+                    print(f"   ⏭️ Skipping {date_str} (404 - no index file, may be weekend/holiday)", flush=True)
+                    response = None  # Mark as skipped
+                    break  # 404 is expected for weekends/holidays, don't retry
                 else:
                     response.raise_for_status()
             except requests.exceptions.RequestException as e:
@@ -336,66 +345,83 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                 else:
                     raise
         
-        if not response or response.status_code != 200:
-            logger.warning(f"   ⚠️ Could not fetch index file for {date_str}")
-            print(f"   ⚠️ Could not fetch index file for {date_str}", flush=True)
+        if response is None:
+            logger.info(f"   ⏭️ Skipping {date_str} (no index file available)")
+            print(f"   ⏭️ Skipping {date_str} (no index file available)", flush=True)
             return []
         
-        # Parse index file
-        lines = response.text.split('\n')
+        if response.status_code != 200:
+            logger.error(f"   ❌ Unexpected status code {response.status_code} for {date_str}")
+            print(f"   ❌ Unexpected status code {response.status_code} for {date_str}", flush=True)
+            return []
         
-        # Find header line (contains "Form Type")
-        header_idx = None
-        for i, line in enumerate(lines):
-            if 'Form Type' in line and 'CIK' in line:
-                header_idx = i
+        # Parse the index file
+        # Format: CIK|Company Name|Form Type|Date Filed|File Name
+        content = response.text
+        lines = content.split('\n')
+        
+        # Find the header line and data start
+        header_found = False
+        data_start_idx = 0
+        
+        for idx, line in enumerate(lines):
+            if line.startswith('CIK|'):
+                header_found = True
+                data_start_idx = idx + 1
                 break
         
-        if header_idx is None:
-            logger.warning(f"   ⚠️ Could not find header in index file")
-            print(f"   ⚠️ Could not find header in index file", flush=True)
+        if not header_found:
+            logger.warning(f"   ⚠️ No header line found in index file for {date_str}")
+            print(f"   ⚠️ No header line found in index file for {date_str}", flush=True)
             return []
         
-        # Parse data lines (skip header and separator lines)
-        for line in lines[header_idx + 2:]:
+        # Parse data lines
+        form_type_nums = [ft.replace('form', '') if 'form' in ft.lower() else ft for ft in form_types]
+        
+        for line in lines[data_start_idx:]:
             if not line.strip():
                 continue
             
-            # Index file format: Form Type|Company Name|CIK|Date Filed|File Name|File Number
+            # Parse pipe-delimited format: CIK|Company Name|Form Type|Date Filed|File Name
             parts = line.split('|')
-            if len(parts) < 6:
+            if len(parts) < 5:
                 continue
             
-            form_type_raw = parts[0].strip()
-            cik = parts[2].strip()
-            date_filed = parts[3].strip()
-            filename = parts[4].strip()
-            
-            # Extract form type number (e.g., "4" from "4/A")
-            form_type_match = re.match(r'^(\d+)', form_type_raw)
-            if not form_type_match:
+            try:
+                cik = parts[0].strip()
+                company_name = parts[1].strip()
+                form_type_raw = parts[2].strip()
+                date_filed = parts[3].strip()
+                filename = parts[4].strip()
+                
+                # Extract form type number (e.g., "4" from "4" or "4/A")
+                form_type_match = re.match(r'^(\d+)', form_type_raw)
+                if not form_type_match:
+                    continue
+                form_type = form_type_match.group(1)
+                
+                if form_type not in form_type_nums:
+                    continue
+                
+                # Extract accession number from filename
+                # Format: {accession}-{something}.txt or {accession}-index.htm
+                accession_match = re.match(r'^([\d-]+)', filename)
+                if not accession_match:
+                    continue
+                accession_with_dashes = accession_match.group(1)
+                accession_clean = accession_with_dashes.replace('-', '')
+                
+                all_forms.append({
+                    'form_type': form_type,
+                    'cik': cik,
+                    'accession_number': accession_clean,
+                    'accession_dashed': accession_with_dashes,
+                    'filename': filename,
+                    'filing_date': date_filed,
+                })
+            except (ValueError, IndexError) as e:
+                # Skip malformed lines
                 continue
-            form_type = form_type_match.group(1)
-            
-            if form_type not in form_types:
-                continue
-            
-            # Extract accession number from filename
-            # Format: {accession}-{something}.txt or {accession}-index.htm
-            accession_match = re.match(r'^([\d-]+)', filename)
-            if not accession_match:
-                continue
-            accession_with_dashes = accession_match.group(1)
-            accession_clean = accession_with_dashes.replace('-', '')
-            
-            all_forms.append({
-                'form_type': form_type,
-                'cik': cik,
-                'accession_number': accession_clean,
-                'accession_dashed': accession_with_dashes,
-                'filename': filename,
-                'filing_date': date_filed,
-            })
         
         logger.info(f"✅ Found {len(all_forms)} forms (Types: {', '.join(form_types)})")
         print(f"✅ Found {len(all_forms)} forms (Types: {', '.join(form_types)})", flush=True)
@@ -500,79 +526,230 @@ def download_sec_form_both(form_data: Dict[str, Any], target_date: str, s3_bucke
             f"{accession_dashed}.htm",
         ]
         
-        # Also try index page to find document links
+        # Download index page to find document links (matching old script's approach)
+        # Priority 1: Download index.htm to find actual document links
         index_url = f"{base_url}/{accession_dashed}-index.htm"
+        index_url_fallback = f"{base_url}/index.htm"
         
         local_logger.info(f"      🔍 Searching for XML and HTML files...")
         print(f"      🔍 Searching for XML and HTML files...", flush=True)
         
-        # Try index page first to find document links
-        try:
-            time.sleep(0.1)
-            index_response = session.get(index_url, timeout=30)
-            if index_response.status_code == 200:
-                index_html = index_response.text
-                
-                # Find XML links
-                xml_links = re.findall(r'href="([^"]*\.xml[^"]*)"', index_html, re.IGNORECASE)
-                # Find HTML links
-                html_links = re.findall(r'href="([^"]*\.(?:html?)[^"]*)"', index_html, re.IGNORECASE)
-                
-                # Prioritize primary document patterns
-                for link in xml_links:
-                    if 'primary' in link.lower() or 'document' in link.lower() or 'ownership' in link.lower():
-                        xml_patterns.insert(0, link.lstrip('/'))
-                
-                for link in html_links:
-                    if 'primary' in link.lower() or 'document' in link.lower():
-                        html_patterns.insert(0, link.lstrip('/'))
-        except Exception as e:
-            local_logger.warning(f"      ⚠️ Could not fetch index page: {e}")
-            print(f"      ⚠️ Could not fetch index page: {e}", flush=True)
+        # Try index page first to find document links (mild web scraping with regex)
+        # We download the index page, parse it for links, then download those documents (not the index page itself)
+        doc_links_to_try = []  # Will store links found from index page
         
-        # Try XML files
-        for xml_pattern in xml_patterns[:10]:  # Limit to first 10 patterns
-            xml_url = f"{base_url}/{xml_pattern}"
+        for index_url_to_try in [index_url, index_url_fallback]:
             try:
                 time.sleep(0.1)
-                xml_response = session.get(xml_url, timeout=30)
-                if xml_response.status_code == 200:
-                    content = xml_response.content
-                    # Check if it's actual XML (not HTML masquerading as XML)
-                    # Some files with .xml extension are actually HTML
-                    if content.startswith(b'<?xml') or (b'<ownershipDocument' in content and b'<!DOCTYPE html' not in content):
-                        xml_content = content
-                        xml_s3_key = f"{folder_key}/filename.xml"
-                        local_logger.info(f"      ✅ Found XML file: {xml_pattern}")
-                        print(f"      ✅ Found XML file: {xml_pattern}", flush=True)
-                        break
-                    elif b'<!DOCTYPE html' in content or b'<html' in content.lower():
-                        # This is HTML but has .xml extension - store as HTML
-                        if not html_content:  # Only use if we don't have HTML already
-                            html_content = content
-                            html_s3_key = f"{folder_key}/filename.html"
-                            local_logger.info(f"      ✅ Found HTML file (with .xml extension): {xml_pattern}")
-                            print(f"      ✅ Found HTML file (with .xml extension): {xml_pattern}", flush=True)
+                index_response = session.get(index_url_to_try, timeout=30)
+                if index_response.status_code == 200:
+                    index_html = index_response.text
+                    
+                    local_logger.info(f"      🔍 Parsing index page for document links...")
+                    print(f"      🔍 Parsing index page for document links...", flush=True)
+                    
+                    # Strategy 1: Find all .xml file links (prioritize these over .txt)
+                    xml_pattern = r'href="([^"]*\.xml[^"]*)"'
+                    xml_matches = re.findall(xml_pattern, index_html, re.IGNORECASE)
+                    doc_links_to_try.extend(xml_matches)
+                    local_logger.info(f"      🔍 Found {len(xml_matches)} XML links in page")
+                    print(f"      🔍 Found {len(xml_matches)} XML links in page", flush=True)
+                    
+                    # Strategy 2: Look for primary document patterns (highest priority)
+                    primary_patterns = [
+                        r'href="([^"]*primary[_-]?document[^"]*\.xml[^"]*)"',
+                        r'href="([^"]*primarydoc[^"]*\.xml[^"]*)"',
+                        r'href="([^"]*document[^"]*\.xml[^"]*)"',
+                        # Common SEC naming: doc4.xml for Form 4
+                        r'href="([^"]*doc\d+\.xml[^"]*)"',
+                    ]
+                    primary_links = []
+                    for pattern in primary_patterns:
+                        matches = re.findall(pattern, index_html, re.IGNORECASE)
+                        primary_links.extend(matches)
+                    # Prepend primary links to prioritize them
+                    doc_links_to_try = primary_links + [link for link in doc_links_to_try if link not in primary_links]
+                    
+                    # Strategy 3: Find HTML links
+                    html_pattern = r'href="([^"]*\.(?:html?)[^"]*)"'
+                    html_matches = re.findall(html_pattern, index_html, re.IGNORECASE)
+                    html_primary_patterns = [
+                        r'href="([^"]*primary[_-]?document[^"]*\.(?:html?)[^"]*)"',
+                        r'href="([^"]*primarydoc[^"]*\.(?:html?)[^"]*)"',
+                        r'href="([^"]*document[^"]*\.(?:html?)[^"]*)"',
+                    ]
+                    html_primary_links = []
+                    for pattern in html_primary_patterns:
+                        matches = re.findall(pattern, index_html, re.IGNORECASE)
+                        html_primary_links.extend(matches)
+                    html_links = html_primary_links + [link for link in html_matches if link not in html_primary_links]
+                    doc_links_to_try.extend(html_links)
+                    
+                    # Strategy 4: Look for links with accession number (fallback)
+                    if not doc_links_to_try:
+                        acc_pattern = rf'href="([^"]*{re.escape(accession_dashed)}[^"]*)"'
+                        acc_matches = re.findall(acc_pattern, index_html, re.IGNORECASE)
+                        doc_links_to_try.extend(acc_matches)
+                        local_logger.info(f"      🔍 Found {len(acc_matches)} links with accession number")
+                        print(f"      🔍 Found {len(acc_matches)} links with accession number", flush=True)
+                    
+                    # Remove duplicates while preserving order
+                    seen = set()
+                    unique_doc_links = []
+                    for link in doc_links_to_try:
+                        if link not in seen:
+                            seen.add(link)
+                            unique_doc_links.append(link)
+                    
+                    # Sort: XML files first, then others
+                    def link_priority(link):
+                        if link.endswith('.xml'):
+                            return 0  # Highest priority
+                        elif 'primary' in link.lower() or 'document' in link.lower():
+                            return 1
+                        elif 'doc' in link.lower():
+                            return 2
+                        else:
+                            return 3
+                    
+                    sorted_links = sorted(unique_doc_links, key=link_priority)
+                    doc_links_to_try = sorted_links
+                    
+                    local_logger.info(f"      📋 Found {len(doc_links_to_try)} document links from index page, will download documents...")
+                    print(f"      📋 Found {len(doc_links_to_try)} document links from index page, will download documents...", flush=True)
+                    break  # Found index page, stop trying fallback
             except Exception as e:
+                local_logger.warning(f"      ⚠️ Could not fetch index page {index_url_to_try}: {e}")
+                print(f"      ⚠️ Could not fetch index page {index_url_to_try}: {e}", flush=True)
                 continue
         
-        # Try HTML files
-        for html_pattern in html_patterns[:10]:  # Limit to first 10 patterns
-            html_url = f"{base_url}/{html_pattern}"
+        # Now try downloading documents from the links we found (matching old script logic)
+        # Try up to 10 links from index page
+        for doc_link in doc_links_to_try[:10]:
+            # Handle relative URLs (matching old script logic)
+            if doc_link.startswith('/'):
+                doc_url = f"https://www.sec.gov{doc_link}"
+            elif doc_link.startswith('http'):
+                doc_url = doc_link
+            else:
+                doc_url = f"{base_url}/{doc_link}"
+            
+            # Skip index pages - we only want actual documents
+            if 'index' in doc_link.lower():
+                continue
+            
             try:
                 time.sleep(0.1)
-                html_response = session.get(html_url, timeout=30)
-                if html_response.status_code == 200:
-                    content = html_response.content
-                    # Check if it's HTML
-                    if b'<html' in content.lower() or b'<!doctype html' in content.lower():
-                        html_content = content
+                doc_response = session.get(doc_url, timeout=30)
+                if doc_response.status_code == 200:
+                    doc_content = doc_response.content
+                    content_start = doc_content[:1000].lower()
+                    
+                    # Check for HTML indicators
+                    is_html = any(indicator in content_start for indicator in [
+                        b'<!doctype html',
+                        b'<html',
+                        b'<head>',
+                        b'<body>',
+                        b'<style',
+                        b'sec form 4',
+                        b'sec form 3',
+                        b'sec form 5',
+                        b'form 4',
+                        b'form 3',
+                        b'form 5',
+                    ])
+                    
+                    # Check for XML indicators
+                    is_xml = (doc_content.startswith(b'<?xml') or 
+                             b'<ownershipDocument' in doc_content or 
+                             b'<document>' in doc_content or 
+                             b'<edgarDocument' in doc_content)
+                    
+                    # Store HTML document if found and we don't have one yet
+                    if is_html and not html_content:
+                        html_content = doc_content
                         html_s3_key = f"{folder_key}/filename.html"
-                        local_logger.info(f"      ✅ Found HTML file: {html_pattern}")
-                        print(f"      ✅ Found HTML file: {html_pattern}", flush=True)
+                        local_logger.info(f"      ✅ Found HTML document: {doc_link}")
+                        print(f"      ✅ Found HTML document: {doc_link}", flush=True)
+                        # Continue looking for XML
+                    
+                    # Store XML document if found and we don't have one yet
+                    elif is_xml and not is_html and not xml_content:
+                        xml_content = doc_content
+                        xml_s3_key = f"{folder_key}/filename.xml"
+                        local_logger.info(f"      ✅ Found XML document: {doc_link}")
+                        print(f"      ✅ Found XML document: {doc_link}", flush=True)
+                        # Continue looking for HTML
+                    
+                    # If we have both, we're done
+                    if xml_content and html_content:
                         break
             except Exception as e:
                 continue
+        
+        # Fallback: If we didn't find documents from index page, try direct file patterns
+        # (matching old script's Priority 2 approach)
+        if not xml_content or not html_content:
+            local_logger.info(f"      🔄 Trying direct file patterns as fallback...")
+            print(f"      🔄 Trying direct file patterns as fallback...", flush=True)
+            
+            # Try XML files
+            if not xml_content:
+                for xml_pattern in xml_patterns[:10]:  # Limit to first 10 patterns
+                    # Handle relative URLs (matching old script logic)
+                    if xml_pattern.startswith('/'):
+                        xml_url = f"https://www.sec.gov{xml_pattern}"
+                    elif xml_pattern.startswith('http'):
+                        xml_url = xml_pattern
+                    else:
+                        xml_url = f"{base_url}/{xml_pattern}"
+                    try:
+                        time.sleep(0.1)
+                        xml_response = session.get(xml_url, timeout=30)
+                        if xml_response.status_code == 200:
+                            content = xml_response.content
+                            # Check if it's actual XML (not HTML masquerading as XML)
+                            if content.startswith(b'<?xml') or (b'<ownershipDocument' in content and b'<!DOCTYPE html' not in content):
+                                xml_content = content
+                                xml_s3_key = f"{folder_key}/filename.xml"
+                                local_logger.info(f"      ✅ Found XML file (fallback): {xml_pattern}")
+                                print(f"      ✅ Found XML file (fallback): {xml_pattern}", flush=True)
+                                break
+                            elif b'<!DOCTYPE html' in content or b'<html' in content.lower():
+                                # This is HTML but has .xml extension - store as HTML
+                                if not html_content:
+                                    html_content = content
+                                    html_s3_key = f"{folder_key}/filename.html"
+                                    local_logger.info(f"      ✅ Found HTML file (with .xml extension, fallback): {xml_pattern}")
+                                    print(f"      ✅ Found HTML file (with .xml extension, fallback): {xml_pattern}", flush=True)
+                    except Exception as e:
+                        continue
+            
+            # Try HTML files
+            if not html_content:
+                for html_pattern in html_patterns[:10]:  # Limit to first 10 patterns
+                    # Handle relative URLs (matching old script logic)
+                    if html_pattern.startswith('/'):
+                        html_url = f"https://www.sec.gov{html_pattern}"
+                    elif html_pattern.startswith('http'):
+                        html_url = html_pattern
+                    else:
+                        html_url = f"{base_url}/{html_pattern}"
+                    try:
+                        time.sleep(0.1)
+                        html_response = session.get(html_url, timeout=30)
+                        if html_response.status_code == 200:
+                            content = html_response.content
+                            # Check if it's HTML
+                            if b'<html' in content.lower() or b'<!doctype html' in content.lower():
+                                html_content = content
+                                html_s3_key = f"{folder_key}/filename.html"
+                                local_logger.info(f"      ✅ Found HTML file (fallback): {html_pattern}")
+                                print(f"      ✅ Found HTML file (fallback): {html_pattern}", flush=True)
+                                break
+                    except Exception as e:
+                        continue
         
         # If we found at least one file, upload both to S3
         if xml_content or html_content:
