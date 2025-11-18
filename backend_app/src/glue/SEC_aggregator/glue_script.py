@@ -572,7 +572,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
 
 def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_name: str) -> Optional[Dict[str, Any]]:
     """
-    Download SEC form and return file content
+    Download SEC form (both HTML and XML versions) and return file contents
     
     Args:
         form_data: Form metadata
@@ -580,7 +580,7 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         s3_bucket_name: S3 bucket name (passed explicitly to avoid capturing module-level vars)
     
     Returns:
-        Dict with 's3_key', 'content', 'file_ext' or None if download fails
+        Dict with 's3_key' (folder path), 'xml_content', 'html_content', 'file_ext' (preferred: 'xml'), or None if download fails
     """
     # Import inside function to avoid serialization issues
     import logging
@@ -1192,13 +1192,20 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             print(error_msg, flush=True)
             return None
         
-        # Generate S3 key - include accession number to ensure uniqueness
-        # Format: trades/{date}/sec/{form_type}-{cik}-{accession}-{date}.{ext}
-        # Accession is already in dashed format (e.g., 0001140361-25-040858)
+        # NEW: Download both HTML and XML files
+        # We'll collect both file types and store them in a folder structure
+        html_content = None
+        xml_content = None
+        
+        # First, try to find and download both HTML and XML versions
+        # We'll modify the existing download logic to collect both
+        
+        # Generate folder path (without file extension)
+        # Format: sec/{form_type}-{cik}-{accession}-{date}/
         # CRITICAL: Validate all components before generating S3 key to prevent collisions
-        if not all([form_type, cik, accession_dashed, target_date, file_ext]):
+        if not all([form_type, cik, accession_dashed, target_date]):
             error_msg = f"   ❌ Cannot generate S3 key: missing required components"
-            error_msg += f" (form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, target_date={target_date}, file_ext={file_ext})"
+            error_msg += f" (form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, target_date={target_date})"
             local_logger.error(error_msg)
             print(error_msg, flush=True)
             raise ValueError(f"Missing required components for S3 key generation")
@@ -1210,63 +1217,189 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             print(error_msg, flush=True)
             raise ValueError(f"Invalid component values for S3 key generation")
         
-        s3_key = f"trades/{target_date}/sec/{form_type}-{cik}-{accession_dashed}-{target_date}.{file_ext}"
+        # Folder path (without filename) - this will be stored in DynamoDB
+        folder_path = f"sec/{form_type}-{cik}-{accession_dashed}-{target_date}"
         
-        local_logger.info(f"      🔑 Generated S3 Key: {s3_key}")
-        local_logger.info(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}, ext={file_ext}")
-        local_logger.info(f"         File size: {len(file_content):,} bytes")
-        print(f"      🔑 Generated S3 Key: {s3_key}", flush=True)
-        print(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}, ext={file_ext}", flush=True)
-        print(f"         File size: {len(file_content):,} bytes", flush=True)
+        # Store the file we already downloaded
+        if file_ext == 'html':
+            html_content = file_content
+        elif file_ext == 'xml':
+            xml_content = file_content
         
-        local_logger.info(f"")
-        local_logger.info(f"      💾 UPLOADING TO S3:")
-        local_logger.info(f"         Bucket: {s3_bucket_name}")
-        local_logger.info(f"         Key: {s3_key}")
-        local_logger.info(f"         Size: {len(file_content):,} bytes")
-        local_logger.info(f"         Content-Type: {content_type}")
-        print(f"", flush=True)
-        print(f"      💾 UPLOADING TO S3:", flush=True)
-        print(f"         Bucket: {s3_bucket_name}", flush=True)
-        print(f"         Key: {s3_key}", flush=True)
-        print(f"         Size: {len(file_content):,} bytes", flush=True)
-        print(f"         Content-Type: {content_type}", flush=True)
+        # Now try to find the other format
+        # If we have HTML, try to find XML, and vice versa
+        if html_content and not xml_content:
+            # Try to find XML version
+            local_logger.info(f"      🔍 Found HTML, searching for XML version...")
+            print(f"      🔍 Found HTML, searching for XML version...", flush=True)
+            # We'll search through the same links but look for XML
+            # (This logic will be added below)
+        elif xml_content and not html_content:
+            # Try to find HTML version
+            local_logger.info(f"      🔍 Found XML, searching for HTML version...")
+            print(f"      🔍 Found XML, searching for HTML version...", flush=True)
+        
+        # For now, use the file we downloaded
+        # TODO: Add logic to download the other format
+        
+        s3_key = f"trades/{target_date}/{folder_path}"  # Folder path for DynamoDB
+        
+        # Now search for the other format if we haven't found both
+        # We need to search through the links again to find the other format
+        if (html_content and not xml_content) or (xml_content and not html_content):
+            # Re-search through links to find the other format
+            # We'll look for HTML links if we have XML, and XML links if we have HTML
+            target_format = 'xml' if html_content else 'html'
+            local_logger.info(f"      🔍 Searching for {target_format.upper()} version...")
+            print(f"      🔍 Searching for {target_format.upper()} version...", flush=True)
+            
+            # Try to find the other format from the index page links
+            # We already have sorted_links from earlier, so we can search through them
+            # But we need to re-download the index page or use cached links
+            # For now, let's try common patterns
+            other_format_urls = []
+            if target_format == 'xml':
+                # Look for XML files
+                xml_patterns = [
+                    f"{accession_dashed}-primary-document.xml",
+                    f"{accession_dashed}-primarydoc.xml",
+                    "primary-document.xml",
+                    "doc4.xml",
+                    "doc1.xml",
+                    "doc3.xml",
+                    "doc5.xml",
+                    f"{accession_dashed}.xml",
+                    "ownership.xml",
+                ]
+                for pattern in xml_patterns:
+                    other_format_urls.append((f"{base_url}/{pattern}", pattern))
+            else:
+                # Look for HTML files
+                html_patterns = [
+                    f"{accession_dashed}-primary-document.html",
+                    f"{accession_dashed}-primarydoc.html",
+                    "primary-document.html",
+                    "doc4.html",
+                    "doc1.html",
+                    f"{accession_dashed}.html",
+                    "ownership.html",
+                ]
+                for pattern in html_patterns:
+                    other_format_urls.append((f"{base_url}/{pattern}", pattern))
+            
+            # Try to download the other format
+            for other_url, other_name in other_format_urls[:5]:  # Try first 5 patterns
+                try:
+                    time.sleep(0.1)  # Rate limiting
+                    other_response = session.get(other_url, timeout=30)
+                    if other_response.status_code == 200:
+                        other_content = other_response.content
+                        other_content_start = other_content[:1000].lower()
+                        
+                        # Verify it's the format we want
+                        if target_format == 'xml':
+                            is_target = (other_content.startswith(b'<?xml') or 
+                                        b'<ownershipDocument' in other_content)
+                        else:  # HTML
+                            is_target = (b'<!doctype html' in other_content_start or 
+                                        b'<html' in other_content_start)
+                        
+                        if is_target:
+                            if target_format == 'xml':
+                                xml_content = other_content
+                                local_logger.info(f"      ✅ Found XML version: {other_url}")
+                                print(f"      ✅ Found XML version: {other_url}", flush=True)
+                            else:
+                                html_content = other_content
+                                local_logger.info(f"      ✅ Found HTML version: {other_url}")
+                                print(f"      ✅ Found HTML version: {other_url}", flush=True)
+                            break
+                except Exception as e:
+                    continue
+        
+        # Ensure we have at least one file
+        if not html_content and not xml_content:
+            error_msg = f"   ❌ Download failed: No file content retrieved (CIK={cik}, Accession={accession_dashed})"
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            return None
+        
+        # Determine preferred format (XML if available, otherwise HTML)
+        preferred_content = xml_content if xml_content else html_content
+        preferred_ext = 'xml' if xml_content else 'html'
+        
+        local_logger.info(f"      🔑 Generated S3 Folder: {s3_key}")
+        local_logger.info(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}")
+        if xml_content:
+            local_logger.info(f"         XML file size: {len(xml_content):,} bytes")
+        if html_content:
+            local_logger.info(f"         HTML file size: {len(html_content):,} bytes")
+        print(f"      🔑 Generated S3 Folder: {s3_key}", flush=True)
+        print(f"         Components: form_type={form_type}, cik={cik}, accession_dashed={accession_dashed}, date={target_date}", flush=True)
+        if xml_content:
+            print(f"         XML file size: {len(xml_content):,} bytes", flush=True)
+        if html_content:
+            print(f"         HTML file size: {len(html_content):,} bytes", flush=True)
         
         # Create S3 client locally to avoid Spark serialization issues
         s3_client_local = boto3.client('s3')
         
-        # Upload to S3 with correct content type
+        # Upload both files to S3
+        uploaded_files = []
         try:
-            s3_client_local.put_object(
-                Bucket=s3_bucket_name,
-                Key=s3_key,
-                Body=file_content,
-                ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
-            )
+            # Upload XML file if we have it
+            if xml_content:
+                xml_key = f"{s3_key}/filename.xml"
+                local_logger.info(f"      💾 UPLOADING XML: {xml_key}")
+                print(f"      💾 UPLOADING XML: {xml_key}", flush=True)
+                s3_client_local.put_object(
+                    Bucket=s3_bucket_name,
+                    Key=xml_key,
+                    Body=xml_content,
+                    ContentType='application/xml'
+                )
+                uploaded_files.append('xml')
+                local_logger.info(f"      ✅ XML uploaded: {len(xml_content):,} bytes")
+                print(f"      ✅ XML uploaded: {len(xml_content):,} bytes", flush=True)
             
-            local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
-            local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
+            # Upload HTML file if we have it
+            if html_content:
+                html_key = f"{s3_key}/filename.html"
+                local_logger.info(f"      💾 UPLOADING HTML: {html_key}")
+                print(f"      💾 UPLOADING HTML: {html_key}", flush=True)
+                s3_client_local.put_object(
+                    Bucket=s3_bucket_name,
+                    Key=html_key,
+                    Body=html_content,
+                    ContentType='text/html'
+                )
+                uploaded_files.append('html')
+                local_logger.info(f"      ✅ HTML uploaded: {len(html_content):,} bytes")
+                print(f"      ✅ HTML uploaded: {len(html_content):,} bytes", flush=True)
+            
+            local_logger.info(f"      ✅ S3 UPLOAD SUCCESS! Uploaded: {', '.join(uploaded_files)}")
+            local_logger.info(f"      📦 DOWNLOAD COMPLETE: Files ready for parsing")
             local_logger.info(f"      " + "="*70)
-            print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
-            print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
+            print(f"      ✅ S3 UPLOAD SUCCESS! Uploaded: {', '.join(uploaded_files)}", flush=True)
+            print(f"      📦 DOWNLOAD COMPLETE: Files ready for parsing", flush=True)
             print(f"      " + "="*70, flush=True)
         except Exception as s3_error:
             error_type = type(s3_error).__name__
             error_msg = str(s3_error)
             local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
             local_logger.error(f"         Bucket: {s3_bucket_name}")
-            local_logger.error(f"         Key: {s3_key}")
-            local_logger.error(f"         Size: {len(file_content):,} bytes")
+            local_logger.error(f"         Folder: {s3_key}")
             print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
             print(f"         Bucket: {s3_bucket_name}", flush=True)
-            print(f"         Key: {s3_key}", flush=True)
-            print(f"         Size: {len(file_content):,} bytes", flush=True)
+            print(f"         Folder: {s3_key}", flush=True)
             raise  # Re-raise to be caught by outer exception handler
         
         return {
-            's3_key': s3_key,
-            'content': file_content,
-            'file_ext': file_ext,
+            's3_key': s3_key,  # Folder path (without filename)
+            'content': preferred_content,  # Preferred content for parsing (XML if available)
+            'xml_content': xml_content,  # XML content if available
+            'html_content': html_content,  # HTML content if available
+            'file_ext': preferred_ext,  # Preferred format
             'cik': cik,
             'accession_number': accession,
             'form_type': form_type,
@@ -1613,6 +1746,296 @@ def parse_sec_form_html(html_content: str, s3_key: str, filing_date: str) -> Lis
     return trades
 
 
+def parse_sec_form_xml(xml_content: bytes, s3_key: str, filing_date: str) -> List[Dict[str, Any]]:
+    """
+    Parse SEC Form XML and extract trade data
+    
+    Args:
+        xml_content: XML file content as bytes
+        s3_key: S3 key for logging
+        filing_date: Filing date string
+    
+    Returns:
+        List of trade dictionaries
+    """
+    # Import inside function to avoid serialization issues
+    import logging
+    local_logger = logging.getLogger()
+    
+    trades = []
+    
+    try:
+        local_logger.info(f"   🔍 PARSING XML: Starting parse for S3Key={s3_key}")
+        
+        # Parse XML
+        try:
+            xml_text = xml_content.decode('utf-8', errors='ignore')
+            root = ET.fromstring(xml_text)
+        except ET.ParseError as e:
+            local_logger.error(f"   ❌ XML PARSE ERROR: Invalid XML structure: {e}")
+            return trades
+        except Exception as e:
+            local_logger.error(f"   ❌ XML DECODE ERROR: {e}")
+            return trades
+        
+        # Extract form type
+        document_type_elem = root.find('.//documentType')
+        form_number = document_type_elem.text if document_type_elem is not None else None
+        
+        if not form_number:
+            # Try to extract from periodOfReport or other fields
+            form_number = '4'  # Default to Form 4
+        
+        is_form3 = form_number == '3'
+        is_form4 = form_number == '4'
+        is_form5 = form_number == '5'
+        
+        # Extract issuer information
+        issuer_elem = root.find('.//issuer')
+        issuer_name = None
+        ticker = None
+        if issuer_elem is not None:
+            issuer_name_elem = issuer_elem.find('issuerName')
+            ticker_elem = issuer_elem.find('issuerTradingSymbol')
+            issuer_name = issuer_name_elem.text if issuer_name_elem is not None else None
+            ticker = ticker_elem.text if ticker_elem is not None else None
+        
+        # Extract reporting owner name (use first one if multiple)
+        reporting_owner_elem = root.find('.//reportingOwner')
+        filer_name = None
+        if reporting_owner_elem is not None:
+            owner_id_elem = reporting_owner_elem.find('reportingOwnerId')
+            if owner_id_elem is not None:
+                name_elem = owner_id_elem.find('rptOwnerName')
+                filer_name = name_elem.text if name_elem is not None else None
+        
+        if not filer_name:
+            local_logger.warning(f"   ⚠️ PARSE WARNING: Could not extract filer name from XML S3Key={s3_key}")
+            return trades
+        
+        local_logger.info(f"   ✅ PARSED FILER NAME: FilerName={filer_name}, S3Key={s3_key}")
+        
+        # Extract period of report (filing date)
+        period_elem = root.find('.//periodOfReport')
+        filing_date_extracted = period_elem.text if period_elem is not None else filing_date
+        
+        # Parse non-derivative securities (Table I)
+        non_derivative_table = root.find('.//nonDerivativeTable')
+        if non_derivative_table is not None:
+            for transaction in non_derivative_table.findall('nonDerivativeTransaction'):
+                try:
+                    # Extract security title
+                    security_title_elem = transaction.find('.//securityTitle/value')
+                    security_name = security_title_elem.text if security_title_elem is not None else None
+                    
+                    # Extract transaction date
+                    trans_date_elem = transaction.find('.//transactionDate/value')
+                    transaction_date = trans_date_elem.text if trans_date_elem is not None else filing_date_extracted
+                    
+                    # Extract transaction code
+                    trans_code_elem = transaction.find('.//transactionCoding/transactionCode')
+                    trans_code = trans_code_elem.text if trans_code_elem is not None else None
+                    
+                    # Extract transaction amounts
+                    amounts_elem = transaction.find('.//transactionAmounts')
+                    shares = None
+                    price = None
+                    trans_direction = None
+                    
+                    if amounts_elem is not None:
+                        shares_elem = amounts_elem.find('.//transactionShares/value')
+                        price_elem = amounts_elem.find('.//transactionPricePerShare/value')
+                        direction_elem = amounts_elem.find('.//transactionAcquiredDisposedCode/value')
+                        
+                        if shares_elem is not None and shares_elem.text:
+                            try:
+                                shares = float(shares_elem.text)
+                            except (ValueError, TypeError):
+                                pass
+                        
+                        if price_elem is not None and price_elem.text:
+                            try:
+                                price = float(price_elem.text)
+                            except (ValueError, TypeError):
+                                pass
+                        
+                        trans_direction = direction_elem.text if direction_elem is not None else None
+                    
+                    # Extract ownership form
+                    ownership_elem = transaction.find('.//ownershipNature/directOrIndirectOwnership/value')
+                    ownership_form = ownership_elem.text if ownership_elem is not None else None
+                    
+                    if security_name and (shares is not None or is_form3):
+                        total_amount = None
+                        if shares and price:
+                            total_amount = shares * price
+                        
+                        # Convert date format if needed (XML uses YYYY-MM-DD)
+                        if transaction_date and len(transaction_date) == 10:
+                            try:
+                                # Already in YYYY-MM-DD format
+                                pass
+                            except:
+                                transaction_date = filing_date_extracted
+                        else:
+                            transaction_date = filing_date_extracted
+                        
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': security_name,
+                            'transactionDate': transaction_date,
+                            'filingDate': filing_date_extracted,
+                            'transactionType': trans_code if trans_code else ('I' if is_form3 else None),
+                            'shares': shares,
+                            'pricePerShare': price,
+                            'totalAmount': total_amount,
+                            'transactionDirection': trans_direction if trans_direction else ('A' if is_form3 else None),
+                            'formType': f'form{form_number}',
+                            'ownershipForm': ownership_form,
+                        }
+                        
+                        if is_form3:
+                            trade['isInitialOwnership'] = True
+                        
+                        trades.append(trade)
+                except Exception as trans_error:
+                    local_logger.warning(f"   ⚠️ Error parsing non-derivative transaction: {trans_error}")
+                    continue
+        
+        # Parse derivative securities (Table II)
+        derivative_table = root.find('.//derivativeTable')
+        if derivative_table is not None:
+            # Forms 3 and 5 use derivativeHolding, Form 4 uses derivativeTransaction
+            derivative_items = derivative_table.findall('derivativeTransaction') + derivative_table.findall('derivativeHolding')
+            
+            for derivative_item in derivative_items:
+                try:
+                    # Extract derivative security title
+                    security_title_elem = derivative_item.find('.//securityTitle/value')
+                    derivative_name = security_title_elem.text if security_title_elem is not None else None
+                    
+                    # Extract transaction date (for Form 4 transactions)
+                    trans_date_elem = derivative_item.find('.//transactionDate/value')
+                    transaction_date = trans_date_elem.text if trans_date_elem is not None else filing_date_extracted
+                    
+                    # Extract transaction code (for Form 4)
+                    trans_code_elem = derivative_item.find('.//transactionCoding/transactionCode')
+                    trans_code = trans_code_elem.text if trans_code_elem is not None else None
+                    
+                    # Extract conversion/exercise price
+                    exercise_price_elem = derivative_item.find('.//conversionOrExercisePrice/value')
+                    exercise_price = None
+                    if exercise_price_elem is not None and exercise_price_elem.text:
+                        try:
+                            exercise_price = float(exercise_price_elem.text)
+                        except (ValueError, TypeError):
+                            pass
+                    
+                    # Extract underlying security
+                    underlying_elem = derivative_item.find('.//underlyingSecurity')
+                    underlying_title = None
+                    underlying_shares = None
+                    
+                    if underlying_elem is not None:
+                        title_elem = underlying_elem.find('.//underlyingSecurityTitle/value')
+                        shares_elem = underlying_elem.find('.//underlyingSecurityShares/value')
+                        underlying_title = title_elem.text if title_elem is not None else None
+                        if shares_elem is not None and shares_elem.text:
+                            try:
+                                underlying_shares = float(shares_elem.text)
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    # Extract transaction amounts (for Form 4)
+                    amounts_elem = derivative_item.find('.//transactionAmounts')
+                    shares_acquired = None
+                    shares_disposed = None
+                    
+                    if amounts_elem is not None:
+                        acquired_elem = amounts_elem.find('.//transactionShares/value')
+                        disposed_elem = amounts_elem.find('.//transactionSharesDisposed/value')
+                        if acquired_elem is not None and acquired_elem.text:
+                            try:
+                                shares_acquired = float(acquired_elem.text)
+                            except (ValueError, TypeError):
+                                pass
+                        if disposed_elem is not None and disposed_elem.text:
+                            try:
+                                shares_disposed = float(disposed_elem.text)
+                            except (ValueError, TypeError):
+                                pass
+                    
+                    # For Form 3/5, use underlying shares; for Form 4, use transaction amounts
+                    shares = None
+                    if is_form4:
+                        if shares_acquired:
+                            shares = shares_acquired
+                        elif shares_disposed:
+                            shares = -shares_disposed
+                    else:
+                        shares = underlying_shares
+                    
+                    # Extract ownership form
+                    ownership_elem = derivative_item.find('.//ownershipNature/directOrIndirectOwnership/value')
+                    ownership_form = ownership_elem.text if ownership_elem is not None else None
+                    
+                    # Extract nature of ownership
+                    nature_elem = derivative_item.find('.//ownershipNature/natureOfOwnership/value')
+                    nature_of_ownership = nature_elem.text if nature_elem is not None else None
+                    
+                    if derivative_name:
+                        security_name = f"{derivative_name}"
+                        if underlying_title:
+                            security_name += f" (underlying: {underlying_title})"
+                        
+                        trade = {
+                            'filerName': filer_name,
+                            'issuerName': issuer_name,
+                            'securitySymbol': ticker,
+                            'securityName': security_name,
+                            'transactionDate': transaction_date,
+                            'filingDate': filing_date_extracted,
+                            'transactionType': trans_code if trans_code else None,
+                            'shares': shares,
+                            'pricePerShare': exercise_price,
+                            'totalAmount': abs(shares) * exercise_price if shares and exercise_price else None,
+                            'exercisePrice': exercise_price,
+                            'formType': f'form{form_number}',
+                            'isDerivative': True,
+                            'ownershipForm': ownership_form,
+                            'indirectNature': nature_of_ownership,
+                        }
+                        trades.append(trade)
+                except Exception as deriv_error:
+                    local_logger.warning(f"   ⚠️ Error parsing derivative transaction: {deriv_error}")
+                    continue
+        
+        local_logger.info(f"   ✅ PARSED DATA: Extracted {len(trades)} trades from XML S3Key={s3_key}")
+        
+        # Log all parsed trades for verification
+        if trades:
+            local_logger.info(f"   📋 PARSED TRADES DETAIL (S3Key={s3_key}):")
+            for trade_idx, trade in enumerate(trades, 1):
+                local_logger.info(f"      Trade {trade_idx}: Filer={trade.get('filerName', 'N/A')}, "
+                                f"Security={trade.get('securityName', 'N/A')[:60]}, "
+                                f"Symbol={trade.get('securitySymbol', 'N/A')}, "
+                                f"Type={trade.get('transactionType', 'N/A')}, "
+                                f"Amount=${trade.get('totalAmount', 'N/A')}, "
+                                f"Shares={trade.get('shares', 'N/A')}, "
+                                f"Date={trade.get('transactionDate', 'N/A')}")
+        else:
+            local_logger.warning(f"   ⚠️ PARSED DATA: No trades extracted from XML S3Key={s3_key}")
+        
+    except Exception as e:
+        local_logger.error(f"   ❌ PARSE ERROR: Error parsing SEC form XML S3Key={s3_key}: {e}")
+        import traceback
+        local_logger.error(f"      Traceback: {traceback.format_exc()}")
+    
+    return trades
+
+
 def fuzzy_match_name(filer_name: str, politician: Dict[str, Any]) -> float:
     """Fuzzy match filer name to politician name"""
     politician_name = politician.get('name', '')
@@ -1673,6 +2096,131 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]])
     return None
 
 
+def parse_sec_form_metadata_xml(xml_content: bytes, form_data: Dict[str, Any], accepted_date_str: Optional[str]) -> Dict[str, Any]:
+    """
+    Parse SEC Form XML and extract all metadata fields (Forms 3, 4, 5)
+    
+    Returns:
+        Dict with all extracted metadata fields
+    """
+    # Import inside function to avoid serialization issues
+    import logging
+    local_logger = logging.getLogger()
+    
+    try:
+        xml_text = xml_content.decode('utf-8', errors='ignore')
+        root = ET.fromstring(xml_text)
+    except Exception as e:
+        local_logger.error(f"      ❌ XML PARSE ERROR: {e}")
+        return {}
+    
+    # Extract form type
+    document_type_elem = root.find('.//documentType')
+    form_number = document_type_elem.text if document_type_elem is not None else '4'
+    
+    # Extract issuer information
+    issuer_elem = root.find('.//issuer')
+    issuer_name = None
+    ticker = None
+    if issuer_elem is not None:
+        issuer_name_elem = issuer_elem.find('issuerName')
+        ticker_elem = issuer_elem.find('issuerTradingSymbol')
+        issuer_name = issuer_name_elem.text if issuer_name_elem is not None else None
+        ticker = ticker_elem.text if ticker_elem is not None else None
+    
+    # Extract reporting owner (use first one)
+    reporting_owner_elem = root.find('.//reportingOwner')
+    reporting_person_name = None
+    address_parts = []
+    relationship_code = 0
+    
+    if reporting_owner_elem is not None:
+        # Extract name
+        owner_id_elem = reporting_owner_elem.find('reportingOwnerId')
+        if owner_id_elem is not None:
+            name_elem = owner_id_elem.find('rptOwnerName')
+            reporting_person_name = name_elem.text if name_elem is not None else None
+        
+        # Extract address
+        address_elem = reporting_owner_elem.find('reportingOwnerAddress')
+        if address_elem is not None:
+            street1_elem = address_elem.find('rptOwnerStreet1')
+            street2_elem = address_elem.find('rptOwnerStreet2')
+            city_elem = address_elem.find('rptOwnerCity')
+            state_elem = address_elem.find('rptOwnerState')
+            zip_elem = address_elem.find('rptOwnerZipCode')
+            
+            if street1_elem is not None and street1_elem.text:
+                address_parts.append(street1_elem.text)
+            if street2_elem is not None and street2_elem.text:
+                address_parts.append(street2_elem.text)
+            if city_elem is not None and city_elem.text:
+                address_parts.append(city_elem.text.title())  # Title case for city
+            if state_elem is not None and state_elem.text:
+                address_parts.append(state_elem.text)
+            if zip_elem is not None and zip_elem.text:
+                address_parts.append(zip_elem.text)
+        
+        # Extract relationship
+        relationship_elem = reporting_owner_elem.find('reportingOwnerRelationship')
+        if relationship_elem is not None:
+            # XML uses true/false or 1/0
+            is_director = relationship_elem.find('isDirector')
+            is_officer = relationship_elem.find('isOfficer')
+            is_ten_percent = relationship_elem.find('isTenPercentOwner')
+            is_other = relationship_elem.find('isOther')
+            
+            if is_director is not None:
+                val = is_director.text.lower() if is_director.text else 'false'
+                if val in ('true', '1', 'yes'):
+                    relationship_code |= 1  # Director
+            if is_officer is not None:
+                val = is_officer.text.lower() if is_officer.text else 'false'
+                if val in ('true', '1', 'yes'):
+                    relationship_code |= 2  # Officer
+            if is_ten_percent is not None:
+                val = is_ten_percent.text.lower() if is_ten_percent.text else 'false'
+                if val in ('true', '1', 'yes'):
+                    relationship_code |= 4  # 10% Owner
+            if is_other is not None:
+                val = is_other.text.lower() if is_other.text else 'false'
+                if val in ('true', '1', 'yes'):
+                    relationship_code |= 8  # Other
+    
+    # Extract dates
+    period_elem = root.find('.//periodOfReport')
+    event_date = period_elem.text if period_elem is not None else None
+    reporting_date = accepted_date_str or event_date
+    
+    # Extract signature
+    signature_elem = root.find('.//ownerSignature')
+    signature_name = None
+    signature_date = None
+    if signature_elem is not None:
+        name_elem = signature_elem.find('signatureName')
+        date_elem = signature_elem.find('signatureDate')
+        signature_name = name_elem.text if name_elem is not None else None
+        signature_date = date_elem.text if date_elem is not None else None
+    
+    # Build address string
+    address = ", ".join(address_parts) if address_parts else None
+    
+    return {
+        'formType': f'form{form_number}',
+        'reportingPersonName': reporting_person_name,
+        'address': address,
+        'issuerName': issuer_name,
+        'tickerSymbol': ticker,
+        'relationship': str(relationship_code) if relationship_code > 0 else None,
+        'eventDate': event_date,
+        'reportingDate': reporting_date,
+        'signatureName': signature_name,
+        'filingType': 'original',  # XML doesn't explicitly mark amendments, would need to check elsewhere
+        'amendmentDate': None,
+        'relationshipAdditionalText': None,
+    }
+
+
 def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accepted_date_str: Optional[str]) -> Dict[str, Any]:
     """
     Parse SEC Form HTML and extract all metadata fields (Forms 3, 4, 5)
@@ -1684,6 +2232,16 @@ def parse_sec_form_metadata(html_content: str, form_data: Dict[str, Any], accept
     # Import inside function to avoid serialization issues
     import logging
     local_logger = logging.getLogger()
+    
+    # Check if content is actually XML (starts with <?xml)
+    if html_content.strip().startswith('<?xml') or '<ownershipDocument' in html_content:
+        local_logger.info(f"      📋 Detected XML format, using XML parser")
+        try:
+            xml_bytes = html_content.encode('utf-8') if isinstance(html_content, str) else html_content
+            return parse_sec_form_metadata_xml(xml_bytes, form_data, accepted_date_str)
+        except Exception as e:
+            local_logger.warning(f"      ⚠️ XML parsing failed, falling back to HTML parser: {e}")
+            # Fall through to HTML parsing
     
     # Detect form type
     form_number = None
@@ -3237,12 +3795,25 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     # Parse form metadata
     parse_start = datetime.now()
     local_logger.info(f"   📊 Step 3/4: Parsing form metadata from S3Key={s3_key}...")
-    if downloaded['file_ext'] != 'html':
-        local_logger.warning(f"   ⚠️ Unsupported file type: {downloaded['file_ext']} (CIK={cik}, Accession={accession})")
-        return {'skipped': True, 'reason': 'unsupported_file_type'}
     
-    content_str = downloaded['content'].decode('utf-8', errors='ignore')
-    parsed_data = parse_sec_form_metadata(content_str, form_data, accepted_date_str)
+    # Use XML if available, otherwise fall back to HTML
+    xml_content = downloaded.get('xml_content')
+    html_content = downloaded.get('html_content')
+    file_ext = downloaded.get('file_ext', 'html')
+    
+    # Prefer XML parsing if available
+    if xml_content:
+        local_logger.info(f"   📄 Using XML content for parsing (preferred)")
+        print(f"   📄 Using XML content for parsing (preferred)", flush=True)
+        parsed_data = parse_sec_form_metadata_xml(xml_content, form_data, accepted_date_str)
+    elif html_content:
+        local_logger.info(f"   📄 Using HTML content for parsing")
+        print(f"   📄 Using HTML content for parsing", flush=True)
+        content_str = html_content.decode('utf-8', errors='ignore') if isinstance(html_content, bytes) else html_content
+        parsed_data = parse_sec_form_metadata(content_str, form_data, accepted_date_str)
+    else:
+        local_logger.warning(f"   ⚠️ No content available for parsing (CIK={cik}, Accession={accession})")
+        return {'skipped': True, 'reason': 'no_content'}
     parse_duration = (datetime.now() - parse_start).total_seconds()
     
     # Log parsed data summary with full details
