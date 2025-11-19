@@ -2322,7 +2322,15 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
         item_preview = {k: (str(v)[:100] + '...' if len(str(v)) > 100 else v) for k, v in list(dynamodb_item.items())[:10]}
         local_logger.info(f"         Item Preview (first 10 fields): {json.dumps(item_preview, default=str)}")
         
+        # CRITICAL: Validate tradeId exists before writing
+        if 'tradeId' not in dynamodb_item or not dynamodb_item.get('tradeId'):
+            error_msg = f"   ❌ CRITICAL: tradeId is missing or empty in dynamodb_item! Cannot write to DynamoDB."
+            local_logger.error(error_msg)
+            print(error_msg, flush=True)
+            raise ValueError("tradeId is required but missing from dynamodb_item")
+        
         local_logger.info(f"      📡 Calling DynamoDB PutItem API...")
+        local_logger.info(f"         TradeId: {dynamodb_item.get('tradeId')}")
         db_write_start = datetime.now()
         put_response = table_local.put_item(Item=dynamodb_item)
         db_write_duration = (datetime.now() - db_write_start).total_seconds()
@@ -2591,11 +2599,15 @@ try:
     
     # Track S3 keys to detect collisions
     s3_keys_generated = []
+    trade_ids_generated = []
     for result in all_results:
         if result.get('success'):
             s3_key = result.get('s3_key') or result.get('formS3Key')
             if s3_key:
                 s3_keys_generated.append(s3_key)
+            trade_id = result.get('tradeId')
+            if trade_id:
+                trade_ids_generated.append(trade_id)
     
     if s3_keys_generated:
         unique_keys = set(s3_keys_generated)
@@ -2604,6 +2616,32 @@ try:
         if len(s3_keys_generated) != len(unique_keys):
             logger.warning(f"   ⚠️ WARNING: S3 KEY COLLISIONS DETECTED!")
             print(f"   ⚠️ WARNING: S3 KEY COLLISIONS DETECTED!", flush=True)
+    
+    # Track tradeIds to detect duplicates (which would cause overwrites in DynamoDB)
+    if trade_ids_generated:
+        unique_trade_ids = set(trade_ids_generated)
+        logger.info(f"   🔑 TradeIds Generated: {len(trade_ids_generated)} total, {len(unique_trade_ids)} unique")
+        print(f"   🔑 TradeIds Generated: {len(trade_ids_generated)} total, {len(unique_trade_ids)} unique", flush=True)
+        if len(trade_ids_generated) != len(unique_trade_ids):
+            duplicate_count = len(trade_ids_generated) - len(unique_trade_ids)
+            logger.warning(f"   ⚠️ WARNING: DUPLICATE TRADEIDS DETECTED! {duplicate_count} duplicates found")
+            logger.warning(f"      This will cause DynamoDB overwrites - fewer items in table than 'successful_stored' count")
+            print(f"   ⚠️ WARNING: DUPLICATE TRADEIDS DETECTED! {duplicate_count} duplicates found", flush=True)
+            print(f"      This will cause DynamoDB overwrites - fewer items in table than 'successful_stored' count", flush=True)
+            
+            # Find and log duplicate tradeIds
+            from collections import Counter
+            trade_id_counts = Counter(trade_ids_generated)
+            duplicates = {tid: count for tid, count in trade_id_counts.items() if count > 1}
+            if duplicates:
+                logger.warning(f"   📋 Duplicate TradeIds (showing first 10):")
+                print(f"   📋 Duplicate TradeIds (showing first 10):", flush=True)
+                for idx, (tid, count) in enumerate(list(duplicates.items())[:10], 1):
+                    logger.warning(f"      {idx}. {tid} (appears {count} times)")
+                    print(f"      {idx}. {tid} (appears {count} times)", flush=True)
+                if len(duplicates) > 10:
+                    logger.warning(f"      ... and {len(duplicates) - 10} more duplicates")
+                    print(f"      ... and {len(duplicates) - 10} more duplicates", flush=True)
     
     separator = "=" * 80
     logger.info(separator)
