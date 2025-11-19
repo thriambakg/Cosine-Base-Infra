@@ -355,16 +355,16 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     
     # Fetch forms from the single date's index file
     date_to_fetch = target_date_obj
-        # Daily index file URL
-        index_url = f"{SEC_BASE_URL}/Archives/edgar/daily-index/{year}/QTR{quarter}/master.{date_str_idx}.idx"
-        
-        logger.info(f"📥 Fetching daily index file for {date_str}...")
-        print(f"📥 Fetching daily index file for {date_str}...", flush=True)
-        
-        try:
+    # Daily index file URL
+    index_url = f"{SEC_BASE_URL}/Archives/edgar/daily-index/{year}/QTR{quarter}/master.{date_str_idx}.idx"
+    
+    logger.info(f"📥 Fetching daily index file for {date_str}...")
+    print(f"📥 Fetching daily index file for {date_str}...", flush=True)
+    
+    try:
         # Add delay to avoid rate limiting
-            time.sleep(0.3)
-            
+        time.sleep(0.3)
+        
         # Retry logic for 403 errors (SEC may temporarily block rapid requests)
         max_retries = 3
         retry_delay = 1.0
@@ -374,8 +374,8 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
             try:
                 # Use session with pre-configured headers (includes User-Agent)
                 # The session already has User-Agent and other headers set
-            response = session.get(index_url, timeout=30)
-            
+                response = session.get(index_url, timeout=30)
+                
                 if response.status_code == 200:
                     break  # Success, exit retry loop
                 elif response.status_code == 403:
@@ -393,7 +393,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                         logger.warning(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...")
                         print(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...", flush=True)
                         time.sleep(wait_time)
-                continue
+                        continue
                     else:
                         # Last attempt failed - likely no index file exists (holiday or not available yet)
                         logger.info(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)")
@@ -406,7 +406,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                     response = None  # Mark as skipped
                     break  # 404 is expected for weekends/holidays, don't retry
                 else:
-            response.raise_for_status()
+                    response.raise_for_status()
             except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (2 ** attempt)
@@ -426,47 +426,47 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
             logger.error(f"   ❌ Unexpected status code {response.status_code} for {date_str}")
             print(f"   ❌ Unexpected status code {response.status_code} for {date_str}", flush=True)
             return []
-            
-            # Parse the index file
-            # Format: CIK|Company Name|Form Type|Date Filed|File Name
-            content = response.text
-            lines = content.split('\n')
-            
-            # Find the header line and data start
-            header_found = False
-            data_start_idx = 0
-            
-            for idx, line in enumerate(lines):
-                if line.startswith('CIK|'):
-                    header_found = True
-                    data_start_idx = idx + 1
-                    break
-            
-            if not header_found:
-                logger.warning(f"   ⚠️ No header line found in index file for {date_str}")
+        
+        # Parse the index file
+        # Format: CIK|Company Name|Form Type|Date Filed|File Name
+        content = response.text
+        lines = content.split('\n')
+        
+        # Find the header line and data start
+        header_found = False
+        data_start_idx = 0
+        
+        for idx, line in enumerate(lines):
+            if line.startswith('CIK|'):
+                header_found = True
+                data_start_idx = idx + 1
+                break
+        
+        if not header_found:
+            logger.warning(f"   ⚠️ No header line found in index file for {date_str}")
             return []
+        
+        # Parse data lines
+        forms_for_date = []
+        form_type_nums = [ft.replace('form', '') for ft in form_types]
+        
+        for line in lines[data_start_idx:]:
+            if not line.strip():
+                continue
             
-            # Parse data lines
-            forms_for_date = []
-            form_type_nums = [ft.replace('form', '') for ft in form_types]
+            # Parse pipe-delimited format: CIK|Company Name|Form Type|Date Filed|File Name
+            parts = line.split('|')
+            if len(parts) < 5:
+                continue
             
-            for line in lines[data_start_idx:]:
-                if not line.strip():
-                    continue
+            try:
+                cik = parts[0].strip()
+                company_name = parts[1].strip()
+                form_type_raw = parts[2].strip()
+                date_filed = parts[3].strip()
+                filename = parts[4].strip()
                 
-                # Parse pipe-delimited format: CIK|Company Name|Form Type|Date Filed|File Name
-                parts = line.split('|')
-                if len(parts) < 5:
-                    continue
-                
-                try:
-                    cik = parts[0].strip()
-                    company_name = parts[1].strip()
-                    form_type_raw = parts[2].strip()
-                    date_filed = parts[3].strip()
-                    filename = parts[4].strip()
-                    
-                    # Check if this is a Form 3, 4, or 5
+                # Check if this is a Form 3, 4, or 5
                 # Be strict: only match exact form types (3, 4, 5) or "FORM 3", "FORM 4", "FORM 5"
                 # Don't match numbers from other form types like "N-MFP3", "10-K", "8-K", etc.
                 form_num = None
@@ -490,42 +490,42 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                         if date_filed != date_str_idx:
                             continue
                         
-                                # Extract accession number from filename
-                                # Format: {accession}-{form_type}.txt or {accession}-index.htm
-                                accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
-                                if accession_match:
-                                    accession_dashed = accession_match.group(1)
-                                    accession_clean = accession_dashed.replace('-', '')
-                                    
-                                    form_data = {
-                                        'cik': cik,
-                                        'accession_number': accession_clean,  # Without dashes (matching downloader input format)
-                                        'form_type': f'form{form_num}',
+                        # Extract accession number from filename
+                        # Format: {accession}-{form_type}.txt or {accession}-index.htm
+                        accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
+                        if accession_match:
+                            accession_dashed = accession_match.group(1)
+                            accession_clean = accession_dashed.replace('-', '')
+                            
+                            form_data = {
+                                'cik': cik,
+                                'accession_number': accession_clean,  # Without dashes (matching downloader input format)
+                                'form_type': f'form{form_num}',
                                 'filing_date': filing_date_str,  # Use parsed date in YYYY-MM-DD format
-                                        'company_name': company_name,
-                                        'filename': filename
-                                    }
-                                    forms_for_date.append(form_data)
+                                'company_name': company_name,
+                                'filename': filename
+                            }
+                            forms_for_date.append(form_data)
                     except (ValueError, TypeError):
                         # If date parsing fails, skip this form
                         continue
-                except Exception:
-                    continue
-            
-            all_forms.extend(forms_for_date)
-            
-            if forms_for_date:
-                logger.info(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}")
-                print(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}", flush=True)
-            
-        except requests.exceptions.RequestException as e:
-            logger.error(f"   ❌ Error fetching index file for {date_str}: {e}")
-            print(f"   ❌ Error fetching index file for {date_str}: {e}", flush=True)
-        except Exception as e:
-            logger.error(f"   ❌ Unexpected error processing index file for {date_str}: {e}")
-            print(f"   ❌ Unexpected error processing index file for {date_str}: {e}", flush=True)
-            import traceback
-            logger.error(f"   Traceback: {traceback.format_exc()}")
+            except Exception:
+                continue
+        
+        all_forms.extend(forms_for_date)
+        
+        if forms_for_date:
+            logger.info(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}")
+            print(f"   ✅ Found {len(forms_for_date)} Forms 3/4/5 for {date_str}", flush=True)
+        
+    except requests.exceptions.RequestException as e:
+        logger.error(f"   ❌ Error fetching index file for {date_str}: {e}")
+        print(f"   ❌ Error fetching index file for {date_str}: {e}", flush=True)
+    except Exception as e:
+        logger.error(f"   ❌ Unexpected error processing index file for {date_str}: {e}")
+        print(f"   ❌ Unexpected error processing index file for {date_str}: {e}", flush=True)
+        import traceback
+        logger.error(f"   Traceback: {traceback.format_exc()}")
     
     fetch_duration = (datetime.now() - fetch_start).total_seconds()
     
@@ -1298,32 +1298,32 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         
         # Upload original file only if we're NOT using folder structure (backward compatibility)
         if not (xml_content or html_content):
-        try:
-            s3_client_local.put_object(
-                Bucket=s3_bucket_name,
-                Key=s3_key,
-                Body=file_content,
-                ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
-            )
-            
-            local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
-            local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
-            local_logger.info(f"      " + "="*70)
-            print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
-            print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
-            print(f"      " + "="*70, flush=True)
-        except Exception as s3_error:
-            error_type = type(s3_error).__name__
-            error_msg = str(s3_error)
-            local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
-            local_logger.error(f"         Bucket: {s3_bucket_name}")
-            local_logger.error(f"         Key: {s3_key}")
-            local_logger.error(f"         Size: {len(file_content):,} bytes")
-            print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
-            print(f"         Bucket: {s3_bucket_name}", flush=True)
-            print(f"         Key: {s3_key}", flush=True)
-            print(f"         Size: {len(file_content):,} bytes", flush=True)
-            raise  # Re-raise to be caught by outer exception handler
+            try:
+                s3_client_local.put_object(
+                    Bucket=s3_bucket_name,
+                    Key=s3_key,
+                    Body=file_content,
+                    ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
+                )
+                
+                local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
+                local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
+                local_logger.info(f"      " + "="*70)
+                print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
+                print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
+                print(f"      " + "="*70, flush=True)
+            except Exception as s3_error:
+                error_type = type(s3_error).__name__
+                error_msg = str(s3_error)
+                local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
+                local_logger.error(f"         Bucket: {s3_bucket_name}")
+                local_logger.error(f"         Key: {s3_key}")
+                local_logger.error(f"         Size: {len(file_content):,} bytes")
+                print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
+                print(f"         Bucket: {s3_bucket_name}", flush=True)
+                print(f"         Key: {s3_key}", flush=True)
+                print(f"         Size: {len(file_content):,} bytes", flush=True)
+                raise  # Re-raise to be caught by outer exception handler
         else:
             # Using folder structure
             local_logger.info(f"      ✅ S3 UPLOAD SUCCESS (folder structure)!")
@@ -1352,20 +1352,20 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
             }
         else:
             # Fallback to original structure if we don't have folder structure
-        return {
-            's3_key': s3_key,
-            'content': file_content,
+            return {
+                's3_key': s3_key,
+                'content': file_content,
                 'xml_content': None,
                 'html_content': html_content if file_ext == 'html' else None,
-            'file_ext': file_ext,
+                'file_ext': file_ext,
                 'xml_s3_key': None,
                 'html_s3_key': s3_key if file_ext == 'html' else None,
                 'folder_key': None,
-            'cik': cik,
-            'accession_number': accession,
-            'form_type': form_type,
-            'filing_date': target_date
-        }
+                'cik': cik,
+                'accession_number': accession,
+                'form_type': form_type,
+                'filing_date': target_date
+            }
         
     except Exception as e:
         error_type = type(e).__name__
@@ -1595,7 +1595,7 @@ def parse_sec_form_xml(xml_content: bytes, folder_key: str, filing_date: str) ->
                     try:
                         date_obj = datetime.strptime(sig_date, '%Y-%m-%d')
                         sig_data['signatureDate'] = date_obj.strftime('%Y-%m-%d')
-                        except:
+                    except:
                         sig_data['signatureDate'] = sig_date
                 
                 if sig_data:
@@ -2026,10 +2026,10 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                     r'<tr><td><span[^>]*class="FormData"[^>]*>([^<]*)</span></td></tr>',
                     street_table_content, re.IGNORECASE | re.DOTALL
                 )
-            for street_line in street_lines:
-                street = unescape(street_line).strip()
-                if street:
-                    address_parts.append(street)
+                for street_line in street_lines:
+                    street = unescape(street_line).strip()
+                    if street:
+                        address_parts.append(street)
         
         # City, State, Zip
         city_state_zip_patterns = [
@@ -2087,9 +2087,9 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         # Extract issuer name and ticker symbol
         issuer_match = re.search(
             r'Issuer Name[^<]*<b>and</b>[^<]*Ticker[^<]*</span>[^<]*<br[^>]*>[^<]*<a[^>]*>([^<]+)</a>',
-                html_content,
-                re.IGNORECASE | re.DOTALL
-            )
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
         if issuer_match:
             result['issuerName'] = unescape(issuer_match.group(1)).strip().lower()
         
@@ -2116,8 +2116,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         relationship_table = None
         for pattern in relationship_patterns:
             relationship_section_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
-        if relationship_section_match:
-            relationship_table = relationship_section_match.group(1)
+            if relationship_section_match:
+                relationship_table = relationship_section_match.group(1)
                 if relationship_table and ('Director' in relationship_table or 'Officer' in relationship_table):
                     break
         
@@ -2150,7 +2150,7 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                     first_row = rows[0]
                     first_row_cells = re.findall(r'<td[^>]*>(.*?)</td>', first_row, re.IGNORECASE | re.DOTALL)
                     
-                for pair_idx in [0, 2]:
+                    for pair_idx in [0, 2]:
                         if pair_idx + 1 < len(first_row_cells):
                             checkbox_cell = first_row_cells[pair_idx]
                             text_cell = first_row_cells[pair_idx + 1]
@@ -2159,14 +2159,14 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                             if not has_x:
                                 has_x = 'X' in checkbox_cell.strip()
                             
-                        text_content = re.sub(r'<[^>]+>', '', text_cell).strip()
+                            text_content = re.sub(r'<[^>]+>', '', text_cell).strip()
                             text_lower = text_content.lower()
-                        
-                        if has_x and text_content:
+                            
+                            if has_x and text_content:
                                 if 'director' in text_lower and 'Director' not in relationship_types:
-                                relationship_types.append('Director')
+                                    relationship_types.append('Director')
                                 elif '10%' in text_content and 'owner' in text_lower and '10% Owner' not in relationship_types:
-                                relationship_types.append('10% Owner')
+                                    relationship_types.append('10% Owner')
             
             # Extract additional text (simplified)
             if len(rows) >= 3:
@@ -2177,14 +2177,14 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                     officer_cell_html = additional_text_cells[1]
                     officer_text = re.sub(r'<[^>]+>', '', officer_cell_html).strip()
                     officer_text = unescape(officer_text) if officer_text else None
-                        if officer_text:
+                    if officer_text:
                         relationship_additional_dict['Officer'] = officer_text
                 
                 if len(additional_text_cells) > 3:
                     other_cell_html = additional_text_cells[3]
                     other_text = re.sub(r'<[^>]+>', '', other_cell_html).strip()
                     other_text = unescape(other_text) if other_text else None
-                        if other_text:
+                    if other_text:
                         relationship_additional_dict['Other'] = other_text
         
         relationship_code = 0
@@ -2203,8 +2203,8 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         filing_table = None
         for pattern in filing_patterns:
             individual_filing_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
-        if individual_filing_match:
-            filing_table = individual_filing_match.group(1)
+            if individual_filing_match:
+                filing_table = individual_filing_match.group(1)
                 break
         
         if filing_table:
@@ -2240,17 +2240,17 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
         signature_name = None
         for pattern, group_idx in signature_patterns:
             signature_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
-        if signature_match:
+            if signature_match:
                 if group_idx <= len(signature_match.groups()):
                     signature_name = unescape(signature_match.group(group_idx)).strip()
                     if signature_name and 'see exhibit' not in signature_name.lower():
-            signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
+                        signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
                         signature_name = signature_name.strip()
                         if signature_name:
                             break
         
         if signature_name:
-                result['signatureName'] = signature_name.lower()
+            result['signatureName'] = signature_name.lower()
         
     except Exception as e:
         local_logger.error(f"❌ Error parsing form metadata: {e}")
@@ -2400,7 +2400,7 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
                 date_str = event_date_match.group(1)
                 date_obj = datetime.strptime(date_str, '%m/%d/%Y')
                 result['eventDate'] = date_obj.strftime('%Y-%m-%d')
-    except Exception as e:
+            except Exception as e:
                 local_logger.warning(f"   ⚠️ Could not parse eventDate '{date_str}': {e}")
         
         amendment_date_patterns = [
@@ -2418,11 +2418,11 @@ def parse_form5_metadata(html_content: str, form_data: Dict[str, Any], accepted_
                 date_str = amendment_date_match.group(1)
                 date_obj = datetime.strptime(date_str, '%m/%d/%Y')
                 result['amendmentDate'] = date_obj.strftime('%Y-%m-%d')
-    except Exception as e:
+            except Exception as e:
                 local_logger.warning(f"   ⚠️ Could not parse amendmentDate '{date_str}': {e}")
-                else:
+        else:
             result['amendmentDate'] = None
-    
+        
     except Exception as e:
         local_logger.error(f"❌ Error parsing Form 5 metadata: {e}")
         import traceback
@@ -2538,33 +2538,103 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     file_size = len(downloaded.get('content', b''))
     local_logger.info(f"   ✅ Downloaded: {s3_key} (ext: {file_ext}, size: {file_size:,} bytes) in {download_duration:.2f}s")
     
-    # Parse form metadata - XML ONLY (no HTML fallback to prevent duplicate tradeIds)
+    # Parse form metadata - SEPARATE XML and HTML parsing paths
     parse_start = datetime.now()
     local_logger.info(f"   📊 Step 3/4: Parsing form metadata from S3Key={s3_key}...")
     
-    # XML ONLY: Only parse XML files to prevent duplicate tradeIds
-    # HTML fallback removed to avoid processing the same form twice (XML + HTML = duplicate tradeId)
-    parsed_data = None
+    # Get content from download result
     xml_content = downloaded.get('xml_content')
     html_content = downloaded.get('html_content')
     folder_key = downloaded.get('folder_key')
+    file_ext = downloaded.get('file_ext', 'unknown')
+    file_content = downloaded.get('content')
     
+    parsed_data = None
+    parse_method = None
+    
+    # PRIORITY 1: Try XML parsing if XML content is available
     if xml_content:
-        local_logger.info(f"   📊 Parsing XML file...")
-        print(f"   📊 Parsing XML file...", flush=True)
-        parsed_data = parse_sec_form_xml(xml_content, folder_key or s3_key, filing_date_str)
-    else:
-        # No XML content available - skip this form to prevent duplicate tradeIds
-        # (HTML-only forms would create duplicate tradeIds if we processed them)
-        local_logger.warning(f"   ⏭️ SKIPPING: No XML content available (CIK={cik}, Accession={accession})")
-        local_logger.warning(f"      HTML fallback disabled to prevent duplicate tradeIds")
-        print(f"   ⏭️ SKIPPING: No XML content available (CIK={cik}, Accession={accession})", flush=True)
-        print(f"      HTML fallback disabled to prevent duplicate tradeIds", flush=True)
-        return {'skipped': True, 'reason': 'no_xml_content'}
+        try:
+            local_logger.info(f"   📊 Attempting XML parsing...")
+            print(f"   📊 Attempting XML parsing...", flush=True)
+            parsed_data = parse_sec_form_xml(xml_content, folder_key or s3_key, filing_date_str)
+            if parsed_data and parsed_data.get('formType'):
+                parse_method = 'xml'
+                local_logger.info(f"   ✅ XML parsing successful")
+                print(f"   ✅ XML parsing successful", flush=True)
+            else:
+                local_logger.warning(f"   ⚠️ XML parsing returned empty/invalid data, will try HTML fallback")
+                print(f"   ⚠️ XML parsing returned empty/invalid data, will try HTML fallback", flush=True)
+                parsed_data = None  # Reset to try HTML
+        except Exception as xml_error:
+            local_logger.warning(f"   ⚠️ XML parsing failed: {xml_error}, will try HTML fallback")
+            print(f"   ⚠️ XML parsing failed: {xml_error}, will try HTML fallback", flush=True)
+            import traceback
+            local_logger.debug(f"      XML parsing traceback: {traceback.format_exc()}")
+            parsed_data = None  # Reset to try HTML
     
+    # PRIORITY 2: Fall back to HTML parsing if XML failed or not available
     if not parsed_data:
-        local_logger.warning(f"   ⚠️ Failed to parse XML form (CIK={cik}, Accession={accession})")
+        html_content_to_parse = None
+        
+        # Try to get HTML content from various sources
+        if html_content:
+            html_content_to_parse = html_content
+            local_logger.info(f"   📊 Using HTML content from download result...")
+        elif file_ext == 'html' and file_content:
+            html_content_to_parse = file_content
+            local_logger.info(f"   📊 Using HTML content from single file...")
+        elif file_content:
+            # Check if file_content is actually HTML
+            try:
+                content_preview = file_content[:500].decode('utf-8', errors='ignore') if isinstance(file_content, bytes) else str(file_content)[:500]
+                if '<html' in content_preview.lower() or '<!doctype html' in content_preview.lower():
+                    html_content_to_parse = file_content
+                    local_logger.info(f"   📊 Detected HTML in file_content...")
+            except:
+                pass
+        
+        if html_content_to_parse:
+            try:
+                local_logger.info(f"   📊 Attempting HTML parsing...")
+                print(f"   📊 Attempting HTML parsing...", flush=True)
+                
+                # Convert to string if bytes
+                if isinstance(html_content_to_parse, bytes):
+                    content_str = html_content_to_parse.decode('utf-8', errors='ignore')
+                else:
+                    content_str = html_content_to_parse
+                
+                parsed_data = parse_sec_form_metadata(content_str, form_data, accepted_date_str)
+                
+                if parsed_data and parsed_data.get('formType'):
+                    parse_method = 'html'
+                    local_logger.info(f"   ✅ HTML parsing successful")
+                    print(f"   ✅ HTML parsing successful", flush=True)
+                else:
+                    local_logger.warning(f"   ⚠️ HTML parsing returned empty/invalid data")
+                    print(f"   ⚠️ HTML parsing returned empty/invalid data", flush=True)
+                    parsed_data = None
+            except Exception as html_error:
+                local_logger.error(f"   ❌ HTML parsing failed: {html_error}")
+                print(f"   ❌ HTML parsing failed: {html_error}", flush=True)
+                import traceback
+                local_logger.error(f"      HTML parsing traceback: {traceback.format_exc()}")
+                parsed_data = None
+        else:
+            local_logger.warning(f"   ⚠️ No HTML content available for parsing (CIK={cik}, Accession={accession})")
+            print(f"   ⚠️ No HTML content available for parsing", flush=True)
+    
+    # Final check: if we still don't have parsed data, skip this form
+    if not parsed_data:
+        local_logger.warning(f"   ⚠️ Failed to parse form (CIK={cik}, Accession={accession}) - no valid data from XML or HTML parsing")
+        print(f"   ⚠️ Failed to parse form - no valid data from XML or HTML parsing", flush=True)
         return {'skipped': True, 'reason': 'parse_failed'}
+    
+    # Log which parsing method was used
+    if parse_method:
+        local_logger.info(f"   📋 Parsing method used: {parse_method.upper()}")
+        print(f"   📋 Parsing method used: {parse_method.upper()}", flush=True)
     
     parse_duration = (datetime.now() - parse_start).total_seconds()
     
@@ -2949,15 +3019,15 @@ try:
     # Helper function to process forms for a single date
     def process_single_date(date_str: str) -> Dict[str, Any]:
         """Process all forms for a single date: fetch, then process with Spark"""
-    logger.info("")
-    logger.info("=" * 80)
+        logger.info("")
+        logger.info("=" * 80)
         logger.info(f"📋 Processing date: {date_str}")
-    logger.info("=" * 80)
+        logger.info("=" * 80)
         
         # Step 2a: Fetch forms for this date
-    stage2_start = datetime.now()
+        stage2_start = datetime.now()
         forms = fetch_sec_forms_paginated(date_str)
-    stage2_duration = (datetime.now() - stage2_start).total_seconds()
+        stage2_duration = (datetime.now() - stage2_start).total_seconds()
         
         if not forms:
             logger.info(f"   ⏭️ No forms found for {date_str}, skipping processing")
@@ -2979,74 +3049,73 @@ try:
         print(f"   ✅ Fetched {len(forms)} forms for {date_str} in {stage2_duration:.2f} seconds", flush=True)
         
         # Step 2b: Process forms with Spark
-    logger.info("")
+        logger.info("")
         logger.info(f"   📊 Processing {len(forms)} forms for {date_str} using Spark")
         print(f"   📊 Processing {len(forms)} forms for {date_str} using Spark", flush=True)
-    stage3_start = datetime.now()
-    
+        stage3_start = datetime.now()
+        
         # Broadcast necessary variables
-    politicians_broadcast = sc.broadcast(politicians)
+        politicians_broadcast = sc.broadcast(politicians)
         target_date_broadcast = sc.broadcast(date_str)
-    s3_bucket_broadcast = sc.broadcast(s3_bucket)
-    dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
+        s3_bucket_broadcast = sc.broadcast(s3_bucket)
+        dynamodb_table_broadcast = sc.broadcast(dynamodb_table)
         # OpenSearch disabled for MVP
         # opensearch_endpoint_broadcast = sc.broadcast(opensearch_endpoint)
         # opensearch_index_broadcast = sc.broadcast(opensearch_index)
-    
-    # Process each form (download, parse, check match, store)
-    def process_form_wrapper(form_data):
-        import logging
-        import traceback
-        local_logger = logging.getLogger()
-        local_logger.setLevel(logging.INFO)
         
-        try:
-            politicians_local = politicians_broadcast.value
-            target_date_local = target_date_broadcast.value
-            s3_bucket_local = s3_bucket_broadcast.value
-            dynamodb_table_local = dynamodb_table_broadcast.value
+        # Process each form (download, parse, check match, store)
+        def process_form_wrapper(form_data):
+            import logging
+            import traceback
+            local_logger = logging.getLogger()
+            local_logger.setLevel(logging.INFO)
+            
+            try:
+                politicians_local = politicians_broadcast.value
+                target_date_local = target_date_broadcast.value
+                s3_bucket_local = s3_bucket_broadcast.value
+                dynamodb_table_local = dynamodb_table_broadcast.value
                 # OpenSearch disabled for MVP
                 # opensearch_endpoint_local = opensearch_endpoint_broadcast.value
                 # opensearch_index_local = opensearch_index_broadcast.value
-            
-            cik = form_data.get('cik', 'unknown')
-            accession = form_data.get('accession_number', 'unknown')
-            
+                
+                cik = form_data.get('cik', 'unknown')
+                accession = form_data.get('accession_number', 'unknown')
+                
                 result = process_form(form_data, target_date_local, politicians_local, s3_bucket_local, 
                                      dynamodb_table_local, None, None)  # OpenSearch disabled
-            
-            return result
-        except Exception as e:
+                
+                return result
+            except Exception as e:
                 local_logger.error(f"❌ FATAL ERROR processing form: {e}")
-            return {'success': False, 'error': str(e)}
-    
+                return {'success': False, 'error': str(e)}
+        
         # Create RDD and process
         forms_rdd = sc.parallelize(forms)
-    results_rdd = forms_rdd.map(process_form_wrapper)
-    results = results_rdd.collect()
-    
-    # Clean up broadcast variables
-    politicians_broadcast.destroy()
-    target_date_broadcast.destroy()
-    s3_bucket_broadcast.destroy()
-    dynamodb_table_broadcast.destroy()
+        results_rdd = forms_rdd.map(process_form_wrapper)
+        results = results_rdd.collect()
+        
+        # Clean up broadcast variables
+        politicians_broadcast.destroy()
+        target_date_broadcast.destroy()
+        s3_bucket_broadcast.destroy()
+        dynamodb_table_broadcast.destroy()
         # OpenSearch disabled for MVP
         # opensearch_endpoint_broadcast.destroy()
         # opensearch_index_broadcast.destroy()
-    
-    stage3_duration = (datetime.now() - stage3_start).total_seconds()
-    
+        
+        stage3_duration = (datetime.now() - stage3_start).total_seconds()
+        
         # Calculate statistics
-    total_forms_processed = len(forms)
-    successful_stored = builtins.sum(1 for r in results if r.get('success'))
-    failed_stored = builtins.sum(1 for r in results if not r.get('success') and not r.get('skipped'))
-    skipped_date_mismatch = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'date_mismatch')
-    skipped_download_failed = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'download_failed')
-    skipped_unsupported_type = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'unsupported_file_type')
-        skipped_no_xml = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'no_xml_content')
-    politician_matches = builtins.sum(1 for r in results if r.get('politicianMatch'))
-    no_politician_matches = successful_stored - politician_matches
-    
+        total_forms_processed = len(forms)
+        successful_stored = builtins.sum(1 for r in results if r.get('success'))
+        failed_stored = builtins.sum(1 for r in results if not r.get('success') and not r.get('skipped'))
+        skipped_date_mismatch = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'date_mismatch')
+        skipped_download_failed = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'download_failed')
+        skipped_unsupported_type = builtins.sum(1 for r in results if r.get('skipped') and r.get('reason') == 'unsupported_file_type')
+        politician_matches = builtins.sum(1 for r in results if r.get('politicianMatch'))
+        no_politician_matches = successful_stored - politician_matches
+        
         logger.info(f"   ✅ Completed processing {date_str}: {successful_stored}/{total_forms_processed} stored in {stage3_duration:.2f} seconds")
         print(f"   ✅ Completed processing {date_str}: {successful_stored}/{total_forms_processed} stored in {stage3_duration:.2f} seconds", flush=True)
         
@@ -3058,7 +3127,6 @@ try:
             'skipped_date_mismatch': skipped_date_mismatch,
             'skipped_download_failed': skipped_download_failed,
             'skipped_unsupported_type': skipped_unsupported_type,
-            'skipped_no_xml': skipped_no_xml,
             'politician_matches': politician_matches,
             'no_politician_matches': no_politician_matches,
             'results': results
@@ -3101,7 +3169,6 @@ try:
     skipped_date_mismatch = builtins.sum(s['skipped_date_mismatch'] for s in all_date_stats)
     skipped_download_failed = builtins.sum(s['skipped_download_failed'] for s in all_date_stats)
     skipped_unsupported_type = builtins.sum(s['skipped_unsupported_type'] for s in all_date_stats)
-    skipped_no_xml = builtins.sum(s['skipped_no_xml'] for s in all_date_stats)
     politician_matches = builtins.sum(s['politician_matches'] for s in all_date_stats)
     no_politician_matches = builtins.sum(s['no_politician_matches'] for s in all_date_stats)
     
@@ -3181,7 +3248,6 @@ try:
     logger.info(f"   - Skipped (date mismatch): {skipped_date_mismatch} ({skipped_date_mismatch/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
     logger.info(f"   - Skipped (download failed): {skipped_download_failed} ({skipped_download_failed/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
     logger.info(f"   - Skipped (unsupported file type): {skipped_unsupported_type} ({skipped_unsupported_type/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
-    logger.info(f"   - Skipped (no XML content): {skipped_no_xml} ({skipped_no_xml/total_forms_processed*100 if total_forms_processed > 0 else 0:.1f}%)")
     logger.info("")
     logger.info(f"👤 Politician Matching Statistics:")
     logger.info(f"   - Forms with politician match: {politician_matches} ({politician_matches/successful_stored*100 if successful_stored > 0 else 0:.1f}% of stored)")
@@ -3194,7 +3260,6 @@ try:
     logger.info(f"   - Skipped (date mismatch): {skipped_date_mismatch} forms")
     logger.info(f"   - Skipped (download failed): {skipped_download_failed} forms")
     logger.info(f"   - Skipped (unsupported file type): {skipped_unsupported_type} forms")
-    logger.info(f"   - Skipped (no XML content): {skipped_no_xml} forms")
     logger.info(f"   - Failed to store: {failed_stored} forms")
     
     # Show sample of failed results for debugging
@@ -3225,12 +3290,6 @@ try:
         logger.info(f"   ⚠️ Note: {skipped_date_mismatch} forms were skipped due to date mismatch")
         logger.info(f"      This is normal if the filing date in the form doesn't match the target date")
     
-    if skipped_no_xml > 0:
-        logger.info("")
-        logger.info(f"   ⚠️ Note: {skipped_no_xml} forms were skipped due to no XML content available")
-        logger.info(f"      HTML fallback disabled to prevent duplicate tradeIds")
-        logger.info(f"      These forms only have HTML versions available (older filings may not have XML)")
-    
     # Check for critical failures that should cause job to fail
     # Note: No forms found is valid for holidays/weekends - only fail on actual errors
     if total_forms_processed == 0:
@@ -3242,7 +3301,7 @@ try:
             # All dates were skipped (likely holidays/weekends) - this is valid, don't fail
             logger.warning("")
             logger.warning("⚠️ WARNING: No forms were fetched from SEC API for any processed dates")
-        print("", flush=True)
+            print("", flush=True)
             print("⚠️ WARNING: No forms were fetched from SEC API for any processed dates", flush=True)
             print("   This is normal for:", flush=True)
             print("      - Federal holidays (SEC is closed)", flush=True)
@@ -3257,7 +3316,7 @@ try:
             logger.warning("⚠️ WARNING: No forms were fetched from SEC API")
             print("", flush=True)
             print("⚠️ WARNING: No forms were fetched from SEC API", flush=True)
-        print("   This could indicate:", flush=True)
+            print("   This could indicate:", flush=True)
             print("      - No forms filed on the target date(s)", flush=True)
             print("      - Federal holiday or weekend", flush=True)
             print("      - SEC API temporarily unavailable (check logs for 403/404 errors)", flush=True)
@@ -3296,7 +3355,6 @@ try:
         print(f"      Skipped (date mismatch): {skipped_date_mismatch}", flush=True)
         print(f"      Skipped (download failed): {skipped_download_failed}", flush=True)
         print(f"      Skipped (unsupported file type): {skipped_unsupported_type}", flush=True)
-        print(f"      Skipped (no XML content): {skipped_no_xml}", flush=True)
         
         raise Exception(f"No forms were successfully stored. {total_forms_processed} forms were fetched but none were stored. Check logs for details.")
     elif successful_stored == 0 and total_forms_processed == 0:
