@@ -1614,7 +1614,7 @@ def parse_sec_form_xml(xml_content: bytes, folder_key: str, filing_date: str) ->
                 if not result.get('reportingDate'):
                     result['reportingDate'] = sig_date
         
-        # Extract footnotes first (needed for resolving footnoteId references)
+        # Extract footnotes first (needed for footnoteId references)
         footnotes_dict = {}
         footnotes_elem = root.find('.//footnotes') if not ns or 'ns' not in ns else root.find('.//ns:footnotes', ns)
         if footnotes_elem is not None:
@@ -1625,9 +1625,16 @@ def parse_sec_form_xml(xml_content: bytes, folder_key: str, filing_date: str) ->
                 if footnote_id and footnote_text:
                     footnotes_dict[footnote_id] = footnote_text
         
-        # Helper to resolve footnote references
-        def resolve_footnote(elem, path):
-            """Find element and resolve footnoteId if present, otherwise return value"""
+        # Helper to find value and footnote ID (returns dict with 'value' and/or 'footnoteId')
+        def find_value_with_footnote(elem, path):
+            """
+            Find element and return dict with 'value' and/or 'footnoteId'.
+            Returns:
+                - String if only value exists (no footnote) - for backward compatibility
+                - Dict with 'value' and 'footnoteId' if both exist
+                - Dict with 'footnoteId' if only footnote exists
+                - None if neither exists
+            """
             if ns and 'ns' in ns:
                 found = elem.find(f'.//ns:{path}', ns)
             else:
@@ -1636,20 +1643,34 @@ def parse_sec_form_xml(xml_content: bytes, folder_key: str, filing_date: str) ->
             if found is None:
                 return None
             
-            # Check if it's a footnoteId reference
+            result_dict = {}
+            
+            # Check for value element
+            value_elem = found.find('value') if not ns or 'ns' not in ns else found.find('ns:value', ns)
+            if value_elem is not None and value_elem.text:
+                result_dict['value'] = value_elem.text.strip()
+            elif found.text and found.text.strip():
+                # Fallback: use element text directly
+                result_dict['value'] = found.text.strip()
+            
+            # Check for footnoteId reference
             footnote_id_elem = found.find('footnoteId') if not ns or 'ns' not in ns else found.find('ns:footnoteId', ns)
             if footnote_id_elem is not None:
                 footnote_id = footnote_id_elem.get('id', '')
-                if footnote_id in footnotes_dict:
-                    return footnotes_dict[footnote_id]
+                if footnote_id:
+                    result_dict['footnoteId'] = footnote_id
+            
+            # Return format:
+            # - If only value exists (no footnote): return string for backward compatibility
+            # - If footnote exists (with or without value): return dict
+            if 'footnoteId' in result_dict:
+                # Has footnote - return dict
+                return result_dict if result_dict else None
+            elif 'value' in result_dict:
+                # Only value - return string for backward compatibility
+                return result_dict['value']
+            else:
                 return None
-            
-            # Otherwise return the value
-            value_elem = found.find('value') if not ns or 'ns' not in ns else found.find('ns:value', ns)
-            if value_elem is not None:
-                return value_elem.text or None
-            
-            return found.text or None
         
         # Extract nonDerivativeTable (transactions for non-derivative securities like common stock)
         non_derivative_transactions = []
@@ -1673,17 +1694,17 @@ def parse_sec_form_xml(xml_content: bytes, folder_key: str, filing_date: str) ->
                     transaction['transactionFormType'] = find_text(trans_coding, 'transactionFormType', '')
                     transaction['equitySwapInvolved'] = find_text(trans_coding, 'equitySwapInvolved', '')
                 
-                # Transaction amounts
+                # Transaction amounts (with footnote support)
                 trans_amounts = trans.find('transactionAmounts') if not ns or 'ns' not in ns else trans.find('ns:transactionAmounts', ns)
                 if trans_amounts is not None:
-                    transaction['transactionShares'] = find_value(trans_amounts, 'transactionShares', '')
-                    transaction['transactionPricePerShare'] = find_value(trans_amounts, 'transactionPricePerShare', '')
-                    transaction['transactionAcquiredDisposedCode'] = find_value(trans_amounts, 'transactionAcquiredDisposedCode', '')
+                    transaction['transactionShares'] = find_value_with_footnote(trans_amounts, 'transactionShares')
+                    transaction['transactionPricePerShare'] = find_value_with_footnote(trans_amounts, 'transactionPricePerShare')
+                    transaction['transactionAcquiredDisposedCode'] = find_value_with_footnote(trans_amounts, 'transactionAcquiredDisposedCode')
                 
-                # Post-transaction amounts
+                # Post-transaction amounts (with footnote support)
                 post_trans = trans.find('postTransactionAmounts') if not ns or 'ns' not in ns else trans.find('ns:postTransactionAmounts', ns)
                 if post_trans is not None:
-                    transaction['sharesOwnedFollowingTransaction'] = find_value(post_trans, 'sharesOwnedFollowingTransaction', '')
+                    transaction['sharesOwnedFollowingTransaction'] = find_value_with_footnote(post_trans, 'sharesOwnedFollowingTransaction')
                 
                 # Ownership nature
                 ownership = trans.find('ownershipNature') if not ns or 'ns' not in ns else trans.find('ns:ownershipNature', ns)
@@ -1711,25 +1732,19 @@ def parse_sec_form_xml(xml_content: bytes, folder_key: str, filing_date: str) ->
                 derivative['securityTitle'] = find_value(holding, 'securityTitle', '')
                 
                 # Conversion/exercise price (may be footnote)
-                conversion_price = resolve_footnote(holding, 'conversionOrExercisePrice')
+                conversion_price = find_value_with_footnote(holding, 'conversionOrExercisePrice')
                 if conversion_price:
                     derivative['conversionOrExercisePrice'] = conversion_price
-                else:
-                    derivative['conversionOrExercisePrice'] = find_value(holding, 'conversionOrExercisePrice', '')
                 
                 # Exercise date (may be footnote)
-                exercise_date = resolve_footnote(holding, 'exerciseDate')
+                exercise_date = find_value_with_footnote(holding, 'exerciseDate')
                 if exercise_date:
                     derivative['exerciseDate'] = exercise_date
-                else:
-                    derivative['exerciseDate'] = find_value(holding, 'exerciseDate', '')
                 
                 # Expiration date (may be footnote)
-                expiration_date = resolve_footnote(holding, 'expirationDate')
+                expiration_date = find_value_with_footnote(holding, 'expirationDate')
                 if expiration_date:
                     derivative['expirationDate'] = expiration_date
-                else:
-                    derivative['expirationDate'] = find_value(holding, 'expirationDate', '')
                 
                 # Underlying security
                 underlying = holding.find('underlyingSecurity') if not ns or 'ns' not in ns else holding.find('ns:underlyingSecurity', ns)
@@ -1762,38 +1777,32 @@ def parse_sec_form_xml(xml_content: bytes, folder_key: str, filing_date: str) ->
                     derivative['transactionFormType'] = find_text(trans_coding, 'transactionFormType', '')
                     derivative['equitySwapInvolved'] = find_text(trans_coding, 'equitySwapInvolved', '')
                 
-                # Conversion/exercise price
-                conversion_price = resolve_footnote(trans, 'conversionOrExercisePrice')
+                # Conversion/exercise price (may be footnote)
+                conversion_price = find_value_with_footnote(trans, 'conversionOrExercisePrice')
                 if conversion_price:
                     derivative['conversionOrExercisePrice'] = conversion_price
-                else:
-                    derivative['conversionOrExercisePrice'] = find_value(trans, 'conversionOrExercisePrice', '')
                 
-                # Exercise date
-                exercise_date = resolve_footnote(trans, 'exerciseDate')
+                # Exercise date (may be footnote)
+                exercise_date = find_value_with_footnote(trans, 'exerciseDate')
                 if exercise_date:
                     derivative['exerciseDate'] = exercise_date
-                else:
-                    derivative['exerciseDate'] = find_value(trans, 'exerciseDate', '')
                 
-                # Expiration date
-                expiration_date = resolve_footnote(trans, 'expirationDate')
+                # Expiration date (may be footnote)
+                expiration_date = find_value_with_footnote(trans, 'expirationDate')
                 if expiration_date:
                     derivative['expirationDate'] = expiration_date
-                else:
-                    derivative['expirationDate'] = find_value(trans, 'expirationDate', '')
                 
-                # Transaction amounts (for Form 4/5 transactions)
+                # Transaction amounts (for Form 4/5 transactions) - with footnote support
                 trans_amounts = trans.find('transactionAmounts') if not ns or 'ns' not in ns else trans.find('ns:transactionAmounts', ns)
                 if trans_amounts is not None:
-                    derivative['transactionShares'] = find_value(trans_amounts, 'transactionShares', '')
-                    derivative['transactionPricePerShare'] = find_value(trans_amounts, 'transactionPricePerShare', '')
-                    derivative['transactionAcquiredDisposedCode'] = find_value(trans_amounts, 'transactionAcquiredDisposedCode', '')
+                    derivative['transactionShares'] = find_value_with_footnote(trans_amounts, 'transactionShares')
+                    derivative['transactionPricePerShare'] = find_value_with_footnote(trans_amounts, 'transactionPricePerShare')
+                    derivative['transactionAcquiredDisposedCode'] = find_value_with_footnote(trans_amounts, 'transactionAcquiredDisposedCode')
                 
-                # Post-transaction amounts
+                # Post-transaction amounts (with footnote support)
                 post_trans = trans.find('postTransactionAmounts') if not ns or 'ns' not in ns else trans.find('ns:postTransactionAmounts', ns)
                 if post_trans is not None:
-                    derivative['sharesOwnedFollowingTransaction'] = find_value(post_trans, 'sharesOwnedFollowingTransaction', '')
+                    derivative['sharesOwnedFollowingTransaction'] = find_value_with_footnote(post_trans, 'sharesOwnedFollowingTransaction')
                 
                 # Underlying security
                 underlying = trans.find('underlyingSecurity') if not ns or 'ns' not in ns else trans.find('ns:underlyingSecurity', ns)
