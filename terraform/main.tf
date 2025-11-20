@@ -2587,11 +2587,5 @@ module "politician_trades_scheduler" {
 #   })
 # }
 
-# Note: KMS key policy is updated in the locals section below to include OpenSearch service
-
-# Data sources for account ID (needed for KMS key policy)
-# Note: aws_region data source was removed as it was only used by OpenSearch (now disabled)
-data "aws_caller_identity" "current" {}
-
 # Note: KMS key policies are managed by the KMS module
 # No additional policy updates needed
