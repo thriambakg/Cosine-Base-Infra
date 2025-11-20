@@ -59,6 +59,163 @@ def create_session():
     })
     return session
 
+def scrape_filing_page_for_documents(filing_page_url: str) -> List[str]:
+    """
+    Scrape a SEC filing page (index.htm) to extract all document URLs
+    Only extracts from the "Document Format Files" table, not "Data Files" table
+    
+    Args:
+        filing_page_url: URL to the SEC filing index page
+    
+    Returns:
+        List of document URLs found in the Document Format Files table
+    """
+    session = create_session()
+    document_urls = []
+    
+    try:
+        time.sleep(0.1)  # Rate limiting
+        response = session.get(filing_page_url, timeout=30)
+        response.raise_for_status()
+        
+        html_text = response.text
+        
+        # Find the "Document Format Files" table section
+        # Extract only links from this table, not from "Data Files"
+        
+        # Strategy: Find the section between "Document Format Files" and "Data Files"
+        doc_table_start_patterns = [
+            r'Document Format Files',
+            r'<table[^>]*>.*?Document Format Files',
+            r'<th[^>]*>.*?Document Format Files',
+        ]
+        
+        data_table_start_patterns = [
+            r'Data Files',
+            r'<table[^>]*>.*?Data Files',
+            r'<th[^>]*>.*?Data Files',
+        ]
+        
+        # Find the start of Document Format Files table
+        doc_table_start = -1
+        for pattern in doc_table_start_patterns:
+            match = re.search(pattern, html_text, re.IGNORECASE)
+            if match:
+                doc_table_start = match.start()
+                break
+        
+        # Find the start of Data Files table (if it exists)
+        data_table_start = len(html_text)  # Default to end of text
+        for pattern in data_table_start_patterns:
+            match = re.search(pattern, html_text, re.IGNORECASE)
+            if match:
+                data_table_start = match.start()
+                break
+        
+        # Extract the section containing Document Format Files table
+        if doc_table_start >= 0:
+            # Look backwards from doc_table_start to find opening <table> tag
+            before_start = html_text[:doc_table_start]
+            table_open_match = before_start.rfind('<table')
+            if table_open_match >= 0:
+                # Find the matching closing </table> tag
+                table_section_full = html_text[table_open_match:data_table_start]
+                table_close_match = table_section_full.find('</table>')
+                if table_close_match > 0:
+                    table_section = table_section_full[:table_close_match + 8]  # Include </table>
+                else:
+                    table_section = table_section_full
+            else:
+                table_section = html_text[doc_table_start:data_table_start]
+        else:
+            # Fallback: use entire HTML if we can't find the table markers
+            table_section = html_text
+        
+        # Extract links only from this table section
+        # Strategy 1: Find all .xml file links (prioritize these)
+        xml_pattern = r'href="([^"]*\.xml[^"]*)"'
+        xml_matches = re.findall(xml_pattern, table_section, re.IGNORECASE)
+        document_urls.extend(xml_matches)
+        
+        # Strategy 2: Look for primary document patterns (highest priority)
+        primary_patterns = [
+            r'href="([^"]*primary[_-]?document[^"]*\.xml[^"]*)"',
+            r'href="([^"]*primarydoc[^"]*\.xml[^"]*)"',
+            r'href="([^"]*document[^"]*\.xml[^"]*)"',
+            r'href="([^"]*doc\d+\.xml[^"]*)"',  # Common SEC naming: doc4.xml for Form 4
+        ]
+        primary_links = []
+        for pattern in primary_patterns:
+            matches = re.findall(pattern, table_section, re.IGNORECASE)
+            primary_links.extend(matches)
+        
+        # Prepend primary links to prioritize them
+        document_urls = primary_links + [link for link in document_urls if link not in primary_links]
+        
+        # Strategy 3: Look for .html/.htm files in the table
+        html_pattern = r'href="([^"]*\.(?:html?|htm)[^"]*)"'
+        html_matches = re.findall(html_pattern, table_section, re.IGNORECASE)
+        # Filter out index files and XBRL files
+        html_matches = [link for link in html_matches 
+                       if 'index' not in link.lower() 
+                       and 'xbrl' not in link.lower()
+                       and 'taxonomy' not in link.lower()]
+        document_urls.extend(html_matches)
+        
+        # Strategy 4: Look for .txt files in the table (complete submission text file)
+        txt_pattern = r'href="([^"]*\.txt[^"]*)"'
+        txt_matches = re.findall(txt_pattern, table_section, re.IGNORECASE)
+        document_urls.extend(txt_matches)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        unique_doc_links = []
+        for link in document_urls:
+            if link not in seen:
+                seen.add(link)
+                unique_doc_links.append(link)
+        
+        # Convert relative URLs to absolute
+        base_url = '/'.join(filing_page_url.split('/')[:-1])  # Remove filename
+        absolute_urls = []
+        for link in unique_doc_links:
+            if link.startswith('/'):
+                absolute_url = f"{SEC_BASE_URL}{link}"
+            elif not link.startswith('http'):
+                absolute_url = f"{base_url}/{link}"
+            else:
+                absolute_url = link
+            
+            # Skip index pages and XBRL taxonomy files
+            if ('index' not in absolute_url.lower() and 
+                'xbrl' not in absolute_url.lower() and
+                'taxonomy' not in absolute_url.lower() and
+                'schema' not in absolute_url.lower()):
+                absolute_urls.append(absolute_url)
+        
+        # Sort: XML files first, then HTML, then TXT
+        def link_priority(link):
+            if link.endswith('.xml'):
+                return 0  # Highest priority
+            elif 'primary' in link.lower() or 'document' in link.lower():
+                return 1
+            elif link.endswith(('.html', '.htm')):
+                return 2
+            elif 'doc' in link.lower():
+                return 3
+            elif link.endswith('.txt'):
+                return 4
+            else:
+                return 5
+        
+        sorted_urls = sorted(absolute_urls, key=link_priority)
+        
+        return sorted_urls
+        
+    except Exception as e:
+        # Silently fail - return empty list
+        return []
+
 def get_company_search_preview(search_term: str) -> List[Dict[str, Any]]:
     """
     Get search preview/autocomplete results from SEC search-index API
@@ -78,8 +235,20 @@ def get_company_search_preview(search_term: str) -> List[Dict[str, Any]]:
             'keysTyped': search_term
         }
         
+        # Use proper headers matching browser request
+        headers = {
+            'accept': 'application/json, text/javascript, */*; q=0.01',
+            'accept-language': 'en-US,en;q=0.9',
+            'origin': 'https://www.sec.gov',
+            'referer': 'https://www.sec.gov/',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'user-agent': SEC_USER_AGENT
+        }
+        
         time.sleep(0.1)  # Rate limiting
-        response = session.get(url, params=params, timeout=10)
+        response = session.get(url, params=params, headers=headers, timeout=10)
         response.raise_for_status()
         
         # The API returns JSON with company matches
@@ -88,10 +257,11 @@ def get_company_search_preview(search_term: str) -> List[Dict[str, Any]]:
         # Parse the response - structure may vary
         results = []
         
-        # Debug: Check response structure
+        # Debug: Check response structure (uncomment for debugging)
         # print(f"   DEBUG: API response type: {type(data)}")
         # if isinstance(data, dict):
         #     print(f"   DEBUG: API response keys: {list(data.keys())}")
+        # print(f"   DEBUG: API response sample: {str(data)[:500]}")
         
         if isinstance(data, list):
             # If it's a list, use it directly
@@ -114,24 +284,31 @@ def get_company_search_preview(search_term: str) -> List[Dict[str, Any]]:
         elif isinstance(data, dict):
             # If it's a dict, look for common keys
             if 'hits' in data:
-                hits = data['hits']
-                if isinstance(hits, list):
-                    for hit in hits:
-                        if isinstance(hit, dict):
-                            source = hit.get('_source', hit)
-                            name = (source.get('name') or source.get('entityName') or 
-                                   source.get('entity') or '')
-                            cik = (source.get('cik') or source.get('CIK') or 
-                                  source.get('cik_str') or '')
-                            ticker = (source.get('ticker') or source.get('symbol') or 
-                                     source.get('tickerSymbol') or '')
-                            
-                            if name or cik:
-                                results.append({
-                                    'name': str(name),
-                                    'cik': str(cik) if cik else '',
-                                    'ticker': str(ticker) if ticker else ''
-                                })
+                # Elasticsearch response structure: data.hits.hits[]
+                hits_data = data.get('hits', {})
+                hits_list = hits_data.get('hits', [])
+                
+                for hit in hits_list:
+                    if isinstance(hit, dict):
+                        # _id is the CIK in SEC's Elasticsearch response
+                        cik = hit.get('_id', '')
+                        
+                        # _source contains the entity information
+                        source = hit.get('_source', {})
+                        name = source.get('entity', source.get('entity_words', ''))
+                        
+                        # Tickers might be in _source but not always present
+                        ticker = source.get('ticker', source.get('tickers', ''))
+                        # If tickers is a list, get first one
+                        if isinstance(ticker, list) and len(ticker) > 0:
+                            ticker = ticker[0]
+                        
+                        if name or cik:  # Only add if we have at least name or CIK
+                            results.append({
+                                'name': str(name),
+                                'cik': str(cik) if cik else '',
+                                'ticker': str(ticker) if ticker else ''
+                            })
             elif 'results' in data:
                 for item in data['results']:
                     if isinstance(item, dict):
@@ -347,6 +524,172 @@ def get_search_parameters() -> Dict[str, Any]:
     print()
     
     return params
+
+def search_by_search_index_api(search_params: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Search using SEC search-index API (Elasticsearch endpoint)
+    This is the API that powers the SEC search webpage
+    
+    Args:
+        search_params: Dictionary with search parameters:
+            - cik: CIK number
+            - entityName: Entity name
+            - keywords: Keywords to search
+            - formTypes: List of form types
+            - dateFrom: Start date (YYYY-MM-DD)
+            - dateTo: End date (YYYY-MM-DD)
+            - reportingFor: Reporting for entity
+            - located: Located location
+            - incorporated: Incorporated state
+            - fileNumber: File number
+            - filmNumber: Film number
+    
+    Returns:
+        Dict with success flag and results list (limited to MAX_RESULTS)
+    """
+    session = create_session()
+    
+    try:
+        # Build query parameters for search-index API
+        params = {
+            'dateRange': 'all'  # Default to all dates
+        }
+        
+        # Add CIK if provided
+        if search_params.get('cik'):
+            params['ciks'] = str(search_params['cik']).zfill(10)
+        
+        # Add entity name if provided
+        if search_params.get('entityName'):
+            entity_name = search_params['entityName']
+            # If CIK is also provided, append it to entity name
+            if search_params.get('cik'):
+                cik_str = str(search_params['cik']).zfill(10)
+                params['entityName'] = f"{entity_name} (CIK {cik_str})"
+            else:
+                params['entityName'] = entity_name
+        
+        # Add date range
+        if search_params.get('dateFrom'):
+            params['startdt'] = search_params['dateFrom']
+        if search_params.get('dateTo'):
+            params['enddt'] = search_params['dateTo']
+        
+        # Note: Other filters (reportingFor, located, incorporated, fileNumber, filmNumber)
+        # may need to be added to the query, but the API structure may vary
+        
+        url = "https://efts.sec.gov/LATEST/search-index"
+        
+        headers = {
+            'accept': 'application/json, text/javascript, */*; q=0.01',
+            'accept-language': 'en-US,en;q=0.9',
+            'origin': 'https://www.sec.gov',
+            'referer': 'https://www.sec.gov/',
+            'sec-fetch-dest': 'empty',
+            'sec-fetch-mode': 'cors',
+            'sec-fetch-site': 'same-site',
+            'user-agent': SEC_USER_AGENT
+        }
+        
+        print(f"🔍 Querying search-index API: {url}")
+        print(f"   Parameters: {params}")
+        
+        time.sleep(0.1)  # Rate limiting
+        response = session.get(url, params=params, headers=headers, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        
+        # Parse Elasticsearch response structure
+        if not isinstance(data, dict) or 'hits' not in data:
+            return {
+                'success': False,
+                'error': 'Unexpected response format from search-index API'
+            }
+        
+        hits_data = data.get('hits', {})
+        total_hits = hits_data.get('total', {})
+        total_count = total_hits.get('value', 0) if isinstance(total_hits, dict) else total_hits
+        
+        hits_list = hits_data.get('hits', [])
+        
+        # Limit results
+        limited_hits = hits_list[:MAX_RESULTS]
+        
+        # Extract results with all column data
+        results = []
+        for hit in limited_hits:
+            source = hit.get('_source', {})
+            _id = hit.get('_id', '')
+            
+            # Extract all column data
+            form = source.get('form', source.get('file_type', 'N/A'))
+            file_date = source.get('file_date', 'N/A')
+            
+            # display_names is an array - get the first non-empty one, or join them
+            display_names = source.get('display_names', [])
+            reporting_for = display_names[0] if display_names else 'N/A'
+            filing_entity = display_names[0] if display_names else 'N/A'
+            
+            # ciks is an array - get the first one
+            ciks = source.get('ciks', [])
+            cik = ciks[0] if ciks else 'N/A'
+            
+            # biz_locations is an array - get the first non-empty one
+            biz_locations = source.get('biz_locations', [])
+            located = next((loc for loc in biz_locations if loc), 'N/A')
+            
+            # inc_states is an array - get the first non-empty one
+            inc_states = source.get('inc_states', [])
+            incorporated = next((state for state in inc_states if state), 'N/A')
+            
+            # file_num is an array - get the first one
+            file_nums = source.get('file_num', [])
+            file_number = file_nums[0] if file_nums else 'N/A'
+            
+            # film_num is an array - get the first one
+            film_nums = source.get('film_num', [])
+            film_number = film_nums[0] if film_nums else 'N/A'
+            
+            # Extract accession number from _id (format: "accession:filename")
+            accession = _id.split(':')[0] if ':' in _id else ''
+            
+            # Build filing page URL from accession
+            filing_page_url = None
+            if accession and cik != 'N/A':
+                cik_padded = str(cik).zfill(10)
+                accession_clean = accession.replace('-', '')
+                if len(accession_clean) >= 12:
+                    accession_dashed = f"{accession_clean[:10]}-{accession_clean[10:12]}-{accession_clean[12:]}"
+                    base_url = f"{SEC_BASE_URL}/Archives/edgar/data/{cik_padded}/{accession_dashed}"
+                    filing_page_url = f"{base_url}/{accession_dashed}-index.htm"
+            
+            results.append({
+                'form': form,
+                'filingDate': file_date,
+                'reportingFor': reporting_for,
+                'filingEntity': filing_entity,
+                'cik': cik,
+                'located': located,
+                'incorporated': incorporated,
+                'fileNumber': file_number,
+                'filmNumber': film_number,
+                'accession': accession,
+                'filingPageUrl': filing_page_url,
+                'adsh': source.get('adsh', '')
+            })
+        
+        return {
+            'success': True,
+            'total_found': total_count,
+            'results': results
+        }
+        
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
 
 def search_by_cik_submissions(cik: str, form_types: Optional[List[str]] = None, 
                               start_date: Optional[str] = None, 
@@ -770,11 +1113,15 @@ def search_edgar_with_browser(query_params: Dict[str, Any]) -> Dict[str, Any]:
                             if href and ('index' in href.lower() or '/Archives/edgar/data/' in href.lower()):
                                 filing_page_url = href
                         
-                        # Store filing page URL
+                        # Store filing page URL and scrape for document URLs
                         if filing_page_url:
                             result_data['filingPageUrl'] = filing_page_url
+                            # Scrape filing page to get document URLs
+                            document_urls = scrape_filing_page_for_documents(filing_page_url)
+                            if document_urls:
+                                result_data['documentUrls'] = document_urls
                         
-                        # Try to extract form type, date, company from text
+                        # Try to extract all column fields from text and element structure
                         if text:
                             # Extract form type (e.g., "Form 4", "10-K", "4")
                             form_patterns = [
@@ -800,10 +1147,50 @@ def search_edgar_with_browser(query_params: Dict[str, Any]) -> Dict[str, Any]:
                                     result_data['filingDate'] = date_match.group(1)
                                     break
                             
-                            # Extract company name (if present)
+                            # Extract company/entity name (if present)
                             company_match = re.search(r'([A-Z][A-Za-z0-9\s&.,/]+(?:Inc|Corp|LLC|Ltd|Company))', text)
                             if company_match:
                                 result_data['company'] = company_match.group(1).strip()
+                                result_data['filingEntity'] = result_data['company']
+                            
+                            # Try to extract CIK from text
+                            cik_match = re.search(r'CIK[:\s]*(\d+)', text, re.IGNORECASE)
+                            if cik_match:
+                                result_data['cik'] = cik_match.group(1)
+                            
+                            # Try to extract file number
+                            file_num_match = re.search(r'File\s+[Nn]o[.:\s]*(\d+[-]?\d*)', text, re.IGNORECASE)
+                            if file_num_match:
+                                result_data['fileNumber'] = file_num_match.group(1)
+                            
+                            # Try to extract film number
+                            film_num_match = re.search(r'Film\s+[Nn]o[.:\s]*(\d+)', text, re.IGNORECASE)
+                            if film_num_match:
+                                result_data['filmNumber'] = film_num_match.group(1)
+                        
+                        # Try to extract data from table cells if available
+                        try:
+                            cells = element.find_elements(By.TAG_NAME, "td")
+                            if len(cells) >= 2:
+                                # Common table structure: Form | Filed Date | Company | CIK | etc.
+                                cell_texts = [cell.text.strip() for cell in cells]
+                                
+                                # Map cells to fields (structure may vary)
+                                if len(cell_texts) > 0 and not result_data.get('form'):
+                                    result_data['form'] = cell_texts[0]
+                                if len(cell_texts) > 1 and not result_data.get('filingDate'):
+                                    result_data['filingDate'] = cell_texts[1]
+                                if len(cell_texts) > 2 and not result_data.get('filingEntity'):
+                                    result_data['filingEntity'] = cell_texts[2]
+                                    result_data['company'] = cell_texts[2]
+                                if len(cell_texts) > 3 and not result_data.get('cik'):
+                                    # Check if it looks like a CIK
+                                    if cell_texts[3].isdigit() or 'CIK' in cell_texts[3]:
+                                        cik_clean = re.sub(r'[^\d]', '', cell_texts[3])
+                                        if cik_clean:
+                                            result_data['cik'] = cik_clean
+                        except:
+                            pass  # If table cell extraction fails, continue with text extraction
                         
                         if result_data:
                             results.append(result_data)
@@ -855,7 +1242,82 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
     print("=" * 80)
     print()
     
-    # Try Browser Automation first (most reliable for getting real URLs)
+    # Try search-index API first (most complete data, all columns available)
+    print("📋 Method 1: Search-Index API (Direct)")
+    print("-" * 80)
+    search_index_result = search_by_search_index_api(search_params)
+    
+    if search_index_result.get('success'):
+        print(f"✅ Success!")
+        print(f"   Results found: {search_index_result.get('total_found', 0)}")
+        print()
+        
+        results_list = search_index_result.get('results', [])
+        if results_list:
+            # Get column selection (default to all columns)
+            columns_to_show = search_params.get('columns', [])
+            show_all_columns = not columns_to_show  # If empty, show all
+            
+            # Define all available columns
+            all_columns = {
+                'Form & File': lambda r: r.get('form', 'N/A'),
+                'Filed': lambda r: r.get('filingDate', 'N/A'),
+                'Reporting for': lambda r: r.get('reportingFor', 'N/A'),
+                'Filing entity/person': lambda r: r.get('filingEntity', 'N/A'),
+                'CIK': lambda r: r.get('cik', 'N/A'),
+                'Located': lambda r: r.get('located', 'N/A'),
+                'Incorporated': lambda r: r.get('incorporated', 'N/A'),
+                'File number': lambda r: r.get('fileNumber', 'N/A'),
+                'Film number': lambda r: r.get('filmNumber', 'N/A'),
+            }
+            
+            # Determine which columns to display
+            if show_all_columns:
+                display_columns = list(all_columns.keys())
+            else:
+                # Only show requested columns
+                display_columns = [col for col in columns_to_show if col in all_columns]
+                if not display_columns:
+                    display_columns = list(all_columns.keys())  # Fallback to all if none match
+            
+            # Print table header
+            print("   Results:")
+            header = "   | ".join([f"{col:20}" for col in display_columns])
+            print(f"   {header}")
+            print("   " + "-" * len(header))
+            
+            # Print each result as a row
+            for i, result in enumerate(results_list, 1):
+                row_values = []
+                for col in display_columns:
+                    value = all_columns[col](result)
+                    # Truncate long values
+                    if len(str(value)) > 20:
+                        value = str(value)[:17] + "..."
+                    row_values.append(f"{str(value):20}")
+                
+                row = "   | ".join(row_values)
+                print(f"   {row}")
+                
+                # Show document URLs below each row
+                filing_page_url = result.get('filingPageUrl', '')
+                if filing_page_url:
+                    # Scrape filing page for document URLs
+                    document_urls = scrape_filing_page_for_documents(filing_page_url)
+                    if document_urls:
+                        print(f"      📄 Document URLs ({len(document_urls)} found):")
+                        for doc_url in document_urls[:3]:  # Show first 3
+                            print(f"         - {doc_url}")
+                        if len(document_urls) > 3:
+                            print(f"         ... and {len(document_urls) - 3} more")
+                print()
+        else:
+            print("   No results found.")
+    else:
+        print(f"❌ Error: {search_index_result.get('error')}")
+    print()
+    
+    # Try Browser Automation (fallback for getting real URLs)
     if SELENIUM_AVAILABLE:
         print("📋 Method 1: Browser Automation (SEC Search Page)")
         print("-" * 80)
@@ -869,22 +1331,69 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
             
             results_list = browser_result.get('results', [])
             if results_list:
-                print("   Filings with URLs:")
+                # Get column selection (default to all columns)
+                columns_to_show = search_params.get('columns', [])
+                show_all_columns = not columns_to_show  # If empty, show all
+                
+                # Define all available columns
+                all_columns = {
+                    'Form & File': lambda r: r.get('form', 'N/A'),
+                    'Filed': lambda r: r.get('filingDate', 'N/A'),
+                    'Reporting for': lambda r: r.get('reportingFor', r.get('company', 'N/A')),
+                    'Filing entity/person': lambda r: r.get('filingEntity', r.get('entityName', 'N/A')),
+                    'CIK': lambda r: r.get('cik', 'N/A'),
+                    'Located': lambda r: r.get('located', 'N/A'),
+                    'Incorporated': lambda r: r.get('incorporated', 'N/A'),
+                    'File number': lambda r: r.get('fileNumber', 'N/A'),
+                    'Film number': lambda r: r.get('filmNumber', 'N/A'),
+                }
+                
+                # Determine which columns to display
+                if show_all_columns:
+                    display_columns = list(all_columns.keys())
+                else:
+                    # Only show requested columns
+                    display_columns = [col for col in columns_to_show if col in all_columns]
+                    if not display_columns:
+                        display_columns = list(all_columns.keys())  # Fallback to all if none match
+                
+                # Print table header
+                print("   Results:")
+                header = "   | ".join([f"{col:20}" for col in display_columns])
+                print(f"   {header}")
+                print("   " + "-" * len(header))
+                
+                # Print each result as a row
                 for i, result in enumerate(results_list, 1):
-                    form = result.get('form', 'N/A')
-                    filing_date = result.get('filingDate', 'N/A')
-                    document_url = result.get('documentUrl', '')
-                    filing_page_url = result.get('filingPageUrl', '')
+                    row_values = []
+                    for col in display_columns:
+                        value = all_columns[col](result)
+                        # Truncate long values
+                        if len(str(value)) > 20:
+                            value = str(value)[:17] + "..."
+                        row_values.append(f"{str(value):20}")
                     
-                    print(f"   {i}. Form {form} - Filed: {filing_date}")
-                    if filing_page_url:
-                        print(f"      📋 Filing Page URL: {filing_page_url}")
-                    if result.get('text'):
-                        # Show preview of text
-                        text_preview = result.get('text', '')[:100]
-                        if len(result.get('text', '')) > 100:
-                            text_preview += "..."
-                        print(f"      Preview: {text_preview}")
+                    row = "   | ".join(row_values)
+                    print(f"   {row}")
+                    
+                    # Show document URLs below each row
+                    filing_page_url = result.get('filingPageUrl', '')
+                    if result.get('documentUrls'):
+                        document_urls = result.get('documentUrls', [])
+                        print(f"      📄 Document URLs ({len(document_urls)} found):")
+                        for doc_url in document_urls[:3]:  # Show first 3
+                            print(f"         - {doc_url}")
+                        if len(document_urls) > 3:
+                            print(f"         ... and {len(document_urls) - 3} more")
+                    elif filing_page_url:
+                        # If we have filing page but haven't scraped yet, scrape it now
+                        document_urls = scrape_filing_page_for_documents(filing_page_url)
+                        if document_urls:
+                            print(f"      📄 Document URLs ({len(document_urls)} found):")
+                            for doc_url in document_urls[:3]:
+                                print(f"         - {doc_url}")
+                            if len(document_urls) > 3:
+                                print(f"         ... and {len(document_urls) - 3} more")
                     print()
             else:
                 print("   No results found or could not extract results from page.")
@@ -916,7 +1425,39 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
             
             filings = result1.get('filings', [])
             if filings:
+                # Get column selection (default to all columns)
+                columns_to_show = search_params.get('columns', [])
+                show_all_columns = not columns_to_show  # If empty, show all
+                
+                # Define all available columns for Submissions API results
+                all_columns = {
+                    'Form & File': lambda f, c: f.get('form', 'N/A'),
+                    'Filed': lambda f, c: f.get('filingDate', 'N/A'),
+                    'Reporting for': lambda f, c: c.get('name', 'N/A'),
+                    'Filing entity/person': lambda f, c: c.get('name', 'N/A'),
+                    'CIK': lambda f, c: c.get('cik', 'N/A'),
+                    'Located': lambda f, c: 'N/A',  # Not available from Submissions API
+                    'Incorporated': lambda f, c: 'N/A',  # Not available from Submissions API
+                    'File number': lambda f, c: f.get('fileNumber', 'N/A'),
+                    'Film number': lambda f, c: 'N/A',  # Not available from Submissions API
+                }
+                
+                # Determine which columns to display
+                if show_all_columns:
+                    display_columns = list(all_columns.keys())
+                else:
+                    # Only show requested columns
+                    display_columns = [col for col in columns_to_show if col in all_columns]
+                    if not display_columns:
+                        display_columns = list(all_columns.keys())  # Fallback to all if none match
+                
+                # Print table header
                 print("   Filings:")
+                header = "   | ".join([f"{col:20}" for col in display_columns])
+                print(f"   {header}")
+                print("   " + "-" * len(header))
+                
+                # Print each filing as a row
                 for i, filing in enumerate(filings, 1):
                     cik = company.get('cik', search_params['cik'])
                     accession = filing.get('accessionNumber', '')
@@ -931,10 +1472,28 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
                             base_url = f"{SEC_BASE_URL}/Archives/edgar/data/{cik_padded}/{accession_dashed}"
                             filing_page_url = f"{base_url}/{accession_dashed}-index.htm"
                     
-                    print(f"   {i}. Form {filing.get('form', 'N/A')} - Filed: {filing.get('filingDate', 'N/A')}")
-                    print(f"      Accession: {filing.get('accessionNumber', 'N/A')}")
+                    row_values = []
+                    for col in display_columns:
+                        value = all_columns[col](filing, company)
+                        # Truncate long values
+                        if len(str(value)) > 20:
+                            value = str(value)[:17] + "..."
+                        row_values.append(f"{str(value):20}")
+                    
+                    row = "   | ".join(row_values)
+                    print(f"   {row}")
+                    
+                    # Show document URLs below each row
                     if filing_page_url:
-                        print(f"      📋 Filing Page: {filing_page_url}")
+                        # Scrape filing page for document URLs
+                        document_urls = scrape_filing_page_for_documents(filing_page_url)
+                        if document_urls:
+                            print(f"      📄 Document URLs ({len(document_urls)} found):")
+                            for doc_url in document_urls[:3]:  # Show first 3
+                                print(f"         - {doc_url}")
+                            if len(document_urls) > 3:
+                                print(f"         ... and {len(document_urls) - 3} more")
+                    print()
             else:
                 print("   No filings found matching criteria.")
         else:
