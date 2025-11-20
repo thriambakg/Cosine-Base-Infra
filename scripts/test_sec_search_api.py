@@ -43,8 +43,10 @@ SEC_SEARCH_URL = "https://www.sec.gov/edgar/search"
 SEC_DATA_URL = "https://data.sec.gov"
 SEC_USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 (Cosine Financial Platform; contact@cosine.financial)"
 
-# Limit results to 10
-MAX_RESULTS = 10
+# Default page size for pagination
+PAGE_SIZE = 10
+# Set to True to fetch all results, False to limit to first page
+FETCH_ALL_RESULTS = True
 
 def create_session():
     """Create a requests session with proper headers"""
@@ -355,8 +357,8 @@ def get_company_search_preview(search_term: str) -> List[Dict[str, Any]]:
                         'ticker': str(ticker) if ticker else ''
                     })
         
-        # Limit to first 10 results
-        return results[:10]
+        # Return all results (no limit for autocomplete)
+        return results
         
     except Exception as e:
         # If preview fails, return empty list (will use original input)
@@ -439,20 +441,28 @@ def get_search_parameters() -> Dict[str, Any]:
                         
                         print()
                         print(f"   Enter number (1-{len(preview_results)}) or press Enter to use original input:")
-                        selection = input("   Selection: ").strip()
-                        
-                        if selection.isdigit():
-                            idx = int(selection) - 1
-                            if 0 <= idx < len(preview_results):
-                                selected = preview_results[idx]
-                                params['cik'] = selected.get('cik', '')
-                                params['entityName'] = selected.get('name', entity_input)
-                                if selected.get('ticker'):
-                                    params['ticker'] = selected.get('ticker')
-                                print(f"   ✓ Selected: {selected.get('name', 'N/A')} (CIK: {selected.get('cik', 'N/A')})")
+                        try:
+                            selection = input("   Selection: ").strip()
+                            
+                            if selection and selection.isdigit():
+                                idx = int(selection) - 1
+                                if 0 <= idx < len(preview_results):
+                                    selected = preview_results[idx]
+                                    params['cik'] = selected.get('cik', '')
+                                    params['entityName'] = selected.get('name', entity_input)
+                                    if selected.get('ticker'):
+                                        params['ticker'] = selected.get('ticker')
+                                    print(f"   ✓ Selected: {selected.get('name', 'N/A')} (CIK: {selected.get('cik', 'N/A')})")
+                                else:
+                                    print(f"   ⚠️  Invalid selection, using original input: {entity_input}")
+                                    params['entityName'] = entity_input
                             else:
+                                # Blank input - use original
+                                print(f"   ℹ️  Using original input: {entity_input}")
                                 params['entityName'] = entity_input
-                        else:
+                        except (EOFError, KeyboardInterrupt):
+                            # Handle Ctrl+D or Ctrl+C
+                            print(f"   ℹ️  Using original input: {entity_input}")
                             params['entityName'] = entity_input
                     elif preview_results and len(preview_results) == 1:
                         # Only one result, use it automatically
@@ -525,7 +535,7 @@ def get_search_parameters() -> Dict[str, Any]:
     
     return params
 
-def search_by_search_index_api(search_params: Dict[str, Any]) -> Dict[str, Any]:
+def search_by_search_index_api(search_params: Dict[str, Any], fetch_all: bool = FETCH_ALL_RESULTS, page: int = 1) -> Dict[str, Any]:
     """
     Search using SEC search-index API (Elasticsearch endpoint)
     This is the API that powers the SEC search webpage
@@ -543,21 +553,23 @@ def search_by_search_index_api(search_params: Dict[str, Any]) -> Dict[str, Any]:
             - incorporated: Incorporated state
             - fileNumber: File number
             - filmNumber: Film number
+        fetch_all: If True, fetch all results by making multiple API calls
+        page: Page number to fetch (1-indexed). Only used when fetch_all=False
     
     Returns:
-        Dict with success flag and results list (limited to MAX_RESULTS)
+        Dict with success flag and results list (all results if fetch_all=True, or one page if fetch_all=False)
     """
     session = create_session()
     
     try:
-        # Build query parameters for search-index API
-        params = {
+        # Build base query parameters for search-index API
+        base_params = {
             'dateRange': 'all'  # Default to all dates
         }
         
         # Add CIK if provided
         if search_params.get('cik'):
-            params['ciks'] = str(search_params['cik']).zfill(10)
+            base_params['ciks'] = str(search_params['cik']).zfill(10)
         
         # Add entity name if provided
         if search_params.get('entityName'):
@@ -565,18 +577,31 @@ def search_by_search_index_api(search_params: Dict[str, Any]) -> Dict[str, Any]:
             # If CIK is also provided, append it to entity name
             if search_params.get('cik'):
                 cik_str = str(search_params['cik']).zfill(10)
-                params['entityName'] = f"{entity_name} (CIK {cik_str})"
+                base_params['entityName'] = f"{entity_name} (CIK {cik_str})"
             else:
-                params['entityName'] = entity_name
+                base_params['entityName'] = entity_name
         
         # Add date range
         if search_params.get('dateFrom'):
-            params['startdt'] = search_params['dateFrom']
+            base_params['startdt'] = search_params['dateFrom']
         if search_params.get('dateTo'):
-            params['enddt'] = search_params['dateTo']
+            base_params['enddt'] = search_params['dateTo']
         
-        # Note: Other filters (reportingFor, located, incorporated, fileNumber, filmNumber)
-        # may need to be added to the query, but the API structure may vary
+        # Add other filters if provided
+        if search_params.get('reportingFor'):
+            base_params['reportingFor'] = search_params['reportingFor']
+        if search_params.get('located'):
+            base_params['located'] = search_params['located']
+        if search_params.get('incorporated'):
+            base_params['incorporated'] = search_params['incorporated']
+        if search_params.get('fileNumber'):
+            base_params['fileNumber'] = search_params['fileNumber']
+        if search_params.get('filmNumber'):
+            base_params['filmNumber'] = search_params['filmNumber']
+        if search_params.get('keywords'):
+            base_params['q'] = search_params['keywords']
+        if search_params.get('formTypes'):
+            base_params['forms'] = ','.join(search_params['formTypes'])
         
         url = "https://efts.sec.gov/LATEST/search-index"
         
@@ -591,30 +616,195 @@ def search_by_search_index_api(search_params: Dict[str, Any]) -> Dict[str, Any]:
             'user-agent': SEC_USER_AGENT
         }
         
+        all_hits = []
+        total_count = 0
+        current_page = page if not fetch_all else 1
+        max_pages = 1000  # Safety limit to prevent infinite loops
+        
         print(f"🔍 Querying search-index API: {url}")
-        print(f"   Parameters: {params}")
+        print(f"   Base parameters: {base_params}")
+        if fetch_all:
+            print(f"   Fetching ALL results (will paginate through all pages)...")
+        else:
+            print(f"   Fetching page {current_page} only (limited to {PAGE_SIZE} results)...")
         
-        time.sleep(0.1)  # Rate limiting
-        response = session.get(url, params=params, headers=headers, timeout=30)
-        response.raise_for_status()
+        while True:
+            # Build params for this page - mirror SEC website behavior
+            params = base_params.copy()
+            
+            # SEC website pagination pattern:
+            # Page 1: no page/from params
+            # Page 2: page=2&from=100
+            # Page 3: page=3&from=200 (increments of 100)
+            if current_page > 1:
+                params['page'] = current_page
+                params['from'] = (current_page - 1) * 100  # SEC uses increments of 100
+            
+            print(f"   📄 Fetching page {current_page} (params: page={params.get('page', 'N/A')}, from={params.get('from', 'N/A')})...")
+            
+            # Retry logic for handling timeouts
+            max_retries = 3
+            retry_count = 0
+            response = None
+            
+            while retry_count < max_retries:
+                try:
+                    time.sleep(0.1)  # Rate limiting
+                    response = session.get(url, params=params, headers=headers, timeout=60)  # Increased timeout for large result sets
+                    response.raise_for_status()
+                    break  # Success, exit retry loop
+                except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
+                    retry_count += 1
+                    if retry_count >= max_retries:
+                        print(f"   ❌ Failed to fetch page {current_page} after {max_retries} retries: {e}")
+                        raise
+                    print(f"   ⚠️  Timeout/error on page {current_page}, retry {retry_count}/{max_retries}: {e}")
+                    time.sleep(1)  # Wait before retry
+            
+            data = response.json()
+            
+            # Parse Elasticsearch response structure
+            if not isinstance(data, dict) or 'hits' not in data:
+                if current_page == 1:
+                    return {
+                        'success': False,
+                        'error': 'Unexpected response format from search-index API'
+                    }
+                else:
+                    # If we get an error on a later page, break and return what we have
+                    print(f"   ⚠️  Unexpected response format on page {current_page}, stopping pagination")
+                    break
+            
+            hits_data = data.get('hits', {})
+            total_hits = hits_data.get('total', {})
+            page_total_count = total_hits.get('value', 0) if isinstance(total_hits, dict) else total_hits
+            
+            # Set total_count on first page
+            if current_page == 1:
+                total_count = page_total_count
+                print(f"   ✅ Total results found: {total_count}")
+            
+            hits_list = hits_data.get('hits', [])
+            
+            if not hits_list:
+                # No more results
+                print(f"   ℹ️  No more results on page {current_page}, stopping pagination")
+                break
+            
+            print(f"   ✅ Got {len(hits_list)} results on API page {current_page}")
+            all_hits.extend(hits_list)
+            
+            # CRITICAL: When fetch_all=False, we MUST break here to only fetch one page
+            if not fetch_all:
+                # Only fetch the requested page - break immediately after getting results
+                print(f"   ✅ Single page fetch complete: got {len(all_hits)} results (will be sliced to 10 by caller)")
+                break  # Exit loop immediately - do not continue fetching more pages
+            
+            # Check if we've reached the total
+            if len(all_hits) >= total_count:
+                print(f"   ✅ Fetched all {total_count} results")
+                break
+            
+            # Check if we got fewer results than expected (might be last page)
+            if len(hits_list) < PAGE_SIZE:
+                print(f"   ℹ️  Got fewer results than page size, likely last page")
+                break
+            
+            # Safety check
+            if current_page >= max_pages:
+                print(f"   ⚠️  Reached max pages limit ({max_pages}), stopping")
+                break
+            
+            current_page += 1
         
-        data = response.json()
+        if fetch_all:
+            print(f"   📊 Total results fetched: {len(all_hits)} out of {total_count}")
+            limited_hits = all_hits
+        else:
+            # For single page fetch, return all hits from this API call (~100 results)
+            # The caller (fetch_page) will slice it to get the right 10 results
+            limited_hits = all_hits
         
-        # Parse Elasticsearch response structure
-        if not isinstance(data, dict) or 'hits' not in data:
-            return {
-                'success': False,
-                'error': 'Unexpected response format from search-index API'
-            }
+        # Extract results with all column data
+        results = []
+        for hit in limited_hits:
+            source = hit.get('_source', {})
+            _id = hit.get('_id', '')
+            
+            # Extract all column data
+            form = source.get('form', source.get('file_type', 'N/A'))
+            file_date = source.get('file_date', 'N/A')
+            
+            # display_names is an array - get the first non-empty one
+            display_names = source.get('display_names', [])
+            reporting_for = display_names[0] if display_names else 'N/A'
+            filing_entity = display_names[0] if display_names else 'N/A'
+            
+            # ciks is an array - get the first one
+            ciks = source.get('ciks', [])
+            cik = ciks[0] if ciks else 'N/A'
+            
+            # biz_locations is an array - get the first non-empty one
+            biz_locations = source.get('biz_locations', [])
+            located = next((loc for loc in biz_locations if loc), 'N/A')
+            
+            # inc_states is an array - get the first non-empty one
+            inc_states = source.get('inc_states', [])
+            incorporated = next((state for state in inc_states if state), 'N/A')
+            
+            # file_num is an array - get the first one
+            file_nums = source.get('file_num', [])
+            file_number = file_nums[0] if file_nums else 'N/A'
+            
+            # film_num is an array - get the first one
+            film_nums = source.get('film_num', [])
+            film_number = film_nums[0] if film_nums else 'N/A'
+            
+            # Extract accession number from _id (format: "accession:filename")
+            accession = _id.split(':')[0] if ':' in _id else ''
+            
+            # Build filing page URL from accession
+            filing_page_url = None
+            if accession and cik != 'N/A':
+                cik_padded = str(cik).zfill(10)
+                accession_clean = accession.replace('-', '')
+                if len(accession_clean) >= 12:
+                    accession_dashed = f"{accession_clean[:10]}-{accession_clean[10:12]}-{accession_clean[12:]}"
+                    base_url = f"{SEC_BASE_URL}/Archives/edgar/data/{cik_padded}/{accession_dashed}"
+                    filing_page_url = f"{base_url}/{accession_dashed}-index.htm"
+            
+            # Scrape document URLs from filing page
+            document_urls = []
+            if filing_page_url:
+                document_urls = scrape_filing_page_for_documents(filing_page_url)
+            
+            results.append({
+                'form': form,
+                'filingDate': file_date,
+                'reportingFor': reporting_for,
+                'filingEntity': filing_entity,
+                'cik': cik,
+                'located': located,
+                'incorporated': incorporated,
+                'fileNumber': file_number,
+                'filmNumber': film_number,
+                'accession': accession,
+                'filingPageUrl': filing_page_url,
+                'documentUrls': document_urls,
+                'adsh': source.get('adsh', '')
+            })
         
-        hits_data = data.get('hits', {})
-        total_hits = hits_data.get('total', {})
-        total_count = total_hits.get('value', 0) if isinstance(total_hits, dict) else total_hits
+        return {
+            'success': True,
+            'total_found': total_count,
+            'results': results
+        }
         
-        hits_list = hits_data.get('hits', [])
-        
-        # Limit results
-        limited_hits = hits_list[:MAX_RESULTS]
+    except Exception as e:
+        return {
+            'success': False,
+            'error': str(e)
+        }
         
         # Extract results with all column data
         results = []
@@ -664,6 +854,11 @@ def search_by_search_index_api(search_params: Dict[str, Any]) -> Dict[str, Any]:
                     base_url = f"{SEC_BASE_URL}/Archives/edgar/data/{cik_padded}/{accession_dashed}"
                     filing_page_url = f"{base_url}/{accession_dashed}-index.htm"
             
+            # Scrape document URLs from filing page
+            document_urls = []
+            if filing_page_url:
+                document_urls = scrape_filing_page_for_documents(filing_page_url)
+            
             results.append({
                 'form': form,
                 'filingDate': file_date,
@@ -676,6 +871,7 @@ def search_by_search_index_api(search_params: Dict[str, Any]) -> Dict[str, Any]:
                 'filmNumber': film_number,
                 'accession': accession,
                 'filingPageUrl': filing_page_url,
+                'documentUrls': document_urls,
                 'adsh': source.get('adsh', '')
             })
         
@@ -706,7 +902,7 @@ def search_by_cik_submissions(cik: str, form_types: Optional[List[str]] = None,
         keywords: Optional keywords (not supported by this API, but kept for compatibility)
     
     Returns:
-        Dict with company info and filings (limited to MAX_RESULTS)
+        Dict with company info and filings (all results if FETCH_ALL_RESULTS=True)
     """
     session = create_session()
     
@@ -768,8 +964,11 @@ def search_by_cik_submissions(cik: str, form_types: Optional[List[str]] = None,
             filtered_filings = [f for f in filtered_filings 
                               if f['filingDate'] and f['filingDate'] <= end_date]
         
-        # Limit to MAX_RESULTS
-        limited_filings = filtered_filings[:MAX_RESULTS]
+        # Limit to PAGE_SIZE if not fetching all
+        if FETCH_ALL_RESULTS:
+            limited_filings = filtered_filings
+        else:
+            limited_filings = filtered_filings[:PAGE_SIZE]
         
         return {
             'success': True,
@@ -1079,9 +1278,12 @@ def search_edgar_with_browser(query_params: Dict[str, Any]) -> Dict[str, Any]:
                                   ('edgar' in link.get_attribute('href').lower() or 
                                    'sec.gov' in link.get_attribute('href').lower())]
                     if filing_links:
-                        result_elements = filing_links[:MAX_RESULTS]
+                        max_links = len(filing_links) if FETCH_ALL_RESULTS else PAGE_SIZE
+                        result_elements = filing_links[:max_links]
                 
-                for idx, element in enumerate(result_elements[:MAX_RESULTS]):
+                # Limit results if not fetching all
+                max_elements = len(result_elements) if FETCH_ALL_RESULTS else PAGE_SIZE
+                for idx, element in enumerate(result_elements[:max_elements]):
                     try:
                         result_data = {}
                         
@@ -1235,7 +1437,7 @@ def search_edgar_with_browser(query_params: Dict[str, Any]) -> Dict[str, Any]:
             print("   ✓ Browser closed")
 
 def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
-    """Display search results in a formatted way"""
+    """Display search results in a formatted way with interactive pagination"""
     print()
     print("=" * 80)
     print("SEARCH RESULTS")
@@ -1245,14 +1447,187 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
     # Try search-index API first (most complete data, all columns available)
     print("📋 Method 1: Search-Index API (Direct)")
     print("-" * 80)
-    search_index_result = search_by_search_index_api(search_params)
     
-    if search_index_result.get('success'):
-        print(f"✅ Success!")
-        print(f"   Results found: {search_index_result.get('total_found', 0)}")
+    # Fetch first page to get total count
+    first_page_result = search_by_search_index_api(search_params, fetch_all=False, page=1)
+    
+    if not first_page_result.get('success'):
+        print(f"❌ Error: {first_page_result.get('error')}")
         print()
+        return
+    
+    total_found = first_page_result.get('total_found', 0)
+    print(f"✅ Success!")
+    print(f"   Results found: {total_found}")
+    print()
+    
+    if total_found == 0:
+        print("   No results found.")
+        print()
+        return
+    
+    # Interactive pagination - fetch 10 results at a time
+    current_page = 1
+    results_per_page = 10
+    cached_results = {}  # Cache results we've already fetched
+    
+    # Calculate which API page we need for the current display page
+    # API returns ~100 results per call, we display 10 per page
+    # So API page 1 contains display pages 1-10
+    # API page 2 contains display pages 11-20, etc.
+    def get_api_page(display_page: int) -> int:
+        """Convert display page (1-indexed, 10 results each) to API page (1-indexed, ~100 results each)"""
+        return ((display_page - 1) // 10) + 1
+    
+    def fetch_page(display_page: int) -> List[Dict[str, Any]]:
+        """Fetch a specific display page, using cache if available"""
+        api_page = get_api_page(display_page)
         
-        results_list = search_index_result.get('results', [])
+        # Check cache first
+        if api_page in cached_results:
+            # We have the API batch cached, extract the right slice
+            batch_results = cached_results[api_page]
+            offset_in_batch = ((display_page - 1) % 10) * results_per_page
+            start_idx = offset_in_batch
+            end_idx = start_idx + results_per_page
+            return batch_results[start_idx:end_idx]
+        
+        # Need to fetch this API page
+        print(f"   📥 Fetching results for display page {display_page} (API page {api_page})...")
+        api_result = search_by_search_index_api(search_params, fetch_all=False, page=api_page)
+        
+        if not api_result.get('success'):
+            return []
+        
+        # Cache the full batch (we get ~100 results per API call)
+        batch_results = api_result.get('results', [])
+        cached_results[api_page] = batch_results
+        
+        # Extract the right slice for this display page
+        offset_in_batch = ((display_page - 1) % 10) * results_per_page
+        start_idx = offset_in_batch
+        end_idx = start_idx + results_per_page
+        return batch_results[start_idx:end_idx]
+    
+    # Get column selection (default to all columns)
+    columns_to_show = search_params.get('columns', [])
+    show_all_columns = not columns_to_show  # If empty, show all
+    
+    # Define all available columns
+    all_columns = {
+        'Form & File': lambda r: r.get('form', 'N/A'),
+        'Filed': lambda r: r.get('filingDate', 'N/A'),
+        'Reporting for': lambda r: r.get('reportingFor', 'N/A'),
+        'Filing entity/person': lambda r: r.get('filingEntity', 'N/A'),
+        'CIK': lambda r: r.get('cik', 'N/A'),
+        'Located': lambda r: r.get('located', 'N/A'),
+        'Incorporated': lambda r: r.get('incorporated', 'N/A'),
+        'File number': lambda r: r.get('fileNumber', 'N/A'),
+        'Film number': lambda r: r.get('filmNumber', 'N/A'),
+    }
+    
+    # Determine which columns to display
+    if show_all_columns:
+        display_columns = list(all_columns.keys())
+    else:
+        # Only show requested columns
+        display_columns = [col for col in columns_to_show if col in all_columns]
+        if not display_columns:
+            display_columns = list(all_columns.keys())  # Fallback to all if none match
+    
+    while True:
+        # Fetch current page results
+        current_page_results = fetch_page(current_page)
+        
+        if not current_page_results:
+            print("   No more results to display.")
+            break
+        
+        # Calculate display indices
+        start_idx = (current_page - 1) * results_per_page
+        end_idx = min(start_idx + len(current_page_results), total_found)
+        
+        # Print table header
+        print(f"   Results {start_idx + 1}-{end_idx} of {total_found}:")
+        header = "   | ".join([f"{col:20}" for col in display_columns])
+        print(f"   {header}")
+        print("   " + "-" * len(header))
+        
+        # Print each result as a row
+        for i, result in enumerate(current_page_results, start_idx + 1):
+            row_values = []
+            for col in display_columns:
+                value = all_columns[col](result)
+                # Truncate long values
+                if len(str(value)) > 20:
+                    value = str(value)[:17] + "..."
+                row_values.append(f"{str(value):20}")
+            
+            row = "   | ".join(row_values)
+            print(f"   {row}")
+            
+            # Show document URLs below each row
+            filing_page_url = result.get('filingPageUrl', '')
+            if filing_page_url:
+                # Scrape filing page for document URLs
+                document_urls = scrape_filing_page_for_documents(filing_page_url)
+                if document_urls:
+                    print(f"      📄 Document URLs ({len(document_urls)} found):")
+                    for doc_url in document_urls[:3]:  # Show first 3
+                        print(f"         - {doc_url}")
+                    if len(document_urls) > 3:
+                        print(f"         ... and {len(document_urls) - 3} more")
+            print()
+        
+        # Navigation prompt
+        print(f"   Showing {start_idx + 1}-{end_idx} of {total_found} results")
+        
+        # Build prompt based on position
+        if current_page == 1:
+            # First page - only next available
+            if end_idx < total_found:
+                prompt = "Next 10?: n (or 'q' to quit): "
+            else:
+                # Last page and it's the first page
+                print("   (End of results)")
+                break
+        elif end_idx >= total_found:
+            # Last page - only previous available
+            prompt = "Next 10?: p (or 'q' to quit): "
+        else:
+            # Middle page - both next and previous available
+            prompt = "Next 10?: n/p (or 'q' to quit): "
+        
+        if end_idx < total_found or current_page > 1:
+            try:
+                user_input = input(prompt).strip().lower()
+                
+                if user_input == 'q':
+                    print("   Exiting results view.")
+                    break
+                elif user_input == 'n' and end_idx < total_found:
+                    # Next page
+                    current_page += 1
+                    print()  # Blank line for spacing
+                elif user_input == 'p' and current_page > 1:
+                    # Previous page
+                    current_page -= 1
+                    print()  # Blank line for spacing
+                elif user_input == 'n' and end_idx >= total_found:
+                    print("   ⚠️  Already at the last page.")
+                elif user_input == 'p' and current_page == 1:
+                    print("   ⚠️  Already at the first page.")
+                else:
+                    print("   ⚠️  Invalid input. Use 'n' for next, 'p' for previous, or 'q' to quit.")
+            except (EOFError, KeyboardInterrupt):
+                print("\n   Exiting results view.")
+                break
+        else:
+            # No more results
+            break
+    
+    if False:  # Keep original code structure but disabled
+        results_list = []
         if results_list:
             # Get column selection (default to all columns)
             columns_to_show = search_params.get('columns', [])
@@ -1280,41 +1655,98 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
                 if not display_columns:
                     display_columns = list(all_columns.keys())  # Fallback to all if none match
             
-            # Print table header
-            print("   Results:")
-            header = "   | ".join([f"{col:20}" for col in display_columns])
-            print(f"   {header}")
-            print("   " + "-" * len(header))
+            # Interactive pagination - show 10 results at a time
+            current_offset = 0
+            results_per_page = 10
             
-            # Print each result as a row
-            for i, result in enumerate(results_list, 1):
-                row_values = []
-                for col in display_columns:
-                    value = all_columns[col](result)
-                    # Truncate long values
-                    if len(str(value)) > 20:
-                        value = str(value)[:17] + "..."
-                    row_values.append(f"{str(value):20}")
+            while True:
+                # Calculate current page slice
+                start_idx = current_offset
+                end_idx = min(current_offset + results_per_page, len(results_list))
+                current_page_results = results_list[start_idx:end_idx]
                 
-                row = "   | ".join(row_values)
-                print(f"   {row}")
+                if not current_page_results:
+                    print("   No more results to display.")
+                    break
                 
-                # Show document URLs below each row
-                filing_page_url = result.get('filingPageUrl', '')
-                if filing_page_url:
-                    # Scrape filing page for document URLs
-                    document_urls = scrape_filing_page_for_documents(filing_page_url)
-                    if document_urls:
-                        print(f"      📄 Document URLs ({len(document_urls)} found):")
-                        for doc_url in document_urls[:3]:  # Show first 3
-                            print(f"         - {doc_url}")
-                        if len(document_urls) > 3:
-                            print(f"         ... and {len(document_urls) - 3} more")
-                print()
-        else:
-            print("   No results found.")
-    else:
-        print(f"❌ Error: {search_index_result.get('error')}")
+                # Print table header
+                print(f"   Results {start_idx + 1}-{end_idx} of {len(results_list)}:")
+                header = "   | ".join([f"{col:20}" for col in display_columns])
+                print(f"   {header}")
+                print("   " + "-" * len(header))
+                
+                # Print each result as a row
+                for i, result in enumerate(current_page_results, start_idx + 1):
+                    row_values = []
+                    for col in display_columns:
+                        value = all_columns[col](result)
+                        # Truncate long values
+                        if len(str(value)) > 20:
+                            value = str(value)[:17] + "..."
+                        row_values.append(f"{str(value):20}")
+                    
+                    row = "   | ".join(row_values)
+                    print(f"   {row}")
+                    
+                    # Show document URLs below each row
+                    filing_page_url = result.get('filingPageUrl', '')
+                    if filing_page_url:
+                        # Scrape filing page for document URLs
+                        document_urls = scrape_filing_page_for_documents(filing_page_url)
+                        if document_urls:
+                            print(f"      📄 Document URLs ({len(document_urls)} found):")
+                            for doc_url in document_urls[:3]:  # Show first 3
+                                print(f"         - {doc_url}")
+                            if len(document_urls) > 3:
+                                print(f"         ... and {len(document_urls) - 3} more")
+                    print()
+                
+                # Navigation prompt
+                print(f"   Showing {start_idx + 1}-{end_idx} of {len(results_list)} results")
+                
+                # Build prompt based on position
+                if current_offset == 0:
+                    # First page - only next available
+                    if end_idx < len(results_list):
+                        prompt = "Next 10?: n (or 'q' to quit): "
+                    else:
+                        # Last page and it's the first page
+                        print("   (End of results)")
+                        break
+                elif end_idx >= len(results_list):
+                    # Last page - only previous available
+                    prompt = "Next 10?: p (or 'q' to quit): "
+                else:
+                    # Middle page - both next and previous available
+                    prompt = "Next 10?: n/p (or 'q' to quit): "
+                
+                if end_idx < len(results_list) or current_offset > 0:
+                    try:
+                        user_input = input(prompt).strip().lower()
+                        
+                        if user_input == 'q':
+                            print("   Exiting results view.")
+                            break
+                        elif user_input == 'n' and end_idx < len(results_list):
+                            # Next page
+                            current_offset += results_per_page
+                            print()  # Blank line for spacing
+                        elif user_input == 'p' and current_offset > 0:
+                            # Previous page
+                            current_offset = max(0, current_offset - results_per_page)
+                            print()  # Blank line for spacing
+                        elif user_input == 'n' and end_idx >= len(results_list):
+                            print("   ⚠️  Already at the last page.")
+                        elif user_input == 'p' and current_offset == 0:
+                            print("   ⚠️  Already at the first page.")
+                        else:
+                            print("   ⚠️  Invalid input. Use 'n' for next, 'p' for previous, or 'q' to quit.")
+                    except (EOFError, KeyboardInterrupt):
+                        print("\n   Exiting results view.")
+                        break
+                else:
+                    # No more results
+                    break
     print()
     
     # Try Browser Automation (fallback for getting real URLs)
@@ -1420,7 +1852,7 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
             print(f"   Ticker: {company.get('ticker', 'N/A')}")
             print(f"   CIK: {company.get('cik', 'N/A')}")
             print(f"   Total filings found: {result1.get('filtered_filings', 0)}")
-            print(f"   Showing: {len(result1.get('filings', []))} (limited to {MAX_RESULTS})")
+            print(f"   Showing: {len(result1.get('filings', []))} (limited to {PAGE_SIZE})")
             print()
             
             filings = result1.get('filings', [])
@@ -1510,7 +1942,10 @@ def main():
     print("This script allows you to search SEC EDGAR filings with all parameters")
     print("available on the SEC search webpage.")
     print()
-    print(f"Results will be limited to {MAX_RESULTS} entries.")
+    if FETCH_ALL_RESULTS:
+        print(f"✅ Will fetch ALL results (no limit)")
+    else:
+        print(f"Results will be limited to {PAGE_SIZE} entries per page.")
     print()
     
     if SELENIUM_AVAILABLE:

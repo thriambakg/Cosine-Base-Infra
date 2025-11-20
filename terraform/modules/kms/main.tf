@@ -6,6 +6,7 @@ data "aws_caller_identity" "current" {}
 data "aws_region" "current" {}
 
 # Main KMS key for general encryption
+# Note: This key policy includes CloudFront service principal to allow CloudFront to decrypt S3 objects
 resource "aws_kms_key" "main" {
   description              = "Main KMS key for ${var.project_name} ${var.environment}"
   key_usage                = "ENCRYPT_DECRYPT"
