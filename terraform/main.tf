@@ -1796,19 +1796,11 @@ module "sec_filings_table" {
     { name = "cik", type = "S" },
     { name = "fileNumber", type = "S" },
     { name = "filmNumber", type = "S" },
-    { name = "accession", type = "S" },
-    { name = "adsh", type = "S" },
     { name = "filingDate", type = "S" },
     { name = "reportingFor", type = "S" },
     { name = "filingEntity", type = "S" },
     { name = "located", type = "S" },
-    { name = "incorporated", type = "S" },
-    { name = "periodEnding", type = "S" },
-    { name = "filingPageUrl", type = "S" },
-    { name = "primaryDocumentUrl", type = "S" },
-    { name = "cachedAt", type = "N" },
-    { name = "lastAccessed", type = "N" },
-    { name = "ttl", type = "N" }
+    { name = "incorporated", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -1871,14 +1863,6 @@ module "sec_filings_table" {
     {
       name            = "FilmNumberFilingDateIndex"
       hash_key        = "filmNumber"
-      range_key       = "filingDate"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "AccessionFilingDateIndex"
-      hash_key        = "accession"
       range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
