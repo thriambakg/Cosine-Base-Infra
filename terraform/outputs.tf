@@ -227,6 +227,22 @@ output "stock_data_table_policy_arn" {
   value       = module.stock_data_table.table_policy_arn
 }
 
+# SEC Filings Cache Table outputs
+output "sec_filings_table_name" {
+  description = "Name of the SEC filings cache DynamoDB table"
+  value       = module.sec_filings_table.table_name
+}
+
+output "sec_filings_table_arn" {
+  description = "ARN of the SEC filings cache DynamoDB table"
+  value       = module.sec_filings_table.table_arn
+}
+
+output "sec_filings_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing sec_filings_cache table"
+  value       = module.sec_filings_table.table_policy_arn
+}
+
 # CloudWatch outputs
 output "security_log_group_name" {
   description = "Name of the security CloudWatch log group"
