@@ -1776,100 +1776,110 @@ module "politician_trades_table" {
   depends_on = [module.kms]
 }
 
-# SEC Filings DynamoDB Table (separate from politician trades for scalability)
+# SEC Filings Cache DynamoDB Table
+# Caches SEC filing data to avoid repeated web scraping
+# Primary Key: filingId = {form}-{CIK}-{fileNumber}-{filmNumber}
+# Note: documentUrls will be stored as a String Set (SS) in items but doesn't need to be in schema
 module "sec_filings_table" {
   source = "./modules/dynamodb-table"
 
   project_name = var.project_name
   environment  = var.environment
-  table_name   = "sec-filings"
+  table_name   = "sec-filings-cache"
 
-  hash_key  = "tradeId"
+  hash_key  = "filingId"
   range_key = null
 
   attributes = [
-    { name = "tradeId", type = "S" },
-    { name = "formType", type = "S" },
-    { name = "reportingPersonName", type = "S" }, # Changed from "name" for clarity
-    { name = "address", type = "S" },
-    { name = "eventDate", type = "S" },
-    { name = "reportingDate", type = "S" },
-    { name = "issuerName", type = "S" },
-    { name = "tickerSymbol", type = "S" },
-    { name = "relationship", type = "S" },
-    { name = "politician", type = "N" },
-    { name = "amendmentDate", type = "S" }
+    { name = "filingId", type = "S" },
+    { name = "form", type = "S" },
+    { name = "cik", type = "S" },
+    { name = "fileNumber", type = "S" },
+    { name = "filmNumber", type = "S" },
+    { name = "accession", type = "S" },
+    { name = "adsh", type = "S" },
+    { name = "filingDate", type = "S" },
+    { name = "reportingFor", type = "S" },
+    { name = "filingEntity", type = "S" },
+    { name = "located", type = "S" },
+    { name = "incorporated", type = "S" },
+    { name = "periodEnding", type = "S" },
+    { name = "filingPageUrl", type = "S" },
+    { name = "primaryDocumentUrl", type = "S" },
+    { name = "cachedAt", type = "N" },
+    { name = "lastAccessed", type = "N" },
+    { name = "ttl", type = "N" }
   ]
 
   global_secondary_indexes = [
     {
-      name            = "FormTypeReportingDateIndex"
-      hash_key        = "formType"
-      range_key       = "reportingDate"
+      name            = "FormTypeFilingDateIndex"
+      hash_key        = "form"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "ReportingPersonNameReportingDateIndex" # Updated GSI name
-      hash_key        = "reportingPersonName"                   # Changed from "name"
-      range_key       = "reportingDate"
+      name            = "ReportingForFilingDateIndex"
+      hash_key        = "reportingFor"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "AddressReportingDateIndex"
-      hash_key        = "address"
-      range_key       = "reportingDate"
+      name            = "FilingEntityFilingDateIndex"
+      hash_key        = "filingEntity"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "EventDateIndex"
-      hash_key        = "eventDate"
-      range_key       = "reportingDate"
+      name            = "LocationFilingDateIndex"
+      hash_key        = "located"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "IssuerNameReportingDateIndex"
-      hash_key        = "issuerName"
-      range_key       = "reportingDate"
+      name            = "IncorporatedFilingDateIndex"
+      hash_key        = "incorporated"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "TickerSymbolReportingDateIndex"
-      hash_key        = "tickerSymbol"
-      range_key       = "reportingDate"
+      name            = "CIKFilingDateIndex"
+      hash_key        = "cik"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "RelationshipReportingDateIndex"
-      hash_key        = "relationship"
-      range_key       = "reportingDate"
+      name            = "FileNumberFilingDateIndex"
+      hash_key        = "fileNumber"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "PoliticianReportingDateIndex"
-      hash_key        = "politician"
-      range_key       = "reportingDate"
+      name            = "FilmNumberFilingDateIndex"
+      hash_key        = "filmNumber"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "AmendmentDateIndex"
-      hash_key        = "amendmentDate"
-      range_key       = "reportingDate"
+      name            = "AccessionFilingDateIndex"
+      hash_key        = "accession"
+      range_key       = "filingDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
@@ -1883,13 +1893,13 @@ module "sec_filings_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+  ttl_enabled                    = true # Enable TTL for cache expiration
+  ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn
 
-  table_type    = "TradeData"
-  table_purpose = "SECFilings"
+  table_type    = "CacheData"
+  table_purpose = "SECFilingsCache"
 
   tags = var.common_tags
 
