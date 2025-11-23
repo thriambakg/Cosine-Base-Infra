@@ -1703,4 +1703,3 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
         "date": event.get('date')
     }
 
-

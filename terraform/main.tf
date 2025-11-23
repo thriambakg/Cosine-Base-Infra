@@ -1885,6 +1885,18 @@ module "sec_filings_table" {
   table_type    = "CacheData"
   table_purpose = "SECFilingsCache"
 
+  # Add BatchGetItem and BatchWriteItem for cache operations
+  iam_policy_actions = [
+    "dynamodb:GetItem",
+    "dynamodb:PutItem",
+    "dynamodb:UpdateItem",
+    "dynamodb:DeleteItem",
+    "dynamodb:Query",
+    "dynamodb:Scan",
+    "dynamodb:BatchGetItem",
+    "dynamodb:BatchWriteItem"
+  ]
+
   tags = var.common_tags
 
   depends_on = [module.kms]
