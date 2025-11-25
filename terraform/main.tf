@@ -1919,8 +1919,7 @@ module "sec_search_query_cache_table" {
   attributes = [
     { name = "queryHash", type = "S" },
     { name = "job_id", type = "S" },
-    { name = "created_at", type = "S" },
-    { name = "updated_at", type = "S" }
+    { name = "created_at", type = "S" }
   ]
 
   global_secondary_indexes = [
