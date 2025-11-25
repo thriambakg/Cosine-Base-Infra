@@ -243,6 +243,22 @@ output "sec_filings_table_policy_arn" {
   value       = module.sec_filings_table.table_policy_arn
 }
 
+# SEC Search Query Cache Table outputs
+output "sec_search_query_cache_table_name" {
+  description = "Name of the SEC search query cache table"
+  value       = module.sec_search_query_cache_table.table_name
+}
+
+output "sec_search_query_cache_table_arn" {
+  description = "ARN of the SEC search query cache table"
+  value       = module.sec_search_query_cache_table.table_arn
+}
+
+output "sec_search_query_cache_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing the SEC search query cache table"
+  value       = module.sec_search_query_cache_table.table_policy_arn
+}
+
 # CloudWatch outputs
 output "security_log_group_name" {
   description = "Name of the security CloudWatch log group"

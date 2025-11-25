@@ -442,21 +442,21 @@ def get_search_parameters() -> Dict[str, Any]:
                         print()
                         print(f"   Enter number (1-{len(preview_results)}) or press Enter to use original input:")
                         try:
-                            selection = input("   Selection: ").strip()
-                            
+                        selection = input("   Selection: ").strip()
+                        
                             if selection and selection.isdigit():
-                                idx = int(selection) - 1
-                                if 0 <= idx < len(preview_results):
-                                    selected = preview_results[idx]
-                                    params['cik'] = selected.get('cik', '')
-                                    params['entityName'] = selected.get('name', entity_input)
-                                    if selected.get('ticker'):
-                                        params['ticker'] = selected.get('ticker')
-                                    print(f"   ✓ Selected: {selected.get('name', 'N/A')} (CIK: {selected.get('cik', 'N/A')})")
-                                else:
-                                    print(f"   ⚠️  Invalid selection, using original input: {entity_input}")
-                                    params['entityName'] = entity_input
+                            idx = int(selection) - 1
+                            if 0 <= idx < len(preview_results):
+                                selected = preview_results[idx]
+                                params['cik'] = selected.get('cik', '')
+                                params['entityName'] = selected.get('name', entity_input)
+                                if selected.get('ticker'):
+                                    params['ticker'] = selected.get('ticker')
+                                print(f"   ✓ Selected: {selected.get('name', 'N/A')} (CIK: {selected.get('cik', 'N/A')})")
                             else:
+                                    print(f"   ⚠️  Invalid selection, using original input: {entity_input}")
+                                params['entityName'] = entity_input
+                        else:
                                 # Blank input - use original
                                 print(f"   ℹ️  Using original input: {entity_input}")
                                 params['entityName'] = entity_input
@@ -649,9 +649,9 @@ def search_by_search_index_api(search_params: Dict[str, Any], fetch_all: bool = 
             
             while retry_count < max_retries:
                 try:
-                    time.sleep(0.1)  # Rate limiting
+        time.sleep(0.1)  # Rate limiting
                     response = session.get(url, params=params, headers=headers, timeout=60)  # Increased timeout for large result sets
-                    response.raise_for_status()
+        response.raise_for_status()
                     break  # Success, exit retry loop
                 except (requests.exceptions.Timeout, requests.exceptions.RequestException) as e:
                     retry_count += 1
@@ -660,32 +660,32 @@ def search_by_search_index_api(search_params: Dict[str, Any], fetch_all: bool = 
                         raise
                     print(f"   ⚠️  Timeout/error on page {current_page}, retry {retry_count}/{max_retries}: {e}")
                     time.sleep(1)  # Wait before retry
-            
-            data = response.json()
-            
-            # Parse Elasticsearch response structure
-            if not isinstance(data, dict) or 'hits' not in data:
+        
+        data = response.json()
+        
+        # Parse Elasticsearch response structure
+        if not isinstance(data, dict) or 'hits' not in data:
                 if current_page == 1:
-                    return {
-                        'success': False,
-                        'error': 'Unexpected response format from search-index API'
-                    }
+            return {
+                'success': False,
+                'error': 'Unexpected response format from search-index API'
+            }
                 else:
                     # If we get an error on a later page, break and return what we have
                     print(f"   ⚠️  Unexpected response format on page {current_page}, stopping pagination")
                     break
-            
-            hits_data = data.get('hits', {})
-            total_hits = hits_data.get('total', {})
+        
+        hits_data = data.get('hits', {})
+        total_hits = hits_data.get('total', {})
             page_total_count = total_hits.get('value', 0) if isinstance(total_hits, dict) else total_hits
             
             # Set total_count on first page
             if current_page == 1:
                 total_count = page_total_count
                 print(f"   ✅ Total results found: {total_count}")
-            
-            hits_list = hits_data.get('hits', [])
-            
+        
+        hits_list = hits_data.get('hits', [])
+        
             if not hits_list:
                 # No more results
                 print(f"   ℹ️  No more results on page {current_page}, stopping pagination")
@@ -1457,10 +1457,10 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
         return
     
     total_found = first_page_result.get('total_found', 0)
-    print(f"✅ Success!")
+        print(f"✅ Success!")
     print(f"   Results found: {total_found}")
-    print()
-    
+        print()
+        
     if total_found == 0:
         print("   No results found.")
         print()
@@ -1668,38 +1668,38 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
                 if not current_page_results:
                     print("   No more results to display.")
                     break
-                
-                # Print table header
+            
+            # Print table header
                 print(f"   Results {start_idx + 1}-{end_idx} of {len(results_list)}:")
-                header = "   | ".join([f"{col:20}" for col in display_columns])
-                print(f"   {header}")
-                print("   " + "-" * len(header))
-                
-                # Print each result as a row
+            header = "   | ".join([f"{col:20}" for col in display_columns])
+            print(f"   {header}")
+            print("   " + "-" * len(header))
+            
+            # Print each result as a row
                 for i, result in enumerate(current_page_results, start_idx + 1):
-                    row_values = []
-                    for col in display_columns:
-                        value = all_columns[col](result)
-                        # Truncate long values
-                        if len(str(value)) > 20:
-                            value = str(value)[:17] + "..."
-                        row_values.append(f"{str(value):20}")
-                    
-                    row = "   | ".join(row_values)
-                    print(f"   {row}")
-                    
-                    # Show document URLs below each row
-                    filing_page_url = result.get('filingPageUrl', '')
-                    if filing_page_url:
-                        # Scrape filing page for document URLs
-                        document_urls = scrape_filing_page_for_documents(filing_page_url)
-                        if document_urls:
-                            print(f"      📄 Document URLs ({len(document_urls)} found):")
-                            for doc_url in document_urls[:3]:  # Show first 3
-                                print(f"         - {doc_url}")
-                            if len(document_urls) > 3:
-                                print(f"         ... and {len(document_urls) - 3} more")
-                    print()
+                row_values = []
+                for col in display_columns:
+                    value = all_columns[col](result)
+                    # Truncate long values
+                    if len(str(value)) > 20:
+                        value = str(value)[:17] + "..."
+                    row_values.append(f"{str(value):20}")
+                
+                row = "   | ".join(row_values)
+                print(f"   {row}")
+                
+                # Show document URLs below each row
+                filing_page_url = result.get('filingPageUrl', '')
+                if filing_page_url:
+                    # Scrape filing page for document URLs
+                    document_urls = scrape_filing_page_for_documents(filing_page_url)
+                    if document_urls:
+                        print(f"      📄 Document URLs ({len(document_urls)} found):")
+                        for doc_url in document_urls[:3]:  # Show first 3
+                            print(f"         - {doc_url}")
+                        if len(document_urls) > 3:
+                            print(f"         ... and {len(document_urls) - 3} more")
+                print()
                 
                 # Navigation prompt
                 print(f"   Showing {start_idx + 1}-{end_idx} of {len(results_list)} results")
@@ -1709,14 +1709,14 @@ def display_results(results: Dict[str, Any], search_params: Dict[str, Any]):
                     # First page - only next available
                     if end_idx < len(results_list):
                         prompt = "Next 10?: n (or 'q' to quit): "
-                    else:
+        else:
                         # Last page and it's the first page
                         print("   (End of results)")
                         break
                 elif end_idx >= len(results_list):
                     # Last page - only previous available
                     prompt = "Next 10?: p (or 'q' to quit): "
-                else:
+    else:
                     # Middle page - both next and previous available
                     prompt = "Next 10?: n/p (or 'q' to quit): "
                 

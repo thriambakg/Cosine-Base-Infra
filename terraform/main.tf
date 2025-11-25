@@ -1902,6 +1902,78 @@ module "sec_filings_table" {
   depends_on = [module.kms]
 }
 
+# SEC Search Query Cache DynamoDB Table
+# Caches search queries to avoid re-running identical searches
+# Primary Key: queryHash = hash of normalized search parameters (excluding reportingFor, incorporated, fileNumber, filmNumber)
+# Stores job_id and S3 key for quick retrieval of cached results
+module "sec_search_query_cache_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "sec-search-query-cache"
+
+  hash_key  = "queryHash"
+  range_key = null
+
+  attributes = [
+    { name = "queryHash", type = "S" },
+    { name = "job_id", type = "S" },
+    { name = "created_at", type = "S" },
+    { name = "updated_at", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "JobIdIndex"
+      hash_key        = "job_id"
+      range_key       = null
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "CreatedAtIndex"
+      hash_key        = "created_at"
+      range_key       = null
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = false
+  stream_view_type               = null
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = true # Enable TTL for cache expiration
+  ttl_attribute_name             = "ttl"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "CacheData"
+  table_purpose = "SECSearchQueryCache"
+
+  # Add BatchGetItem and BatchWriteItem for cache operations
+  iam_policy_actions = [
+    "dynamodb:GetItem",
+    "dynamodb:PutItem",
+    "dynamodb:UpdateItem",
+    "dynamodb:DeleteItem",
+    "dynamodb:Query",
+    "dynamodb:Scan",
+    "dynamodb:BatchGetItem",
+    "dynamodb:BatchWriteItem"
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
 # Lambda 1: Fetch SEC Forms and Congressional PTRs
 module "politician_trades_fetcher" {
   source = "./modules/lambda"
