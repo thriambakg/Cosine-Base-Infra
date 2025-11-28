@@ -1876,6 +1876,7 @@ def lambda_handler(event, context):
                     'party': matched_politician['party'],  # GSI: PartyTradeDateIndex
                     'position': matched_politician['position'],  # GSI: PositionTradeDateIndex
                     'websiteUrl': matched_politician.get('websiteUrl'),  # Regular attribute (not GSI)
+                    'filingPageUrl': event.get('filingPageUrl') or event.get('view_url') or event.get('url'),  # Filing page URL from fetcher (passed through downloader)
                     'formType': form_type or 'senate_ptr',  # GSI: FormTypeTradeDateIndex
                     'filingDate': final_filing_date,
                     'transactionDate': transaction_date_num,  # GSI range key (numeric: YYYYMMDD format)

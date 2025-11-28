@@ -1294,7 +1294,29 @@ def check_if_filing_processed(s3_key: str) -> bool:
         logger.warning(f"⚠️ Error checking if filing was processed: {e}. Proceeding with processing.")
         return False
     
-def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_duplicate_check: bool = False) -> Dict[str, Any]:
+def reconstruct_house_filing_page_url(s3_key: str) -> str:
+    """
+    Reconstruct House PTR filing page URL from S3 key
+    
+    Args:
+        s3_key: S3 key like "trades/house/2025/20033394.pdf"
+        
+    Returns:
+        Filing page URL like "https://disclosures-clerk.house.gov/public_disc/ptr-pdfs/2025/20033394.pdf"
+    """
+    # Extract filename and year from S3 key
+    # Format: "trades/house/2025/20033394.pdf"
+    parts = s3_key.split('/')
+    if len(parts) >= 4:
+        year = parts[2]  # "2025"
+        filename = parts[3]  # "20033394.pdf"
+        # Construct House Clerk URL
+        base_url = "https://disclosures-clerk.house.gov"
+        return f"{base_url}/public_disc/ptr-pdfs/{year}/{filename}"
+    # Fallback: return empty string if we can't reconstruct
+    return ""
+
+def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_duplicate_check: bool = False, filing_page_url: Optional[str] = None) -> Dict[str, Any]:
     """
     Parse House PTR PDF, extract trades, and match to politicians
     
@@ -1302,6 +1324,7 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
         s3_key: S3 key of the House PTR PDF
         politicians: List of politician dicts for matching
         skip_duplicate_check: If True, skip the duplicate check (already done upstream)
+        filing_page_url: Optional filing page URL (if not provided, will be reconstructed from s3_key)
         
     Returns:
         Dict with matchedTrades, unmatchedCount, s3Key, formType
@@ -1419,6 +1442,10 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                 # Format state/district for the politician
                 state_district = format_state_district(politician)
                 
+                # Get filing page URL (use provided or reconstruct from S3 key)
+                if not filing_page_url:
+                    filing_page_url = reconstruct_house_filing_page_url(s3_key)
+                
                 # Format matched trade to match Senate output structure
                 matched_trade = {
                     'tradeId': trade_id,
@@ -1426,6 +1453,7 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'party': politician.get('party'),
                     'position': politician.get('position'),
                     'websiteUrl': politician.get('websiteUrl'),
+                    'filingPageUrl': filing_page_url,  # Filing page URL (reconstructed from S3 key or provided)
                     'formType': 'house_ptr',
                     'filingDate': filing_date,
                     'transactionDate': transaction_date_int,
