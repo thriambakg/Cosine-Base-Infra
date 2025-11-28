@@ -5,6 +5,7 @@
 # Web content processing
 markdownify>=1.0.0
 readabilipy>=0.2.0
+readability-lxml>=0.8.1
 beautifulsoup4>=4.11.1
 lxml>=4.9.1 
 html5lib>=1.1

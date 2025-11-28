@@ -1236,42 +1236,42 @@ def download_sec_form(form_data: Dict[str, Any], target_date: str, s3_bucket_nam
         s3_client_local = boto3.client('s3')
         
         # Upload to S3 with correct content type
-        try:
-            s3_client_local.put_object(
-                Bucket=s3_bucket_name,
-                Key=s3_key,
-                Body=file_content,
-                ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
-            )
-            
-            local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
-            local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
-            local_logger.info(f"      " + "="*70)
-            print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
-            print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
-            print(f"      " + "="*70, flush=True)
-        except Exception as s3_error:
-            error_type = type(s3_error).__name__
-            error_msg = str(s3_error)
-            local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
-            local_logger.error(f"         Bucket: {s3_bucket_name}")
-            local_logger.error(f"         Key: {s3_key}")
-            local_logger.error(f"         Size: {len(file_content):,} bytes")
-            print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
-            print(f"         Bucket: {s3_bucket_name}", flush=True)
-            print(f"         Key: {s3_key}", flush=True)
-            print(f"         Size: {len(file_content):,} bytes", flush=True)
-            raise  # Re-raise to be caught by outer exception handler
+            try:
+                s3_client_local.put_object(
+                    Bucket=s3_bucket_name,
+                    Key=s3_key,
+                    Body=file_content,
+                    ContentType=content_type or ('application/xml' if file_ext == 'xml' else 'text/html' if file_ext == 'html' else 'application/pdf' if file_ext == 'pdf' else 'text/plain')
+                )
+                
+                local_logger.info(f"      ✅ S3 UPLOAD SUCCESS!")
+                local_logger.info(f"      📦 DOWNLOAD COMPLETE: File ready for parsing")
+                local_logger.info(f"      " + "="*70)
+                print(f"      ✅ S3 UPLOAD SUCCESS!", flush=True)
+                print(f"      📦 DOWNLOAD COMPLETE: File ready for parsing", flush=True)
+                print(f"      " + "="*70, flush=True)
+            except Exception as s3_error:
+                error_type = type(s3_error).__name__
+                error_msg = str(s3_error)
+                local_logger.error(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}")
+                local_logger.error(f"         Bucket: {s3_bucket_name}")
+                local_logger.error(f"         Key: {s3_key}")
+                local_logger.error(f"         Size: {len(file_content):,} bytes")
+                print(f"      ❌ S3 UPLOAD FAILED: {error_type}: {error_msg}", flush=True)
+                print(f"         Bucket: {s3_bucket_name}", flush=True)
+                print(f"         Key: {s3_key}", flush=True)
+                print(f"         Size: {len(file_content):,} bytes", flush=True)
+                raise  # Re-raise to be caught by outer exception handler
         
-        return {
-            's3_key': s3_key,
-            'content': file_content,
-            'file_ext': file_ext,
-            'cik': cik,
-            'accession_number': accession,
-            'form_type': form_type,
-            'filing_date': target_date
-        }
+            return {
+                's3_key': s3_key,
+                'content': file_content,
+                'file_ext': file_ext,
+                'cik': cik,
+                'accession_number': accession,
+                'form_type': form_type,
+                'filing_date': target_date
+            }
         
     except Exception as e:
         error_type = type(e).__name__
@@ -1471,7 +1471,7 @@ def parse_sec_form_html(html_content: str, s3_key: str, filing_date: str) -> Lis
                         shares = None
                         try:
                             shares = int(re.sub(r'[,\.]', '', shares_owned_str))
-                        except:
+                    except:
                             pass
                         
                         trade = {
@@ -1938,9 +1938,9 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             # Final fallback: try without <br> requirement
             issuer_match = re.search(
                 r'Issuer Name[^<]*<a[^>]*>([^<]+)</a>',
-                html_content,
-                re.IGNORECASE | re.DOTALL
-            )
+            html_content,
+            re.IGNORECASE | re.DOTALL
+        )
         if issuer_match:
             result['issuerName'] = unescape(issuer_match.group(1)).strip().lower()
             local_logger.info(f"   ✅ Extracted issuerName: {result['issuerName']}")
@@ -2001,7 +2001,7 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             if relationship_section_match:
                 # Extract the table content
                 if len(relationship_section_match.groups()) > 0:
-                    relationship_table = relationship_section_match.group(1)
+                relationship_table = relationship_section_match.group(1)
                 else:
                     # Pattern 3 matches the whole table, extract it differently
                     relationship_table = relationship_section_match.group(0)
@@ -2107,23 +2107,23 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                 # Extract text based on checkbox positions
                 # Officer: checkbox in cell 0 → additional text in cell 1
                 if 'Officer' in checked_positions and checked_positions['Officer'] == 0:
-                    if len(additional_text_cells) > 1:
-                        officer_cell_html = additional_text_cells[1]
-                        officer_text = re.sub(r'<[^>]+>', '', officer_cell_html).strip()
-                        officer_text = unescape(officer_text) if officer_text else None
-                        if officer_text:
-                            relationship_additional_dict['Officer'] = officer_text
+                if len(additional_text_cells) > 1:
+                    officer_cell_html = additional_text_cells[1]
+                    officer_text = re.sub(r'<[^>]+>', '', officer_cell_html).strip()
+                    officer_text = unescape(officer_text) if officer_text else None
+                    if officer_text:
+                        relationship_additional_dict['Officer'] = officer_text
                             local_logger.info(f"      ✅ Found Officer additional text (cell 1): {officer_text}")
                             print(f"      ✅ Found Officer additional text (cell 1): {officer_text}", flush=True)
                 
                 # Other: checkbox in cell 2 → additional text in cell 3
                 if 'Other' in checked_positions and checked_positions['Other'] == 2:
-                    if len(additional_text_cells) > 3:
-                        other_cell_html = additional_text_cells[3]
-                        other_text = re.sub(r'<[^>]+>', '', other_cell_html).strip()
-                        other_text = unescape(other_text) if other_text else None
-                        if other_text:
-                            relationship_additional_dict['Other'] = other_text
+                if len(additional_text_cells) > 3:
+                    other_cell_html = additional_text_cells[3]
+                    other_text = re.sub(r'<[^>]+>', '', other_cell_html).strip()
+                    other_text = unescape(other_text) if other_text else None
+                    if other_text:
+                        relationship_additional_dict['Other'] = other_text
                             local_logger.info(f"      ✅ Found Other additional text (cell 3): {other_text}")
                             print(f"      ✅ Found Other additional text (cell 3): {other_text}", flush=True)
             
@@ -2228,7 +2228,7 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                             result['filingType'] = 'joint/group'
                             local_logger.info(f"   ✅ Extracted filingType: joint/group")
                             break
-            
+        
             # If we didn't find a match, log warning
             if not result.get('filingType'):
                 result['filingType'] = None
@@ -2299,7 +2299,7 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
                 if re.search(r'Exhibit 99\.1', section_content, re.IGNORECASE):
                     # Try to extract signature from various patterns
                     # Look for /s/ Name patterns in the section
-                    signature_patterns = [
+        signature_patterns = [
                         r'(/s/|s/)\s*([A-Z][A-Za-z\s,\.]+?)(?:\s+Date|\s+\d{1,2}/\d{1,2}/\d{4}|</td>|</span>|$)',
                         r'Signature[^<]*<u><span[^>]*class="FormData"[^>]*>(/s/|s/)\s*([^<]+)</span></u>',
                         r'Signature[^<]*<u><span[^>]*class="FormData"[^>]*>([^<]+)</span></u>',
@@ -2335,29 +2335,29 @@ def _parse_common_metadata(html_content: str, form_data: Dict[str, Any], accepte
             # Try patterns in order of specificity
             signature_patterns = [
                 # Pattern 1: Direct signature with /s/ prefix
-                (r'<u><span[^>]*class="FormData"[^>]*>(/s/|s/)\s*([^<]+)</span></u>', 2),
+            (r'<u><span[^>]*class="FormData"[^>]*>(/s/|s/)\s*([^<]+)</span></u>', 2),
                 # Pattern 2: Signature in signature section with /s/
-                (r'\*\* Signature[^<]*<u><span[^>]*class="FormData"[^>]*>(/s/|s/)\s*([^<]+)</span></u>', 2),
+            (r'\*\* Signature[^<]*<u><span[^>]*class="FormData"[^>]*>(/s/|s/)\s*([^<]+)</span></u>', 2),
                 # Pattern 3: Signature in signature section without /s/
-                (r'\*\* Signature[^<]*<u><span[^>]*class="FormData"[^>]*>([^<]+)</span></u>', 1),
+            (r'\*\* Signature[^<]*<u><span[^>]*class="FormData"[^>]*>([^<]+)</span></u>', 1),
                 # Pattern 4: Direct signature without /s/ (exclude "See Exhibit" and common prefixes)
                 (r'<u><span[^>]*class="FormData"[^>]*>(?!/s/|s/|See Exhibit)([^<]+)</span></u>', 1),
-            ]
-            
-            for pattern, group_idx in signature_patterns:
-                signature_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
-                if signature_match:
+        ]
+        
+        for pattern, group_idx in signature_patterns:
+            signature_match = re.search(pattern, html_content, re.IGNORECASE | re.DOTALL)
+            if signature_match:
                     # Extract the signature name from the appropriate group
-                    if group_idx <= len(signature_match.groups()):
-                        signature_name = unescape(signature_match.group(group_idx)).strip()
+                if group_idx <= len(signature_match.groups()):
+                    signature_name = unescape(signature_match.group(group_idx)).strip()
                         
                         # Skip if it's "See Exhibit" or empty
-                        if signature_name and 'see exhibit' not in signature_name.lower():
+                    if signature_name and 'see exhibit' not in signature_name.lower():
                             # Remove /s/ or s/ prefix if present (shouldn't be needed but just in case)
-                            signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
-                            signature_name = signature_name.strip()
-                            if signature_name:
-                                break
+                        signature_name = re.sub(r'^[/]?s[/]\s*', '', signature_name, flags=re.IGNORECASE)
+                        signature_name = signature_name.strip()
+                        if signature_name:
+                            break
         
         if signature_name:
             result['signatureName'] = signature_name.lower()
@@ -3239,7 +3239,7 @@ def process_form(form_data: Dict[str, Any], target_date: str, politicians: List[
     local_logger.info(f"   📊 Step 3/4: Parsing form metadata from S3Key={s3_key}...")
     if downloaded['file_ext'] != 'html':
         local_logger.warning(f"   ⚠️ Unsupported file type: {downloaded['file_ext']} (CIK={cik}, Accession={accession})")
-        return {'skipped': True, 'reason': 'unsupported_file_type'}
+                return {'skipped': True, 'reason': 'unsupported_file_type'}
     
     content_str = downloaded['content'].decode('utf-8', errors='ignore')
     parsed_data = parse_sec_form_metadata(content_str, form_data, accepted_date_str)
