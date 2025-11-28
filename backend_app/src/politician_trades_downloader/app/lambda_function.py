@@ -1038,7 +1038,6 @@ def lambda_handler(event, context):
                     "filingDate": target_date,
                     "filer_name": event.get('filer_name'),  # Always pass through filer_name
                 "transactions": event.get('transactions', []),  # Pass through pre-extracted transactions if available
-                    "filingPageUrl": event.get('filingPageUrl') or event.get('view_url') or event.get('url'),  # Pass through filing page URL
                     "success": True
                 }
         elif source == 'house':
@@ -1056,7 +1055,6 @@ def lambda_handler(event, context):
                 "source": "house",
                     "filingDate": target_date,
                     "filer_name": event.get('filer_name'),  # Always pass through filer_name if available
-                    "filingPageUrl": event.get('filingPageUrl') or event.get('url'),  # Pass through filing page URL
                     "success": True
                 }
         else:

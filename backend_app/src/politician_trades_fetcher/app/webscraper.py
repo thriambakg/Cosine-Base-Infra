@@ -371,7 +371,6 @@ class CongressionalPTRScraper:
                 ptr_info = {
                     'url': view_url,
                     'view_url': view_url,
-                    'filingPageUrl': view_url,  # Filing page URL for Senate (view page)
                     'formType': 'senate_ptr',
                     'source': 'senate',
                     'filingDate': filing_date_str if filing_date_str else date_str,
@@ -589,18 +588,9 @@ class CongressionalPTRScraper:
                     filename = relative_path.split('/')[-1]
                     uuid = filename.replace('.pdf', '')
                     
-                    # Build filing page URL for House
-                    # House filing page is the search results page with the specific filing
-                    # We can construct it from the PDF URL or use a search result URL
-                    # For now, use the PDF URL as the filing page (users can view/download from there)
-                    # Alternatively, we could construct: f"{self.HOUSE_BASE_URL}/FinancialDisclosure/ViewMemberSearchResult?FilingYear={filing_year}"
-                    # But the PDF URL is more direct and useful
-                    filing_page_url = full_url  # PDF URL serves as the filing page for House
-                    
                     # Build output payload (similar to Senate structure)
                     ptr_info = {
                         'url': full_url,
-                        'filingPageUrl': filing_page_url,  # Filing page URL for House (PDF URL)
                         'formType': 'house_ptr',
                         'source': 'house',
                         'filer_name': name_text,
