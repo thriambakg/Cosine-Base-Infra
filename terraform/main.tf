@@ -1735,6 +1735,15 @@ module "glue_scripts_s3" {
 
   kms_key_arn = module.kms.main_key_arn
 
+  # Upload Glue script to S3
+  static_files = [
+    {
+      source_path  = "${path.module}/../backend_app/src/glue/govt_contracts/glue_script.py"
+      s3_key       = "govt_contracts/glue_script.py"
+      content_type = "text/x-python"
+    }
+  ]
+
   tags = var.common_tags
 
   depends_on = [module.kms]
