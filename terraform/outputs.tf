@@ -523,6 +523,43 @@ output "lambda_s3_chat_files_policy_arn" {
   value       = aws_iam_policy.lambda_s3_chat_files_policy.arn
 }
 
+# USAspending Awards Index Table Outputs
+output "usaspending_awards_table_name" {
+  description = "Name of the USAspending awards index DynamoDB table"
+  value       = module.usaspending_awards_index_table.table_name
+}
+
+output "usaspending_awards_table_arn" {
+  description = "ARN of the USAspending awards index DynamoDB table"
+  value       = module.usaspending_awards_index_table.table_arn
+}
+
+output "usaspending_awards_table_id" {
+  description = "ID of the USAspending awards index DynamoDB table"
+  value       = module.usaspending_awards_index_table.table_id
+}
+
+output "usaspending_awards_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing the USAspending awards index table"
+  value       = module.usaspending_awards_index_table.table_policy_arn
+}
+
+# USAspending Data S3 Bucket Outputs
+output "usaspending_data_s3_bucket_name" {
+  description = "Name of the USAspending data S3 bucket"
+  value       = module.usaspending_data_s3.bucket_id
+}
+
+output "usaspending_data_s3_bucket_arn" {
+  description = "ARN of the USAspending data S3 bucket"
+  value       = module.usaspending_data_s3.bucket_arn
+}
+
+output "lambda_usaspending_data_s3_policy_arn" {
+  description = "ARN of the IAM policy for Lambda access to USAspending data S3 bucket"
+  value       = aws_iam_policy.lambda_usaspending_data_s3_policy.arn
+}
+
 # OpenSearch Domain Outputs
 # DISABLED FOR MVP - OpenSearch is not being used
 # output "opensearch_domain_endpoint" {
