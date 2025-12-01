@@ -57,6 +57,11 @@ job.init(args['JOB_NAME'], args)
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)
 
+# Log script initialization
+logger.info("=" * 80)
+logger.info("USAspending Bulk Indexing Glue Job - Script Loaded Successfully")
+logger.info("=" * 80)
+
 # Environment variables
 USASPENDING_BASE_URL = args.get('USASPENDING_BASE_URL', 'https://api.usaspending.gov')
 USASPENDING_USER_AGENT = args.get('USASPENDING_USER_AGENT', 'Cosine Financial Platform (contact@cosine.financial)')
@@ -68,6 +73,8 @@ REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 dynamodb = boto3.resource('dynamodb')
 s3_client = boto3.client('s3')
 awards_table = dynamodb.Table(AWARDS_TABLE_NAME)
+
+logger.info(f"Configuration: Table={AWARDS_TABLE_NAME}, S3 Bucket={S3_BUCKET_NAME}, API={USASPENDING_BASE_URL}")
 
 # ============================================================================
 # Helper Functions (ported from Lambda)
@@ -369,7 +376,9 @@ def index_award(award_id: str) -> Dict[str, Any]:
 
 def initiate_bulk_download(start_date: str, end_date: str) -> Dict[str, Any]:
     """Initiate bulk download for all contracts in date range"""
-    logger.info(f"Initiating bulk download for date range: {start_date} to {end_date}")
+    logger.info("=" * 80)
+    logger.info(f"CHECKPOINT: Beginning Bulk Download - Date Range: {start_date} to {end_date}")
+    logger.info("=" * 80)
     
     bulk_filters = {
         "date_range": {
@@ -393,7 +402,7 @@ def initiate_bulk_download(start_date: str, end_date: str) -> Dict[str, Any]:
     if not file_name:
         raise Exception("No file_name in bulk download response")
     
-    logger.info(f"Bulk download initiated: {file_name}")
+    logger.info(f"Bulk download initiated successfully: {file_name}")
     return {'file_name': file_name, 'response': response}
 
 
@@ -410,9 +419,11 @@ def poll_download_status(file_name: str, max_wait: int = 3600, poll_interval: in
         )
         
         status = response.get("status")
-        logger.info(f"Download status: {status}")
         
         if status == "ready":
+            logger.info("=" * 80)
+            logger.info("CHECKPOINT: Bulk Download Completed - File Ready")
+            logger.info("=" * 80)
             return response
         elif status == "failed":
             raise Exception(f"Bulk download failed: {response.get('message', 'Unknown error')}")
@@ -424,6 +435,9 @@ def poll_download_status(file_name: str, max_wait: int = 3600, poll_interval: in
 
 def download_and_parse_csv(file_url: str) -> List[Dict[str, Any]]:
     """Download CSV file and parse to extract award IDs"""
+    logger.info("=" * 80)
+    logger.info("CHECKPOINT: Beginning CSV Download and Parsing")
+    logger.info("=" * 80)
     logger.info(f"Downloading CSV from {file_url}")
     
     response = requests.get(file_url, timeout=300)
@@ -440,7 +454,9 @@ def download_and_parse_csv(file_url: str) -> List[Dict[str, Any]]:
         if award_id and award_id not in award_ids:
             award_ids.append(award_id)
     
-    logger.info(f"Extracted {len(award_ids)} unique award IDs from CSV")
+    logger.info("=" * 80)
+    logger.info(f"CHECKPOINT: CSV Parsing Completed - Extracted {len(award_ids)} unique award IDs")
+    logger.info("=" * 80)
     return award_ids
 
 
@@ -507,7 +523,9 @@ def main():
             return
         
         # Step 4: Index all awards
-        logger.info(f"Indexing {len(award_ids)} awards...")
+        logger.info("=" * 80)
+        logger.info(f"CHECKPOINT: Beginning Award Indexing - {len(award_ids)} awards to process")
+        logger.info("=" * 80)
         indexed_count = 0
         skipped_count = 0
         
@@ -526,9 +544,15 @@ def main():
                 logger.error(f"Failed to index award {award_id}: {str(e)}")
                 raise  # Stop on error
         
-        logger.info(f"✅ Bulk indexing complete: {indexed_count} indexed, {skipped_count} skipped out of {len(award_ids)} total")
+        logger.info("=" * 80)
+        logger.info(f"CHECKPOINT: Award Indexing Completed")
+        logger.info(f"  Total Awards: {len(award_ids)}")
+        logger.info(f"  Successfully Indexed: {indexed_count}")
+        logger.info(f"  Skipped (Already Indexed): {skipped_count}")
+        logger.info("=" * 80)
         
         # Job success
+        logger.info("Job completed successfully - committing")
         job.commit()
         
     except Exception as e:
