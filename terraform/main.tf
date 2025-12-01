@@ -1708,27 +1708,60 @@ resource "aws_iam_policy" "lambda_usaspending_data_s3_policy" {
 # Daily Glue job that fetches all new contract awards from the previous day,
 # downloads bulk data, and indexes awards, transactions, and subawards
 
+# S3 Bucket for Glue Scripts
+module "glue_scripts_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-glue-scripts-${var.environment}"
+  environment = var.environment
+  purpose     = "GlueScripts"
+
+  # No lifecycle transitions needed for scripts (they're small and rarely change)
+  enable_lifecycle_transitions = false
+
+  # No expiration for scripts (keep them indefinitely)
+  enable_expiration = false
+
+  # Abort incomplete multipart uploads after 1 day
+  abort_incomplete_multipart_upload_days = 1
+
+  # Noncurrent version expiration
+  noncurrent_version_expiration_days = 30
+
+  kms_key_arn = module.kms.main_key_arn
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
 # Glue Job for USAspending Daily Bulk Indexing
 module "usaspending_bulk_indexing_glue_job" {
   source = "./modules/glue-job"
 
   job_name = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
 
-  # Script location - uploaded to static hosting bucket
-  script_location = "s3://${module.static_hosting_bucket.bucket_id}/glue/govt_contracts/glue_script.py"
+  # Script location - uploaded to glue scripts bucket
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/govt_contracts/glue_script.py"
   python_version  = "3"
   glue_version    = "4.0"
 
   # Job configuration
   max_retries       = 1
-  timeout           = 14400 # 4 hours (bulk downloads can take time)
+  timeout           = 2880 # 48 hours (max is 10080 minutes = 7 days, bulk downloads can take time)
   worker_type       = "G.1X"
   number_of_workers = 2
 
   # S3 buckets
-  s3_bucket_arn = module.static_hosting_bucket.bucket_arn
+  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
   additional_s3_bucket_arns = [
-    module.usaspending_data_s3.bucket_arn
+    module.usaspending_data_s3.bucket_arn,
+    module.static_hosting_bucket.bucket_arn
   ]
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
@@ -1753,6 +1786,7 @@ module "usaspending_bulk_indexing_glue_job" {
   tags = var.common_tags
 
   depends_on = [
+    module.glue_scripts_s3,
     module.static_hosting_bucket,
     module.usaspending_data_s3,
     module.usaspending_awards_index_table,
