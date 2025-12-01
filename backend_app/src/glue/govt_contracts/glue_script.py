@@ -41,7 +41,9 @@ args = getResolvedOptions(sys.argv, [
     'USASPENDING_USER_AGENT',
     'AWARDS_TABLE_NAME',
     'S3_BUCKET_NAME',
-    'REQUEST_TIMEOUT'
+    'REQUEST_TIMEOUT',
+    '--START_DATE',  # Optional: YYYY-MM-DD format, defaults to yesterday
+    '--END_DATE'     # Optional: YYYY-MM-DD format, defaults to START_DATE
 ])
 
 # Initialize Glue context
@@ -449,12 +451,42 @@ def download_and_parse_csv(file_url: str) -> List[Dict[str, Any]]:
 def main():
     """Main Glue job execution"""
     try:
-        # Get yesterday's date range
-        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-        start_date = yesterday.strftime('%Y-%m-%d')
-        end_date = yesterday.strftime('%Y-%m-%d')
+        # Get date range from parameters or default to yesterday
+        start_date = args.get('--START_DATE')
+        end_date = args.get('--END_DATE')
         
-        logger.info(f"Starting daily bulk indexing for {start_date}")
+        if not start_date:
+            # Default to yesterday if not provided
+            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+            start_date = yesterday.strftime('%Y-%m-%d')
+            logger.info(f"No START_DATE provided, defaulting to yesterday: {start_date}")
+        else:
+            # Validate date format
+            try:
+                datetime.strptime(start_date, '%Y-%m-%d')
+            except ValueError:
+                raise ValueError(f"Invalid START_DATE format: {start_date}. Expected YYYY-MM-DD")
+        
+        if not end_date:
+            # Default to start_date if not provided
+            end_date = start_date
+            logger.info(f"No END_DATE provided, defaulting to START_DATE: {end_date}")
+        else:
+            # Validate date format
+            try:
+                datetime.strptime(end_date, '%Y-%m-%d')
+            except ValueError:
+                raise ValueError(f"Invalid END_DATE format: {end_date}. Expected YYYY-MM-DD")
+        
+        # Validate date range
+        start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+        end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+        if end_dt < start_dt:
+            raise ValueError(f"END_DATE ({end_date}) must be >= START_DATE ({start_date})")
+        
+        # Calculate number of days
+        days_diff = (end_dt - start_dt).days + 1
+        logger.info(f"Starting bulk indexing for date range: {start_date} to {end_date} ({days_diff} day(s))")
         
         # Step 1: Initiate bulk download
         download_info = initiate_bulk_download(start_date, end_date)

@@ -1804,20 +1804,31 @@ module "usaspending_bulk_indexing_state_machine" {
   # Step Functions definition - uses glue:startJobRun.sync to wait for completion
   definition = jsonencode({
     Comment = "Daily USAspending Bulk Indexing - Runs Glue job to index all new contracts from previous day"
-    StartAt = "StartBulkIndexing"
+    StartAt = "BuildGlueParameters"
     States = {
+      BuildGlueParameters = {
+        Type = "Pass"
+        Parameters = {
+          "JobName.$" : "$.JobName"
+          "Arguments" : {
+            "--USASPENDING_BASE_URL" : "https://api.usaspending.gov"
+            "--USASPENDING_USER_AGENT" : "Cosine Financial Platform (contact@cosine.financial)"
+            "--AWARDS_TABLE_NAME.$" : "$.AWARDS_TABLE_NAME"
+            "--S3_BUCKET_NAME.$" : "$.S3_BUCKET_NAME"
+            "--REQUEST_TIMEOUT" : "30"
+            "--START_DATE.$" : "$.START_DATE"
+            "--END_DATE.$" : "$.END_DATE"
+          }
+        }
+        ResultPath = "$.glue_params"
+        Next       = "StartBulkIndexing"
+      }
       StartBulkIndexing = {
         Type     = "Task"
         Resource = "arn:aws:states:::glue:startJobRun.sync"
         Parameters = {
-          JobName = module.usaspending_bulk_indexing_glue_job.job_name
-          Arguments = {
-            "--USASPENDING_BASE_URL"   = "https://api.usaspending.gov"
-            "--USASPENDING_USER_AGENT" = "Cosine Financial Platform (contact@cosine.financial)"
-            "--AWARDS_TABLE_NAME"      = module.usaspending_awards_index_table.table_name
-            "--S3_BUCKET_NAME"         = module.usaspending_data_s3.bucket_id
-            "--REQUEST_TIMEOUT"        = "30"
-          }
+          "JobName.$" : "$.glue_params.JobName"
+          "Arguments.$" : "$.glue_params.Arguments"
         }
         Retry = [
           {
@@ -1885,8 +1896,12 @@ module "usaspending_bulk_indexing_scheduler" {
   target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
 
   target_input = jsonencode({
-    source    = "scheduler-daily"
-    timestamp = "scheduled"
+    source            = "scheduler-daily"
+    timestamp         = "scheduled"
+    JobName           = module.usaspending_bulk_indexing_glue_job.job_name
+    AWARDS_TABLE_NAME = module.usaspending_awards_index_table.table_name
+    S3_BUCKET_NAME    = module.usaspending_data_s3.bucket_id
+    # START_DATE and END_DATE omitted - will default to yesterday in Glue script
   })
 
   purpose     = "USASpendingBulkIndexing"
