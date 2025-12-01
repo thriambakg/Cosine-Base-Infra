@@ -1611,6 +1611,42 @@ module "sec_filings_s3" {
   tags = var.common_tags
 }
 
+# S3 Bucket for USAspending Award Details (Transactions and Subawards)
+# Stores combined transaction and subaward data as gzipped JSON files
+# Structure: award-details/{award_id}.json.gz
+module "usaspending_data_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-usaspending-data-${var.environment}"
+  environment = var.environment
+  purpose     = "USASpendingAwardDetails"
+
+  # Enable lifecycle transitions to Glacier for cost optimization
+  enable_lifecycle_transitions = true
+  transition_to_ia_days        = 30
+  transition_to_glacier_days   = 90
+
+  # Enable expiration after 90 days (same as award TTL in DynamoDB)
+  # Award details are re-indexed on demand, so we can expire old files
+  enable_expiration = true
+  expiration_days   = 90 # 90 days - matches DynamoDB TTL
+
+  # Abort incomplete multipart uploads after 7 days
+  abort_incomplete_multipart_upload_days = 7
+
+  # Noncurrent version expiration
+  noncurrent_version_expiration_days = 30
+
+  kms_key_arn = module.kms.main_key_arn
+
+  tags = var.common_tags
+}
+
 # IAM Policy for Lambda to access S3 politician trades bucket
 resource "aws_iam_policy" "lambda_politician_trades_s3_policy" {
   name        = "${var.project_name}-lambda-politician-trades-s3-access-${var.environment}"
@@ -1630,6 +1666,33 @@ resource "aws_iam_policy" "lambda_politician_trades_s3_policy" {
         Resource = [
           module.politician_trades_s3.bucket_arn,
           "${module.politician_trades_s3.bucket_arn}/*"
+        ]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for Lambda to access S3 USAspending data bucket
+resource "aws_iam_policy" "lambda_usaspending_data_s3_policy" {
+  name        = "${var.project_name}-lambda-usaspending-data-s3-access-${var.environment}"
+  description = "Allows Lambda to read/write to USAspending award details S3 bucket"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          module.usaspending_data_s3.bucket_arn,
+          "${module.usaspending_data_s3.bucket_arn}/*"
         ]
       }
     ]
@@ -1886,6 +1949,207 @@ module "sec_filings_table" {
   table_purpose = "SECFilingsCache"
 
   # Add BatchGetItem and BatchWriteItem for cache operations
+  iam_policy_actions = [
+    "dynamodb:GetItem",
+    "dynamodb:PutItem",
+    "dynamodb:UpdateItem",
+    "dynamodb:DeleteItem",
+    "dynamodb:Query",
+    "dynamodb:Scan",
+    "dynamodb:BatchGetItem",
+    "dynamodb:BatchWriteItem"
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# USAspending Awards Index DynamoDB Table
+# Stores indexed award/contract data from USAspending API
+# Primary Key: award_id (unique per contract/award)
+# Transactions and subawards stored in S3 (referenced via award_details_s3_key)
+module "usaspending_awards_index_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "usaspending-awards-index"
+
+  hash_key  = "award_id"
+  range_key = null
+
+  attributes = [
+    { name = "award_id", type = "S" },
+    { name = "recipient_id", type = "S" },
+    { name = "recipient_name_normalized", type = "S" },
+    { name = "awarding_agency_code", type = "S" },
+    { name = "funding_agency_code", type = "S" },
+    { name = "fiscal_year", type = "N" },
+    { name = "total_obligation", type = "N" },
+    { name = "period_start_date", type = "S" },
+    { name = "naics_code", type = "S" },
+    { name = "psc_code", type = "S" },
+    { name = "cfda_number", type = "S" },
+    { name = "recipient_location_state", type = "S" },
+    { name = "award_type", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "RecipientFiscalYearIndex"
+      hash_key        = "recipient_id"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "RecipientObligationIndex"
+      hash_key        = "recipient_id"
+      range_key       = "total_obligation"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "AwardingAgencyFiscalYearIndex"
+      hash_key        = "awarding_agency_code"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "AwardingAgencyObligationIndex"
+      hash_key        = "awarding_agency_code"
+      range_key       = "total_obligation"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FiscalYearObligationIndex"
+      hash_key        = "fiscal_year"
+      range_key       = "total_obligation"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FiscalYearStartDateIndex"
+      hash_key        = "fiscal_year"
+      range_key       = "period_start_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "NAICSCodeFiscalYearIndex"
+      hash_key        = "naics_code"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "NAICSCodeObligationIndex"
+      hash_key        = "naics_code"
+      range_key       = "total_obligation"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PSCCodeFiscalYearIndex"
+      hash_key        = "psc_code"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PSCCodeObligationIndex"
+      hash_key        = "psc_code"
+      range_key       = "total_obligation"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "StateFiscalYearIndex"
+      hash_key        = "recipient_location_state"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "StateObligationIndex"
+      hash_key        = "recipient_location_state"
+      range_key       = "total_obligation"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "AwardTypeFiscalYearIndex"
+      hash_key        = "award_type"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "AwardTypeObligationIndex"
+      hash_key        = "award_type"
+      range_key       = "total_obligation"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "CFDANumberFiscalYearIndex"
+      hash_key        = "cfda_number"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "RecipientNameFiscalYearIndex"
+      hash_key        = "recipient_name_normalized"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FundingAgencyFiscalYearIndex"
+      hash_key        = "funding_agency_code"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = true
+  ttl_attribute_name             = "ttl"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "AwardData"
+  table_purpose = "USASpendingAwardsIndex"
+
+  # Add BatchGetItem and BatchWriteItem for efficient indexing operations
   iam_policy_actions = [
     "dynamodb:GetItem",
     "dynamodb:PutItem",
