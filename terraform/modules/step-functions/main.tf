@@ -43,7 +43,7 @@ resource "aws_cloudwatch_log_group" "step_functions" {
 
 # IAM Role for Step Functions
 resource "aws_iam_role" "step_functions" {
-  name = "${var.state_machine_name}-role"
+  name = "${var.state_machine_name}-execution-role"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -61,7 +61,7 @@ resource "aws_iam_role" "step_functions" {
   tags = merge(
     var.tags,
     {
-      Name        = "${var.state_machine_name}-role"
+      Name        = "${var.state_machine_name}-execution-role"
       Environment = var.environment
     }
   )
