@@ -1631,10 +1631,10 @@ module "usaspending_data_s3" {
   transition_to_ia_days        = 30
   transition_to_glacier_days   = 90
 
-  # Enable expiration after 90 days (same as award TTL in DynamoDB)
+  # Enable expiration after 120 days (must be greater than glacier transition)
   # Award details are re-indexed on demand, so we can expire old files
   enable_expiration = true
-  expiration_days   = 90 # 90 days - matches DynamoDB TTL
+  expiration_days   = 120 # 120 days - must be > transition_to_glacier_days (90)
 
   # Abort incomplete multipart uploads after 7 days
   abort_incomplete_multipart_upload_days = 7
