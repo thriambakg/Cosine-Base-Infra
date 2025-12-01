@@ -1507,7 +1507,8 @@ resource "aws_iam_role_policy" "eventbridge_stepfunctions_policy" {
         Resource = [
           module.eod_aggregator_state_machine.state_machine_arn,
           module.stock_data_historical_loader_state_machine.state_machine_arn,
-          module.politician_trades_state_machine.state_machine_arn
+          module.politician_trades_state_machine.state_machine_arn,
+          module.usaspending_bulk_indexing_state_machine.state_machine_arn
         ]
       }
     ]
@@ -1699,6 +1700,166 @@ resource "aws_iam_policy" "lambda_usaspending_data_s3_policy" {
   })
 
   tags = var.common_tags
+}
+
+# ==============================================================================
+# USASPENDING DAILY BULK INDEXING SYSTEM
+# ==============================================================================
+# Daily Glue job that fetches all new contract awards from the previous day,
+# downloads bulk data, and indexes awards, transactions, and subawards
+
+# Glue Job for USAspending Daily Bulk Indexing
+module "usaspending_bulk_indexing_glue_job" {
+  source = "./modules/glue-job"
+
+  job_name = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
+
+  # Script location - uploaded to static hosting bucket
+  script_location = "s3://${module.static_hosting_bucket.bucket_id}/glue/govt_contracts/glue_script.py"
+  python_version  = "3"
+  glue_version    = "4.0"
+
+  # Job configuration
+  max_retries       = 1
+  timeout           = 14400 # 4 hours (bulk downloads can take time)
+  worker_type       = "G.1X"
+  number_of_workers = 2
+
+  # S3 buckets
+  s3_bucket_arn = module.static_hosting_bucket.bucket_arn
+  additional_s3_bucket_arns = [
+    module.usaspending_data_s3.bucket_arn
+  ]
+  spark_logs_bucket = module.static_hosting_bucket.bucket_id
+  temp_bucket       = module.static_hosting_bucket.bucket_id
+
+  # DynamoDB access
+  dynamodb_table_arn = module.usaspending_awards_index_table.table_arn
+
+  # KMS for encryption
+  kms_key_arn = module.kms.main_key_arn
+
+  # Job arguments
+  default_arguments = {
+    "--USASPENDING_BASE_URL"   = "https://api.usaspending.gov"
+    "--USASPENDING_USER_AGENT" = "Cosine Financial Platform (contact@cosine.financial)"
+    "--AWARDS_TABLE_NAME"      = module.usaspending_awards_index_table.table_name
+    "--S3_BUCKET_NAME"         = module.usaspending_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"        = "30"
+  }
+
+  job_bookmark_option = "job-bookmark-disable"
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.static_hosting_bucket,
+    module.usaspending_data_s3,
+    module.usaspending_awards_index_table,
+    module.kms
+  ]
+}
+
+# Step Functions State Machine for USAspending Daily Bulk Indexing
+module "usaspending_bulk_indexing_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
+  environment        = var.environment
+
+  # Step Functions definition - uses glue:startJobRun.sync to wait for completion
+  definition = jsonencode({
+    Comment = "Daily USAspending Bulk Indexing - Runs Glue job to index all new contracts from previous day"
+    StartAt = "StartBulkIndexing"
+    States = {
+      StartBulkIndexing = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Parameters = {
+          JobName = module.usaspending_bulk_indexing_glue_job.job_name
+          Arguments = {
+            "--USASPENDING_BASE_URL"   = "https://api.usaspending.gov"
+            "--USASPENDING_USER_AGENT" = "Cosine Financial Platform (contact@cosine.financial)"
+            "--AWARDS_TABLE_NAME"      = module.usaspending_awards_index_table.table_name
+            "--S3_BUCKET_NAME"         = module.usaspending_data_s3.bucket_id
+            "--REQUEST_TIMEOUT"        = "30"
+          }
+        }
+        Retry = [
+          {
+            ErrorEquals = [
+              "Glue.JobRunFailed",
+              "Glue.JobRunTimeout",
+              "States.TaskFailed"
+            ]
+            IntervalSeconds = 60
+            MaxAttempts     = 2
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "HandleError"
+          }
+        ]
+        Next = "IndexingComplete"
+      }
+      IndexingComplete = {
+        Type    = "Succeed"
+        Comment = "Bulk indexing completed successfully"
+      }
+      HandleError = {
+        Type  = "Fail"
+        Error = "BulkIndexingFailed"
+        Cause = "The daily bulk indexing job failed. Check CloudWatch logs for details."
+      }
+    }
+  })
+
+  # Glue job name for IAM permissions
+  glue_job_names = [
+    module.usaspending_bulk_indexing_glue_job.job_name
+  ]
+
+  # Logging configuration
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [module.usaspending_bulk_indexing_glue_job]
+}
+
+# EventBridge Scheduler for Daily USAspending Bulk Indexing (2:00 AM UTC)
+module "usaspending_bulk_indexing_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
+  rule_description    = "Trigger daily bulk indexing of USAspending contracts at 2:00 AM UTC (runs for previous day's contracts)"
+  schedule_expression = "cron(0 2 * * ? *)" # 2:00 AM UTC daily
+  enabled             = true
+
+  # Target is Step Functions state machine
+  target_arn = module.usaspending_bulk_indexing_state_machine.state_machine_arn
+  target_id  = "USASpendingBulkIndexingScheduler"
+
+  # For Step Functions, we need to provide a role
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
+
+  target_input = jsonencode({
+    source    = "scheduler-daily"
+    timestamp = "scheduled"
+  })
+
+  purpose     = "USASpendingBulkIndexing"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [module.usaspending_bulk_indexing_state_machine]
 }
 
 resource "aws_iam_policy" "lambda_politician_trades_textract_policy" {
