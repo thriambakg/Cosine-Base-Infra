@@ -34,17 +34,24 @@ import requests
 # Configuration
 # ============================================================================
 
-# Get job parameters
+# Get required job parameters
 args = getResolvedOptions(sys.argv, [
     'JOB_NAME',
     'USASPENDING_BASE_URL',
     'USASPENDING_USER_AGENT',
     'AWARDS_TABLE_NAME',
     'S3_BUCKET_NAME',
-    'REQUEST_TIMEOUT',
-    '--START_DATE',  # Optional: YYYY-MM-DD format, defaults to yesterday
-    '--END_DATE'     # Optional: YYYY-MM-DD format, defaults to START_DATE
+    'REQUEST_TIMEOUT'
 ])
+
+# Get optional date parameters (if provided)
+# getResolvedOptions requires all listed args, so we parse optional ones separately
+try:
+    optional_args = getResolvedOptions(sys.argv, ['--START_DATE', '--END_DATE'])
+    args.update(optional_args)
+except Exception:
+    # Optional args not provided - will default in main()
+    pass
 
 # Initialize Glue context
 sc = SparkContext()
