@@ -25,6 +25,8 @@ from decimal import Decimal
 from io import StringIO, BytesIO
 from requests.adapters import HTTPAdapter
 from urllib3.util.retry import Retry
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -114,6 +116,10 @@ log_print(f"ℹ️ Rate Limiting: {API_RATE_LIMIT_DELAY}s delay, {MAX_RETRIES} m
 _global_session = None
 _last_api_call_time = 0
 
+# Thread-safe progress tracking for parallel processing
+_progress_lock = Lock()
+_progress_counter = {'indexed': 0, 'skipped': 0, 'total': 0, 'processed': 0}
+
 # ============================================================================
 # Helper Functions (ported from Lambda)
 # ============================================================================
@@ -145,7 +151,13 @@ def create_session():
         raise_on_status=False  # We'll handle status codes manually
     )
     
-    adapter = HTTPAdapter(max_retries=retry_strategy, pool_connections=10, pool_maxsize=20)
+    # Increased pool sizes to handle parallel requests better
+    # But keep reasonable limits to avoid overwhelming the API
+    adapter = HTTPAdapter(
+        max_retries=retry_strategy,
+        pool_connections=20,  # Increased from 10 - more connection pools for parallel requests
+        pool_maxsize=30       # Increased from 20 - more connections per pool
+    )
     session.mount("http://", adapter)
     session.mount("https://", adapter)
     
@@ -159,8 +171,12 @@ def rate_limit():
     current_time = time.time()
     time_since_last_call = current_time - _last_api_call_time
     
-    if time_since_last_call < API_RATE_LIMIT_DELAY:
-        sleep_time = API_RATE_LIMIT_DELAY - time_since_last_call
+    # Reduced rate limit delay for parallel processing (0.1s instead of 0.5s)
+    # Since we're already controlling concurrency with ThreadPoolExecutor,
+    # we can use a smaller delay here to avoid unnecessary waiting
+    parallel_rate_limit = 0.1  # 100ms between calls per thread
+    if time_since_last_call < parallel_rate_limit:
+        sleep_time = parallel_rate_limit - time_since_last_call
         time.sleep(sleep_time)
     
     _last_api_call_time = time.time()
@@ -454,6 +470,74 @@ def upload_award_details_to_s3(award_id: str, transactions: List[Dict], subaward
     return s3_key
 
 
+def index_award_from_csv_record(award_record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Index an award directly from CSV record (no API calls needed).
+    Much faster than index_award() since it uses data already in the CSV.
+    """
+    try:
+        award_id = award_record['award_id']
+        
+        # Check if already indexed
+        existing_award = awards_table.get_item(Key={'award_id': award_id})
+        item = existing_award.get('Item')
+        if item and (item.get('full_indexing_complete') or item.get('award_details_s3_key')):
+            return {'success': True, 'award_id': award_id, 'skipped': True}
+        
+        # Extract transactions before modifying award_record
+        transactions = award_record.get('transactions', [])
+        transaction_count = len(transactions)
+        
+        # Create a copy for DynamoDB (without transactions list)
+        award_db_record = award_record.copy()
+        award_db_record.pop('transactions', None)  # Remove transactions from DB record
+        
+        # Remove None/empty values for sparse GSI fields
+        # DynamoDB sparse indexes don't allow NULL values - field must be omitted entirely
+        # Only include these fields if they have actual values
+        sparse_gsi_fields = ['cfda_number', 'naics_code', 'psc_code', 'awarding_agency_code', 
+                             'funding_agency_code', 'recipient_id', 'recipient_location_state']
+        for field in sparse_gsi_fields:
+            if award_db_record.get(field) is None or award_db_record.get(field) == '':
+                award_db_record.pop(field, None)
+        
+        # Convert to Decimal for DynamoDB
+        award_db_record['total_obligation'] = Decimal(str(award_db_record.get('total_obligation', 0)))
+        award_db_record = convert_floats_to_decimal(award_db_record)
+        
+        # Store award in DynamoDB
+        awards_table.put_item(Item=award_db_record)
+        
+        # Fetch subawards from API (not available in CSV, but we still want them)
+        # This is the only API call needed when using CSV data
+        try:
+            subawards = fetch_all_subawards(award_id)
+            subaward_count = len(subawards)
+        except Exception as e:
+            log_print(f"⚠️ Warning: Failed to fetch subawards for {award_id}: {str(e)[:200]}")
+            subawards = []
+            subaward_count = 0
+        
+        # Upload transactions and subawards to S3
+        s3_key = upload_award_details_to_s3(award_id, transactions, subawards)
+        
+        # Update DynamoDB with S3 key and completion flags
+        award_db_record['award_details_s3_key'] = s3_key
+        award_db_record['award_details_indexed'] = True
+        award_db_record['transaction_count'] = transaction_count
+        award_db_record['subaward_count'] = subaward_count
+        award_db_record['full_indexing_complete'] = True
+        award_db_record['last_updated'] = datetime.now(timezone.utc).isoformat()
+        awards_table.put_item(Item=award_db_record)
+        
+        return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
+    
+    except Exception as e:
+        log_print(f"❌ Error indexing award {award_record.get('award_id', 'unknown')}: {str(e)}")
+        logger.error(f"❌ Error indexing award from CSV: {str(e)}", exc_info=True)
+        raise
+
+
 def index_award(award_id: str) -> Dict[str, Any]:
     """Index a single award: fetch details, transactions, subawards, and store"""
     try:
@@ -499,6 +583,29 @@ def index_award(award_id: str) -> Dict[str, Any]:
         log_print(f"❌ Error indexing award {award_id}: {str(e)}")
         logger.error(f"❌ Error indexing award {award_id}: {str(e)}", exc_info=True)
         raise  # Re-raise to stop execution
+
+
+def index_award_with_retry(award_id: str) -> Dict[str, Any]:
+    """Index award with retry logic for connection errors (used in parallel processing)"""
+    max_retries = 3
+    retry_delay = RETRY_BASE_DELAY
+    
+    for attempt in range(max_retries):
+        try:
+            return index_award(award_id)
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
+                urllib3.exceptions.ProtocolError, urllib3.exceptions.NewConnectionError) as e:
+            if attempt < max_retries - 1:
+                # Exponential backoff
+                wait_time = retry_delay * (2 ** attempt)
+                time.sleep(wait_time)
+                continue
+            else:
+                # Last attempt failed, raise the exception
+                raise
+        except Exception as e:
+            # For non-connection errors, don't retry, just raise
+            raise
 
 
 # ============================================================================
@@ -759,7 +866,101 @@ def save_zip_to_s3(zip_content: bytes, start_date: str, end_date: str, agency_na
     return s3_key
 
 
-def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None) -> List[Dict[str, Any]]:
+def parse_csv_to_award_records(csv_content: str) -> Dict[str, Dict[str, Any]]:
+    """
+    Parse CSV content and group transactions by award to create award-level records.
+    Returns a dict mapping award_id -> award_record with aggregated data.
+    This avoids API calls by using data directly from the bulk download CSV.
+    """
+    reader = csv.DictReader(StringIO(csv_content))
+    awards = {}  # award_id -> award data
+    
+    for row in reader:
+        # Get award ID - primary key for grouping
+        award_id = (
+            row.get('contract_award_unique_key') or
+            row.get('generated_unique_award_id') or
+            row.get('award_id') or
+            None
+        )
+        
+        if not award_id:
+            continue
+        
+        # Initialize award record if first time seeing this award
+        if award_id not in awards:
+            # Extract award-level fields (use first transaction's values)
+            period_start = row.get('period_of_performance_start_date')
+            period_end = row.get('period_of_performance_current_end_date')
+            fiscal_year = None
+            if period_start:
+                try:
+                    date_obj = datetime.strptime(period_start.split('T')[0], '%Y-%m-%d')
+                    fiscal_year = date_obj.year + 1 if date_obj.month >= 10 else date_obj.year
+                except:
+                    pass
+            
+            awards[award_id] = {
+                'award_id': award_id,
+                'award_type': (row.get('award_type') or 'contract').lower(),
+                'period_start_date': period_start,
+                'period_end_date': period_end,
+                'fiscal_year': fiscal_year,
+                'description': row.get('transaction_description') or row.get('prime_award_base_transaction_description') or '',
+                'awarding_agency_code': row.get('awarding_agency_code'),
+                'awarding_agency_name': row.get('awarding_agency_name'),
+                'funding_agency_code': row.get('funding_agency_code'),
+                'funding_agency_name': row.get('funding_agency_name'),
+                'recipient_name': row.get('recipient_name'),
+                'recipient_name_normalized': (row.get('recipient_name') or '').lower().strip(),
+                'recipient_unique_id': row.get('recipient_uei') or row.get('recipient_duns'),
+                'recipient_location_country': row.get('recipient_country_code'),
+                'recipient_location_state': row.get('recipient_state_code'),
+                'naics_code': row.get('naics_code'),
+                'naics_description': row.get('naics_description'),
+                'psc_code': row.get('product_or_service_code'),
+                'psc_description': row.get('product_or_service_code_description'),
+                # Note: cfda_number not included for contracts (sparse GSI - only include when present)
+                'total_obligation': Decimal('0'),
+                'transaction_count': 0,
+                'transactions': [],  # Store all transactions for this award
+                'indexed_at': datetime.now(timezone.utc).isoformat(),
+                'last_updated': datetime.now(timezone.utc).isoformat(),
+                'data_source': 'usaspending_bulk_download',
+                'api_version': 'bulk_csv',
+                'award_details_indexed': False,
+                'full_indexing_complete': False,
+                'ttl': int((datetime.now(timezone.utc).timestamp() + (90 * 24 * 60 * 60)))
+            }
+        
+        # Aggregate transaction data
+        award = awards[award_id]
+        award['transaction_count'] += 1
+        
+        # Sum up obligations (use total_dollars_obligated if available, else federal_action_obligation)
+        obligation_str = row.get('total_dollars_obligated') or row.get('federal_action_obligation') or '0'
+        try:
+            obligation = Decimal(str(obligation_str))
+            award['total_obligation'] += obligation
+        except:
+            pass
+        
+        # Store transaction record (for S3 upload later)
+        transaction_record = {
+            'transaction_id': row.get('contract_transaction_unique_key'),
+            'action_date': row.get('action_date'),
+            'federal_action_obligation': row.get('federal_action_obligation'),
+            'transaction_description': row.get('transaction_description'),
+            'action_type': row.get('action_type'),
+            'modification_number': row.get('modification_number'),
+            'transaction_number': row.get('transaction_number')
+        }
+        award['transactions'].append(transaction_record)
+    
+    return awards
+
+
+def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, return_award_records: bool = False) -> Any:
     """Download CSV/ZIP file and parse to extract award IDs"""
     agency_prefix = f"[{agency_name}] " if agency_name else ""
     parse_start_time = time.time()
@@ -841,38 +1042,47 @@ def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, sta
             
             csv_size_mb = len(csv_content.encode('utf-8')) / (1024 * 1024)
             log_print(f"📊 {agency_prefix}CSV size: {csv_size_mb:.2f} MB")
-            log_print(f"🔄 {agency_prefix}Parsing CSV to extract award IDs...")
             
-            # Parse CSV
-            reader = csv.DictReader(StringIO(csv_content))
-            row_count = 0
-            award_ids = []
-            
-            for row in reader:
-                row_count += 1
-                # Extract award ID from CSV row
-                # Bulk download CSV uses 'contract_award_unique_key' which contains the full award ID
-                # Format: CONT_AWD_<PIID>_<agency>_<parent_id>_<parent_agency>
-                # Also check for other possible column names as fallback
-                award_id = (
-                    row.get('contract_award_unique_key') or  # Primary: bulk download format
-                    row.get('generated_unique_award_id') or  # Alternative format
-                    row.get('award_id') or                   # Simple format
-                    row.get('Award ID')                      # Header format
-                )
-                if award_id and award_id not in award_ids:
-                    award_ids.append(award_id)
+            if return_award_records:
+                log_print(f"🔄 {agency_prefix}Parsing CSV to extract award records (no API calls needed)...")
+                awards = parse_csv_to_award_records(csv_content)
+                parse_duration = time.time() - parse_start_time
+                log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
+                log_print(f"   🆔 Unique Awards: {len(awards):,}")
+                log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
+                return awards
+            else:
+                log_print(f"🔄 {agency_prefix}Parsing CSV to extract award IDs...")
+                # Parse CSV
+                reader = csv.DictReader(StringIO(csv_content))
+                row_count = 0
+                award_ids = []
                 
-                # Log progress for large files
-                if row_count % 100000 == 0:
-                    log_print(f"  📊 {agency_prefix}Parsed {row_count:,} rows, found {len(award_ids):,} unique award IDs so far...")
-            
-            parse_duration = time.time() - parse_start_time
-            log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
-            log_print(f"   📊 Total Rows: {row_count:,}")
-            log_print(f"   🆔 Unique Award IDs: {len(award_ids):,}")
-            log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
-            return award_ids
+                for row in reader:
+                    row_count += 1
+                    # Extract award ID from CSV row
+                    # Bulk download CSV uses 'contract_award_unique_key' which contains the full award ID
+                    # Format: CONT_AWD_<PIID>_<agency>_<parent_id>_<parent_agency>
+                    # Also check for other possible column names as fallback
+                    award_id = (
+                        row.get('contract_award_unique_key') or  # Primary: bulk download format
+                        row.get('generated_unique_award_id') or  # Alternative format
+                        row.get('award_id') or                   # Simple format
+                        row.get('Award ID')                      # Header format
+                    )
+                    if award_id and award_id not in award_ids:
+                        award_ids.append(award_id)
+                    
+                    # Log progress for large files
+                    if row_count % 100000 == 0:
+                        log_print(f"  📊 {agency_prefix}Parsed {row_count:,} rows, found {len(award_ids):,} unique award IDs so far...")
+                
+                parse_duration = time.time() - parse_start_time
+                log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
+                log_print(f"   📊 Total Rows: {row_count:,}")
+                log_print(f"   🆔 Unique Award IDs: {len(award_ids):,}")
+                log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
+                return award_ids
             
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 403 and attempt < max_download_retries - 1:
@@ -1062,9 +1272,10 @@ def main():
                 log_print(f"{'─' * 80}")
                 parse_phase_start = time.time()
                 
-                agency_award_ids = download_and_parse_csv(file_url, agency_name=agency_name, start_date=start_date, end_date=end_date)
+                # Use CSV-based parsing to get full award records (no API calls needed!)
+                agency_awards = download_and_parse_csv(file_url, agency_name=agency_name, start_date=start_date, end_date=end_date, return_award_records=True)
                 
-                if not agency_award_ids:
+                if not agency_awards:
                     parse_phase_duration = time.time() - parse_phase_start
                     agency_duration = time.time() - agency_start_time
                     log_print(f"ℹ️ {agency_name}: No awards found for date range (this is OK)")
@@ -1079,59 +1290,90 @@ def main():
                 
                 parse_phase_duration = time.time() - parse_phase_start
                 log_print(f"✅ PARSE Phase Complete: {int(parse_phase_duration // 60)}m {int(parse_phase_duration % 60)}s")
-                log_print(f"📊 Extracted {len(agency_award_ids)} unique award IDs")
+                log_print(f"📊 Extracted {len(agency_awards)} unique award records from CSV")
                 
                 # ========================================================================
-                # PHASE 3: STORE - Index all awards to DynamoDB and S3
+                # PHASE 3: STORE - Index all awards to DynamoDB and S3 (PARALLEL, NO API CALLS!)
                 # ========================================================================
-                log_print(f"\n🟢 PHASE 3: STORE - Indexing Awards for {agency_name}")
+                log_print(f"\n🟢 PHASE 3: STORE - Indexing Awards for {agency_name} (CSV-based, no API calls)")
                 log_print(f"{'─' * 80}")
-                log_print(f"📊 Indexing {len(agency_award_ids)} awards...")
+                log_print(f"📊 Indexing {len(agency_awards)} awards in parallel from CSV data...")
                 store_phase_start = time.time()
+                
+                # Parallel processing configuration
+                # Can use more workers since we're not making API calls - just DynamoDB writes
+                # 20 workers should be fine for DynamoDB operations
+                max_workers = min(20, len(agency_awards))
+                batch_size = 1000  # Process in batches of 1000 for better progress tracking
+                
+                log_print(f"⚙️ Parallel Processing: {max_workers} workers, batch size: {batch_size}")
+                log_print(f"🚀 Using CSV data - NO API CALLS needed! Much faster!")
+                
                 agency_indexed = 0
                 agency_skipped = 0
+                agency_errors = []
                 
-                for j, award_id in enumerate(agency_award_ids, 1):
-                    try:
-                        result = index_award(award_id)
-                        if result.get('skipped'):
-                            agency_skipped += 1
-                        else:
-                            agency_indexed += 1
-                            transaction_count = result.get('transaction_count', 0)
-                            subaward_count = result.get('subaward_count', 0)
-                        
-                        # Progress logging every 50 awards (more frequent for visibility)
-                        if j % 50 == 0 or j == len(agency_award_ids):
-                            elapsed = time.time() - store_phase_start
-                            rate = j / elapsed if elapsed > 0 else 0
-                            remaining = (len(agency_award_ids) - j) / rate if rate > 0 else 0
-                            log_print(f"  📊 Progress: {j}/{len(agency_award_ids)} awards ({agency_indexed} indexed, {agency_skipped} skipped)")
-                            log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
-                        
-                        # Small delay between awards to avoid overwhelming the API
-                        if j < len(agency_award_ids):  # Don't delay after last award
-                            time.sleep(API_RATE_LIMIT_DELAY)
+                # Convert awards dict to list for batch processing
+                award_list = list(agency_awards.values())
+                
+                # Process awards in batches
+                for batch_start in range(0, len(award_list), batch_size):
+                    batch_end = min(batch_start + batch_size, len(award_list))
+                    batch_awards = award_list[batch_start:batch_end]
                     
-                    except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
-                            urllib3.exceptions.ProtocolError, urllib3.exceptions.NewConnectionError) as e:
-                        log_print(f"❌ Connection error indexing award {award_id}: {str(e)[:200]}")
-                        # For connection errors, we'll retry with exponential backoff
-                        retry_delay = RETRY_BASE_DELAY * (2 ** min(3, j % 4))  # Cap at 4 retries worth
-                        log_print(f"⏳ Waiting {retry_delay}s before retrying...")
-                        time.sleep(retry_delay)
-                        try:
-                            result = index_award(award_id)  # Retry once
-                            if result.get('skipped'):
-                                agency_skipped += 1
-                            else:
-                                agency_indexed += 1
-                        except Exception as retry_error:
-                            log_print(f"❌ Retry failed for award {award_id}: {str(retry_error)[:200]}")
-                            raise  # Stop on error after retry
-                    except Exception as e:
-                        log_print(f"❌ Failed to index award {award_id}: {str(e)[:200]}")
-                        raise  # Stop on error
+                    log_print(f"📦 Processing batch {batch_start // batch_size + 1}/{(len(award_list) + batch_size - 1) // batch_size}: awards {batch_start + 1}-{batch_end}")
+                    
+                    # Reset progress counter for this batch
+                    with _progress_lock:
+                        _progress_counter['processed'] = 0
+                        _progress_counter['indexed'] = 0
+                        _progress_counter['skipped'] = 0
+                        _progress_counter['total'] = len(batch_awards)
+                    
+                    # Process batch in parallel
+                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                        # Submit all tasks - no retry needed since no API calls
+                        future_to_award = {
+                            executor.submit(index_award_from_csv_record, award_record): award_record['award_id']
+                            for award_record in batch_awards
+                        }
+                        
+                        # Process completed tasks
+                        for future in as_completed(future_to_award):
+                            award_id = future_to_award[future]
+                            try:
+                                result = future.result()
+                                with _progress_lock:
+                                    _progress_counter['processed'] += 1
+                                    if result.get('skipped'):
+                                        _progress_counter['skipped'] += 1
+                                        agency_skipped += 1
+                                    else:
+                                        _progress_counter['indexed'] += 1
+                                        agency_indexed += 1
+                                    
+                                    # Progress logging every 50 awards or at end of batch
+                                    processed = _progress_counter['processed']
+                                    if processed % 50 == 0 or processed == len(batch_awards):
+                                        elapsed = time.time() - store_phase_start
+                                        total_processed = batch_start + processed
+                                        rate = total_processed / elapsed if elapsed > 0 else 0
+                                        remaining = (len(award_list) - total_processed) / rate if rate > 0 else 0
+                                        log_print(f"  📊 Progress: {total_processed}/{len(award_list)} awards ({agency_indexed} indexed, {agency_skipped} skipped)")
+                                        log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
+                            except Exception as e:
+                                error_msg = f"Award {award_id}: {str(e)[:200]}"
+                                agency_errors.append(error_msg)
+                                log_print(f"❌ {error_msg}")
+                                # Continue processing other awards instead of stopping
+                    
+                    # Small delay between batches (much shorter since no API calls)
+                    if batch_end < len(award_list):
+                        time.sleep(0.5)  # 0.5 seconds between batches
+                
+                # Log any errors that occurred
+                if agency_errors:
+                    log_print(f"⚠️ {len(agency_errors)} errors occurred during indexing (see logs above)")
                 
                 store_phase_duration = time.time() - store_phase_start
                 agency_duration = time.time() - agency_start_time
@@ -1141,7 +1383,7 @@ def main():
                 log_print(f"📊 {agency_name} Summary:")
                 log_print(f"   ✅ Indexed: {agency_indexed}")
                 log_print(f"   ⏭️ Skipped: {agency_skipped}")
-                log_print(f"   📦 Total: {len(agency_award_ids)}")
+                log_print(f"   📦 Total: {len(award_list)}")
                 log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
                 log_print(f"{'─' * 80}")
                 
