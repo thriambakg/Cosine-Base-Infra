@@ -408,7 +408,7 @@ def index_award_metadata(award_record: Dict[str, Any]) -> Dict[str, Any]:
 def complete_award_indexing(award_record: Dict[str, Any]) -> Dict[str, Any]:
     """
     Complete award indexing: fetch subawards from API, combine with transactions from CSV,
-    and upload to S3. This is Phase 3b - sequential processing to avoid API overload.
+    and upload to S3. This is Phase 3b - can be called in parallel within batches.
     """
     try:
         award_id = award_record['award_id']
@@ -530,13 +530,17 @@ def initiate_bulk_download(start_date: str, end_date: str, agency: Optional[Dict
             }
         ]
     
+    # Log the exact request payload for debugging
+    request_body = {
+        "filters": bulk_filters,
+        "file_format": "csv"
+    }
+    log_print(f"📤 Bulk download request payload: {json.dumps(request_body, indent=2)}")
+    
     response = call_usaspending_api(
         "/api/v2/bulk_download/awards/",
         method='POST',
-        body={
-            "filters": bulk_filters,
-            "file_format": "csv"
-        }
+        body=request_body
     )
     
     file_name = response.get("file_name")
@@ -903,7 +907,8 @@ def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, sta
                 awards = parse_csv_to_award_records(csv_content)
                 parse_duration = time.time() - parse_start_time
                 log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
-                log_print(f"   🆔 Unique Awards: {len(awards):,}")
+                log_print(f"   📊 CSV Size: {len(csv_content):,} bytes")
+                log_print(f"   🆔 Unique Awards Found in CSV: {len(awards):,}")
                 log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
                 return awards
             else:
@@ -1078,10 +1083,10 @@ def main():
                 log_print(f"⏱️ Parse Phase: {int(parse_phase_duration // 60)}m {int(parse_phase_duration % 60)}s")
                 log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
                 successful_agencies += 1
-                # Delay before next agency to give API time to rest (increased since parsing is more efficient)
+                # Delay before next agency to give API time to rest
                 if i < len(agencies):
-                    delay_seconds = 10  # Increased from 2.5s to 10s
-                    log_print(f"⏳ Waiting {delay_seconds}s before next agency...")
+                    delay_seconds = 60  # 1 minute between departments
+                    log_print(f"⏳ Waiting {delay_seconds}s (1 minute) before next agency...")
                     time.sleep(delay_seconds)
                 continue
             
@@ -1173,10 +1178,10 @@ def main():
             log_print(f"✅ Metadata Phase Complete: {int(metadata_phase_duration // 60)}m {int(metadata_phase_duration % 60)}s")
             
             # ========================================================================
-            # PHASE 3b: Sequential completion (subawards + S3 upload)
+            # PHASE 3b: Parallel completion (subawards + S3 upload) in batches
             # ========================================================================
-            log_print(f"\n📦 PHASE 3b: Completing Awards (Subawards + S3 Upload) - Sequential")
-            log_print(f"📊 Completing {len(award_list)} awards sequentially to avoid API overload...")
+            log_print(f"\n📦 PHASE 3b: Completing Awards (Subawards + S3 Upload) - Parallel Batches")
+            log_print(f"📊 Completing {len(award_list)} awards in parallel batches of 500...")
             completion_phase_start = time.time()
             
             agency_completed = 0
@@ -1184,34 +1189,61 @@ def main():
             total_transactions = 0
             total_subawards = 0
             
-            # Process awards sequentially (one at a time to avoid connection errors)
-            for idx, award_record in enumerate(award_list, 1):
-                try:
-                    result = complete_award_indexing(award_record)
-                    if result.get('skipped'):
-                        agency_completion_skipped += 1
-                    else:
-                        agency_completed += 1
-                        total_transactions += result.get('transaction_count', 0)
-                        total_subawards += result.get('subaward_count', 0)
+            # Process awards in batches of 500 with parallel processing
+            batch_size = 500
+            max_workers = 20  # Parallel workers for subaward fetching
+            num_batches = (len(award_list) + batch_size - 1) // batch_size
+            
+            for batch_num in range(num_batches):
+                batch_start = batch_num * batch_size
+                batch_end = min(batch_start + batch_size, len(award_list))
+                batch_awards = award_list[batch_start:batch_end]
+                
+                log_print(f"📦 Processing batch {batch_num + 1}/{num_batches}: awards {batch_start + 1}-{batch_end} ({len(batch_awards)} awards)")
+                
+                # Process batch in parallel
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all tasks for this batch
+                    future_to_award = {
+                        executor.submit(complete_award_indexing, award_record): award_record['award_id']
+                        for award_record in batch_awards
+                    }
                     
-                    # Progress logging every 50 awards or at end
-                    if idx % 50 == 0 or idx == len(award_list):
-                        elapsed = time.time() - completion_phase_start
-                        rate = idx / elapsed if elapsed > 0 else 0
-                        remaining = (len(award_list) - idx) / rate if rate > 0 else 0
-                        log_print(f"  📊 Progress: {idx}/{len(award_list)} awards completed ({agency_completed} completed, {agency_completion_skipped} skipped)")
-                        log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
-                    
-                    # Small delay between awards to avoid overwhelming the API
-                    if idx < len(award_list):
-                        time.sleep(0.5)  # 0.5 seconds between awards
-                        
-                except Exception as e:
-                    error_msg = f"Award {award_record.get('award_id', 'unknown')}: {str(e)[:200]}"
-                    agency_errors.append(error_msg)
-                    log_print(f"❌ {error_msg}")
-                    # Continue processing other awards instead of stopping
+                    # Process completed tasks
+                    batch_completed = 0
+                    batch_skipped = 0
+                    for future in as_completed(future_to_award):
+                        award_id = future_to_award[future]
+                        try:
+                            result = future.result()
+                            if result.get('skipped'):
+                                agency_completion_skipped += 1
+                                batch_skipped += 1
+                            else:
+                                agency_completed += 1
+                                batch_completed += 1
+                                total_transactions += result.get('transaction_count', 0)
+                                total_subawards += result.get('subaward_count', 0)
+                            
+                            # Progress logging every 50 awards or at end of batch
+                            total_processed = batch_start + batch_completed + batch_skipped
+                            if (batch_completed + batch_skipped) % 50 == 0 or (batch_completed + batch_skipped) == len(batch_awards):
+                                elapsed = time.time() - completion_phase_start
+                                rate = total_processed / elapsed if elapsed > 0 else 0
+                                remaining = (len(award_list) - total_processed) / rate if rate > 0 else 0
+                                log_print(f"  📊 Progress: {total_processed}/{len(award_list)} awards completed ({agency_completed} completed, {agency_completion_skipped} skipped)")
+                                log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
+                                
+                        except Exception as e:
+                            error_msg = f"Award {award_id}: {str(e)[:200]}"
+                            agency_errors.append(error_msg)
+                            log_print(f"❌ {error_msg}")
+                            # Continue processing other awards instead of stopping
+                
+                # 30-second delay between batches (except after the last batch)
+                if batch_num < num_batches - 1:
+                    log_print(f"⏳ Waiting 30s before next batch...")
+                    time.sleep(30)
             
             completion_phase_duration = time.time() - completion_phase_start
             log_print(f"✅ Completion Phase Complete: {int(completion_phase_duration // 60)}m {int(completion_phase_duration % 60)}s")
@@ -1228,9 +1260,10 @@ def main():
             log_print(f"\n{'─' * 80}")
             log_print(f"✅ STORE Phase Complete: {int(store_phase_duration // 60)}m {int(store_phase_duration % 60)}s")
             log_print(f"📊 {agency_name} Summary:")
-            log_print(f"   ✅ Indexed: {agency_indexed}")
-            log_print(f"   ⏭️ Skipped: {agency_skipped}")
-            log_print(f"   📦 Total: {len(award_list)}")
+            log_print(f"   📥 Parsed from CSV: {len(award_list):,} unique awards")
+            log_print(f"   ✅ Newly Indexed: {agency_indexed}")
+            log_print(f"   ⏭️ Skipped (already existed): {agency_skipped}")
+            log_print(f"   📦 Total Processed: {len(award_list):,}")
             log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
             log_print(f"{'─' * 80}")
             
@@ -1238,10 +1271,10 @@ def main():
             total_skipped += agency_skipped
             successful_agencies += 1
             
-            # Delay before next agency to give API time to rest (increased since parsing is more efficient)
+            # Delay before next agency to give API time to rest
             if i < len(agencies):
-                delay_seconds = 10  # Increased from 2.5s to 10s
-                log_print(f"\n⏳ Waiting {delay_seconds}s before next agency...")
+                delay_seconds = 60  # 1 minute between departments
+                log_print(f"\n⏳ Waiting {delay_seconds}s (1 minute) before next agency...")
                 time.sleep(delay_seconds)
         
         total_job_duration = time.time() - job_start_time
