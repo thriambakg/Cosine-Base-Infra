@@ -192,9 +192,9 @@ resource "aws_iam_role_policy" "kms_access" {
   name = length("${var.job_name}-kms") > 128 ? substr("${var.job_name}-kms", 0, 128) : "${var.job_name}-kms"
   role = aws_iam_role.glue_role.id
 
-  # Use try() to safely check if ARN is provided and non-empty
-  # If ARN is null/empty/unknown, create empty policy (no-op)
-  policy = try(var.kms_key_arn != null && var.kms_key_arn != "", false) ? jsonencode({
+  # Collect all KMS key ARNs (main key + additional keys)
+  # Support both old kms_key_arn (for backward compatibility) and new additional_kms_key_arns
+  policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
@@ -205,14 +205,14 @@ resource "aws_iam_role_policy" "kms_access" {
           "kms:GenerateDataKey",
           "kms:DescribeKey"
         ]
-        Resource = [
-          var.kms_key_arn
-        ]
+        Resource = concat(
+          # Include main key if provided (for backward compatibility)
+          try(var.kms_key_arn != null && var.kms_key_arn != "", false) ? [var.kms_key_arn] : [],
+          # Include all additional keys
+          var.additional_kms_key_arns != null ? var.additional_kms_key_arns : []
+        )
       }
     ]
-    }) : jsonencode({
-    Version   = "2012-10-17"
-    Statement = []
   })
 }
 

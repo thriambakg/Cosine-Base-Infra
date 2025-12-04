@@ -191,3 +191,4 @@ aws glue start-job-run \
 - The job will **fail and stop** if any API call fails (no partial completion)
 - Bulk downloads can take time to prepare - the job polls for up to 1 hour
 
+

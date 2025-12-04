@@ -87,9 +87,15 @@ variable "dynamodb_table_arn" {
 }
 
 variable "kms_key_arn" {
-  description = "ARN of KMS key for encryption (optional)"
+  description = "ARN of KMS key for encryption (optional, deprecated - use additional_kms_key_arns instead)"
   type        = string
   default     = null
+}
+
+variable "additional_kms_key_arns" {
+  description = "List of additional KMS key ARNs for encryption (e.g., DynamoDB key, S3 key, etc.)"
+  type        = list(string)
+  default     = []
 }
 
 variable "default_arguments" {

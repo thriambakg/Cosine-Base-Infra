@@ -1780,6 +1780,10 @@ module "usaspending_bulk_indexing_glue_job" {
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
+  # Also include DynamoDB KMS key since the table is encrypted with it
+  additional_kms_key_arns = [
+    module.kms.dynamodb_key_arn
+  ]
 
   # Job arguments
   default_arguments = {
@@ -1799,6 +1803,25 @@ module "usaspending_bulk_indexing_glue_job" {
     module.static_hosting_bucket,
     module.usaspending_data_s3,
     module.usaspending_awards_index_table,
+    module.kms
+  ]
+}
+
+# Grant Glue job role access to DynamoDB KMS key
+# This is needed because the DynamoDB table is encrypted with the DynamoDB-specific KMS key
+resource "aws_kms_grant" "glue_dynamodb_key_access" {
+  name              = "${var.project_name}-usaspending-bulk-indexing-${var.environment}-dynamodb-key-grant"
+  key_id            = module.kms.dynamodb_key_id
+  grantee_principal = module.usaspending_bulk_indexing_glue_job.role_arn
+  operations = [
+    "Decrypt",
+    "Encrypt",
+    "GenerateDataKey",
+    "DescribeKey"
+  ]
+
+  depends_on = [
+    module.usaspending_bulk_indexing_glue_job,
     module.kms
   ]
 }
