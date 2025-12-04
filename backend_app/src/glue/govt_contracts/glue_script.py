@@ -1,14 +1,15 @@
 """
 AWS Glue Job: USAspending Daily Bulk Indexing
-Fetches all new contract awards from the previous day, downloads bulk data,
-and indexes awards, transactions, and subawards to DynamoDB and S3.
+Downloads bulk CSV files from USAspending, parses them directly (no API calls for award data),
+fetches subawards via API, and indexes everything to DynamoDB and S3.
 
 This job runs daily via Step Functions to:
-1. Get yesterday's date range
-2. Initiate bulk download for all contracts from that day
-3. Download and parse the CSV file
-4. For each award, fetch full details, transactions, and subawards
-5. Store award metadata in DynamoDB and transaction/subaward details in S3
+1. Get date range from parameters
+2. For each agency, initiate bulk download
+3. Download and parse CSV file directly from S3/bulk download
+4. Extract award records from CSV (transactions included)
+5. For each award, fetch subawards via API
+6. Store award metadata in DynamoDB and transaction/subaward details in S3
 """
 
 import sys
@@ -276,136 +277,6 @@ def convert_floats_to_decimal(obj: Any) -> Any:
         return obj
 
 
-def flatten_award_data(award_data: Dict[str, Any]) -> Dict[str, Any]:
-    """Flatten award data for DynamoDB storage - ported from Lambda"""
-    award_id = award_data.get('generated_unique_award_id') or award_data.get('id')
-    if not award_id:
-        raise ValueError("Award ID not found in award data")
-    
-    awarding_agency = award_data.get('awarding_agency', {})
-    funding_agency = award_data.get('funding_agency', {})
-    recipient = award_data.get('recipient', {})
-    recipient_location = recipient.get('location', {}) if recipient else {}
-    period_of_performance = award_data.get('period_of_performance', {})
-    period_start_date = period_of_performance.get('start_date') if period_of_performance else None
-    period_end_date = period_of_performance.get('end_date') if period_of_performance else None
-    
-    naics_hierarchy = award_data.get('naics_hierarchy', {})
-    naics_code = None
-    if naics_hierarchy:
-        base_code = naics_hierarchy.get('base_code', {})
-        naics_code = base_code.get('code') if base_code else None
-    
-    psc_hierarchy = award_data.get('psc_hierarchy', {})
-    psc_code = None
-    if psc_hierarchy:
-        base_code = psc_hierarchy.get('base_code', {})
-        psc_code = base_code.get('code') if base_code else None
-    
-    cfda_number = None
-    if award_data.get('category') == 'financial_assistance':
-        cfda_info = award_data.get('cfda_info', [])
-        if cfda_info and len(cfda_info) > 0:
-            cfda_number = cfda_info[0].get('number')
-    
-    def_codes = []
-    if 'account_obligations_by_defc' in award_data:
-        account_obligations = award_data['account_obligations_by_defc']
-        if isinstance(account_obligations, dict):
-            def_codes = list(account_obligations.keys())
-        elif isinstance(account_obligations, list):
-            def_codes = [item.get('code') for item in account_obligations if isinstance(item, dict) and item.get('code')]
-    
-    category = award_data.get('category', 'contract')
-    award_type = category
-    fiscal_year = extract_fiscal_year(period_start_date)
-    
-    recipient_name = recipient.get('recipient_name') if recipient else None
-    recipient_name_normalized = recipient_name.lower().strip() if recipient_name else None
-    
-    flattened = {
-        'award_id': award_id,
-        'award_type': award_type,
-        'total_obligation': Decimal(str(award_data.get('total_obligation', 0))),
-        'period_start_date': period_start_date,
-        'period_end_date': period_end_date,
-        'fiscal_year': fiscal_year,
-        'description': award_data.get('description', ''),
-        'awarding_agency_id': awarding_agency.get('id') if awarding_agency else None,
-        'awarding_agency_name': awarding_agency.get('toptier_agency', {}).get('name') if awarding_agency else None,
-        'funding_agency_id': funding_agency.get('id') if funding_agency else None,
-        'funding_agency_name': funding_agency.get('toptier_agency', {}).get('name') if funding_agency else None,
-        'recipient_name': recipient_name,
-        'recipient_name_normalized': recipient_name_normalized,
-        'recipient_unique_id': recipient.get('recipient_unique_id') if recipient else None,
-        'recipient_location_country': recipient_location.get('country_code') if recipient_location else None,
-        'naics_description': naics_hierarchy.get('base_code', {}).get('description') if naics_hierarchy else None,
-        'psc_description': psc_hierarchy.get('base_code', {}).get('description') if psc_hierarchy else None,
-        'def_codes': def_codes,
-        'full_response': convert_floats_to_decimal(award_data),
-        'indexed_at': datetime.now(timezone.utc).isoformat(),
-        'last_updated': datetime.now(timezone.utc).isoformat(),
-        'data_source': 'usaspending_api',
-        'api_version': 'v2',
-        'award_details_indexed': False,
-        'full_indexing_complete': False,
-        'ttl': int((datetime.now(timezone.utc).timestamp() + (90 * 24 * 60 * 60)))
-    }
-    
-    # Conditionally add GSI attributes (sparse GSIs)
-    if awarding_agency and awarding_agency.get('toptier_agency', {}).get('toptier_code'):
-        flattened['awarding_agency_code'] = awarding_agency.get('toptier_agency', {}).get('toptier_code')
-    if funding_agency and funding_agency.get('toptier_agency', {}).get('toptier_code'):
-        flattened['funding_agency_code'] = funding_agency.get('toptier_agency', {}).get('toptier_code')
-    if recipient and recipient.get('recipient_id'):
-        flattened['recipient_id'] = recipient.get('recipient_id')
-    if recipient_location and recipient_location.get('state_code'):
-        flattened['recipient_location_state'] = recipient_location.get('state_code')
-    if naics_code:
-        flattened['naics_code'] = naics_code
-    if psc_code:
-        flattened['psc_code'] = psc_code
-    if cfda_number is not None:
-        flattened['cfda_number'] = cfda_number
-    
-    return convert_floats_to_decimal(flattened)
-
-
-def fetch_all_transactions(award_id: str) -> List[Dict[str, Any]]:
-    """Fetch all transactions for an award (paginated)"""
-    all_transactions = []
-    page = 1
-    limit = 100
-    
-    while True:
-        response = call_usaspending_api(
-            '/api/v2/transactions/',
-            method='POST',
-            body={
-                'award_id': award_id,
-                'page': page,
-                'limit': limit,
-                'sort': 'action_date',
-                'order': 'desc'
-            }
-        )
-        
-        if not response:
-            break
-        
-        transactions = response.get('results', [])
-        if not transactions:
-            break
-        
-        all_transactions.extend(transactions)
-        
-        page_metadata = response.get('page_metadata', {})
-        if not page_metadata.get('hasNext', False):
-            break
-        
-        page += 1
-    
-    return all_transactions
 
 
 def fetch_all_subawards(award_id: str) -> List[Dict[str, Any]]:
@@ -447,13 +318,17 @@ def fetch_all_subawards(award_id: str) -> List[Dict[str, Any]]:
 
 def upload_award_details_to_s3(award_id: str, transactions: List[Dict], subawards: List[Dict]) -> str:
     """Upload combined transactions and subawards to S3"""
+    transaction_count = len(transactions)
+    subaward_count = len(subawards)
+    
     combined_data = {
         'transactions': transactions,
         'subawards': subawards,
         'indexed_at': datetime.now(timezone.utc).isoformat(),
-        'transaction_count': len(transactions),
-        'subaward_count': len(subawards)
+        'transaction_count': transaction_count,
+        'subaward_count': subaward_count
     }
+    
     combined_json = json.dumps(combined_data, default=str)
     combined_gzipped = gzip.compress(combined_json.encode('utf-8'))
     s3_key = f"award-details/{award_id}/details.json.gz"
@@ -470,10 +345,25 @@ def upload_award_details_to_s3(award_id: str, transactions: List[Dict], subaward
     return s3_key
 
 
-def index_award_from_csv_record(award_record: Dict[str, Any]) -> Dict[str, Any]:
+def check_s3_key_exists(s3_key: str) -> bool:
+    """Check if an S3 key exists in the bucket"""
+    try:
+        s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+        return True
+    except Exception as e:
+        # Check if it's a 404 (NoSuchKey) error
+        error_code = getattr(e, 'response', {}).get('Error', {}).get('Code', '')
+        if error_code == '404' or 'NoSuchKey' in str(e):
+            return False
+        # For other errors, log and assume it doesn't exist to be safe
+        log_print(f"⚠️ Warning: Error checking S3 key {s3_key}: {str(e)[:200]}")
+        return False
+
+
+def index_award_metadata(award_record: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Index an award directly from CSV record (no API calls needed).
-    Much faster than index_award() since it uses data already in the CSV.
+    Index award metadata to DynamoDB only (fast, parallel, no API calls).
+    This is Phase 3a - just stores the award metadata.
     """
     try:
         award_id = award_record['award_id']
@@ -481,12 +371,11 @@ def index_award_from_csv_record(award_record: Dict[str, Any]) -> Dict[str, Any]:
         # Check if already indexed
         existing_award = awards_table.get_item(Key={'award_id': award_id})
         item = existing_award.get('Item')
-        if item and (item.get('full_indexing_complete') or item.get('award_details_s3_key')):
-            return {'success': True, 'award_id': award_id, 'skipped': True}
-        
-        # Extract transactions before modifying award_record
-        transactions = award_record.get('transactions', [])
-        transaction_count = len(transactions)
+        if item and item.get('full_indexing_complete'):
+            # Also verify the S3 key exists before skipping
+            s3_key = item.get('award_details_s3_key')
+            if s3_key and check_s3_key_exists(s3_key):
+                return {'success': True, 'award_id': award_id, 'skipped': True}
         
         # Create a copy for DynamoDB (without transactions list)
         award_db_record = award_record.copy()
@@ -505,16 +394,43 @@ def index_award_from_csv_record(award_record: Dict[str, Any]) -> Dict[str, Any]:
         award_db_record['total_obligation'] = Decimal(str(award_db_record.get('total_obligation', 0)))
         award_db_record = convert_floats_to_decimal(award_db_record)
         
-        # Store award in DynamoDB
+        # Store award metadata in DynamoDB (no S3 key or completion flags yet)
         awards_table.put_item(Item=award_db_record)
         
-        # Fetch subawards from API (not available in CSV, but we still want them)
-        # This is the only API call needed when using CSV data
+        return {'success': True, 'award_id': award_id}
+    
+    except Exception as e:
+        log_print(f"❌ Error indexing award metadata {award_record.get('award_id', 'unknown')}: {str(e)}")
+        logger.error(f"❌ Error indexing award metadata: {str(e)}", exc_info=True)
+        raise
+
+
+def complete_award_indexing(award_record: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Complete award indexing: fetch subawards from API, combine with transactions from CSV,
+    and upload to S3. This is Phase 3b - sequential processing to avoid API overload.
+    """
+    try:
+        award_id = award_record['award_id']
+        
+        # Check if already completed
+        existing_award = awards_table.get_item(Key={'award_id': award_id})
+        item = existing_award.get('Item')
+        if item and item.get('full_indexing_complete'):
+            s3_key = item.get('award_details_s3_key')
+            if s3_key and check_s3_key_exists(s3_key):
+                return {'success': True, 'award_id': award_id, 'skipped': True}
+        
+        # Get transactions from CSV record (already parsed)
+        transactions = award_record.get('transactions', [])
+        transaction_count = len(transactions)
+        
+        # Fetch subawards from API (sequential to avoid connection errors)
         try:
             subawards = fetch_all_subawards(award_id)
             subaward_count = len(subawards)
         except Exception as e:
-            log_print(f"⚠️ Warning: Failed to fetch subawards for {award_id}: {str(e)[:200]}")
+            logger.error(f"⚠️ Failed to fetch subawards for {award_id}: {str(e)}", exc_info=True)
             subawards = []
             subaward_count = 0
         
@@ -522,90 +438,29 @@ def index_award_from_csv_record(award_record: Dict[str, Any]) -> Dict[str, Any]:
         s3_key = upload_award_details_to_s3(award_id, transactions, subawards)
         
         # Update DynamoDB with S3 key and completion flags
-        award_db_record['award_details_s3_key'] = s3_key
-        award_db_record['award_details_indexed'] = True
-        award_db_record['transaction_count'] = transaction_count
-        award_db_record['subaward_count'] = subaward_count
-        award_db_record['full_indexing_complete'] = True
-        award_db_record['last_updated'] = datetime.now(timezone.utc).isoformat()
-        awards_table.put_item(Item=award_db_record)
+        update_expression = "SET award_details_s3_key = :s3_key, award_details_indexed = :indexed, transaction_count = :tx_count, subaward_count = :sub_count, full_indexing_complete = :complete, last_updated = :updated"
+        expression_values = {
+            ':s3_key': s3_key,
+            ':indexed': True,
+            ':tx_count': transaction_count,
+            ':sub_count': subaward_count,
+            ':complete': True,
+            ':updated': datetime.now(timezone.utc).isoformat()
+        }
+        awards_table.update_item(
+            Key={'award_id': award_id},
+            UpdateExpression=update_expression,
+            ExpressionAttributeValues=expression_values
+        )
         
         return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
     
     except Exception as e:
-        log_print(f"❌ Error indexing award {award_record.get('award_id', 'unknown')}: {str(e)}")
-        logger.error(f"❌ Error indexing award from CSV: {str(e)}", exc_info=True)
+        log_print(f"❌ Error completing award indexing {award_record.get('award_id', 'unknown')}: {str(e)}")
+        logger.error(f"❌ Error completing award indexing: {str(e)}", exc_info=True)
         raise
 
 
-def index_award(award_id: str) -> Dict[str, Any]:
-    """Index a single award: fetch details, transactions, subawards, and store"""
-    try:
-        # Check if already indexed
-        existing_award = awards_table.get_item(Key={'award_id': award_id})
-        item = existing_award.get('Item')
-        if item and (item.get('full_indexing_complete') or item.get('award_details_s3_key')):
-            # Skip logging for individual skipped awards to reduce noise
-            return {'success': True, 'award_id': award_id, 'skipped': True}
-        
-        # Fetch award details
-        award_data = call_usaspending_api(f'/api/v2/awards/{award_id}/', method='GET')
-        if not award_data:
-            raise Exception(f'Award not found: {award_id}')
-        
-        # Flatten award data
-        flattened_award = flatten_award_data(award_data)
-        
-        # Store award in DynamoDB
-        awards_table.put_item(Item=flattened_award)
-        
-        # Fetch transactions and subawards
-        transactions = fetch_all_transactions(award_id)
-        subawards = fetch_all_subawards(award_id)
-        
-        # Upload to S3
-        s3_key = upload_award_details_to_s3(award_id, transactions, subawards)
-        
-        # Update DynamoDB with S3 key and completion flags
-        existing_item = flattened_award.copy()
-        existing_item['award_details_s3_key'] = s3_key
-        existing_item['award_details_indexed'] = True
-        existing_item['transaction_count'] = len(transactions)
-        existing_item['subaward_count'] = len(subawards)
-        existing_item['full_indexing_complete'] = True
-        existing_item['last_updated'] = datetime.now(timezone.utc).isoformat()
-        awards_table.put_item(Item=existing_item)
-        
-        # Don't log every award individually - only log in progress updates
-        return {'success': True, 'award_id': award_id, 'transaction_count': len(transactions), 'subaward_count': len(subawards)}
-    
-    except Exception as e:
-        log_print(f"❌ Error indexing award {award_id}: {str(e)}")
-        logger.error(f"❌ Error indexing award {award_id}: {str(e)}", exc_info=True)
-        raise  # Re-raise to stop execution
-
-
-def index_award_with_retry(award_id: str) -> Dict[str, Any]:
-    """Index award with retry logic for connection errors (used in parallel processing)"""
-    max_retries = 3
-    retry_delay = RETRY_BASE_DELAY
-    
-    for attempt in range(max_retries):
-        try:
-            return index_award(award_id)
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
-                urllib3.exceptions.ProtocolError, urllib3.exceptions.NewConnectionError) as e:
-            if attempt < max_retries - 1:
-                # Exponential backoff
-                wait_time = retry_delay * (2 ** attempt)
-                time.sleep(wait_time)
-                continue
-            else:
-                # Last attempt failed, raise the exception
-                raise
-        except Exception as e:
-            # For non-connection errors, don't retry, just raise
-            raise
 
 
 # ============================================================================
@@ -1160,255 +1015,248 @@ def main():
         agencies = get_all_agencies()
         
         if not agencies:
-            log_print("⚠️ No agencies found. Attempting bulk download without agency filter...")
-            # Fallback to original approach without agency filter
-            download_info = initiate_bulk_download(start_date, end_date, agency=None)
+            raise Exception("No agencies found. Cannot proceed without agencies.")
+        
+        log_print(f"✅ Found {len(agencies)} agencies - starting processing...")
+        
+        # Process each agency completely (download, parse, index) before moving to next
+        job_start_time = time.time()
+        log_print("=" * 80)
+        log_print(f"📥 Step 2: Processing Agencies Sequentially")
+        log_print(f"   Each agency will be fully downloaded, parsed, and indexed before the next begins")
+        log_print(f"   Total Agencies: {len(agencies)}")
+        log_print("=" * 80)
+        
+        total_indexed = 0
+        total_skipped = 0
+        successful_agencies = 0
+        
+        for i, agency in enumerate(agencies, 1):
+            agency_name = agency.get('name', 'Unknown')
+            agency_start_time = time.time()
+            log_print(f"\n{'=' * 80}")
+            log_print(f"📦 Processing Agency {i}/{len(agencies)}: {agency_name}")
+            log_print(f"📅 Date Range: {start_date} to {end_date}")
+            log_print(f"{'=' * 80}")
+            
+            # ========================================================================
+            # PHASE 1: GET - Request and wait for bulk download
+            # ========================================================================
+            log_print(f"\n🔵 PHASE 1: GET - Requesting Bulk Download for {agency_name}")
+            log_print(f"{'─' * 80}")
+            get_phase_start = time.time()
+            
+            download_info = initiate_bulk_download(start_date, end_date, agency=agency)
             file_name = download_info['file_name']
-            status_info = poll_download_status(file_name, max_wait=21600, poll_interval=30)
+            log_print(f"📋 File Name: {file_name}")
+            
+            # Poll for download completion
+            status_info = poll_download_status(file_name, max_wait=14400, poll_interval=30, agency_name=agency_name)  # 4 hours per agency
             file_url = status_info.get('file_url')
+            
             if not file_url:
-                raise Exception("No file_url in download status response")
-            award_ids = download_and_parse_csv(file_url)
+                raise Exception(f"No file_url in download status response for {agency_name}")
             
-            if not award_ids:
-                log_print(f"⚠️ No award IDs found in bulk download for {start_date} to {end_date}")
-                return
+            get_phase_duration = time.time() - get_phase_start
+            log_print(f"✅ GET Phase Complete: {int(get_phase_duration // 60)}m {int(get_phase_duration % 60)}s")
+            log_print(f"📁 File URL: {file_url}")
             
-            # Index all awards
-            log_print("=" * 80)
-            log_print(f"📊 CHECKPOINT: Beginning Award Indexing - {len(award_ids)} awards to process")
-            log_print("=" * 80)
-            indexed_count = 0
-            skipped_count = 0
+            # ========================================================================
+            # PHASE 2: PARSE - Download and extract award records from CSV
+            # ========================================================================
+            log_print(f"\n🟡 PHASE 2: PARSE - Downloading and Parsing CSV for {agency_name}")
+            log_print(f"{'─' * 80}")
+            parse_phase_start = time.time()
             
-            for i, award_id in enumerate(award_ids, 1):
-                try:
-                    result = index_award(award_id)
-                    if result.get('skipped'):
-                        skipped_count += 1
-                    else:
-                        indexed_count += 1
+            # Use CSV-based parsing to get full award records (no API calls needed!)
+            agency_awards = download_and_parse_csv(file_url, agency_name=agency_name, start_date=start_date, end_date=end_date, return_award_records=True)
+            
+            if not agency_awards:
+                parse_phase_duration = time.time() - parse_phase_start
+                agency_duration = time.time() - agency_start_time
+                log_print(f"ℹ️ {agency_name}: No awards found for date range (this is OK)")
+                log_print(f"⏱️ Parse Phase: {int(parse_phase_duration // 60)}m {int(parse_phase_duration % 60)}s")
+                log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
+                successful_agencies += 1
+                # Delay before next agency to give API time to rest (increased since parsing is more efficient)
+                if i < len(agencies):
+                    delay_seconds = 10  # Increased from 2.5s to 10s
+                    log_print(f"⏳ Waiting {delay_seconds}s before next agency...")
+                    time.sleep(delay_seconds)
+                continue
+            
+            parse_phase_duration = time.time() - parse_phase_start
+            log_print(f"✅ PARSE Phase Complete: {int(parse_phase_duration // 60)}m {int(parse_phase_duration % 60)}s")
+            log_print(f"📊 Extracted {len(agency_awards)} unique award records from CSV")
+            
+            # ========================================================================
+            # PHASE 3: STORE - Index awards in two sub-phases
+            # ========================================================================
+            log_print(f"\n🟢 PHASE 3: STORE - Indexing Awards for {agency_name}")
+            log_print(f"{'─' * 80}")
+            store_phase_start = time.time()
+            
+            # Convert awards dict to list for processing
+            award_list = list(agency_awards.values())
+            
+            # ========================================================================
+            # PHASE 3a: Parallel metadata indexing (fast, no API calls)
+            # ========================================================================
+            log_print(f"\n📝 PHASE 3a: Indexing Award Metadata to DynamoDB (Parallel)")
+            log_print(f"📊 Indexing metadata for {len(award_list)} awards in parallel...")
+            metadata_phase_start = time.time()
+            
+            max_workers = min(20, len(award_list))
+            batch_size = 1000
+            log_print(f"⚙️ Parallel Processing: {max_workers} workers, batch size: {batch_size}")
+            
+            agency_indexed = 0
+            agency_skipped = 0
+            agency_errors = []
+            
+            # Process awards in batches
+            for batch_start in range(0, len(award_list), batch_size):
+                batch_end = min(batch_start + batch_size, len(award_list))
+                batch_awards = award_list[batch_start:batch_end]
+                
+                log_print(f"📦 Processing batch {batch_start // batch_size + 1}/{(len(award_list) + batch_size - 1) // batch_size}: awards {batch_start + 1}-{batch_end}")
+                
+                # Reset progress counter for this batch
+                with _progress_lock:
+                    _progress_counter['processed'] = 0
+                    _progress_counter['indexed'] = 0
+                    _progress_counter['skipped'] = 0
+                    _progress_counter['total'] = len(batch_awards)
+                
+                # Process batch in parallel
+                with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    # Submit all tasks - only metadata indexing (no API calls)
+                    future_to_award = {
+                        executor.submit(index_award_metadata, award_record): award_record['award_id']
+                        for award_record in batch_awards
+                    }
                     
-                    if i % 100 == 0:
-                        log_print(f"📊 Progress: {i}/{len(award_ids)} awards processed ({indexed_count} indexed, {skipped_count} skipped)")
+                    # Process completed tasks
+                    for future in as_completed(future_to_award):
+                        award_id = future_to_award[future]
+                        try:
+                            result = future.result()
+                            with _progress_lock:
+                                _progress_counter['processed'] += 1
+                                if result.get('skipped'):
+                                    _progress_counter['skipped'] += 1
+                                    agency_skipped += 1
+                                else:
+                                    _progress_counter['indexed'] += 1
+                                    agency_indexed += 1
+                                
+                                # Progress logging every 50 awards or at end of batch
+                                processed = _progress_counter['processed']
+                                if processed % 50 == 0 or processed == len(batch_awards):
+                                    elapsed = time.time() - metadata_phase_start
+                                    total_processed = batch_start + processed
+                                    rate = total_processed / elapsed if elapsed > 0 else 0
+                                    remaining = (len(award_list) - total_processed) / rate if rate > 0 else 0
+                                    log_print(f"  📊 Progress: {total_processed}/{len(award_list)} awards ({agency_indexed} indexed, {agency_skipped} skipped)")
+                                    log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
+                        except Exception as e:
+                            error_msg = f"Award {award_id}: {str(e)[:200]}"
+                            agency_errors.append(error_msg)
+                            log_print(f"❌ {error_msg}")
+                            # Continue processing other awards instead of stopping
+                
+                # Small delay between batches
+                if batch_end < len(award_list):
+                    time.sleep(0.5)
+            
+            metadata_phase_duration = time.time() - metadata_phase_start
+            log_print(f"✅ Metadata Phase Complete: {int(metadata_phase_duration // 60)}m {int(metadata_phase_duration % 60)}s")
+            
+            # ========================================================================
+            # PHASE 3b: Sequential completion (subawards + S3 upload)
+            # ========================================================================
+            log_print(f"\n📦 PHASE 3b: Completing Awards (Subawards + S3 Upload) - Sequential")
+            log_print(f"📊 Completing {len(award_list)} awards sequentially to avoid API overload...")
+            completion_phase_start = time.time()
+            
+            agency_completed = 0
+            agency_completion_skipped = 0
+            total_transactions = 0
+            total_subawards = 0
+            
+            # Process awards sequentially (one at a time to avoid connection errors)
+            for idx, award_record in enumerate(award_list, 1):
+                try:
+                    result = complete_award_indexing(award_record)
+                    if result.get('skipped'):
+                        agency_completion_skipped += 1
+                    else:
+                        agency_completed += 1
+                        total_transactions += result.get('transaction_count', 0)
+                        total_subawards += result.get('subaward_count', 0)
+                    
+                    # Progress logging every 50 awards or at end
+                    if idx % 50 == 0 or idx == len(award_list):
+                        elapsed = time.time() - completion_phase_start
+                        rate = idx / elapsed if elapsed > 0 else 0
+                        remaining = (len(award_list) - idx) / rate if rate > 0 else 0
+                        log_print(f"  📊 Progress: {idx}/{len(award_list)} awards completed ({agency_completed} completed, {agency_completion_skipped} skipped)")
+                        log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
                     
                     # Small delay between awards to avoid overwhelming the API
-                    if i < len(award_ids):  # Don't delay after last award
-                        time.sleep(API_RATE_LIMIT_DELAY)
-                
-                except (requests.exceptions.ConnectionError, requests.exceptions.Timeout,
-                        urllib3.exceptions.ProtocolError, urllib3.exceptions.NewConnectionError) as e:
-                    log_print(f"❌ Connection error indexing award {award_id}: {str(e)[:200]}")
-                    # For connection errors, we'll retry with exponential backoff
-                    retry_delay = RETRY_BASE_DELAY * (2 ** min(3, i % 4))  # Cap at 4 retries worth
-                    log_print(f"⏳ Waiting {retry_delay}s before retrying...")
-                    time.sleep(retry_delay)
-                    try:
-                        result = index_award(award_id)  # Retry once
-                        if result.get('skipped'):
-                            skipped_count += 1
-                        else:
-                            indexed_count += 1
-                    except Exception as retry_error:
-                        log_print(f"❌ Retry failed for award {award_id}: {str(retry_error)[:200]}")
-                        raise  # Stop on error after retry
-                except Exception as e:
-                    log_print(f"❌ Failed to index award {award_id}: {str(e)[:200]}")
-                    raise  # Stop on error
-            
-            log_print("=" * 80)
-            log_print(f"✅ CHECKPOINT: Award Indexing Completed")
-            log_print(f"  📊 Total Awards: {len(award_ids)}")
-            log_print(f"  ✅ Successfully Indexed: {indexed_count}")
-            log_print(f"  ⏭️ Skipped (Already Indexed): {skipped_count}")
-            log_print("=" * 80)
-        else:
-            # Process each agency completely (download, parse, index) before moving to next
-            job_start_time = time.time()
-            log_print("=" * 80)
-            log_print(f"📥 Step 2: Processing Agencies Sequentially")
-            log_print(f"   Each agency will be fully downloaded, parsed, and indexed before the next begins")
-            log_print(f"   Total Agencies: {len(agencies)}")
-            log_print("=" * 80)
-            
-            total_indexed = 0
-            total_skipped = 0
-            successful_agencies = 0
-            
-            for i, agency in enumerate(agencies, 1):
-                agency_name = agency.get('name', 'Unknown')
-                agency_start_time = time.time()
-                log_print(f"\n{'=' * 80}")
-                log_print(f"📦 Processing Agency {i}/{len(agencies)}: {agency_name}")
-                log_print(f"📅 Date Range: {start_date} to {end_date}")
-                log_print(f"{'=' * 80}")
-                
-                # ========================================================================
-                # PHASE 1: GET - Request and wait for bulk download
-                # ========================================================================
-                log_print(f"\n🔵 PHASE 1: GET - Requesting Bulk Download for {agency_name}")
-                log_print(f"{'─' * 80}")
-                get_phase_start = time.time()
-                
-                download_info = initiate_bulk_download(start_date, end_date, agency=agency)
-                file_name = download_info['file_name']
-                log_print(f"📋 File Name: {file_name}")
-                
-                # Poll for download completion
-                status_info = poll_download_status(file_name, max_wait=14400, poll_interval=30, agency_name=agency_name)  # 4 hours per agency
-                file_url = status_info.get('file_url')
-                
-                if not file_url:
-                    raise Exception(f"No file_url in download status response for {agency_name}")
-                
-                get_phase_duration = time.time() - get_phase_start
-                log_print(f"✅ GET Phase Complete: {int(get_phase_duration // 60)}m {int(get_phase_duration % 60)}s")
-                log_print(f"📁 File URL: {file_url}")
-                
-                # ========================================================================
-                # PHASE 2: PARSE - Download and extract award IDs
-                # ========================================================================
-                log_print(f"\n🟡 PHASE 2: PARSE - Downloading and Parsing CSV for {agency_name}")
-                log_print(f"{'─' * 80}")
-                parse_phase_start = time.time()
-                
-                # Use CSV-based parsing to get full award records (no API calls needed!)
-                agency_awards = download_and_parse_csv(file_url, agency_name=agency_name, start_date=start_date, end_date=end_date, return_award_records=True)
-                
-                if not agency_awards:
-                    parse_phase_duration = time.time() - parse_phase_start
-                    agency_duration = time.time() - agency_start_time
-                    log_print(f"ℹ️ {agency_name}: No awards found for date range (this is OK)")
-                    log_print(f"⏱️ Parse Phase: {int(parse_phase_duration // 60)}m {int(parse_phase_duration % 60)}s")
-                    log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
-                    successful_agencies += 1
-                    # Small delay before next agency to give API time to rest
-                    if i < len(agencies):
-                        log_print(f"⏳ Waiting {API_RATE_LIMIT_DELAY * 5}s before next agency...")
-                        time.sleep(API_RATE_LIMIT_DELAY * 5)
-                    continue
-                
-                parse_phase_duration = time.time() - parse_phase_start
-                log_print(f"✅ PARSE Phase Complete: {int(parse_phase_duration // 60)}m {int(parse_phase_duration % 60)}s")
-                log_print(f"📊 Extracted {len(agency_awards)} unique award records from CSV")
-                
-                # ========================================================================
-                # PHASE 3: STORE - Index all awards to DynamoDB and S3 (PARALLEL, NO API CALLS!)
-                # ========================================================================
-                log_print(f"\n🟢 PHASE 3: STORE - Indexing Awards for {agency_name} (CSV-based, no API calls)")
-                log_print(f"{'─' * 80}")
-                log_print(f"📊 Indexing {len(agency_awards)} awards in parallel from CSV data...")
-                store_phase_start = time.time()
-                
-                # Parallel processing configuration
-                # Can use more workers since we're not making API calls - just DynamoDB writes
-                # 20 workers should be fine for DynamoDB operations
-                max_workers = min(20, len(agency_awards))
-                batch_size = 1000  # Process in batches of 1000 for better progress tracking
-                
-                log_print(f"⚙️ Parallel Processing: {max_workers} workers, batch size: {batch_size}")
-                log_print(f"🚀 Using CSV data - NO API CALLS needed! Much faster!")
-                
-                agency_indexed = 0
-                agency_skipped = 0
-                agency_errors = []
-                
-                # Convert awards dict to list for batch processing
-                award_list = list(agency_awards.values())
-                
-                # Process awards in batches
-                for batch_start in range(0, len(award_list), batch_size):
-                    batch_end = min(batch_start + batch_size, len(award_list))
-                    batch_awards = award_list[batch_start:batch_end]
-                    
-                    log_print(f"📦 Processing batch {batch_start // batch_size + 1}/{(len(award_list) + batch_size - 1) // batch_size}: awards {batch_start + 1}-{batch_end}")
-                    
-                    # Reset progress counter for this batch
-                    with _progress_lock:
-                        _progress_counter['processed'] = 0
-                        _progress_counter['indexed'] = 0
-                        _progress_counter['skipped'] = 0
-                        _progress_counter['total'] = len(batch_awards)
-                    
-                    # Process batch in parallel
-                    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                        # Submit all tasks - no retry needed since no API calls
-                        future_to_award = {
-                            executor.submit(index_award_from_csv_record, award_record): award_record['award_id']
-                            for award_record in batch_awards
-                        }
+                    if idx < len(award_list):
+                        time.sleep(0.5)  # 0.5 seconds between awards
                         
-                        # Process completed tasks
-                        for future in as_completed(future_to_award):
-                            award_id = future_to_award[future]
-                            try:
-                                result = future.result()
-                                with _progress_lock:
-                                    _progress_counter['processed'] += 1
-                                    if result.get('skipped'):
-                                        _progress_counter['skipped'] += 1
-                                        agency_skipped += 1
-                                    else:
-                                        _progress_counter['indexed'] += 1
-                                        agency_indexed += 1
-                                    
-                                    # Progress logging every 50 awards or at end of batch
-                                    processed = _progress_counter['processed']
-                                    if processed % 50 == 0 or processed == len(batch_awards):
-                                        elapsed = time.time() - store_phase_start
-                                        total_processed = batch_start + processed
-                                        rate = total_processed / elapsed if elapsed > 0 else 0
-                                        remaining = (len(award_list) - total_processed) / rate if rate > 0 else 0
-                                        log_print(f"  📊 Progress: {total_processed}/{len(award_list)} awards ({agency_indexed} indexed, {agency_skipped} skipped)")
-                                        log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
-                            except Exception as e:
-                                error_msg = f"Award {award_id}: {str(e)[:200]}"
-                                agency_errors.append(error_msg)
-                                log_print(f"❌ {error_msg}")
-                                # Continue processing other awards instead of stopping
-                    
-                    # Small delay between batches (much shorter since no API calls)
-                    if batch_end < len(award_list):
-                        time.sleep(0.5)  # 0.5 seconds between batches
-                
-                # Log any errors that occurred
-                if agency_errors:
-                    log_print(f"⚠️ {len(agency_errors)} errors occurred during indexing (see logs above)")
-                
-                store_phase_duration = time.time() - store_phase_start
-                agency_duration = time.time() - agency_start_time
-                
-                log_print(f"\n{'─' * 80}")
-                log_print(f"✅ STORE Phase Complete: {int(store_phase_duration // 60)}m {int(store_phase_duration % 60)}s")
-                log_print(f"📊 {agency_name} Summary:")
-                log_print(f"   ✅ Indexed: {agency_indexed}")
-                log_print(f"   ⏭️ Skipped: {agency_skipped}")
-                log_print(f"   📦 Total: {len(award_list)}")
-                log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
-                log_print(f"{'─' * 80}")
-                
-                total_indexed += agency_indexed
-                total_skipped += agency_skipped
-                successful_agencies += 1
-                
-                # Small delay before next agency to give API time to rest
-                if i < len(agencies):
-                    log_print(f"\n⏳ Waiting {API_RATE_LIMIT_DELAY * 5}s before next agency...")
-                    time.sleep(API_RATE_LIMIT_DELAY * 5)
+                except Exception as e:
+                    error_msg = f"Award {award_record.get('award_id', 'unknown')}: {str(e)[:200]}"
+                    agency_errors.append(error_msg)
+                    log_print(f"❌ {error_msg}")
+                    # Continue processing other awards instead of stopping
             
-            total_job_duration = time.time() - job_start_time
-            log_print("\n" + "=" * 80)
-            log_print(f"📊 FINAL SUMMARY - All Agencies Processed")
-            log_print("=" * 80)
-            log_print(f"  ✅ Agencies Processed: {successful_agencies}/{len(agencies)}")
-            log_print(f"  📦 Total Awards Indexed: {total_indexed:,}")
-            log_print(f"  ⏭️ Total Awards Skipped: {total_skipped:,}")
-            log_print(f"  📊 Total Awards Processed: {total_indexed + total_skipped:,}")
-            if successful_agencies > 0:
-                avg_per_agency = (total_indexed + total_skipped) / successful_agencies
-                log_print(f"  📈 Average Awards per Agency: {avg_per_agency:.1f}")
-            log_print(f"  ⏱️ Total Job Duration: {int(total_job_duration // 3600)}h {int((total_job_duration % 3600) // 60)}m {int(total_job_duration % 60)}s")
-            log_print("=" * 80)
+            completion_phase_duration = time.time() - completion_phase_start
+            log_print(f"✅ Completion Phase Complete: {int(completion_phase_duration // 60)}m {int(completion_phase_duration % 60)}s")
+            log_print(f"📊 Total transactions indexed: {total_transactions:,}")
+            log_print(f"📊 Total subawards indexed: {total_subawards:,}")
+            
+            # Log any errors that occurred
+            if agency_errors:
+                log_print(f"⚠️ {len(agency_errors)} errors occurred during indexing (see logs above)")
+            
+            store_phase_duration = time.time() - store_phase_start
+            agency_duration = time.time() - agency_start_time
+            
+            log_print(f"\n{'─' * 80}")
+            log_print(f"✅ STORE Phase Complete: {int(store_phase_duration // 60)}m {int(store_phase_duration % 60)}s")
+            log_print(f"📊 {agency_name} Summary:")
+            log_print(f"   ✅ Indexed: {agency_indexed}")
+            log_print(f"   ⏭️ Skipped: {agency_skipped}")
+            log_print(f"   📦 Total: {len(award_list)}")
+            log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
+            log_print(f"{'─' * 80}")
+            
+            total_indexed += agency_indexed
+            total_skipped += agency_skipped
+            successful_agencies += 1
+            
+            # Delay before next agency to give API time to rest (increased since parsing is more efficient)
+            if i < len(agencies):
+                delay_seconds = 10  # Increased from 2.5s to 10s
+                log_print(f"\n⏳ Waiting {delay_seconds}s before next agency...")
+                time.sleep(delay_seconds)
+        
+        total_job_duration = time.time() - job_start_time
+        log_print("\n" + "=" * 80)
+        log_print(f"📊 FINAL SUMMARY - All Agencies Processed")
+        log_print("=" * 80)
+        log_print(f"  ✅ Agencies Processed: {successful_agencies}/{len(agencies)}")
+        log_print(f"  📦 Total Awards Indexed: {total_indexed:,}")
+        log_print(f"  ⏭️ Total Awards Skipped: {total_skipped:,}")
+        log_print(f"  📊 Total Awards Processed: {total_indexed + total_skipped:,}")
+        if successful_agencies > 0:
+            avg_per_agency = (total_indexed + total_skipped) / successful_agencies
+            log_print(f"  📈 Average Awards per Agency: {avg_per_agency:.1f}")
+        log_print(f"  ⏱️ Total Job Duration: {int(total_job_duration // 3600)}h {int((total_job_duration % 3600) // 60)}m {int(total_job_duration % 60)}s")
+        log_print("=" * 80)
         
         # Job success
         log_print("✅ Job completed successfully - committing")
