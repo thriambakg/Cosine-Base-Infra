@@ -20,6 +20,7 @@ import csv
 import gzip
 import zipfile
 import urllib3
+import random
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from decimal import Decimal
@@ -119,7 +120,7 @@ _last_api_call_time = 0
 
 # Thread-safe progress tracking for parallel processing
 _progress_lock = Lock()
-_progress_counter = {'indexed': 0, 'skipped': 0, 'total': 0, 'processed': 0}
+_progress_counter = {'indexed': 0, 'total': 0, 'processed': 0}
 
 # ============================================================================
 # Helper Functions (ported from Lambda)
@@ -368,15 +369,6 @@ def index_award_metadata(award_record: Dict[str, Any]) -> Dict[str, Any]:
     try:
         award_id = award_record['award_id']
         
-        # Check if already indexed
-        existing_award = awards_table.get_item(Key={'award_id': award_id})
-        item = existing_award.get('Item')
-        if item and item.get('full_indexing_complete'):
-            # Also verify the S3 key exists before skipping
-            s3_key = item.get('award_details_s3_key')
-            if s3_key and check_s3_key_exists(s3_key):
-                return {'success': True, 'award_id': award_id, 'skipped': True}
-        
         # Create a copy for DynamoDB (without transactions list)
         award_db_record = award_record.copy()
         award_db_record.pop('transactions', None)  # Remove transactions from DB record
@@ -413,20 +405,12 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
     2. Fetch subawards from API
     3. Upload transactions + subawards to S3
     4. Update DynamoDB with completion flags
-    5. Add 1-second delay to respect API rate limits
+    5. Add random delay (1-3 seconds) to respect API rate limits
     
     Designed to be called in parallel with ThreadPoolExecutor.
     """
     try:
         award_id = award_record['award_id']
-        
-        # Check if already completed
-        existing_award = awards_table.get_item(Key={'award_id': award_id})
-        item = existing_award.get('Item')
-        if item and item.get('full_indexing_complete'):
-            s3_key = item.get('award_details_s3_key')
-            if s3_key and check_s3_key_exists(s3_key):
-                return {'success': True, 'award_id': award_id, 'skipped': True}
         
         # Step 1: Index metadata to DynamoDB
         # Create a copy for DynamoDB (without transactions list)
@@ -479,8 +463,8 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             ExpressionAttributeValues=expression_values
         )
         
-        # Step 6: Add 1-second delay to respect API rate limits (per thread)
-        time.sleep(1)
+        # Step 6: Add random delay (1-3 seconds) to respect API rate limits (per thread)
+        time.sleep(random.uniform(1, 3))
         
         return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
     
@@ -1062,7 +1046,6 @@ def main():
         log_print("=" * 80)
         
         total_indexed = 0
-        total_skipped = 0
         successful_agencies = 0
         
         for i, agency in enumerate(agencies, 1):
@@ -1134,13 +1117,12 @@ def main():
             award_list = list(agency_awards.values())
             
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
-            log_print(f"⚙️ Each thread processes one award at a time with a 1-second delay per award")
+            log_print(f"⚙️ Each thread processes one award at a time with a random 1-3 second delay per award")
             
             max_workers = min(20, len(award_list))
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
             agency_indexed = 0
-            agency_skipped = 0
             agency_errors = []
             total_transactions = 0
             total_subawards = 0
@@ -1149,10 +1131,9 @@ def main():
             with _progress_lock:
                 _progress_counter['processed'] = 0
                 _progress_counter['indexed'] = 0
-                _progress_counter['skipped'] = 0
                 _progress_counter['total'] = len(award_list)
             
-            # Process all awards in parallel - each thread handles one award at a time with 3s delay
+            # Process all awards in parallel - each thread handles one award at a time with 1s delay
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all tasks - each does: metadata + subawards + S3 upload
                 future_to_award = {
@@ -1167,14 +1148,10 @@ def main():
                         result = future.result()
                         with _progress_lock:
                             _progress_counter['processed'] += 1
-                            if result.get('skipped'):
-                                _progress_counter['skipped'] += 1
-                                agency_skipped += 1
-                            else:
-                                _progress_counter['indexed'] += 1
-                                agency_indexed += 1
-                                total_transactions += result.get('transaction_count', 0)
-                                total_subawards += result.get('subaward_count', 0)
+                            _progress_counter['indexed'] += 1
+                            agency_indexed += 1
+                            total_transactions += result.get('transaction_count', 0)
+                            total_subawards += result.get('subaward_count', 0)
                             
                             # Progress logging every 50 awards or at end
                             processed = _progress_counter['processed']
@@ -1182,7 +1159,7 @@ def main():
                                 elapsed = time.time() - store_phase_start
                                 rate = processed / elapsed if elapsed > 0 else 0
                                 remaining = (len(award_list) - processed) / rate if rate > 0 else 0
-                                log_print(f"  📊 Progress: {processed}/{len(award_list)} awards ({agency_indexed} indexed, {agency_skipped} skipped)")
+                                log_print(f"  📊 Progress: {processed}/{len(award_list)} awards ({agency_indexed} indexed)")
                                 log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
                     except Exception as e:
                         error_msg = f"Award {award_id}: {str(e)[:200]}"
@@ -1203,14 +1180,12 @@ def main():
             log_print(f"📊 Total subawards indexed: {total_subawards:,}")
             log_print(f"📊 {agency_name} Summary:")
             log_print(f"   📥 Parsed from CSV: {len(award_list):,} unique awards")
-            log_print(f"   ✅ Newly Indexed: {agency_indexed}")
-            log_print(f"   ⏭️ Skipped (already existed): {agency_skipped}")
+            log_print(f"   ✅ Indexed: {agency_indexed}")
             log_print(f"   📦 Total Processed: {len(award_list):,}")
             log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
             log_print(f"{'─' * 80}")
             
             total_indexed += agency_indexed
-            total_skipped += agency_skipped
             successful_agencies += 1
             
             # Delay before next agency to give API time to rest
@@ -1225,10 +1200,8 @@ def main():
         log_print("=" * 80)
         log_print(f"  ✅ Agencies Processed: {successful_agencies}/{len(agencies)}")
         log_print(f"  📦 Total Awards Indexed: {total_indexed:,}")
-        log_print(f"  ⏭️ Total Awards Skipped: {total_skipped:,}")
-        log_print(f"  📊 Total Awards Processed: {total_indexed + total_skipped:,}")
         if successful_agencies > 0:
-            avg_per_agency = (total_indexed + total_skipped) / successful_agencies
+            avg_per_agency = total_indexed / successful_agencies
             log_print(f"  📈 Average Awards per Agency: {avg_per_agency:.1f}")
         log_print(f"  ⏱️ Total Job Duration: {int(total_job_duration // 3600)}h {int((total_job_duration % 3600) // 60)}m {int(total_job_duration % 60)}s")
         log_print("=" * 80)

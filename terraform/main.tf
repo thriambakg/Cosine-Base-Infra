@@ -2226,10 +2226,12 @@ module "usaspending_awards_index_table" {
     { name = "recipient_id", type = "S" },
     { name = "recipient_name_normalized", type = "S" },
     { name = "awarding_agency_code", type = "S" },
+    { name = "awarding_agency_name", type = "S" },
     { name = "funding_agency_code", type = "S" },
     { name = "fiscal_year", type = "N" },
     { name = "total_obligation", type = "N" },
     { name = "period_start_date", type = "S" },
+    { name = "period_end_date", type = "S" },
     { name = "naics_code", type = "S" },
     { name = "psc_code", type = "S" },
     { name = "cfda_number", type = "S" },
@@ -2239,23 +2241,7 @@ module "usaspending_awards_index_table" {
 
   global_secondary_indexes = [
     {
-      name            = "RecipientFiscalYearIndex"
-      hash_key        = "recipient_id"
-      range_key       = "fiscal_year"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "RecipientObligationIndex"
-      hash_key        = "recipient_id"
-      range_key       = "total_obligation"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "AwardingAgencyFiscalYearIndex"
+      name            = "AwardingAgencyCodeFiscalYearIndex"
       hash_key        = "awarding_agency_code"
       range_key       = "fiscal_year"
       projection_type = "ALL"
@@ -2263,9 +2249,17 @@ module "usaspending_awards_index_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "AwardingAgencyObligationIndex"
-      hash_key        = "awarding_agency_code"
-      range_key       = "total_obligation"
+      name            = "AwardingAgencyNameFiscalYearIndex"
+      hash_key        = "awarding_agency_name"
+      range_key       = "fiscal_year"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "RecipientNameFiscalYearIndex"
+      hash_key        = "recipient_name_normalized"
+      range_key       = "fiscal_year"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
@@ -2287,49 +2281,9 @@ module "usaspending_awards_index_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "NAICSCodeFiscalYearIndex"
-      hash_key        = "naics_code"
-      range_key       = "fiscal_year"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "NAICSCodeObligationIndex"
-      hash_key        = "naics_code"
-      range_key       = "total_obligation"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "PSCCodeFiscalYearIndex"
-      hash_key        = "psc_code"
-      range_key       = "fiscal_year"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "PSCCodeObligationIndex"
-      hash_key        = "psc_code"
-      range_key       = "total_obligation"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
       name            = "StateFiscalYearIndex"
       hash_key        = "recipient_location_state"
       range_key       = "fiscal_year"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "StateObligationIndex"
-      hash_key        = "recipient_location_state"
-      range_key       = "total_obligation"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
@@ -2343,33 +2297,17 @@ module "usaspending_awards_index_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "AwardTypeObligationIndex"
-      hash_key        = "award_type"
-      range_key       = "total_obligation"
+      name            = "PeriodStartDateIndex"
+      hash_key        = "fiscal_year"
+      range_key       = "period_start_date"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "CFDANumberFiscalYearIndex"
-      hash_key        = "cfda_number"
-      range_key       = "fiscal_year"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "RecipientNameFiscalYearIndex"
-      hash_key        = "recipient_name_normalized"
-      range_key       = "fiscal_year"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "FundingAgencyFiscalYearIndex"
-      hash_key        = "funding_agency_code"
-      range_key       = "fiscal_year"
+      name            = "PeriodEndDateIndex"
+      hash_key        = "fiscal_year"
+      range_key       = "period_end_date"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
