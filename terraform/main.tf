@@ -2889,19 +2889,24 @@ module "politician_trades_state_machine" {
                         Type    = "Pass"
                         Comment = "Handle matcher errors gracefully"
                         Result = {
-                          "matchedTrades" : [],
+                          "matchedTradesS3Key" : null,
+                          "matchedTradesCount" : 0,
                           "unmatchedCount" : 0,
-                          "error" : "House PTR matching failed"
+                          "error" : "House PTR matching failed",
+                          "source" : "house"
                         }
                         ResultPath = "$.matchResults"
                         Next       = "SaveHouseTrades"
                       }
                       SaveHouseTrades = {
                         Type    = "Pass"
-                        Comment = "Format matched House trades for saver. Date preserved from TransformHouse."
+                        Comment = "Format matched House trades for saver. Trades are stored in S3 due to large size. Date preserved from TransformHouse."
                         Parameters = {
                           "date.$" : "$.date",
-                          "matchedTrades.$" : "$.matchResults.matchedTrades"
+                          "matchedTradesS3Key.$" : "$.matchResults.matchedTradesS3Key",
+                          "matchedTradesCount.$" : "$.matchResults.matchedTradesCount",
+                          "unmatchedCount.$" : "$.matchResults.unmatchedCount",
+                          "source.$" : "$.matchResults.source"
                         }
                         Next = "SaveHouseTradesTask"
                       }
