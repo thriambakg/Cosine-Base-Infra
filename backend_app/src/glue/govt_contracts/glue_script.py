@@ -20,7 +20,6 @@ import csv
 import gzip
 import zipfile
 import urllib3
-import random
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from decimal import Decimal
@@ -397,7 +396,7 @@ def index_award_metadata(award_record: Dict[str, Any]) -> Dict[str, Any]:
         raise
 
 
-def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
+def index_award_complete(award_record: Dict[str, Any], delay: float = 0) -> Dict[str, Any]:
     """
     Complete award indexing in a single function: metadata, transactions, and subawards.
     This function does everything:
@@ -405,9 +404,14 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
     2. Fetch subawards from API
     3. Upload transactions + subawards to S3
     4. Update DynamoDB with completion flags
-    5. Add random delay (1.5-3 seconds) to respect API rate limits
+    5. Optional delay to respect API rate limits for large batches
     
     Designed to be called in parallel with ThreadPoolExecutor.
+    Rate limiting is handled by the API retry logic in call_usaspending_api.
+    
+    Args:
+        award_record: The award record to index
+        delay: Optional delay in seconds to add after processing (for rate limiting large batches)
     """
     try:
         award_id = award_record['award_id']
@@ -463,8 +467,9 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             ExpressionAttributeValues=expression_values
         )
         
-        # Step 6: Add random delay (1.5-3 seconds) to respect API rate limits (per thread)
-        time.sleep(random.uniform(1.5, 3))
+        # Add delay if specified (for rate limiting large batches)
+        if delay > 0:
+            time.sleep(delay)
         
         return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
     
@@ -1117,10 +1122,15 @@ def main():
             award_list = list(agency_awards.values())
             
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
-            log_print(f"⚙️ Each thread processes one award at a time with a random 1.5-3 second delay per award")
-            log_print(f"⏸️ Pause of 20 seconds every 200 awards per department to respect API rate limits")
+            log_print(f"⚙️ Rate limiting handled by API retry logic")
             
-            max_workers = min(15, len(award_list))
+            max_workers = min(20, len(award_list))
+            
+            # Set delay for large batches (>5000 awards) to help with rate limiting
+            thread_delay = 3.0 if len(award_list) > 5000 else 0.0
+            if thread_delay > 0:
+                log_print(f"⏸️ Large batch detected ({len(award_list)} awards): Adding {thread_delay}s delay per thread")
+            
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
             agency_indexed = 0
@@ -1134,11 +1144,12 @@ def main():
                 _progress_counter['indexed'] = 0
                 _progress_counter['total'] = len(award_list)
             
-            # Process all awards in parallel - each thread handles one award at a time with 1s delay
+            # Process all awards in parallel - each thread handles one award at a time
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all tasks - each does: metadata + subawards + S3 upload
+                # Pass delay parameter for large batches
                 future_to_award = {
-                    executor.submit(index_award_complete, award_record): award_record['award_id']
+                    executor.submit(index_award_complete, award_record, thread_delay): award_record['award_id']
                     for award_record in award_list
                 }
                 
@@ -1155,12 +1166,6 @@ def main():
                             total_subawards += result.get('subaward_count', 0)
                             
                             processed = _progress_counter['processed']
-                            
-                            # Pause every 200 awards per department to respect API rate limits
-                            # This prevents hitting rate limits around 900-1000 awards
-                            if processed > 0 and processed % 200 == 0:
-                                log_print(f"⏸️ Pausing 20 seconds after {processed} awards (per department) to respect API rate limits...")
-                                time.sleep(20)
                             
                             # Progress logging every 50 awards or at end
                             if processed % 50 == 0 or processed == len(award_list):

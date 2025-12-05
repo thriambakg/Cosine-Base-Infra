@@ -1700,9 +1700,53 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
     logger.info(f"   📄 Total trades matched: {len(all_matched_trades)}")
     logger.info(f"   ⚠️ Total unmatched trades/files: {total_unmatched}")
     
+    # Save matched trades to S3 as JSON (output too large for Step Functions)
+    s3_key = None
+    if all_matched_trades:
+        try:
+            # Extract year from folder name or date (use same logic as earlier in function)
+            folder_name = download_results.get('folderName', '')
+            if folder_name:
+                # Extract year from folder name like "trades/house/2025"
+                year = folder_name.split('/')[-1] if '/' in folder_name else folder_name
+            else:
+                # Fallback: try to get year from date in event
+                date = event.get('date') or download_results.get('date')
+                if date:
+                    try:
+                        year = datetime.strptime(date, '%Y-%m-%d').strftime('%Y')
+                    except:
+                        year = datetime.now().strftime('%Y')
+                else:
+                    year = datetime.now().strftime('%Y')
+            
+            # Save to same folder as PDFs: trades/house/{year}/matched_trades_{timestamp}.json
+            timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
+            s3_key = f"trades/house/{year}/matched_trades_{timestamp}.json"
+            
+            # Convert trades to JSON-serializable format
+            json_trades = json.dumps(all_matched_trades, default=str, indent=2)
+            
+            # Upload to S3
+            s3_client.put_object(
+                Bucket=S3_BUCKET,
+                Key=s3_key,
+                Body=json_trades.encode('utf-8'),
+                ContentType='application/json'
+            )
+            
+            logger.info(f"💾 Saved {len(all_matched_trades)} matched trades to S3: s3://{S3_BUCKET}/{s3_key}")
+        except Exception as e:
+            logger.error(f"❌ Error saving matched trades to S3: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            # Continue anyway - saver can still try to read from event if needed
+    
     return {
-        "matchedTrades": all_matched_trades,
+        "matchedTradesS3Key": s3_key,  # S3 key instead of trades array
+        "matchedTradesCount": len(all_matched_trades),
         "unmatchedCount": total_unmatched,
-        "date": event.get('date')
+        "date": event.get('date'),
+        "source": "house"
     }
 

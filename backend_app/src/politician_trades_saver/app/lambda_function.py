@@ -19,9 +19,11 @@ logger.setLevel(logging.INFO)
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
+s3_client = boto3.client('s3')
 
 # Environment variables
 DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
+S3_BUCKET = os.environ.get('S3_BUCKET')
 
 def convert_to_dynamodb_format(item: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -205,7 +207,9 @@ def lambda_handler(event, context):
     Expected input from Step 2:
     {
         "date": "2024-01-15",
-        "matchedTrades": [...],
+        "matchedTrades": [...],  # Old format (direct trades array)
+        "matchedTradesS3Key": "trades/house/2025/matched_trades_20250115_123456.json",  # New format (S3 key)
+        "matchedTradesCount": 45,
         "totalMatched": 45
     }
     
@@ -227,8 +231,37 @@ def lambda_handler(event, context):
     # Get input from previous step
     # Support both old format (matchResults) and new format (aggregateResults)
     match_results = event.get('aggregateResults') or event.get('matchResults') or event
-    matched_trades = match_results.get('matchedTrades', [])
     date = match_results.get('date')
+    
+    # Check if trades are in S3 (new format for large outputs) or in event (old format)
+    matched_trades_s3_key = match_results.get('matchedTradesS3Key')
+    matched_trades = []
+    
+    if matched_trades_s3_key:
+        # Read trades from S3 (new format - handles large outputs)
+        logger.info(f"📥 Reading matched trades from S3: s3://{S3_BUCKET}/{matched_trades_s3_key}")
+        try:
+            if not S3_BUCKET:
+                raise ValueError("S3_BUCKET environment variable not set")
+            
+            response = s3_client.get_object(
+                Bucket=S3_BUCKET,
+                Key=matched_trades_s3_key
+            )
+            
+            json_content = response['Body'].read().decode('utf-8')
+            matched_trades = json.loads(json_content)
+            
+            logger.info(f"✅ Loaded {len(matched_trades)} matched trades from S3")
+        except Exception as e:
+            logger.error(f"❌ Error reading matched trades from S3: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            raise
+    else:
+        # Fall back to reading from event (old format - backward compatibility)
+        matched_trades = match_results.get('matchedTrades', [])
+        logger.info(f"📥 Using matched trades from event (legacy format): {len(matched_trades)} trades")
     
     logger.info(f"📅 Processing date: {date}")
     logger.info(f"💾 Saving {len(matched_trades)} matched trades to DynamoDB")
