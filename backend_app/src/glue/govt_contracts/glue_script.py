@@ -405,10 +405,17 @@ def index_award_metadata(award_record: Dict[str, Any]) -> Dict[str, Any]:
         raise
 
 
-def complete_award_indexing(award_record: Dict[str, Any]) -> Dict[str, Any]:
+def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Complete award indexing: fetch subawards from API, combine with transactions from CSV,
-    and upload to S3. This is Phase 3b - can be called in parallel within batches.
+    Complete award indexing in a single function: metadata, transactions, and subawards.
+    This function does everything:
+    1. Index metadata to DynamoDB
+    2. Fetch subawards from API
+    3. Upload transactions + subawards to S3
+    4. Update DynamoDB with completion flags
+    5. Add 3-second delay to respect API rate limits
+    
+    Designed to be called in parallel with ThreadPoolExecutor.
     """
     try:
         award_id = award_record['award_id']
@@ -419,13 +426,34 @@ def complete_award_indexing(award_record: Dict[str, Any]) -> Dict[str, Any]:
         if item and item.get('full_indexing_complete'):
             s3_key = item.get('award_details_s3_key')
             if s3_key and check_s3_key_exists(s3_key):
+                # Still add delay even if skipped to maintain rate limiting
+                time.sleep(3)
                 return {'success': True, 'award_id': award_id, 'skipped': True}
         
-        # Get transactions from CSV record (already parsed)
+        # Step 1: Index metadata to DynamoDB
+        # Create a copy for DynamoDB (without transactions list)
+        award_db_record = award_record.copy()
+        award_db_record.pop('transactions', None)  # Remove transactions from DB record
+        
+        # Remove None/empty values for sparse GSI fields
+        sparse_gsi_fields = ['cfda_number', 'naics_code', 'psc_code', 'awarding_agency_code', 
+                             'funding_agency_code', 'recipient_id', 'recipient_location_state']
+        for field in sparse_gsi_fields:
+            if award_db_record.get(field) is None or award_db_record.get(field) == '':
+                award_db_record.pop(field, None)
+        
+        # Convert to Decimal for DynamoDB
+        award_db_record['total_obligation'] = Decimal(str(award_db_record.get('total_obligation', 0)))
+        award_db_record = convert_floats_to_decimal(award_db_record)
+        
+        # Store award metadata in DynamoDB
+        awards_table.put_item(Item=award_db_record)
+        
+        # Step 2: Get transactions from CSV record (already parsed)
         transactions = award_record.get('transactions', [])
         transaction_count = len(transactions)
         
-        # Fetch subawards from API (sequential to avoid connection errors)
+        # Step 3: Fetch subawards from API
         try:
             subawards = fetch_all_subawards(award_id)
             subaward_count = len(subawards)
@@ -434,10 +462,10 @@ def complete_award_indexing(award_record: Dict[str, Any]) -> Dict[str, Any]:
             subawards = []
             subaward_count = 0
         
-        # Upload transactions and subawards to S3
+        # Step 4: Upload transactions and subawards to S3
         s3_key = upload_award_details_to_s3(award_id, transactions, subawards)
         
-        # Update DynamoDB with S3 key and completion flags
+        # Step 5: Update DynamoDB with S3 key and completion flags
         update_expression = "SET award_details_s3_key = :s3_key, award_details_indexed = :indexed, transaction_count = :tx_count, subaward_count = :sub_count, full_indexing_complete = :complete, last_updated = :updated"
         expression_values = {
             ':s3_key': s3_key,
@@ -453,11 +481,16 @@ def complete_award_indexing(award_record: Dict[str, Any]) -> Dict[str, Any]:
             ExpressionAttributeValues=expression_values
         )
         
+        # Step 6: Add 3-second delay to respect API rate limits (per thread)
+        time.sleep(3)
+        
         return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
     
     except Exception as e:
-        log_print(f"❌ Error completing award indexing {award_record.get('award_id', 'unknown')}: {str(e)}")
-        logger.error(f"❌ Error completing award indexing: {str(e)}", exc_info=True)
+        log_print(f"❌ Error indexing award {award_record.get('award_id', 'unknown')}: {str(e)}")
+        logger.error(f"❌ Error indexing award: {str(e)}", exc_info=True)
+        # Still add delay even on error to maintain rate limiting
+        time.sleep(3)
         raise
 
 
@@ -1095,7 +1128,7 @@ def main():
             log_print(f"📊 Extracted {len(agency_awards)} unique award records from CSV")
             
             # ========================================================================
-            # PHASE 3: STORE - Index awards in two sub-phases
+            # PHASE 3: STORE - Index awards (metadata + transactions + subawards) in parallel
             # ========================================================================
             log_print(f"\n🟢 PHASE 3: STORE - Indexing Awards for {agency_name}")
             log_print(f"{'─' * 80}")
@@ -1104,161 +1137,74 @@ def main():
             # Convert awards dict to list for processing
             award_list = list(agency_awards.values())
             
-            # ========================================================================
-            # PHASE 3a: Parallel metadata indexing (fast, no API calls)
-            # ========================================================================
-            log_print(f"\n📝 PHASE 3a: Indexing Award Metadata to DynamoDB (Parallel)")
-            log_print(f"📊 Indexing metadata for {len(award_list)} awards in parallel...")
-            metadata_phase_start = time.time()
+            log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
+            log_print(f"⚙️ Each thread processes one award at a time with a 3-second delay per award")
             
             max_workers = min(20, len(award_list))
-            batch_size = 1000
-            log_print(f"⚙️ Parallel Processing: {max_workers} workers, batch size: {batch_size}")
+            log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
             agency_indexed = 0
             agency_skipped = 0
             agency_errors = []
-            
-            # Process awards in batches
-            for batch_start in range(0, len(award_list), batch_size):
-                batch_end = min(batch_start + batch_size, len(award_list))
-                batch_awards = award_list[batch_start:batch_end]
-                
-                log_print(f"📦 Processing batch {batch_start // batch_size + 1}/{(len(award_list) + batch_size - 1) // batch_size}: awards {batch_start + 1}-{batch_end}")
-                
-                # Reset progress counter for this batch
-                with _progress_lock:
-                    _progress_counter['processed'] = 0
-                    _progress_counter['indexed'] = 0
-                    _progress_counter['skipped'] = 0
-                    _progress_counter['total'] = len(batch_awards)
-                
-                # Process batch in parallel
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    # Submit all tasks - only metadata indexing (no API calls)
-                    future_to_award = {
-                        executor.submit(index_award_metadata, award_record): award_record['award_id']
-                        for award_record in batch_awards
-                    }
-                    
-                    # Process completed tasks
-                    for future in as_completed(future_to_award):
-                        award_id = future_to_award[future]
-                        try:
-                            result = future.result()
-                            with _progress_lock:
-                                _progress_counter['processed'] += 1
-                                if result.get('skipped'):
-                                    _progress_counter['skipped'] += 1
-                                    agency_skipped += 1
-                                else:
-                                    _progress_counter['indexed'] += 1
-                                    agency_indexed += 1
-                                
-                                # Progress logging every 50 awards or at end of batch
-                                processed = _progress_counter['processed']
-                                if processed % 50 == 0 or processed == len(batch_awards):
-                                    elapsed = time.time() - metadata_phase_start
-                                    total_processed = batch_start + processed
-                                    rate = total_processed / elapsed if elapsed > 0 else 0
-                                    remaining = (len(award_list) - total_processed) / rate if rate > 0 else 0
-                                    log_print(f"  📊 Progress: {total_processed}/{len(award_list)} awards ({agency_indexed} indexed, {agency_skipped} skipped)")
-                                    log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
-                        except Exception as e:
-                            error_msg = f"Award {award_id}: {str(e)[:200]}"
-                            agency_errors.append(error_msg)
-                            log_print(f"❌ {error_msg}")
-                            # Continue processing other awards instead of stopping
-                
-                # Small delay between batches
-                if batch_end < len(award_list):
-                    time.sleep(0.5)
-            
-            metadata_phase_duration = time.time() - metadata_phase_start
-            log_print(f"✅ Metadata Phase Complete: {int(metadata_phase_duration // 60)}m {int(metadata_phase_duration % 60)}s")
-            
-            # ========================================================================
-            # PHASE 3b: Parallel completion (subawards + S3 upload) in batches
-            # ========================================================================
-            log_print(f"\n📦 PHASE 3b: Completing Awards (Subawards + S3 Upload) - Parallel Batches")
-            log_print(f"📊 Completing {len(award_list)} awards in parallel batches of 500...")
-            completion_phase_start = time.time()
-            
-            agency_completed = 0
-            agency_completion_skipped = 0
             total_transactions = 0
             total_subawards = 0
             
-            # Process awards in batches of 500 with parallel processing
-            batch_size = 500
-            max_workers = 20  # Parallel workers for subaward fetching
-            num_batches = (len(award_list) + batch_size - 1) // batch_size
+            # Reset progress counter
+            with _progress_lock:
+                _progress_counter['processed'] = 0
+                _progress_counter['indexed'] = 0
+                _progress_counter['skipped'] = 0
+                _progress_counter['total'] = len(award_list)
             
-            for batch_num in range(num_batches):
-                batch_start = batch_num * batch_size
-                batch_end = min(batch_start + batch_size, len(award_list))
-                batch_awards = award_list[batch_start:batch_end]
+            # Process all awards in parallel - each thread handles one award at a time with 3s delay
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                # Submit all tasks - each does: metadata + subawards + S3 upload
+                future_to_award = {
+                    executor.submit(index_award_complete, award_record): award_record['award_id']
+                    for award_record in award_list
+                }
                 
-                log_print(f"📦 Processing batch {batch_num + 1}/{num_batches}: awards {batch_start + 1}-{batch_end} ({len(batch_awards)} awards)")
-                
-                # Process batch in parallel
-                with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                    # Submit all tasks for this batch
-                    future_to_award = {
-                        executor.submit(complete_award_indexing, award_record): award_record['award_id']
-                        for award_record in batch_awards
-                    }
-                    
-                    # Process completed tasks
-                    batch_completed = 0
-                    batch_skipped = 0
-                    for future in as_completed(future_to_award):
-                        award_id = future_to_award[future]
-                        try:
-                            result = future.result()
+                # Process completed tasks
+                for future in as_completed(future_to_award):
+                    award_id = future_to_award[future]
+                    try:
+                        result = future.result()
+                        with _progress_lock:
+                            _progress_counter['processed'] += 1
                             if result.get('skipped'):
-                                agency_completion_skipped += 1
-                                batch_skipped += 1
+                                _progress_counter['skipped'] += 1
+                                agency_skipped += 1
                             else:
-                                agency_completed += 1
-                                batch_completed += 1
+                                _progress_counter['indexed'] += 1
+                                agency_indexed += 1
                                 total_transactions += result.get('transaction_count', 0)
                                 total_subawards += result.get('subaward_count', 0)
                             
-                            # Progress logging every 50 awards or at end of batch
-                            total_processed = batch_start + batch_completed + batch_skipped
-                            if (batch_completed + batch_skipped) % 50 == 0 or (batch_completed + batch_skipped) == len(batch_awards):
-                                elapsed = time.time() - completion_phase_start
-                                rate = total_processed / elapsed if elapsed > 0 else 0
-                                remaining = (len(award_list) - total_processed) / rate if rate > 0 else 0
-                                log_print(f"  📊 Progress: {total_processed}/{len(award_list)} awards completed ({agency_completed} completed, {agency_completion_skipped} skipped)")
+                            # Progress logging every 50 awards or at end
+                            processed = _progress_counter['processed']
+                            if processed % 50 == 0 or processed == len(award_list):
+                                elapsed = time.time() - store_phase_start
+                                rate = processed / elapsed if elapsed > 0 else 0
+                                remaining = (len(award_list) - processed) / rate if rate > 0 else 0
+                                log_print(f"  📊 Progress: {processed}/{len(award_list)} awards ({agency_indexed} indexed, {agency_skipped} skipped)")
                                 log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
-                                
-                        except Exception as e:
-                            error_msg = f"Award {award_id}: {str(e)[:200]}"
-                            agency_errors.append(error_msg)
-                            log_print(f"❌ {error_msg}")
-                            # Continue processing other awards instead of stopping
-                
-                # 30-second delay between batches (except after the last batch)
-                if batch_num < num_batches - 1:
-                    log_print(f"⏳ Waiting 30s before next batch...")
-                    time.sleep(30)
+                    except Exception as e:
+                        error_msg = f"Award {award_id}: {str(e)[:200]}"
+                        agency_errors.append(error_msg)
+                        log_print(f"❌ {error_msg}")
+                        # Continue processing other awards instead of stopping
             
-            completion_phase_duration = time.time() - completion_phase_start
-            log_print(f"✅ Completion Phase Complete: {int(completion_phase_duration // 60)}m {int(completion_phase_duration % 60)}s")
-            log_print(f"📊 Total transactions indexed: {total_transactions:,}")
-            log_print(f"📊 Total subawards indexed: {total_subawards:,}")
+            store_phase_duration = time.time() - store_phase_start
+            agency_duration = time.time() - agency_start_time
             
             # Log any errors that occurred
             if agency_errors:
                 log_print(f"⚠️ {len(agency_errors)} errors occurred during indexing (see logs above)")
             
-            store_phase_duration = time.time() - store_phase_start
-            agency_duration = time.time() - agency_start_time
-            
             log_print(f"\n{'─' * 80}")
             log_print(f"✅ STORE Phase Complete: {int(store_phase_duration // 60)}m {int(store_phase_duration % 60)}s")
+            log_print(f"📊 Total transactions indexed: {total_transactions:,}")
+            log_print(f"📊 Total subawards indexed: {total_subawards:,}")
             log_print(f"📊 {agency_name} Summary:")
             log_print(f"   📥 Parsed from CSV: {len(award_list):,} unique awards")
             log_print(f"   ✅ Newly Indexed: {agency_indexed}")
