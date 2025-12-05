@@ -396,7 +396,7 @@ def index_award_metadata(award_record: Dict[str, Any]) -> Dict[str, Any]:
         raise
 
 
-def index_award_complete(award_record: Dict[str, Any], delay: float = 0) -> Dict[str, Any]:
+def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
     """
     Complete award indexing in a single function: metadata, transactions, and subawards.
     This function does everything:
@@ -404,14 +404,9 @@ def index_award_complete(award_record: Dict[str, Any], delay: float = 0) -> Dict
     2. Fetch subawards from API
     3. Upload transactions + subawards to S3
     4. Update DynamoDB with completion flags
-    5. Optional delay to respect API rate limits for large batches
     
     Designed to be called in parallel with ThreadPoolExecutor.
     Rate limiting is handled by the API retry logic in call_usaspending_api.
-    
-    Args:
-        award_record: The award record to index
-        delay: Optional delay in seconds to add after processing (for rate limiting large batches)
     """
     try:
         award_id = award_record['award_id']
@@ -466,10 +461,6 @@ def index_award_complete(award_record: Dict[str, Any], delay: float = 0) -> Dict
             UpdateExpression=update_expression,
             ExpressionAttributeValues=expression_values
         )
-        
-        # Add delay if specified (for rate limiting large batches)
-        if delay > 0:
-            time.sleep(delay)
         
         return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
     
@@ -1124,16 +1115,14 @@ def main():
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
             log_print(f"⚙️ Rate limiting handled by API retry logic")
             
-            # Adjust workers and delay based on batch size
+            # Adjust workers based on batch size
             if len(award_list) > 2000:
-                # For large batches (>2000), reduce workers to 5 and add 3s delay per thread
+                # For large batches (>2000), reduce workers to 5 to avoid rate limits
                 max_workers = min(5, len(award_list))
-                thread_delay = 3.0
-                log_print(f"⏸️ Large batch detected ({len(award_list)} awards): Reducing workers to {max_workers} with {thread_delay}s delay per thread")
+                log_print(f"⏸️ Large batch detected ({len(award_list)} awards): Reducing workers to {max_workers}")
             else:
-                # For smaller batches, full speed: 20 workers, no delay
+                # For smaller batches, full speed: 20 workers
                 max_workers = min(20, len(award_list))
-                thread_delay = 0.0
             
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
@@ -1151,9 +1140,8 @@ def main():
             # Process all awards in parallel - each thread handles one award at a time
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all tasks - each does: metadata + subawards + S3 upload
-                # Pass delay parameter for large batches
                 future_to_award = {
-                    executor.submit(index_award_complete, award_record, thread_delay): award_record['award_id']
+                    executor.submit(index_award_complete, award_record): award_record['award_id']
                     for award_record in award_list
                 }
                 
