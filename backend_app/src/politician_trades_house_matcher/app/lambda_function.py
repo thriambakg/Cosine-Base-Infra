@@ -811,7 +811,7 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         if not filer_name:
             logger.warning(f"⚠️ Could not extract filer name from House PTR: {s3_key}")
         
-        # Extract filing date from e-signature at bottom
+        # Extract filing date from e-signature at bottom (fallback - primary source is notification date from trade text)
         filing_date = None
         
         # Look for "Digitally Signed: [Name] [Date]" pattern
@@ -1100,10 +1100,19 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     transaction_type = type_char  # Keep as-is for other types
             
             # Extract dates (MM/DD/YYYY format)
+            # Transaction date is first date, notification date is second date (right next to it)
             date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', trade_text))
+            notification_date = None
             if date_matches and len(date_matches) >= 1:
                 try:
                     transaction_date = datetime.strptime(date_matches[0].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
+                    # Extract notification date (second date) if present
+                    if len(date_matches) >= 2:
+                        try:
+                            notification_date = datetime.strptime(date_matches[1].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
+                            logger.debug(f"   Extracted notification date: {notification_date}")
+                        except ValueError:
+                            pass
                 except ValueError:
                     pass
                     
@@ -1198,9 +1207,11 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 
                 # Only create trade if we have minimum required fields
                 if transaction_date and (security_name or security_symbol) and transaction_type and amount:
+                    # Use notification_date as filingDate if available, otherwise fall back to signature-based filing_date
+                    trade_filing_date = notification_date if notification_date else filing_date
                     trade = {
                         'filerName': filer_name,
-                        'filingDate': filing_date,
+                        'filingDate': trade_filing_date,
                         'transactionDate': transaction_date,
                         'securityName': security_name,
                         'securitySymbol': security_symbol,
@@ -1272,13 +1283,17 @@ def check_if_filing_processed(s3_key: str) -> bool:
         table = dynamodb.Table(DYNAMODB_TABLE_NAME)
         
         # Scan for tradeIds that contain this UUID
-        # House PTR tradeIds likely contain the UUID (e.g., "house_ptr_20033394_..." or "trade_2025-01-15_house_20033394")
+        # House PTR tradeIds likely contain the UUID (e.g., "trade_2025-01-15_house_20033394")
         # Use a filter expression to check if tradeId contains the UUID
+        # Also check source = 'house' to ensure it's a House PTR trade
         response = table.scan(
-            FilterExpression='contains(tradeId, :uuid) AND formType = :formType',
+            FilterExpression='contains(tradeId, :uuid) AND #source = :source',
+            ExpressionAttributeNames={
+                '#source': 'source'
+            },
             ExpressionAttributeValues={
                 ':uuid': uuid,
-                ':formType': 'house_ptr'
+                ':source': 'house'
             },
             Limit=1  # We only need to know if at least one exists
         )
@@ -1614,23 +1629,6 @@ def handle_house_ptr_matching(event: Dict[str, Any], download_results: Dict[str,
             "unmatchedCount": 0,
             "date": event.get('date')
         }
-    
-    # Filter to specific test file for debugging (20026533.pdf for multi-page testing)
-    test_uuid = "20026533"
-    test_file = None
-    for key in unprocessed_keys:
-        if test_uuid in key:
-            test_file = key
-            break
-    
-    if test_file:
-        logger.info(f"🧪 Testing with specific file: {test_file} (UUID: {test_uuid})")
-        unprocessed_keys = [test_file]
-    else:
-        # Fallback: limit to first 1 file if test file not found
-        if len(unprocessed_keys) > 1:
-            logger.info(f"⚠️ Test file {test_uuid} not found, limiting to first 1 file (found {len(unprocessed_keys)} unprocessed files)")
-            unprocessed_keys = unprocessed_keys[:1]
     
     # Load politician list for matching
     logger.info("📋 Loading politician list for matching")

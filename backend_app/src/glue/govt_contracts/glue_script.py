@@ -1118,9 +1118,9 @@ def main():
             
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
             log_print(f"⚙️ Each thread processes one award at a time with a random 1.5-3 second delay per award")
-            log_print(f"⏸️ Pause of 10 seconds every 300 awards per department to respect API rate limits")
+            log_print(f"⏸️ Pause of 20 seconds every 200 awards per department to respect API rate limits")
             
-            max_workers = min(20, len(award_list))
+            max_workers = min(15, len(award_list))
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
             agency_indexed = 0
@@ -1156,10 +1156,11 @@ def main():
                             
                             processed = _progress_counter['processed']
                             
-                            # Pause every 300 awards per department to respect API rate limits
-                            if processed > 0 and processed % 300 == 0:
-                                log_print(f"⏸️ Pausing 10 seconds after {processed} awards (per department) to respect API rate limits...")
-                                time.sleep(10)
+                            # Pause every 200 awards per department to respect API rate limits
+                            # This prevents hitting rate limits around 900-1000 awards
+                            if processed > 0 and processed % 200 == 0:
+                                log_print(f"⏸️ Pausing 20 seconds after {processed} awards (per department) to respect API rate limits...")
+                                time.sleep(20)
                             
                             # Progress logging every 50 awards or at end
                             if processed % 50 == 0 or processed == len(award_list):
