@@ -413,7 +413,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
     2. Fetch subawards from API
     3. Upload transactions + subawards to S3
     4. Update DynamoDB with completion flags
-    5. Add 3-second delay to respect API rate limits
+    5. Add 1-second delay to respect API rate limits
     
     Designed to be called in parallel with ThreadPoolExecutor.
     """
@@ -426,8 +426,6 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         if item and item.get('full_indexing_complete'):
             s3_key = item.get('award_details_s3_key')
             if s3_key and check_s3_key_exists(s3_key):
-                # Still add delay even if skipped to maintain rate limiting
-                time.sleep(3)
                 return {'success': True, 'award_id': award_id, 'skipped': True}
         
         # Step 1: Index metadata to DynamoDB
@@ -481,16 +479,14 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             ExpressionAttributeValues=expression_values
         )
         
-        # Step 6: Add 3-second delay to respect API rate limits (per thread)
-        time.sleep(3)
+        # Step 6: Add 1-second delay to respect API rate limits (per thread)
+        time.sleep(1)
         
         return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
     
     except Exception as e:
         log_print(f"❌ Error indexing award {award_record.get('award_id', 'unknown')}: {str(e)}")
         logger.error(f"❌ Error indexing award: {str(e)}", exc_info=True)
-        # Still add delay even on error to maintain rate limiting
-        time.sleep(3)
         raise
 
 
@@ -1138,7 +1134,7 @@ def main():
             award_list = list(agency_awards.values())
             
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
-            log_print(f"⚙️ Each thread processes one award at a time with a 3-second delay per award")
+            log_print(f"⚙️ Each thread processes one award at a time with a 1-second delay per award")
             
             max_workers = min(20, len(award_list))
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
