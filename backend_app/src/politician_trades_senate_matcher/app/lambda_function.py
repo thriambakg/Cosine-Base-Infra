@@ -1870,6 +1870,11 @@ def lambda_handler(event, context):
                 # Format state/district for the politician
                 state_district = format_state_district(matched_politician)
                 
+                # Get securitySymbol and set to "OTHER" if missing or empty
+                security_symbol = trade.get('ticker') or trade.get('securitySymbol')
+                if not security_symbol or (isinstance(security_symbol, str) and security_symbol.strip() in ('', '--')):
+                    security_symbol = 'OTHER'
+                
                 matched_trade = {
                     'tradeId': f"trade_{final_filing_date}_senate_{len(matched_trades)}",
                     'politicianName': matched_politician['name'],  # GSI: PoliticianTradeDateIndex
@@ -1880,7 +1885,7 @@ def lambda_handler(event, context):
                     'filingDate': final_filing_date,
                     'transactionDate': transaction_date_num,  # GSI range key (numeric: YYYYMMDD format)
                     'transactionTime': trade.get('transactionTime'),
-                    'securitySymbol': trade.get('ticker') or trade.get('securitySymbol'),  # GSI: SecurityTradeDateIndex
+                    'securitySymbol': security_symbol,  # GSI: SecurityTradeDateIndex
                     'securityName': trade.get('securityName'),
                     'assetType': trade.get('assetType'),  # Include assetType for Senate PTRs
                     'transactionType': transaction_type,  # GSI: TransactionTypeTradeDateIndex ("Purchase", "Sale", etc.) - None for unparsed

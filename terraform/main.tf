@@ -1987,6 +1987,7 @@ module "politician_trades_table" {
     { name = "party", type = "S" },
     { name = "position", type = "S" },
     { name = "securitySymbol", type = "S" },
+    { name = "securityName", type = "S" },
     { name = "formType", type = "S" },
     { name = "transactionType", type = "S" },
     { name = "transactionDate", type = "N" },
@@ -2028,8 +2029,8 @@ module "politician_trades_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "FormTypeTradeDateIndex"
-      hash_key        = "formType"
+      name            = "SecurityNameTradeDateIndex"
+      hash_key        = "securityName"
       range_key       = "transactionDate"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity

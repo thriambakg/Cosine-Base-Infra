@@ -405,7 +405,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
     2. Fetch subawards from API
     3. Upload transactions + subawards to S3
     4. Update DynamoDB with completion flags
-    5. Add random delay (1-3 seconds) to respect API rate limits
+    5. Add random delay (1.5-3 seconds) to respect API rate limits
     
     Designed to be called in parallel with ThreadPoolExecutor.
     """
@@ -463,8 +463,8 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             ExpressionAttributeValues=expression_values
         )
         
-        # Step 6: Add random delay (1-3 seconds) to respect API rate limits (per thread)
-        time.sleep(random.uniform(1, 3))
+        # Step 6: Add random delay (1.5-3 seconds) to respect API rate limits (per thread)
+        time.sleep(random.uniform(1.5, 3))
         
         return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
     
@@ -1117,7 +1117,8 @@ def main():
             award_list = list(agency_awards.values())
             
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
-            log_print(f"⚙️ Each thread processes one award at a time with a random 1-3 second delay per award")
+            log_print(f"⚙️ Each thread processes one award at a time with a random 1.5-3 second delay per award")
+            log_print(f"⏸️ Pause of 10 seconds every 300 awards per department to respect API rate limits")
             
             max_workers = min(20, len(award_list))
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
@@ -1153,8 +1154,14 @@ def main():
                             total_transactions += result.get('transaction_count', 0)
                             total_subawards += result.get('subaward_count', 0)
                             
-                            # Progress logging every 50 awards or at end
                             processed = _progress_counter['processed']
+                            
+                            # Pause every 300 awards per department to respect API rate limits
+                            if processed > 0 and processed % 300 == 0:
+                                log_print(f"⏸️ Pausing 10 seconds after {processed} awards (per department) to respect API rate limits...")
+                                time.sleep(10)
+                            
+                            # Progress logging every 50 awards or at end
                             if processed % 50 == 0 or processed == len(award_list):
                                 elapsed = time.time() - store_phase_start
                                 rate = processed / elapsed if elapsed > 0 else 0

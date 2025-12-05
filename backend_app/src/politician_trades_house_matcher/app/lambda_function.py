@@ -1419,6 +1419,11 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                 # Format state/district for the politician
                 state_district = format_state_district(politician)
                 
+                # Get securitySymbol and set to "OTHER" if missing or empty
+                security_symbol = trade.get('securitySymbol')
+                if not security_symbol or (isinstance(security_symbol, str) and security_symbol.strip() in ('', '--')):
+                    security_symbol = 'OTHER'
+                
                 # Format matched trade to match Senate output structure
                 matched_trade = {
                     'tradeId': trade_id,
@@ -1430,7 +1435,7 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'filingDate': filing_date,
                     'transactionDate': transaction_date_int,
                     'transactionTime': None,
-                    'securitySymbol': trade.get('securitySymbol'),
+                    'securitySymbol': security_symbol,
                     'securityName': trade.get('securityName'),
                     'assetType': trade.get('assetType'),
                     'transactionType': trade.get('transactionType'),
