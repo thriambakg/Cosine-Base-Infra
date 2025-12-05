@@ -1988,7 +1988,6 @@ module "politician_trades_table" {
     { name = "position", type = "S" },
     { name = "securitySymbol", type = "S" },
     { name = "securityName", type = "S" },
-    { name = "formType", type = "S" },
     { name = "transactionType", type = "S" },
     { name = "transactionDate", type = "N" },
     { name = "amountMin", type = "N" },
