@@ -2223,18 +2223,13 @@ module "usaspending_awards_index_table" {
 
   attributes = [
     { name = "award_id", type = "S" },
-    { name = "recipient_id", type = "S" },
     { name = "recipient_name_normalized", type = "S" },
     { name = "awarding_agency_code", type = "S" },
     { name = "awarding_agency_name", type = "S" },
-    { name = "funding_agency_code", type = "S" },
     { name = "fiscal_year", type = "N" },
     { name = "total_obligation", type = "N" },
     { name = "period_start_date", type = "S" },
     { name = "period_end_date", type = "S" },
-    { name = "naics_code", type = "S" },
-    { name = "psc_code", type = "S" },
-    { name = "cfda_number", type = "S" },
     { name = "recipient_location_state", type = "S" },
     { name = "award_type", type = "S" }
   ]
