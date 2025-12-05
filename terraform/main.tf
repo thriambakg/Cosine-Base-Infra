@@ -2572,6 +2572,7 @@ module "politician_trades_saver" {
   # Environment variables
   environment_variables = {
     DYNAMODB_TABLE_NAME = module.politician_trades_table.table_name
+    S3_BUCKET           = module.politician_trades_s3.bucket_id
   }
 
   # Lambda layers
@@ -2582,7 +2583,8 @@ module "politician_trades_saver" {
   # IAM policies
   additional_policy_arns = [
     module.politician_trades_table.table_policy_arn,
-    module.kms.kms_access_policy_arn
+    module.kms.kms_access_policy_arn,
+    aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
 
   tags = var.common_tags

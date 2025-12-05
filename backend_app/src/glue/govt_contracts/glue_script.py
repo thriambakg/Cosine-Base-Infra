@@ -1124,12 +1124,18 @@ def main():
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
             log_print(f"⚙️ Rate limiting handled by API retry logic")
             
-            max_workers = min(20, len(award_list))
-            
-            # Set delay for large batches (>5000 awards) to help with rate limiting
-            thread_delay = 3.0 if len(award_list) > 5000 else 0.0
-            if thread_delay > 0:
-                log_print(f"⏸️ Large batch detected ({len(award_list)} awards): Adding {thread_delay}s delay per thread")
+            # Adjust workers and delay based on batch size
+            if len(award_list) > 2000:
+                # For large batches (>2000), reduce workers to 5 to avoid rate limits
+                max_workers = min(5, len(award_list))
+                thread_delay = 3.0 if len(award_list) > 5000 else 0.0
+                log_print(f"⏸️ Large batch detected ({len(award_list)} awards): Reducing workers to {max_workers}")
+                if thread_delay > 0:
+                    log_print(f"⏸️ Very large batch: Adding {thread_delay}s delay per thread")
+            else:
+                # For smaller batches, use more workers
+                max_workers = min(20, len(award_list))
+                thread_delay = 0.0
             
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
