@@ -396,7 +396,7 @@ def index_award_metadata(award_record: Dict[str, Any]) -> Dict[str, Any]:
         raise
 
 
-def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
+def index_award_complete(award_record: Dict[str, Any], delay: float = 0) -> Dict[str, Any]:
     """
     Complete award indexing in a single function: metadata, transactions, and subawards.
     This function does everything:
@@ -404,9 +404,14 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
     2. Fetch subawards from API
     3. Upload transactions + subawards to S3
     4. Update DynamoDB with completion flags
+    5. Optional delay to respect API rate limits for large batches
     
     Designed to be called in parallel with ThreadPoolExecutor.
     Rate limiting is handled by the API retry logic in call_usaspending_api.
+    
+    Args:
+        award_record: The award record to index
+        delay: Optional delay in seconds to add after processing (for rate limiting large batches)
     """
     try:
         award_id = award_record['award_id']
@@ -415,6 +420,24 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         # Create a copy for DynamoDB (without transactions list)
         award_db_record = award_record.copy()
         award_db_record.pop('transactions', None)  # Remove transactions from DB record
+        
+        # Handle fiscal_year BEFORE removing sparse fields: It's a range key in both StateFiscalYearIndex 
+        # and AwardTypeFiscalYearIndex GSIs. If fiscal_year is None but either recipient_location_state 
+        # or award_type exists, we need a default because GSI range keys cannot be NULL
+        if award_db_record.get('fiscal_year') is None:
+            recipient_state = award_db_record.get('recipient_location_state')
+            award_type = award_db_record.get('award_type')
+            
+            # If either GSI hash key exists (and is not empty), fiscal_year is required
+            if (recipient_state is not None and recipient_state != '') or (award_type is not None and award_type != ''):
+                # Use current fiscal year as default
+                now = datetime.now(timezone.utc)
+                default_fiscal_year = now.year + 1 if now.month >= 10 else now.year
+                award_db_record['fiscal_year'] = default_fiscal_year
+                logger.warning(f"⚠️ Award {award_id} missing fiscal_year but has GSI key(s). Using default: {default_fiscal_year}")
+            else:
+                # Both GSI hash keys are missing/empty, so remove fiscal_year (sparse index)
+                award_db_record.pop('fiscal_year', None)
         
         # Remove None/empty values for sparse GSI fields
         sparse_gsi_fields = ['cfda_number', 'naics_code', 'psc_code', 'awarding_agency_code', 
@@ -461,6 +484,10 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             UpdateExpression=update_expression,
             ExpressionAttributeValues=expression_values
         )
+        
+        # Add delay if specified (for rate limiting large batches)
+        if delay > 0:
+            time.sleep(delay)
         
         return {'success': True, 'award_id': award_id, 'transaction_count': transaction_count, 'subaward_count': subaward_count}
     
@@ -1091,11 +1118,7 @@ def main():
                 log_print(f"⏱️ Parse Phase: {int(parse_phase_duration // 60)}m {int(parse_phase_duration % 60)}s")
                 log_print(f"⏱️ Total Agency Time: {int(agency_duration // 60)}m {int(agency_duration % 60)}s")
                 successful_agencies += 1
-                # Delay before next agency to give API time to rest
-                if i < len(agencies):
-                    delay_seconds = 60  # 1 minute between departments
-                    log_print(f"⏳ Waiting {delay_seconds}s (1 minute) before next agency...")
-                    time.sleep(delay_seconds)
+                # No delay between agencies - proceed immediately to next agency
                 continue
             
             parse_phase_duration = time.time() - parse_phase_start
@@ -1115,14 +1138,16 @@ def main():
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (metadata + transactions + subawards)")
             log_print(f"⚙️ Rate limiting handled by API retry logic")
             
-            # Adjust workers based on batch size
-            if len(award_list) > 2000:
-                # For large batches (>2000), reduce workers to 5 to avoid rate limits
+            # Adjust workers and delay based on batch size
+            if len(award_list) > 1000:
+                # For large batches (>1000), use 10 workers with 2s delay to avoid rate limits
                 max_workers = min(5, len(award_list))
-                log_print(f"⏸️ Large batch detected ({len(award_list)} awards): Reducing workers to {max_workers}")
+                thread_delay = 0
+                log_print(f"⏸️ Large batch detected ({len(award_list)} awards): Using {max_workers} workers with {thread_delay}s delay per thread")
             else:
-                # For smaller batches, full speed: 20 workers
+                # For smaller batches, full speed: 20 workers, no delay
                 max_workers = min(20, len(award_list))
+                thread_delay = 0.0
             
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
@@ -1140,8 +1165,9 @@ def main():
             # Process all awards in parallel - each thread handles one award at a time
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 # Submit all tasks - each does: metadata + subawards + S3 upload
+                # Pass delay parameter for large batches
                 future_to_award = {
-                    executor.submit(index_award_complete, award_record): award_record['award_id']
+                    executor.submit(index_award_complete, award_record, thread_delay): award_record['award_id']
                     for award_record in award_list
                 }
                 
@@ -1193,11 +1219,7 @@ def main():
             total_indexed += agency_indexed
             successful_agencies += 1
             
-            # Delay before next agency to give API time to rest
-            if i < len(agencies):
-                delay_seconds = 60  # 1 minute between departments
-                log_print(f"\n⏳ Waiting {delay_seconds}s (1 minute) before next agency...")
-                time.sleep(delay_seconds)
+            # No delay between agencies - proceed immediately to next agency
         
         total_job_duration = time.time() - job_start_time
         log_print("\n" + "=" * 80)
