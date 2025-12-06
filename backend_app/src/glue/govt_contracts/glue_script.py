@@ -1142,7 +1142,7 @@ def main():
             if len(award_list) > 1000:
                 # For large batches (>1000), use 10 workers with 2s delay to avoid rate limits
                 max_workers = min(5, len(award_list))
-                thread_delay = 0
+                thread_delay = 2
                 log_print(f"⏸️ Large batch detected ({len(award_list)} awards): Using {max_workers} workers with {thread_delay}s delay per thread")
             else:
                 # For smaller batches, full speed: 20 workers, no delay
