@@ -2775,44 +2775,7 @@ module "politician_trades_state_machine" {
                             }
                           }
                         }
-                        Next = "SaveSenateTrades"
-                      }
-                      SaveSenateTrades = {
-                        Type    = "Pass"
-                        Comment = "Collect all matched trades from MatchSenate Map results and flatten into single array. Date preserved from TransformSenate."
-                        Parameters = {
-                          "date.$" : "$.date", # Date preserved from TransformSenate (before Map states)
-                          "matchedTrades.$" : "$.matchResults[*].matchedTrades[*]"
-                        }
-                        Next = "SaveSenateTradesTask"
-                      }
-                      SaveSenateTradesTask = {
-                        Type       = "Task"
-                        Resource   = module.politician_trades_saver.function_arn
-                        Comment    = "Save matched Senate trades directly to DynamoDB (no aggregation needed)"
-                        ResultPath = "$.saveResults"
-                        End        = true
-                        Retry = [
-                          {
-                            ErrorEquals     = ["States.ALL"]
-                            IntervalSeconds = 30
-                            MaxAttempts     = 3
-                            BackoffRate     = 2.0
-                          }
-                        ]
-                        Catch = [
-                          {
-                            ErrorEquals = ["States.ALL"]
-                            ResultPath  = "$.error"
-                            Next        = "SaveSenateTradesFailed"
-                          }
-                        ]
-                      }
-                      SaveSenateTradesFailed = {
-                        Type    = "Pass"
-                        Comment = "Continue even if save fails"
-                        Result  = { "success" : false, "error" : "Save failed" }
-                        End     = true
+                        End = true
                       }
                     }
                   },
@@ -2952,7 +2915,7 @@ module "politician_trades_state_machine" {
         ResultPath = "$.pipelineResults"
         End        = true
         # No aggregation step - each pipeline saves directly to DynamoDB:
-        # - Senate pipeline: Saves via SaveSenateTrades Lambda at end of chain
+        # - Senate pipeline: Saves directly in MatchSenate Lambda (each matched trade saved immediately)
         # - House pipeline: Saves via SaveHouseTrades Lambda at end of chain
       }
     }
