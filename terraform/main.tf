@@ -1911,37 +1911,37 @@ module "usaspending_bulk_indexing_state_machine" {
 }
 
 # EventBridge Scheduler for Daily USAspending Bulk Indexing (2:00 AM UTC)
-module "usaspending_bulk_indexing_scheduler" {
-  source = "./modules/eventbridge-scheduler"
+# module "usaspending_bulk_indexing_scheduler" {
+#   source = "./modules/eventbridge-scheduler"
 
-  rule_name           = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
-  rule_description    = "Trigger daily bulk indexing of USAspending contracts at 2:00 AM UTC (runs for previous day's contracts)"
-  schedule_expression = "cron(0 2 * * ? *)" # 2:00 AM UTC daily
-  enabled             = true
+#   rule_name           = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
+#   rule_description    = "Trigger daily bulk indexing of USAspending contracts at 2:00 AM UTC (runs for previous day's contracts)"
+#   schedule_expression = "cron(0 2 * * ? *)" # 2:00 AM UTC daily
+#   enabled             = true
 
-  # Target is Step Functions state machine
-  target_arn = module.usaspending_bulk_indexing_state_machine.state_machine_arn
-  target_id  = "USASpendingBulkIndexingScheduler"
+#   # Target is Step Functions state machine
+#   target_arn = module.usaspending_bulk_indexing_state_machine.state_machine_arn
+#   target_id  = "USASpendingBulkIndexingScheduler"
 
-  # For Step Functions, we need to provide a role
-  target_type     = "stepfunctions"
-  target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
+#   # For Step Functions, we need to provide a role
+#   target_type     = "stepfunctions"
+#   target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
 
-  target_input = jsonencode({
-    source            = "scheduler-daily"
-    timestamp         = "scheduled"
-    JobName           = module.usaspending_bulk_indexing_glue_job.job_name
-    AWARDS_TABLE_NAME = module.usaspending_awards_index_table.table_name
-    S3_BUCKET_NAME    = module.usaspending_data_s3.bucket_id
-    # START_DATE and END_DATE omitted - will default to yesterday in Glue script
-  })
+#   target_input = jsonencode({
+#     source            = "scheduler-daily"
+#     timestamp         = "scheduled"
+#     JobName           = module.usaspending_bulk_indexing_glue_job.job_name
+#     AWARDS_TABLE_NAME = module.usaspending_awards_index_table.table_name
+#     S3_BUCKET_NAME    = module.usaspending_data_s3.bucket_id
+#     # START_DATE and END_DATE omitted - will default to yesterday in Glue script
+#   })
 
-  purpose     = "USASpendingBulkIndexing"
-  environment = var.environment
-  tags        = var.common_tags
+#   purpose     = "USASpendingBulkIndexing"
+#   environment = var.environment
+#   tags        = var.common_tags
 
-  depends_on = [module.usaspending_bulk_indexing_state_machine]
-}
+#   depends_on = [module.usaspending_bulk_indexing_state_machine]
+# }
 
 resource "aws_iam_policy" "lambda_politician_trades_textract_policy" {
   name        = "${var.project_name}-lambda-politician-trades-textract-access-${var.environment}"
