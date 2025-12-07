@@ -958,8 +958,8 @@ def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, sta
             # Check for 403 - might need to wait longer for CDN propagation
             if response.status_code == 403:
                 if attempt < max_download_retries - 1:
-                    # Exponential backoff: 30s, 60s, 90s, 120s, etc. (capped at 5 minutes)
-                    wait_time = min(download_retry_delay * (attempt + 1), 300)
+                    # Exponential backoff: 30s, 60s, 120s, 240s, 480s, etc. (capped at 10 minutes)
+                    wait_time = min(30 * (2 ** attempt), 600)
                     log_print(f"⚠️ Got 403 Forbidden. Waiting {wait_time}s before retry {attempt + 1}/{max_download_retries}...")
                     log_print(f"   (CDN propagation may take several minutes after status shows 'ready')")
                     time.sleep(wait_time)
@@ -1069,8 +1069,8 @@ def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, sta
             
         except requests.exceptions.HTTPError as e:
             if e.response.status_code == 403 and attempt < max_download_retries - 1:
-                # Exponential backoff: 30s, 60s, 90s, 120s, etc. (capped at 5 minutes)
-                wait_time = min(download_retry_delay * (attempt + 1), 300)
+                # Exponential backoff: 30s, 60s, 120s, 240s, 480s, etc. (capped at 10 minutes)
+                wait_time = min(30 * (2 ** attempt), 600)
                 log_print(f"⚠️ HTTP 403 error: {str(e)[:200]}. Waiting {wait_time}s before retry {attempt + 1}/{max_download_retries}...")
                 log_print(f"   (CDN propagation may take several minutes after status shows 'ready')")
                 time.sleep(wait_time)

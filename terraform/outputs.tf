@@ -581,3 +581,40 @@ output "lambda_usaspending_data_s3_policy_arn" {
 #   description = "Dashboard endpoint of the OpenSearch domain for SEC filings"
 #   value       = module.sec_filings_opensearch.dashboard_endpoint
 # }
+
+output "usaspending_data_s3_bucket_name" {
+  description = "Name of the USAspending data S3 bucket"
+  value       = module.usaspending_data_s3.bucket_id
+}
+
+output "usaspending_data_s3_bucket_arn" {
+  description = "ARN of the USAspending data S3 bucket"
+  value       = module.usaspending_data_s3.bucket_arn
+}
+
+output "lambda_usaspending_data_s3_policy_arn" {
+  description = "ARN of the IAM policy for Lambda access to USAspending data S3 bucket"
+  value       = aws_iam_policy.lambda_usaspending_data_s3_policy.arn
+}
+
+# OpenSearch Domain Outputs
+# DISABLED FOR MVP - OpenSearch is not being used
+# output "opensearch_domain_endpoint" {
+#   description = "Endpoint of the OpenSearch domain for SEC filings"
+#   value       = module.sec_filings_opensearch.domain_endpoint
+# }
+#
+# output "opensearch_domain_arn" {
+#   description = "ARN of the OpenSearch domain for SEC filings"
+#   value       = module.sec_filings_opensearch.domain_arn
+# }
+#
+# output "opensearch_domain_name" {
+#   description = "Name of the OpenSearch domain for SEC filings"
+#   value       = module.sec_filings_opensearch.domain_name
+# }
+#
+# output "opensearch_dashboard_endpoint" {
+#   description = "Dashboard endpoint of the OpenSearch domain for SEC filings"
+#   value       = module.sec_filings_opensearch.dashboard_endpoint
+# }
