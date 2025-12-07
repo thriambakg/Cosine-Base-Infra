@@ -761,13 +761,14 @@ def save_zip_to_s3(zip_content: bytes, start_date: str, end_date: str, agency_na
     return s3_key
 
 
-def parse_csv_to_award_records(csv_content: str) -> Dict[str, Dict[str, Any]]:
+def _parse_csv_chunk(chunk_lines: List[str], header_row: str) -> Dict[str, Dict[str, Any]]:
     """
-    Parse CSV content and group transactions by award to create award-level records.
-    Returns a dict mapping award_id -> award_record with aggregated data.
-    This avoids API calls by using data directly from the bulk download CSV.
+    Parse a chunk of CSV lines (excluding header) and return award records.
+    This is called in parallel by parse_csv_to_award_records.
     """
-    reader = csv.DictReader(StringIO(csv_content))
+    # Combine header with chunk lines
+    chunk_content = header_row + '\n' + '\n'.join(chunk_lines)
+    reader = csv.DictReader(StringIO(chunk_content))
     awards = {}  # award_id -> award data
     
     for row in reader:
@@ -855,6 +856,80 @@ def parse_csv_to_award_records(csv_content: str) -> Dict[str, Dict[str, Any]]:
     return awards
 
 
+def parse_csv_to_award_records(csv_content: str, max_workers: int = 8) -> Dict[str, Dict[str, Any]]:
+    """
+    Parse CSV content and group transactions by award to create award-level records.
+    Uses multithreading to process large CSV files in parallel chunks.
+    Returns a dict mapping award_id -> award_record with aggregated data.
+    This avoids API calls by using data directly from the bulk download CSV.
+    
+    Args:
+        csv_content: The full CSV content as a string
+        max_workers: Number of parallel threads to use for parsing (default: 8)
+    """
+    lines = csv_content.split('\n')
+    if len(lines) < 2:
+        return {}
+    
+    # Extract header row
+    header_row = lines[0]
+    
+    # Determine chunk size based on file size and number of workers
+    # Aim for ~100k-500k rows per chunk for optimal performance
+    total_rows = len(lines) - 1  # Exclude header
+    chunk_size = max(100000, total_rows // (max_workers * 2))  # At least 100k rows per chunk
+    
+    # Split into chunks (excluding header)
+    data_lines = lines[1:]
+    chunks = []
+    for i in range(0, len(data_lines), chunk_size):
+        chunk = data_lines[i:i + chunk_size]
+        if chunk:  # Only add non-empty chunks
+            chunks.append(chunk)
+    
+    if not chunks:
+        return {}
+    
+    log_print(f"📊 CSV Parsing: {total_rows:,} rows split into {len(chunks)} chunks ({chunk_size:,} rows/chunk)")
+    log_print(f"⚙️ Using {min(max_workers, len(chunks))} parallel workers for parsing")
+    
+    # Process chunks in parallel
+    merged_awards = {}  # award_id -> award_record
+    merge_lock = Lock()  # Thread-safe merging
+    
+    def merge_award_records(chunk_awards: Dict[str, Dict[str, Any]]):
+        """Thread-safe function to merge chunk results into main awards dict"""
+        with merge_lock:
+            for award_id, award_data in chunk_awards.items():
+                if award_id not in merged_awards:
+                    # First time seeing this award - just copy it
+                    merged_awards[award_id] = award_data
+                else:
+                    # Award already exists - merge transactions and aggregate
+                    existing = merged_awards[award_id]
+                    existing['transaction_count'] += award_data['transaction_count']
+                    existing['total_obligation'] += award_data['total_obligation']
+                    existing['transactions'].extend(award_data['transactions'])
+    
+    # Process chunks in parallel
+    with ThreadPoolExecutor(max_workers=min(max_workers, len(chunks))) as executor:
+        futures = [executor.submit(_parse_csv_chunk, chunk, header_row) for chunk in chunks]
+        
+        completed = 0
+        for future in as_completed(futures):
+            try:
+                chunk_awards = future.result()
+                merge_award_records(chunk_awards)
+                completed += 1
+                if completed % max(1, len(chunks) // 10) == 0:
+                    log_print(f"📊 Parsing progress: {completed}/{len(chunks)} chunks completed")
+            except Exception as e:
+                log_print(f"❌ Error parsing chunk: {str(e)}")
+                continue
+    
+    return merged_awards
+
+
 def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None, return_award_records: bool = False) -> Any:
     """Download CSV/ZIP file and parse to extract award IDs"""
     agency_prefix = f"[{agency_name}] " if agency_name else ""
@@ -940,10 +1015,22 @@ def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, sta
             
             if return_award_records:
                 log_print(f"🔄 {agency_prefix}Parsing CSV to extract award records (no API calls needed)...")
-                awards = parse_csv_to_award_records(csv_content)
+                # Use multithreading for large files - adjust workers based on file size
+                csv_size_mb = len(csv_content.encode('utf-8')) / (1024 * 1024)
+                if csv_size_mb > 500:
+                    # Large file (>500MB) - use more workers
+                    parse_workers = 12
+                elif csv_size_mb > 100:
+                    # Medium file (100-500MB) - moderate workers
+                    parse_workers = 8
+                else:
+                    # Small file (<100MB) - fewer workers
+                    parse_workers = 4
+                
+                awards = parse_csv_to_award_records(csv_content, max_workers=parse_workers)
                 parse_duration = time.time() - parse_start_time
                 log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
-                log_print(f"   📊 CSV Size: {len(csv_content):,} bytes")
+                log_print(f"   📊 CSV Size: {len(csv_content):,} bytes ({csv_size_mb:.2f} MB)")
                 log_print(f"   🆔 Unique Awards Found in CSV: {len(awards):,}")
                 log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
                 return awards
