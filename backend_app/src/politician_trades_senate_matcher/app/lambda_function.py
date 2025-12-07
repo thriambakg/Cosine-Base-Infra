@@ -1772,11 +1772,18 @@ def lambda_handler(event, context):
     
     Returns:
     {
-        "matchedTrades": [...],
+        "matchedTradeIds": ["trade_2024-01-15_senate_0", "trade_2024-01-15_senate_1", ...],
+        "matchedCount": 2,
         "unmatchedCount": 0,
         "s3Key": "...",
-        "formType": "..."
+        "formType": "...",
+        "source": "senate",
+        "tradesSaved": 2,
+        "saveErrors": 0
     }
+    
+    Note: Only trade IDs are returned to reduce Step Functions payload size.
+    Full trade data is saved directly to DynamoDB during matching.
     """
     logger.info(f"🚀 Politician Trades Senate Matcher Lambda started: {json.dumps(event)}")
     
@@ -1804,20 +1811,26 @@ def lambda_handler(event, context):
     if event.get('success') is False:
         logger.warning(f"⚠️ Skipping failed download: {event.get('error', 'Unknown error')}")
         return {
-            "matchedTrades": [],
+            "matchedTradeIds": [],
+            "matchedCount": 0,
             "unmatchedCount": 0,
             "s3Key": None,
             "formType": form_type,
-            "error": event.get('error', 'Download failed')
+            "error": event.get('error', 'Download failed'),
+            "tradesSaved": 0,
+            "saveErrors": 0
         }
     
     if not s3_key:
         logger.warning("⚠️ No s3Key provided in event")
         return {
-            "matchedTrades": [],
+            "matchedTradeIds": [],
+            "matchedCount": 0,
             "unmatchedCount": 0,
             "s3Key": None,
-            "formType": form_type
+            "formType": form_type,
+            "tradesSaved": 0,
+            "saveErrors": 0
         }
     
     try:
@@ -1923,7 +1936,7 @@ def lambda_handler(event, context):
                 logger.warning(f"⚠️ Cannot create placeholder trade - no valid filer_name available")
         
         # Match trades to politicians and save each one immediately
-        matched_trades = []
+        matched_trade_ids = []  # Only store IDs to reduce payload size
         unmatched_count = 0
         saved_count = 0
         save_errors = 0
@@ -2046,8 +2059,11 @@ def lambda_handler(event, context):
                 if not security_symbol or (isinstance(security_symbol, str) and security_symbol.strip() in ('', '--')):
                     security_symbol = 'OTHER'
                 
+                # Generate trade ID
+                trade_id = f"trade_{final_filing_date}_senate_{len(matched_trade_ids)}"
+                
                 matched_trade = {
-                    'tradeId': f"trade_{final_filing_date}_senate_{len(matched_trades)}",
+                    'tradeId': trade_id,
                     'politicianName': matched_politician['name'],  # GSI: PoliticianTradeDateIndex
                     'party': matched_politician['party'],  # GSI: PartyTradeDateIndex
                     'position': matched_politician['position'],  # GSI: PositionTradeDateIndex
@@ -2093,16 +2109,18 @@ def lambda_handler(event, context):
                 else:
                     logger.debug(f"⚠️ DynamoDB table not initialized - skipping save for trade {matched_trade.get('tradeId', 'unknown')}")
                 
-                matched_trades.append(matched_trade)
+                # Only store the trade ID to reduce payload size
+                matched_trade_ids.append(trade_id)
             else:
                 unmatched_count += 1
         
-        logger.info(f"✅ Matched {len(matched_trades)} trades from {s3_key}")
+        logger.info(f"✅ Matched {len(matched_trade_ids)} trades from {s3_key}")
         if table:
             logger.info(f"💾 Saved {saved_count} trades to DynamoDB ({save_errors} errors)")
         
         return {
-            "matchedTrades": matched_trades,
+            "matchedTradeIds": matched_trade_ids,  # Only return IDs to reduce payload size
+            "matchedCount": len(matched_trade_ids),
             "unmatchedCount": unmatched_count,
             "s3Key": s3_key,
             "formType": form_type,
@@ -2116,7 +2134,8 @@ def lambda_handler(event, context):
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
         return {
-            "matchedTrades": [],
+            "matchedTradeIds": [],
+            "matchedCount": 0,
             "unmatchedCount": 1,
             "s3Key": s3_key,
             "formType": form_type,
