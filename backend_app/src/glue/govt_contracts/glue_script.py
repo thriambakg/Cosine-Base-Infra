@@ -657,10 +657,6 @@ def poll_download_status(file_name: str, max_wait: int = 14400, poll_interval: i
                     log_print(f"⚠️ {agency_prefix}Error in logging (non-critical): {str(log_error)[:200]}")
                     log_print(f"✅ {agency_prefix}File is ready, proceeding with download...")
                 
-                # Add a longer delay to ensure file is fully available on CDN
-                # CDN propagation can take 30-60 seconds even after status says "ready"
-                log_print(f"⏳ {agency_prefix}Waiting 30 seconds for file to be fully available on CDN...")
-                time.sleep(30)
                 return response
             elif status == "failed":
                 raise Exception(f"{agency_prefix}Bulk download failed: {message or 'Unknown error'}")
@@ -937,37 +933,53 @@ def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, sta
     
     log_print(f"📥 {agency_prefix}Downloading file from {file_url}")
     
-    # Add a delay to ensure file is fully available after status says "ready"
-    # Files are uploaded to CDN which may take time to propagate
-    # Increased wait time based on test script that works
-    log_print(f"⏳ {agency_prefix}Waiting 30 seconds for file to be fully available on CDN...")
-    time.sleep(30)
-    
     # Use session with SSL verification disabled for Glue environment
     session = create_session()
     
-    # Retry logic for 403 errors (file might not be immediately available on CDN)
-    # Increased retries and delays based on test script
-    max_download_retries = 10  # Increased from 5
-    download_retry_delay = 30  # Increased from 15 - CDN propagation can take longer
+    # First, verify file is accessible with HEAD request before attempting full download
+    # This is lighter weight and helps catch CDN propagation issues early
+    max_verification_retries = 15
+    verification_retry_delay = 60  # Start with 60s - CDN can take time
     
-    for attempt in range(max_download_retries):
+    file_verified = False
+    for verify_attempt in range(max_verification_retries):
         try:
-            response = session.get(file_url, timeout=300, stream=True)
-            
-            # Check for 403 - might need to wait longer for CDN propagation
-            if response.status_code == 403:
-                if attempt < max_download_retries - 1:
-                    # Exponential backoff: 30s, 60s, 120s, 240s, 480s, etc. (capped at 10 minutes)
-                    wait_time = min(30 * (2 ** attempt), 600)
-                    log_print(f"⚠️ Got 403 Forbidden. Waiting {wait_time}s before retry {attempt + 1}/{max_download_retries}...")
-                    log_print(f"   (CDN propagation may take several minutes after status shows 'ready')")
+            head_response = session.head(file_url, timeout=60, allow_redirects=True)
+            if head_response.status_code == 200:
+                file_verified = True
+                break
+            elif head_response.status_code == 403:
+                if verify_attempt < max_verification_retries - 1:
+                    wait_time = min(60 * (2 ** min(verify_attempt, 5)), 600)  # Cap at 10 minutes
                     time.sleep(wait_time)
                     continue
                 else:
-                    response.raise_for_status()
+                    raise Exception(f"File verification failed: 403 Forbidden after {max_verification_retries} attempts")
             else:
-                response.raise_for_status()
+                head_response.raise_for_status()
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 403 and verify_attempt < max_verification_retries - 1:
+                wait_time = min(60 * (2 ** min(verify_attempt, 5)), 600)
+                time.sleep(wait_time)
+                continue
+            raise
+        except Exception as e:
+            if verify_attempt < max_verification_retries - 1:
+                wait_time = min(60 * (2 ** min(verify_attempt, 5)), 600)
+                time.sleep(wait_time)
+                continue
+            raise
+    
+    if not file_verified:
+        raise Exception(f"File not accessible after {max_verification_retries} verification attempts")
+    
+    # File is verified - proceed with download
+    # Retry logic for download errors
+    max_download_retries = 5
+    for attempt in range(max_download_retries):
+        try:
+            response = session.get(file_url, timeout=300, stream=True)
+            response.raise_for_status()
             
             # Check if it's a ZIP file
             content_type = response.headers.get('Content-Type', '').lower()
@@ -1068,18 +1080,17 @@ def download_and_parse_csv(file_url: str, agency_name: Optional[str] = None, sta
                 return award_ids
             
         except requests.exceptions.HTTPError as e:
-            if e.response.status_code == 403 and attempt < max_download_retries - 1:
-                # Exponential backoff: 30s, 60s, 120s, 240s, 480s, etc. (capped at 10 minutes)
-                wait_time = min(30 * (2 ** attempt), 600)
-                log_print(f"⚠️ HTTP 403 error: {str(e)[:200]}. Waiting {wait_time}s before retry {attempt + 1}/{max_download_retries}...")
-                log_print(f"   (CDN propagation may take several minutes after status shows 'ready')")
+            if attempt < max_download_retries - 1:
+                wait_time = 30 * (attempt + 1)  # Linear backoff: 30s, 60s, 90s, 120s, 150s
                 time.sleep(wait_time)
                 continue
             else:
-                log_print(f"❌ HTTP error downloading file: {str(e)[:200]}")
                 raise
         except Exception as e:
-            log_print(f"❌ Error downloading/parsing file: {str(e)[:200]}")
+            if attempt < max_download_retries - 1:
+                wait_time = 30 * (attempt + 1)
+                time.sleep(wait_time)
+                continue
             raise
     
     raise Exception(f"Failed to download file after {max_download_retries} retries")
