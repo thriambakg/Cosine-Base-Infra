@@ -17,7 +17,6 @@ import json
 import logging
 import time
 import csv
-import gzip
 import zipfile
 import urllib3
 import gc
@@ -250,31 +249,6 @@ def normalize_string(value: Any) -> Optional[str]:
         value = value.strip()
         return value if value else None
     return str(value).strip() if str(value).strip() else None
-
-def upload_award_details_to_s3(award_id: str, transactions: List[Dict], subawards: List[Dict]) -> str:
-    """Upload combined transactions and subawards to S3"""
-    combined_data = {
-        'transactions': transactions,
-        'subawards': subawards,
-        'indexed_at': datetime.now(timezone.utc).isoformat(),
-        'transaction_count': len(transactions),
-        'subaward_count': len(subawards)
-    }
-    
-    combined_json = json.dumps(combined_data, default=str)
-    combined_gzipped = gzip.compress(combined_json.encode('utf-8'))
-    s3_key = f"award-details/{award_id}/details.json.gz"
-    
-    s3_client.put_object(
-        Bucket=S3_BUCKET_NAME,
-        Key=s3_key,
-        Body=combined_gzipped,
-        ContentType='application/json',
-        ContentEncoding='gzip',
-        ServerSideEncryption='aws:kms'
-    )
-    
-    return s3_key
 
 # ============================================================================
 # Bulk Download Functions
@@ -828,10 +802,10 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     
     # Parse all prime award files in parallel
     all_prime_awards = {}
-    parse_workers = min(16, len(prime_files))
+    parse_workers = len(prime_files) * 5
     
     if len(prime_files) > 0:
-        log_print(f"📊 {agency_prefix}Parsing {len(prime_files)} prime award file(s) with {parse_workers} workers...")
+        log_print(f"📊 {agency_prefix}Parsing {len(prime_files)} prime award file(s) with {parse_workers} workers (5x files)...")
         
         def parse_prime_file(file_name):
             try:
@@ -867,10 +841,10 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     
     # Parse all sub-award files in parallel
     all_subawards_by_parent = {}
-    subaward_parse_workers = min(16, len(subaward_files))
+    subaward_parse_workers = len(subaward_files) * 5
     
     if len(subaward_files) > 0:
-        log_print(f"📊 {agency_prefix}Parsing {len(subaward_files)} sub-award file(s) with {subaward_parse_workers} workers...")
+        log_print(f"📊 {agency_prefix}Parsing {len(subaward_files)} sub-award file(s) with {subaward_parse_workers} workers (5x files)...")
         
         def parse_subaward_file(file_name):
             try:
@@ -1011,21 +985,23 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             except:
                 db_item['total_obligation'] = Decimal('0')
         
-        # Convert all floats to Decimal
-        db_item = convert_floats_to_decimal(db_item)
-        
-        # Get transactions and subawards
+        # Get transactions and subawards (already in award_record from CSV parsing)
         transactions = award_record.get('transactions', [])
         subawards = award_record.get('subawards', [])
         transaction_count = len(transactions)
         subaward_count = len(subawards)
         
-        # Upload transactions and subawards to S3
-        s3_key = upload_award_details_to_s3(award_id, transactions, subawards)
+        # Store transactions and subawards directly in DynamoDB
+        # Convert to DynamoDB-compatible format
+        if transactions:
+            db_item['transactions'] = convert_floats_to_decimal(transactions)
+        if subawards:
+            db_item['subawards'] = convert_floats_to_decimal(subawards)
         
-        # Add S3 key and completion flags
-        db_item['award_details_s3_key'] = s3_key
-        db_item['award_details_indexed'] = True
+        # Convert all floats to Decimal
+        db_item = convert_floats_to_decimal(db_item)
+        
+        # Add completion flags and counts
         db_item['transaction_count'] = transaction_count
         db_item['subaward_count'] = subaward_count
         db_item['full_indexing_complete'] = True
