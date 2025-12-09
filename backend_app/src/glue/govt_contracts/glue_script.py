@@ -762,6 +762,13 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     # Extract ZIP
     zip_content = BytesIO(content)
     
+    # Initialize variables outside the with block
+    csv_s3_keys = {}
+    prime_file_list = []
+    subaward_file_list = []
+    date_range_path = format_date_range_path(start_date, end_date) if start_date and end_date else "unknown"
+    agency_filename = format_agency_name_for_s3(agency_name) if agency_name else "unknown"
+    
     with zipfile.ZipFile(zip_content, 'r') as zip_ref:
         file_list = zip_ref.namelist()
         log_print(f"📋 {agency_prefix}ZIP contains {len(file_list)} file(s)")
@@ -780,45 +787,69 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
         log_print(f"   - {len(subaward_files)} Sub-award file(s)")
         
         # Save ZIP to S3 if agency name and dates provided
+        s3_zip_key = None
         if agency_name and start_date and end_date:
             try:
-                save_zip_to_s3(content, start_date, end_date, agency_name)
+                s3_zip_key = save_zip_to_s3(content, start_date, end_date, agency_name)
+                log_print(f"💾 {agency_prefix}ZIP saved to S3, will extract CSV files to S3 to avoid memory issues")
             except Exception as e:
                 log_print(f"⚠️ {agency_prefix}Failed to save ZIP to S3 (non-critical): {str(e)[:200]}")
         
-        # Read all CSV files from ZIP into memory first
-        prime_csv_contents = {}
-        subaward_csv_contents = {}
+        # Extract CSV files to S3 individually to avoid loading all into memory
+        log_print(f"📦 {agency_prefix}Extracting CSV files to S3...")
+        for csv_file in csv_files:
+            try:
+                csv_content = zip_ref.read(csv_file)
+                csv_s3_key = f"{date_range_path}/{agency_filename}/{csv_file}"
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key=csv_s3_key,
+                    Body=csv_content,
+                    ContentType='text/csv'
+                )
+                csv_s3_keys[csv_file] = csv_s3_key
+                log_print(f"   ✅ Extracted {csv_file} to S3")
+                # Clear CSV content from memory immediately
+                del csv_content
+            except Exception as e:
+                log_print(f"   ⚠️ Failed to extract {csv_file} to S3: {str(e)[:200]}")
         
-        for prime_file in prime_files:
-            prime_csv_contents[prime_file] = zip_ref.read(prime_file).decode('utf-8')
-        
-        for subaward_file in subaward_files:
-            subaward_csv_contents[subaward_file] = zip_ref.read(subaward_file).decode('utf-8')
+        # Store file lists for later reading
+        prime_file_list = prime_files.copy()
+        subaward_file_list = subaward_files.copy()
     
     # ZIP file is now closed, clear from memory
     del zip_content
+    del content
     del response
+    gc.collect()
     
-    # Parse all prime award files in parallel
+    # Parse all prime award files in parallel (read from S3)
     all_prime_awards = {}
-    parse_workers = len(prime_files) * 5
+    parse_workers = len(prime_file_list) * 5
     
-    if len(prime_files) > 0:
-        log_print(f"📊 {agency_prefix}Parsing {len(prime_files)} prime award file(s) with {parse_workers} workers (5x files)...")
+    if len(prime_file_list) > 0:
+        log_print(f"📊 {agency_prefix}Parsing {len(prime_file_list)} prime award file(s) with {parse_workers} workers (5x files)...")
+        log_print(f"   Reading CSV files from S3 (extracted individually)")
         
-        def parse_prime_file(file_name):
+        def parse_prime_file_from_s3(file_name):
             try:
-                csv_content = prime_csv_contents[file_name]
-                return parse_prime_award_csv(csv_content, file_name)
+                # Read CSV directly from S3
+                csv_s3_key = csv_s3_keys.get(file_name)
+                if csv_s3_key:
+                    csv_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
+                    csv_content = csv_obj['Body'].read().decode('utf-8')
+                    return parse_prime_award_csv(csv_content, file_name)
+                else:
+                    raise Exception(f"S3 key not found for {file_name}")
             except Exception as e:
                 log_print(f"❌ {agency_prefix}Error parsing {file_name}: {str(e)[:200]}")
                 return {}
         
         with ThreadPoolExecutor(max_workers=parse_workers) as executor:
             future_to_file = {
-                executor.submit(parse_prime_file, prime_file): prime_file
-                for prime_file in prime_files
+                executor.submit(parse_prime_file_from_s3, prime_file): prime_file
+                for prime_file in prime_file_list
             }
             
             for future in as_completed(future_to_file):
@@ -836,28 +867,32 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
                 except Exception as e:
                     log_print(f"❌ {agency_prefix}Error processing results from {prime_file}: {str(e)[:200]}")
     
-    # Clear prime CSV contents from memory
-    del prime_csv_contents
-    
-    # Parse all sub-award files in parallel
+    # Parse all sub-award files in parallel (read from S3)
     all_subawards_by_parent = {}
-    subaward_parse_workers = len(subaward_files) * 5
+    subaward_parse_workers = len(subaward_file_list) * 5
     
-    if len(subaward_files) > 0:
-        log_print(f"📊 {agency_prefix}Parsing {len(subaward_files)} sub-award file(s) with {subaward_parse_workers} workers (5x files)...")
+    if len(subaward_file_list) > 0:
+        log_print(f"📊 {agency_prefix}Parsing {len(subaward_file_list)} sub-award file(s) with {subaward_parse_workers} workers (5x files)...")
+        log_print(f"   Reading CSV files from S3 (extracted individually)")
         
-        def parse_subaward_file(file_name):
+        def parse_subaward_file_from_s3(file_name):
             try:
-                csv_content = subaward_csv_contents[file_name]
-                return parse_subaward_csv(csv_content, file_name)
+                # Read CSV directly from S3
+                csv_s3_key = csv_s3_keys.get(file_name)
+                if csv_s3_key:
+                    csv_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
+                    csv_content = csv_obj['Body'].read().decode('utf-8')
+                    return parse_subaward_csv(csv_content, file_name)
+                else:
+                    raise Exception(f"S3 key not found for {file_name}")
             except Exception as e:
                 log_print(f"❌ {agency_prefix}Error parsing {file_name}: {str(e)[:200]}")
                 return {}
         
         with ThreadPoolExecutor(max_workers=subaward_parse_workers) as executor:
             future_to_file = {
-                executor.submit(parse_subaward_file, subaward_file): subaward_file
-                for subaward_file in subaward_files
+                executor.submit(parse_subaward_file_from_s3, subaward_file): subaward_file
+                for subaward_file in subaward_file_list
             }
             
             for future in as_completed(future_to_file):
@@ -928,9 +963,6 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     log_print(f"   📊 Prime Awards: {len(all_prime_awards):,}")
     log_print(f"   📊 Sub-Awards: {sum(len(subs) for subs in all_subawards_by_parent.values()):,}")
     log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
-    
-    # Clear CSV contents from memory after parsing
-    del subaward_csv_contents
     
     return {
         'prime_awards': all_prime_awards,
