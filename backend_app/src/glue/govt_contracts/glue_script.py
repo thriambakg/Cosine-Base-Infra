@@ -20,6 +20,7 @@ import csv
 import zipfile
 import urllib3
 import gc
+import codecs
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from decimal import Decimal
@@ -502,27 +503,30 @@ def save_zip_to_s3(zip_content: bytes, start_date: str, end_date: str, agency_na
 # CSV Parsing Functions
 # ============================================================================
 
-def parse_prime_award_csv(csv_content: str, csv_filename: str) -> Dict[str, Dict[str, Any]]:
+def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str, Dict[str, Any]]:
     """
-    Parse prime award CSV file and return award records with all columns preserved.
-    Groups transactions by award_id.
+    Parse prime award CSV file from stream and return award records with all columns preserved.
+    Groups transactions by award_id. Uses streaming to avoid loading entire file into memory.
     
     Args:
-        csv_content: CSV content as string
+        csv_file_obj: File-like object (stream) containing CSV content
         csv_filename: Name of the CSV file (for logging)
     
     Returns:
         Dict mapping award_id -> award_record with all CSV columns
     """
     awards = {}
-    lines = csv_content.split('\n')
+    row_count = 0
     
-    if len(lines) < 2:
-        return awards
-    
-    reader = csv.DictReader(StringIO(csv_content))
+    reader = csv.DictReader(csv_file_obj)
     
     for row in reader:
+        row_count += 1
+        
+        # Log progress for large files
+        if row_count % 100000 == 0:
+            log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
+        
         # Get award ID - primary key for grouping
         award_id = (
             row.get('contract_award_unique_key') or
@@ -604,29 +608,47 @@ def parse_prime_award_csv(csv_content: str, csv_filename: str) -> Dict[str, Dict
         except:
             pass
     
-    log_print(f"✅ Parsed {csv_filename}: {len(awards)} unique awards, {sum(a['transaction_count'] for a in awards.values())} total transactions")
+    log_print(f"✅ Parsed {csv_filename}: {len(awards)} unique awards, {sum(a['transaction_count'] for a in awards.values())} total transactions, {row_count:,} rows processed")
     return awards
 
-def parse_subaward_csv(csv_content: str, csv_filename: str) -> Dict[str, List[Dict[str, Any]]]:
+def parse_prime_award_csv(csv_content: str, csv_filename: str) -> Dict[str, Dict[str, Any]]:
     """
-    Parse sub-award CSV file and return sub-awards grouped by parent award ID.
+    Parse prime award CSV file from string (legacy method for backward compatibility).
+    Groups transactions by award_id.
     
     Args:
         csv_content: CSV content as string
         csv_filename: Name of the CSV file (for logging)
     
     Returns:
+        Dict mapping award_id -> award_record with all CSV columns
+    """
+    return parse_prime_award_csv_streaming(StringIO(csv_content), csv_filename)
+
+def parse_subaward_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Parse sub-award CSV file from stream and return sub-awards grouped by parent award ID.
+    Uses streaming to avoid loading entire file into memory.
+    
+    Args:
+        csv_file_obj: File-like object (stream) containing CSV content
+        csv_filename: Name of the CSV file (for logging)
+    
+    Returns:
         Dict mapping parent_award_id -> list of sub-award records
     """
     subawards_by_parent = {}
-    lines = csv_content.split('\n')
+    row_count = 0
     
-    if len(lines) < 2:
-        return subawards_by_parent
-    
-    reader = csv.DictReader(StringIO(csv_content))
+    reader = csv.DictReader(csv_file_obj)
     
     for row in reader:
+        row_count += 1
+        
+        # Log progress for large files
+        if row_count % 100000 == 0:
+            log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
+        
         # Get parent award ID (links sub-award to prime award)
         parent_award_id = (
             row.get('prime_award_unique_key') or
@@ -661,8 +683,21 @@ def parse_subaward_csv(csv_content: str, csv_filename: str) -> Dict[str, List[Di
         subawards_by_parent[parent_award_id].append(subaward_record)
     
     total_subawards = sum(len(subs) for subs in subawards_by_parent.values())
-    log_print(f"✅ Parsed {csv_filename}: {len(subawards_by_parent)} parent awards, {total_subawards} total sub-awards")
+    log_print(f"✅ Parsed {csv_filename}: {len(subawards_by_parent)} parent awards, {total_subawards} total sub-awards, {row_count:,} rows processed")
     return subawards_by_parent
+
+def parse_subaward_csv(csv_content: str, csv_filename: str) -> Dict[str, List[Dict[str, Any]]]:
+    """
+    Parse sub-award CSV file from string (legacy method for backward compatibility).
+    
+    Args:
+        csv_content: CSV content as string
+        csv_filename: Name of the CSV file (for logging)
+    
+    Returns:
+        Dict mapping parent_award_id -> list of sub-award records
+    """
+    return parse_subaward_csv_streaming(StringIO(csv_content), csv_filename)
 
 def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
     """
@@ -824,6 +859,22 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     del response
     gc.collect()
     
+    # Validate that we have S3 keys for the files we need
+    if not csv_s3_keys:
+        raise Exception(f"{agency_prefix}No CSV files were successfully extracted to S3. Cannot proceed with parsing.")
+    
+    missing_prime_files = [f for f in prime_file_list if f not in csv_s3_keys]
+    missing_subaward_files = [f for f in subaward_file_list if f not in csv_s3_keys]
+    
+    if missing_prime_files:
+        log_print(f"⚠️ {agency_prefix}Warning: {len(missing_prime_files)} prime file(s) not extracted to S3: {missing_prime_files}")
+    if missing_subaward_files:
+        log_print(f"⚠️ {agency_prefix}Warning: {len(missing_subaward_files)} sub-award file(s) not extracted to S3: {missing_subaward_files}")
+    
+    # Only parse files that were successfully extracted
+    prime_file_list = [f for f in prime_file_list if f in csv_s3_keys]
+    subaward_file_list = [f for f in subaward_file_list if f in csv_s3_keys]
+    
     # Parse all prime award files in parallel (read from S3)
     all_prime_awards = {}
     parse_workers = len(prime_file_list) * 5
@@ -834,16 +885,28 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
         
         def parse_prime_file_from_s3(file_name):
             try:
-                # Read CSV directly from S3
+                # Read CSV directly from S3 using streaming to avoid memory issues
                 csv_s3_key = csv_s3_keys.get(file_name)
-                if csv_s3_key:
-                    csv_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
-                    csv_content = csv_obj['Body'].read().decode('utf-8')
-                    return parse_prime_award_csv(csv_content, file_name)
-                else:
-                    raise Exception(f"S3 key not found for {file_name}")
+                if not csv_s3_key:
+                    error_msg = f"S3 key not found for {file_name}. Available keys: {list(csv_s3_keys.keys())}"
+                    log_print(f"❌ {agency_prefix}{error_msg}")
+                    raise Exception(error_msg)
+                
+                log_print(f"   📥 Streaming {file_name} from S3: {csv_s3_key}")
+                csv_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
+                
+                # Stream CSV content in chunks to avoid loading entire file into memory
+                # Use TextIOWrapper to decode on the fly
+                stream = csv_obj['Body']
+                decoder = codecs.getreader('utf-8')
+                csv_file_obj = decoder(stream)
+                
+                # Parse CSV directly from stream
+                return parse_prime_award_csv_streaming(csv_file_obj, file_name)
             except Exception as e:
-                log_print(f"❌ {agency_prefix}Error parsing {file_name}: {str(e)[:200]}")
+                error_msg = f"Error parsing {file_name}: {str(e)}"
+                log_print(f"❌ {agency_prefix}{error_msg}")
+                logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
                 return {}
         
         with ThreadPoolExecutor(max_workers=parse_workers) as executor:
@@ -877,16 +940,28 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
         
         def parse_subaward_file_from_s3(file_name):
             try:
-                # Read CSV directly from S3
+                # Read CSV directly from S3 using streaming to avoid memory issues
                 csv_s3_key = csv_s3_keys.get(file_name)
-                if csv_s3_key:
-                    csv_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
-                    csv_content = csv_obj['Body'].read().decode('utf-8')
-                    return parse_subaward_csv(csv_content, file_name)
-                else:
-                    raise Exception(f"S3 key not found for {file_name}")
+                if not csv_s3_key:
+                    error_msg = f"S3 key not found for {file_name}. Available keys: {list(csv_s3_keys.keys())}"
+                    log_print(f"❌ {agency_prefix}{error_msg}")
+                    raise Exception(error_msg)
+                
+                log_print(f"   📥 Streaming {file_name} from S3: {csv_s3_key}")
+                csv_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
+                
+                # Stream CSV content in chunks to avoid loading entire file into memory
+                # Use TextIOWrapper to decode on the fly
+                stream = csv_obj['Body']
+                decoder = codecs.getreader('utf-8')
+                csv_file_obj = decoder(stream)
+                
+                # Parse CSV directly from stream
+                return parse_subaward_csv_streaming(csv_file_obj, file_name)
             except Exception as e:
-                log_print(f"❌ {agency_prefix}Error parsing {file_name}: {str(e)[:200]}")
+                error_msg = f"Error parsing {file_name}: {str(e)}"
+                log_print(f"❌ {agency_prefix}{error_msg}")
+                logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
                 return {}
         
         with ThreadPoolExecutor(max_workers=subaward_parse_workers) as executor:
@@ -932,7 +1007,6 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
                 response = awards_table.get_item(Key={'award_id': parent_id})
                 if 'Item' in response:
                     # Parent exists in DynamoDB - add subawards to it via update
-                    # Note: We'll update it during indexing, but for now just log
                     log_print(f"✅ {agency_prefix}Found parent award {parent_id} in DynamoDB (will update during indexing)")
                     # Store subawards to be added during indexing
                     # We'll handle this by creating a minimal award record for indexing
@@ -951,7 +1025,10 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
                 else:
                     log_print(f"⚠️ {agency_prefix}Parent award {parent_id} not found in bulk file or DynamoDB for {len(subawards)} sub-awards")
             except Exception as e:
-                log_print(f"⚠️ {agency_prefix}Error checking DynamoDB for parent {parent_id}: {str(e)[:200]}")
+                error_msg = f"Error checking DynamoDB for parent {parent_id}: {str(e)}"
+                log_print(f"⚠️ {agency_prefix}{error_msg}")
+                logger.error(f"⚠️ {agency_prefix}{error_msg}", exc_info=True)
+                # Continue processing other parents even if one fails
         
         if dynamodb_linked > 0:
             log_print(f"✅ {agency_prefix}Found {dynamodb_linked} parent awards in DynamoDB")
@@ -1099,8 +1176,22 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             # Ensure all fields are properly converted
             db_item = convert_floats_to_decimal(db_item)
             
-            # Update item in DynamoDB
-            awards_table.put_item(Item=db_item)
+            # Update item in DynamoDB with retry logic for throttling
+            max_put_retries = 3
+            for put_attempt in range(max_put_retries):
+                try:
+                    awards_table.put_item(Item=db_item)
+                    break
+                except Exception as put_error:
+                    error_str = str(put_error)
+                    if 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                        if put_attempt < max_put_retries - 1:
+                            wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
+                            log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                            time.sleep(wait_time)
+                            continue
+                    # Re-raise if not throttling or out of retries
+                    raise
         else:
             # New item - store transactions and subawards directly in DynamoDB
             # Convert to DynamoDB-compatible format
@@ -1118,8 +1209,22 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             db_item['full_indexing_complete'] = True
             db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
             
-            # Store to DynamoDB
-            awards_table.put_item(Item=db_item)
+            # Store to DynamoDB with retry logic for throttling
+            max_put_retries = 3
+            for put_attempt in range(max_put_retries):
+                try:
+                    awards_table.put_item(Item=db_item)
+                    break
+                except Exception as put_error:
+                    error_str = str(put_error)
+                    if 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                        if put_attempt < max_put_retries - 1:
+                            wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
+                            log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                            time.sleep(wait_time)
+                            continue
+                    # Re-raise if not throttling or out of retries
+                    raise
         
         return {
             'success': True,
@@ -1345,8 +1450,14 @@ def main():
         job.commit()
         
     except Exception as e:
-        log_print(f"❌ CRITICAL ERROR in bulk indexing job: {str(e)}")
-        logger.error(f"❌ CRITICAL ERROR in bulk indexing job: {str(e)}", exc_info=True)
+        import traceback
+        error_msg = f"CRITICAL ERROR in bulk indexing job: {str(e)}"
+        error_traceback = traceback.format_exc()
+        log_print(f"❌ {error_msg}")
+        log_print(f"❌ Traceback:\n{error_traceback}")
+        logger.error(f"❌ {error_msg}", exc_info=True)
+        logger.error(f"❌ Traceback:\n{error_traceback}")
+        # Re-raise to trigger Glue job failure (exit code 10)
         raise
 
 if __name__ == "__main__":
