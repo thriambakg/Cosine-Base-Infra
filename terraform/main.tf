@@ -1761,10 +1761,11 @@ module "usaspending_bulk_indexing_glue_job" {
   glue_version    = "4.0"
 
   # Job configuration
-  max_retries       = 1
-  timeout           = 2880 # 48 hours (max is 10080 minutes = 7 days, bulk downloads can take time)
-  worker_type       = "G.1X"
-  number_of_workers = 2
+  max_retries          = 1
+  timeout              = 2880 # 48 hours (max is 10080 minutes = 7 days, bulk downloads can take time)
+  concurrent_executions = 1   # Only allow 1 concurrent run to avoid conflicts
+  worker_type          = "G.1X"
+  number_of_workers    = 2
 
   # S3 buckets
   s3_bucket_arn = module.glue_scripts_s3.bucket_arn
@@ -1858,18 +1859,40 @@ module "usaspending_bulk_indexing_state_machine" {
       StartBulkIndexing = {
         Type     = "Task"
         Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Comment  = "Start Glue job with retry logic for concurrent run errors. Waits 10+ minutes between retries to ensure previous job is fully stopped."
         Parameters = {
           "JobName.$" : "$.glue_params.JobName"
           "Arguments.$" : "$.glue_params.Arguments"
         }
         Retry = [
           {
+            # Handle concurrent run errors with longer backoff
+            # AWS Glue throws this when max_concurrent_runs is exceeded
+            # This can happen if a previous job is still stopping/failing
+            ErrorEquals = [
+              "Glue.ConcurrentRunsExceededException",
+              "Glue.ConcurrentRunsExceeded"
+            ]
+            IntervalSeconds = 600  # 10 minutes initial wait (give previous job time to fully stop)
+            MaxAttempts     = 6    # Up to ~2 hours of retries (6 attempts with backoff)
+            BackoffRate     = 2.0  # Double wait time: 10min, 20min, 40min, 80min, 160min, 320min
+          },
+          {
+            # Handle job failures - wait longer before retry to ensure previous job is fully stopped
             ErrorEquals = [
               "Glue.JobRunFailed",
-              "Glue.JobRunTimeout",
+              "Glue.JobRunTimeout"
+            ]
+            IntervalSeconds = 600  # 10 minutes wait before retry (ensure previous job stopped)
+            MaxAttempts     = 1    # Only retry once after job failure
+            BackoffRate     = 1.0
+          },
+          {
+            # Handle other task failures (but not concurrent runs - those are handled above)
+            ErrorEquals = [
               "States.TaskFailed"
             ]
-            IntervalSeconds = 60
+            IntervalSeconds = 300  # 5 minutes wait
             MaxAttempts     = 2
             BackoffRate     = 2.0
           }
