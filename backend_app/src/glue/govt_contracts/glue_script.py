@@ -26,6 +26,7 @@ from typing import Dict, List, Any, Optional
 from decimal import Decimal
 from io import StringIO, BytesIO
 from requests.adapters import HTTPAdapter
+from urllib3.util.retry import Retry
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from threading import Lock
 
@@ -89,6 +90,8 @@ USASPENDING_USER_AGENT = args.get('USASPENDING_USER_AGENT', 'Cosine Financial Pl
 AWARDS_TABLE_NAME = args.get('AWARDS_TABLE_NAME', 'usaspending-awards-index')
 S3_BUCKET_NAME = args.get('S3_BUCKET_NAME', 'cosine-usaspending-data-production')
 REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
+MAX_RETRIES = int(args.get('MAX_RETRIES', '5'))
+RETRY_BASE_DELAY = float(args.get('RETRY_BASE_DELAY', '2.0'))
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -110,7 +113,7 @@ _progress_counter = {'indexed': 0, 'total': 0, 'processed': 0}
 # ============================================================================
 
 def create_session():
-    """Create a requests session with proper headers and SSL handling"""
+    """Create a requests session with proper headers, SSL handling, and retry logic"""
     global _global_session
     
     if _global_session is not None:
@@ -124,7 +127,16 @@ def create_session():
     })
     session.verify = False
     
+    retry_strategy = Retry(
+        total=MAX_RETRIES,
+        backoff_factor=RETRY_BASE_DELAY,
+        status_forcelist=[429, 500, 502, 503, 504],
+        method_whitelist=["GET", "POST"],
+        raise_on_status=False
+    )
+    
     adapter = HTTPAdapter(
+        max_retries=retry_strategy,
         pool_connections=20,
         pool_maxsize=30
     )
@@ -148,26 +160,64 @@ def rate_limit():
     _last_api_call_time = time.time()
 
 def call_usaspending_api(endpoint: str, method: str = 'GET', body: Optional[Dict] = None, params: Optional[Dict] = None) -> Dict[str, Any]:
-    """Call USAspending API endpoint with rate limiting"""
+    """Call USAspending API endpoint with retry logic and rate limiting"""
     url = f"{USASPENDING_BASE_URL}{endpoint}"
     session = create_session()
     
     rate_limit()
     
-    try:
-        if method.upper() == 'POST':
-            response = session.post(url, json=body, timeout=REQUEST_TIMEOUT)
-        else:
-            response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
-        
-        response.raise_for_status()
-        return response.json()
-    except requests.exceptions.HTTPError as e:
-        log_print(f"❌ HTTP error {e.response.status_code}: {str(e)}")
-        raise
-    except Exception as e:
-        log_print(f"❌ API call error: {str(e)}")
-        raise
+    last_exception = None
+    for attempt in range(MAX_RETRIES + 1):
+        try:
+            if method.upper() == 'POST':
+                response = session.post(url, json=body, timeout=REQUEST_TIMEOUT)
+            else:
+                response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            
+            if response.status_code == 429:
+                retry_after = int(response.headers.get('Retry-After', RETRY_BASE_DELAY * (2 ** attempt)))
+                if attempt < MAX_RETRIES:
+                    log_print(f"⚠️ Rate limited (429). Waiting {retry_after}s before retry {attempt + 1}/{MAX_RETRIES}")
+                    time.sleep(retry_after)
+                    continue
+                else:
+                    response.raise_for_status()
+            
+            if response.status_code >= 500:
+                if attempt < MAX_RETRIES:
+                    backoff_delay = RETRY_BASE_DELAY * (2 ** attempt)
+                    log_print(f"⚠️ Server error {response.status_code}. Retrying in {backoff_delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                    time.sleep(backoff_delay)
+                    continue
+                else:
+                    response.raise_for_status()
+            
+            response.raise_for_status()
+            return response.json()
+            
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout, 
+                requests.exceptions.ChunkedEncodingError, urllib3.exceptions.ProtocolError,
+                urllib3.exceptions.NewConnectionError) as e:
+            last_exception = e
+            if attempt < MAX_RETRIES:
+                backoff_delay = RETRY_BASE_DELAY * (2 ** attempt)
+                log_print(f"⚠️ Connection error: {str(e)[:100]}. Retrying in {backoff_delay}s (attempt {attempt + 1}/{MAX_RETRIES})")
+                time.sleep(backoff_delay)
+            else:
+                log_print(f"❌ Connection error after {MAX_RETRIES} retries: {str(e)}")
+                raise
+        except requests.exceptions.HTTPError as e:
+            if e.response.status_code == 429:
+                continue
+            log_print(f"❌ HTTP error {e.response.status_code}: {str(e)}")
+            raise
+        except Exception as e:
+            log_print(f"❌ Unexpected error: {str(e)}")
+            raise
+    
+    if last_exception:
+        raise last_exception
+    raise Exception(f"Failed to call API after {MAX_RETRIES} retries")
 
 def extract_fiscal_year(date_str: Optional[str]) -> Optional[int]:
     """Extract fiscal year from date string (YYYY-MM-DD)"""
@@ -667,40 +717,79 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     
     # Verify file is accessible
     log_print(f"🔍 {agency_prefix}Verifying file accessibility before download...")
-    try:
-        head_response = session.head(file_url, timeout=60, allow_redirects=True)
-        head_response.raise_for_status()
-        log_print(f"✅ {agency_prefix}File verification successful - file is accessible")
-    except Exception as e:
-        log_print(f"❌ {agency_prefix}File verification failed: {str(e)}")
-        raise
+    max_verification_retries = 15
+    verification_retry_delay = 60
+    
+    file_verified = False
+    for verify_attempt in range(max_verification_retries):
+        try:
+            log_print(f"   Verification attempt {verify_attempt + 1}/{max_verification_retries}...")
+            head_response = session.head(file_url, timeout=60, allow_redirects=True)
+            if head_response.status_code == 200:
+                file_verified = True
+                log_print(f"✅ {agency_prefix}File verification successful - file is accessible")
+                break
+            elif head_response.status_code == 403:
+                if verify_attempt < max_verification_retries - 1:
+                    wait_time = min(60 * (2 ** min(verify_attempt, 5)), 600)
+                    log_print(f"⚠️ {agency_prefix}File not yet accessible (403 Forbidden). Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    raise Exception(f"File verification failed: 403 Forbidden after {max_verification_retries} attempts")
+            else:
+                head_response.raise_for_status()
+        except Exception as e:
+            if verify_attempt < max_verification_retries - 1:
+                wait_time = min(60 * (2 ** min(verify_attempt, 5)), 600)
+                log_print(f"⚠️ {agency_prefix}Verification error (attempt {verify_attempt + 1}): {str(e)[:100]}")
+                log_print(f"   Waiting {wait_time}s before retry...")
+                time.sleep(wait_time)
+                continue
+            raise
+    
+    if not file_verified:
+        raise Exception(f"File not accessible after {max_verification_retries} verification attempts")
     
     # Download file
     log_print(f"📥 {agency_prefix}Starting file download from URL...")
     log_print(f"   URL: {file_url}")
     download_start_time = time.time()
+    max_download_retries = 5
     
-    try:
-        response = session.get(file_url, timeout=300, stream=True)
-        response.raise_for_status()
-        
-        # Read the content
-        log_print(f"   Reading response content...")
-        content = response.content
-        download_duration = time.time() - download_start_time
-        file_size_mb = len(content) / (1024 * 1024)
-        file_size_bytes = len(content)
-        
-        log_print("=" * 80)
-        log_print(f"✅ {agency_prefix}FILE DOWNLOAD SUCCESSFUL")
-        log_print(f"   File Size: {file_size_mb:.2f} MB ({file_size_bytes:,} bytes)")
-        log_print(f"   Download Time: {int(download_duration // 60)}m {int(download_duration % 60)}s")
-        if download_duration > 0:
-            log_print(f"   Download Speed: {file_size_mb / download_duration:.2f} MB/s")
-        log_print("=" * 80)
-    except Exception as e:
-        log_print(f"❌ {agency_prefix}Download failed: {str(e)}")
-        raise
+    response = None
+    content = None
+    
+    for attempt in range(max_download_retries):
+        try:
+            log_print(f"   Download attempt {attempt + 1}/{max_download_retries}...")
+            response = session.get(file_url, timeout=300, stream=True)
+            response.raise_for_status()
+            
+            # Read the content
+            log_print(f"   Reading response content...")
+            content = response.content
+            download_duration = time.time() - download_start_time
+            file_size_mb = len(content) / (1024 * 1024)
+            file_size_bytes = len(content)
+            
+            log_print("=" * 80)
+            log_print(f"✅ {agency_prefix}FILE DOWNLOAD SUCCESSFUL")
+            log_print(f"   File Size: {file_size_mb:.2f} MB ({file_size_bytes:,} bytes)")
+            log_print(f"   Download Time: {int(download_duration // 60)}m {int(download_duration % 60)}s")
+            if download_duration > 0:
+                log_print(f"   Download Speed: {file_size_mb / download_duration:.2f} MB/s")
+            log_print("=" * 80)
+            break
+        except Exception as e:
+            if attempt < max_download_retries - 1:
+                wait_time = 30 * (attempt + 1)
+                log_print(f"❌ {agency_prefix}Download attempt {attempt + 1} failed: {str(e)[:200]}")
+                log_print(f"   Retrying in {wait_time}s...")
+                time.sleep(wait_time)
+                continue
+            log_print(f"❌ {agency_prefix}Download failed after {max_download_retries} attempts")
+            raise
     
     if content is None:
         raise Exception(f"{agency_prefix}Download failed - no content received")
@@ -1087,8 +1176,22 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             # Ensure all fields are properly converted
             db_item = convert_floats_to_decimal(db_item)
             
-            # Update item in DynamoDB
-            awards_table.put_item(Item=db_item)
+            # Update item in DynamoDB with retry logic for throttling
+            max_put_retries = 3
+            for put_attempt in range(max_put_retries):
+                try:
+                    awards_table.put_item(Item=db_item)
+                    break
+                except Exception as put_error:
+                    error_str = str(put_error)
+                    if 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                        if put_attempt < max_put_retries - 1:
+                            wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
+                            log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                            time.sleep(wait_time)
+                            continue
+                    # Re-raise if not throttling or out of retries
+                    raise
         else:
             # New item - store transactions and subawards directly in DynamoDB
             # Convert to DynamoDB-compatible format
@@ -1106,8 +1209,22 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             db_item['full_indexing_complete'] = True
             db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
             
-            # Store to DynamoDB
-            awards_table.put_item(Item=db_item)
+            # Store to DynamoDB with retry logic for throttling
+            max_put_retries = 3
+            for put_attempt in range(max_put_retries):
+                try:
+                    awards_table.put_item(Item=db_item)
+                    break
+                except Exception as put_error:
+                    error_str = str(put_error)
+                    if 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                        if put_attempt < max_put_retries - 1:
+                            wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
+                            log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                            time.sleep(wait_time)
+                            continue
+                    # Re-raise if not throttling or out of retries
+                    raise
         
         return {
             'success': True,
