@@ -825,106 +825,105 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     # ZIP file is now closed, clear from memory
     del zip_content
     del response
+    
+    # Parse all prime award files in parallel
+    all_prime_awards = {}
+    parse_workers = min(16, len(prime_files))
+    
+    if len(prime_files) > 0:
+        log_print(f"📊 {agency_prefix}Parsing {len(prime_files)} prime award file(s) with {parse_workers} workers...")
         
-        # Parse all prime award files in parallel
-        all_prime_awards = {}
-        parse_workers = min(16, len(prime_files))
+        def parse_prime_file(file_name):
+            try:
+                csv_content = prime_csv_contents[file_name]
+                return parse_prime_award_csv(csv_content, file_name)
+            except Exception as e:
+                log_print(f"❌ {agency_prefix}Error parsing {file_name}: {str(e)[:200]}")
+                return {}
         
-        if len(prime_files) > 0:
-            log_print(f"📊 {agency_prefix}Parsing {len(prime_files)} prime award file(s) with {parse_workers} workers...")
+        with ThreadPoolExecutor(max_workers=parse_workers) as executor:
+            future_to_file = {
+                executor.submit(parse_prime_file, prime_file): prime_file
+                for prime_file in prime_files
+            }
             
-            def parse_prime_file(file_name):
+            for future in as_completed(future_to_file):
+                prime_file = future_to_file[future]
                 try:
-                    csv_content = prime_csv_contents[file_name]
-                    return parse_prime_award_csv(csv_content, file_name)
+                    prime_awards = future.result()
+                    # Merge into all_prime_awards (handle duplicates)
+                    for award_id, award_data in prime_awards.items():
+                        if award_id in all_prime_awards:
+                            # Merge transactions
+                            all_prime_awards[award_id]['transactions'].extend(award_data['transactions'])
+                            all_prime_awards[award_id]['transaction_count'] += award_data['transaction_count']
+                        else:
+                            all_prime_awards[award_id] = award_data
                 except Exception as e:
-                    log_print(f"❌ {agency_prefix}Error parsing {file_name}: {str(e)[:200]}")
-                    return {}
+                    log_print(f"❌ {agency_prefix}Error processing results from {prime_file}: {str(e)[:200]}")
+    
+    # Clear prime CSV contents from memory
+    del prime_csv_contents
+    
+    # Parse all sub-award files in parallel
+    all_subawards_by_parent = {}
+    subaward_parse_workers = min(16, len(subaward_files))
+    
+    if len(subaward_files) > 0:
+        log_print(f"📊 {agency_prefix}Parsing {len(subaward_files)} sub-award file(s) with {subaward_parse_workers} workers...")
+        
+        def parse_subaward_file(file_name):
+            try:
+                csv_content = subaward_csv_contents[file_name]
+                return parse_subaward_csv(csv_content, file_name)
+            except Exception as e:
+                log_print(f"❌ {agency_prefix}Error parsing {file_name}: {str(e)[:200]}")
+                return {}
+        
+        with ThreadPoolExecutor(max_workers=subaward_parse_workers) as executor:
+            future_to_file = {
+                executor.submit(parse_subaward_file, subaward_file): subaward_file
+                for subaward_file in subaward_files
+            }
             
-            with ThreadPoolExecutor(max_workers=parse_workers) as executor:
-                future_to_file = {
-                    executor.submit(parse_prime_file, prime_file): prime_file
-                    for prime_file in prime_files
-                }
-                
-                for future in as_completed(future_to_file):
-                    prime_file = future_to_file[future]
-                    try:
-                        prime_awards = future.result()
-                        # Merge into all_prime_awards (handle duplicates)
-                        for award_id, award_data in prime_awards.items():
-                            if award_id in all_prime_awards:
-                                # Merge transactions
-                                all_prime_awards[award_id]['transactions'].extend(award_data['transactions'])
-                                all_prime_awards[award_id]['transaction_count'] += award_data['transaction_count']
-                            else:
-                                all_prime_awards[award_id] = award_data
-                    except Exception as e:
-                        log_print(f"❌ {agency_prefix}Error processing results from {prime_file}: {str(e)[:200]}")
-        
-        # Clear prime CSV contents from memory
-        del prime_csv_contents
-        
-        # Parse all sub-award files in parallel
-        all_subawards_by_parent = {}
-        subaward_parse_workers = min(16, len(subaward_files))
-        
-        if len(subaward_files) > 0:
-            log_print(f"📊 {agency_prefix}Parsing {len(subaward_files)} sub-award file(s) with {subaward_parse_workers} workers...")
-            
-            def parse_subaward_file(file_name):
+            for future in as_completed(future_to_file):
+                subaward_file = future_to_file[future]
                 try:
-                    csv_content = subaward_csv_contents[file_name]
-                    return parse_subaward_csv(csv_content, file_name)
+                    subawards_by_parent = future.result()
+                    # Merge into all_subawards_by_parent
+                    for parent_id, subawards in subawards_by_parent.items():
+                        if parent_id in all_subawards_by_parent:
+                            all_subawards_by_parent[parent_id].extend(subawards)
+                        else:
+                            all_subawards_by_parent[parent_id] = subawards
                 except Exception as e:
-                    log_print(f"❌ {agency_prefix}Error parsing {file_name}: {str(e)[:200]}")
-                    return {}
-            
-            with ThreadPoolExecutor(max_workers=subaward_parse_workers) as executor:
-                future_to_file = {
-                    executor.submit(parse_subaward_file, subaward_file): subaward_file
-                    for subaward_file in subaward_files
-                }
-                
-                for future in as_completed(future_to_file):
-                    subaward_file = future_to_file[future]
-                    try:
-                        subawards_by_parent = future.result()
-                        # Merge into all_subawards_by_parent
-                        for parent_id, subawards in subawards_by_parent.items():
-                            if parent_id in all_subawards_by_parent:
-                                all_subawards_by_parent[parent_id].extend(subawards)
-                            else:
-                                all_subawards_by_parent[parent_id] = subawards
-                    except Exception as e:
-                        log_print(f"❌ {agency_prefix}Error processing results from {subaward_file}: {str(e)[:200]}")
-        
-        # Link sub-awards to their parent awards
-        log_print(f"🔗 {agency_prefix}Linking sub-awards to parent awards...")
-        linked_count = 0
-        for parent_id, subawards in all_subawards_by_parent.items():
-            if parent_id in all_prime_awards:
-                all_prime_awards[parent_id]['subawards'] = subawards
-                linked_count += 1
-            else:
-                log_print(f"⚠️ {agency_prefix}Parent award {parent_id} not found for {len(subawards)} sub-awards")
-        
-        log_print(f"✅ {agency_prefix}Linked {linked_count} parent awards with sub-awards")
-        
-        parse_duration = time.time() - parse_start_time
-        log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
-        log_print(f"   📊 Prime Awards: {len(all_prime_awards):,}")
-        log_print(f"   📊 Sub-Awards: {sum(len(subs) for subs in all_subawards_by_parent.values()):,}")
-        log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
-        
-        # Clear CSV contents from memory after parsing
-        del prime_csv_contents
-        del subaward_csv_contents
-        
-        return {
-            'prime_awards': all_prime_awards,
-            'subawards_by_parent': all_subawards_by_parent
-        }
+                    log_print(f"❌ {agency_prefix}Error processing results from {subaward_file}: {str(e)[:200]}")
+    
+    # Link sub-awards to their parent awards
+    log_print(f"🔗 {agency_prefix}Linking sub-awards to parent awards...")
+    linked_count = 0
+    for parent_id, subawards in all_subawards_by_parent.items():
+        if parent_id in all_prime_awards:
+            all_prime_awards[parent_id]['subawards'] = subawards
+            linked_count += 1
+        else:
+            log_print(f"⚠️ {agency_prefix}Parent award {parent_id} not found for {len(subawards)} sub-awards")
+    
+    log_print(f"✅ {agency_prefix}Linked {linked_count} parent awards with sub-awards")
+    
+    parse_duration = time.time() - parse_start_time
+    log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
+    log_print(f"   📊 Prime Awards: {len(all_prime_awards):,}")
+    log_print(f"   📊 Sub-Awards: {sum(len(subs) for subs in all_subawards_by_parent.values()):,}")
+    log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
+    
+    # Clear CSV contents from memory after parsing
+    del subaward_csv_contents
+    
+    return {
+        'prime_awards': all_prime_awards,
+        'subawards_by_parent': all_subawards_by_parent
+    }
 
 # ============================================================================
 # Indexing Functions
