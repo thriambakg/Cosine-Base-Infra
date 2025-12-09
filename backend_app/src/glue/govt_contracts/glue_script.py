@@ -876,14 +876,52 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     # Link sub-awards to their parent awards
     log_print(f"🔗 {agency_prefix}Linking sub-awards to parent awards...")
     linked_count = 0
+    unlinked_subawards = {}
+    
     for parent_id, subawards in all_subawards_by_parent.items():
         if parent_id in all_prime_awards:
             all_prime_awards[parent_id]['subawards'] = subawards
             linked_count += 1
         else:
-            log_print(f"⚠️ {agency_prefix}Parent award {parent_id} not found for {len(subawards)} sub-awards")
+            # Parent not found in bulk file - check DynamoDB
+            unlinked_subawards[parent_id] = subawards
     
-    log_print(f"✅ {agency_prefix}Linked {linked_count} parent awards with sub-awards")
+    # Check DynamoDB for missing parent awards
+    if unlinked_subawards:
+        log_print(f"🔍 {agency_prefix}Checking DynamoDB for {len(unlinked_subawards)} missing parent awards...")
+        dynamodb_linked = 0
+        
+        for parent_id, subawards in unlinked_subawards.items():
+            try:
+                # Try to get parent award from DynamoDB
+                response = awards_table.get_item(Key={'award_id': parent_id})
+                if 'Item' in response:
+                    # Parent exists in DynamoDB - add subawards to it via update
+                    # Note: We'll update it during indexing, but for now just log
+                    log_print(f"✅ {agency_prefix}Found parent award {parent_id} in DynamoDB (will update during indexing)")
+                    # Store subawards to be added during indexing
+                    # We'll handle this by creating a minimal award record for indexing
+                    if parent_id not in all_prime_awards:
+                        # Create a minimal award record that will trigger an update
+                        all_prime_awards[parent_id] = {
+                            'award_id': parent_id,
+                            'subawards': subawards,
+                            'subaward_count': len(subawards),
+                            'update_from_dynamodb': True,
+                            'existing_item': response['Item']
+                        }
+                    else:
+                        all_prime_awards[parent_id]['subawards'] = subawards
+                    dynamodb_linked += 1
+                else:
+                    log_print(f"⚠️ {agency_prefix}Parent award {parent_id} not found in bulk file or DynamoDB for {len(subawards)} sub-awards")
+            except Exception as e:
+                log_print(f"⚠️ {agency_prefix}Error checking DynamoDB for parent {parent_id}: {str(e)[:200]}")
+        
+        if dynamodb_linked > 0:
+            log_print(f"✅ {agency_prefix}Found {dynamodb_linked} parent awards in DynamoDB")
+    
+    log_print(f"✅ {agency_prefix}Linked {linked_count} parent awards with sub-awards from bulk file")
     
     parse_duration = time.time() - parse_start_time
     log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
@@ -991,24 +1029,65 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         transaction_count = len(transactions)
         subaward_count = len(subawards)
         
-        # Store transactions and subawards directly in DynamoDB
-        # Convert to DynamoDB-compatible format
-        if transactions:
-            db_item['transactions'] = convert_floats_to_decimal(transactions)
-        if subawards:
-            db_item['subawards'] = convert_floats_to_decimal(subawards)
+        # Check if this is an update to an existing DynamoDB item
+        update_from_dynamodb = award_record.get('update_from_dynamodb', False)
+        existing_item = award_record.get('existing_item')
         
-        # Convert all floats to Decimal
-        db_item = convert_floats_to_decimal(db_item)
-        
-        # Add completion flags and counts
-        db_item['transaction_count'] = transaction_count
-        db_item['subaward_count'] = subaward_count
-        db_item['full_indexing_complete'] = True
-        db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
-        
-        # Store to DynamoDB
-        awards_table.put_item(Item=db_item)
+        if update_from_dynamodb and existing_item:
+            # Update existing item with subawards only (preserve all other fields)
+            db_item = existing_item.copy()
+            
+            # Merge subawards (append to existing if any)
+            existing_subawards = db_item.get('subawards', [])
+            if existing_subawards and subawards:
+                # Combine and deduplicate subawards by subaward_id or subaward_number
+                existing_ids = set()
+                for sub in existing_subawards:
+                    sub_id = sub.get('subaward_id') or sub.get('subaward_number') or sub.get('subaward_sam_report_id')
+                    if sub_id:
+                        existing_ids.add(str(sub_id))
+                
+                new_subawards = []
+                for sub in subawards:
+                    sub_id = sub.get('subaward_id') or sub.get('subaward_number') or sub.get('subaward_sam_report_id')
+                    if not sub_id or str(sub_id) not in existing_ids:
+                        new_subawards.append(sub)
+                
+                if new_subawards:
+                    db_item['subawards'] = existing_subawards + convert_floats_to_decimal(new_subawards)
+                else:
+                    db_item['subawards'] = existing_subawards
+            elif subawards:
+                db_item['subawards'] = convert_floats_to_decimal(subawards)
+            
+            # Update counts and timestamp
+            db_item['subaward_count'] = len(db_item.get('subawards', []))
+            db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
+            
+            # Ensure all fields are properly converted
+            db_item = convert_floats_to_decimal(db_item)
+            
+            # Update item in DynamoDB
+            awards_table.put_item(Item=db_item)
+        else:
+            # New item - store transactions and subawards directly in DynamoDB
+            # Convert to DynamoDB-compatible format
+            if transactions:
+                db_item['transactions'] = convert_floats_to_decimal(transactions)
+            if subawards:
+                db_item['subawards'] = convert_floats_to_decimal(subawards)
+            
+            # Convert all floats to Decimal
+            db_item = convert_floats_to_decimal(db_item)
+            
+            # Add completion flags and counts
+            db_item['transaction_count'] = transaction_count
+            db_item['subaward_count'] = subaward_count
+            db_item['full_indexing_complete'] = True
+            db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
+            
+            # Store to DynamoDB
+            awards_table.put_item(Item=db_item)
         
         return {
             'success': True,
@@ -1141,8 +1220,9 @@ def main():
             award_list = list(prime_awards.values())
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (all columns preserved)")
             
-            max_workers = min(50, len(award_list))
-            log_print(f"⚙️ Parallel Processing: {max_workers} workers")
+            # Reduce write workers to avoid DynamoDB throttling
+            max_workers = min(10, len(award_list))
+            log_print(f"⚙️ Parallel Processing: {max_workers} workers (reduced to avoid throttling)")
             
             agency_indexed = 0
             agency_errors = []
