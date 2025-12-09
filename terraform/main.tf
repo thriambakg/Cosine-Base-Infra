@@ -1761,11 +1761,11 @@ module "usaspending_bulk_indexing_glue_job" {
   glue_version    = "4.0"
 
   # Job configuration
-  max_retries          = 1
-  timeout              = 2880 # 48 hours (max is 10080 minutes = 7 days, bulk downloads can take time)
-  concurrent_executions = 1   # Only allow 1 concurrent run to avoid conflicts
-  worker_type          = "G.1X"
-  number_of_workers    = 2
+  max_retries           = 1
+  timeout               = 2880 # 48 hours (max is 10080 minutes = 7 days, bulk downloads can take time)
+  concurrent_executions = 1    # Only allow 1 concurrent run to avoid conflicts
+  worker_type           = "G.1X"
+  number_of_workers     = 2
 
   # S3 buckets
   s3_bucket_arn = module.glue_scripts_s3.bucket_arn
@@ -1873,9 +1873,9 @@ module "usaspending_bulk_indexing_state_machine" {
               "Glue.ConcurrentRunsExceededException",
               "Glue.ConcurrentRunsExceeded"
             ]
-            IntervalSeconds = 600  # 10 minutes initial wait (give previous job time to fully stop)
-            MaxAttempts     = 6    # Up to ~2 hours of retries (6 attempts with backoff)
-            BackoffRate     = 2.0  # Double wait time: 10min, 20min, 40min, 80min, 160min, 320min
+            IntervalSeconds = 600 # 10 minutes initial wait (give previous job time to fully stop)
+            MaxAttempts     = 6   # Up to ~2 hours of retries (6 attempts with backoff)
+            BackoffRate     = 2.0 # Double wait time: 10min, 20min, 40min, 80min, 160min, 320min
           },
           {
             # Handle job failures - wait longer before retry to ensure previous job is fully stopped
@@ -1883,8 +1883,8 @@ module "usaspending_bulk_indexing_state_machine" {
               "Glue.JobRunFailed",
               "Glue.JobRunTimeout"
             ]
-            IntervalSeconds = 600  # 10 minutes wait before retry (ensure previous job stopped)
-            MaxAttempts     = 1    # Only retry once after job failure
+            IntervalSeconds = 600 # 10 minutes wait before retry (ensure previous job stopped)
+            MaxAttempts     = 1   # Only retry once after job failure
             BackoffRate     = 1.0
           },
           {
@@ -1892,7 +1892,7 @@ module "usaspending_bulk_indexing_state_machine" {
             ErrorEquals = [
               "States.TaskFailed"
             ]
-            IntervalSeconds = 300  # 5 minutes wait
+            IntervalSeconds = 300 # 5 minutes wait
             MaxAttempts     = 2
             BackoffRate     = 2.0
           }
