@@ -22,8 +22,12 @@ import logging
 import time
 import requests
 import gc
+import csv
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
+from io import StringIO
+from difflib import SequenceMatcher
 
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -49,7 +53,7 @@ args = getResolvedOptions(sys.argv, [
 
 # Get optional date parameters (parse manually to avoid errors if not provided)
 # getResolvedOptions requires all arguments, so we parse manually for optional ones
-optional_params = ['CONGRESS', 'START_DATE', 'END_DATE']
+optional_params = ['CONGRESS', 'START_DATE', 'END_DATE', 'POLITICIAN_TRADES_S3_BUCKET']
 for param in optional_params:
     for i, arg in enumerate(sys.argv):
         if arg == f'--{param}' and i + 1 < len(sys.argv):
@@ -72,6 +76,203 @@ def log_print(message):
     logger.info(message)
     print(message, file=sys.stdout, flush=True)
 
+
+def format_state_district(politician: Dict[str, Any]) -> Optional[str]:
+    """
+    Format state/district for a politician (same format as politician trades matchers)
+    - Senators: Just state (e.g., "IL", "WA")
+    - House reps: State + district (e.g., "IL02", "TX31")
+    
+    Args:
+        politician: Politician dict with state, district, and position fields
+        
+    Returns:
+        Formatted state/district string or None
+    """
+    state = (politician.get('state') or '').strip()
+    if not state:
+        return None
+    
+    position = (politician.get('position') or '').strip()
+    district = (politician.get('district') or '').strip()
+    
+    # Senators don't have districts
+    if position == 'Senate':
+        return state
+    
+    # House reps have districts
+    if position == 'House' and district:
+        # Format district with zero-padding if needed (e.g., "2" -> "02", "31" -> "31")
+        try:
+            district_num = int(district)
+            return f"{state}{district_num:02d}"
+        except (ValueError, TypeError):
+            # If district is not a number, just append it
+            return f"{state}{district}"
+    
+    # Fallback: just return state if we can't format properly
+    return state
+
+
+def load_legislators_csv() -> List[Dict[str, Any]]:
+    """
+    Load congress-legislators CSV from S3
+    
+    Returns:
+        List of politician dicts with name, party, state, district, position, and alternativeNames
+    """
+    try:
+        if not POLITICIAN_TRADES_S3_BUCKET:
+            log_print("⚠️ POLITICIAN_TRADES_S3_BUCKET not set, skipping CSV load")
+            return []
+        
+        # Download congress-legislators.csv from S3
+        response = s3_client.get_object(
+            Bucket=POLITICIAN_TRADES_S3_BUCKET,
+            Key='congress-legislators.csv'
+        )
+        
+        csv_content = response['Body'].read().decode('utf-8')
+        csv_reader = csv.DictReader(StringIO(csv_content))
+        
+        politicians = []
+        for row in csv_reader:
+            # Construct full name from components
+            name_parts = []
+            if row.get('first_name'):
+                name_parts.append(row['first_name'])
+            if row.get('middle_name'):
+                name_parts.append(row['middle_name'])
+            if row.get('last_name'):
+                name_parts.append(row['last_name'])
+            if row.get('suffix'):
+                name_parts.append(row['suffix'])
+            
+            # Use constructed name or fall back to full_name
+            if row.get('full_name') and row.get('full_name').strip():
+                primary_name = row.get('full_name').strip()
+            else:
+                primary_name = ' '.join(name_parts) if name_parts else ''
+            
+            # Build alternative names
+            alt_names = []
+            if row.get('nickname'):
+                alt_names.append(row['nickname'])
+            if row.get('full_name') and row.get('full_name').strip() != primary_name:
+                alt_names.append(row['full_name'].strip())
+            
+            # Determine position from type
+            leg_type = row.get('type', '').lower().strip()
+            if leg_type == 'sen':
+                position = 'Senate'
+            elif leg_type == 'rep':
+                position = 'House'
+            else:
+                position = leg_type  # fallback
+            
+            # Get party (first character: D, R, I)
+            party_full = row.get('party', '').strip()
+            party = party_full[0].upper() if party_full else ''
+            
+            # Get state and district
+            state = row.get('state', '').strip() if row.get('state') else ''
+            district = row.get('district', '').strip() if row.get('district') else ''
+            
+            politicians.append({
+                'name': primary_name,
+                'party': party,
+                'party_full': party_full,
+                'state': state,
+                'district': district,
+                'position': position,
+                'alternativeNames': alt_names,
+                'bioguide_id': row.get('bioguide_id', '').strip() if row.get('bioguide_id') else None
+            })
+        
+        return politicians
+        
+    except Exception as e:
+        log_print(f"❌ Error loading congress-legislators list: {e}")
+        return []
+
+
+def fuzzy_match_name(name: str, politician: Dict[str, Any]) -> float:
+    """
+    Fuzzy match a name to a politician using Levenshtein distance
+    Handles various name formats
+    """
+    # Normalize names (lowercase, strip)
+    name_normalized = name.lower().strip()
+    politician_normalized = politician['name'].lower().strip()
+    
+    # Remove position markers like "(Senator)", "(Representative)" from name
+    name_clean = re.sub(r'\s*\([^)]*(?:senator|representative)[^)]*\)', '', name_normalized, flags=re.IGNORECASE)
+    name_clean = name_clean.strip()
+    
+    # Check exact match first (after cleaning)
+    if name_clean == politician_normalized:
+        return 1.0
+    
+    # Check alternative names
+    for alt_name in politician.get('alternativeNames', []):
+        alt_normalized = alt_name.lower().strip()
+        if name_clean == alt_normalized:
+            return 1.0
+    
+    # Handle "Last, First" vs "First Last" format differences
+    if ',' in name_clean:
+        parts = [p.strip() for p in name_clean.split(',')]
+        if len(parts) == 2:
+            name_reversed = f"{parts[1]} {parts[0]}".strip()
+            if name_reversed == politician_normalized:
+                return 1.0
+            reversed_similarity = SequenceMatcher(None, name_reversed, politician_normalized).ratio()
+            if reversed_similarity > 0.9:
+                return reversed_similarity
+    
+    # Calculate similarity using SequenceMatcher
+    similarity = SequenceMatcher(None, name_clean, politician_normalized).ratio()
+    
+    # Also check if names are subsets (e.g., "John Doe" vs "John A. Doe")
+    if name_clean in politician_normalized or politician_normalized in name_clean:
+        similarity = max(similarity, 0.9)
+    
+    # If similarity is still low, try with reversed name format
+    if similarity < 0.85 and ',' in name_clean:
+        parts = [p.strip() for p in name_clean.split(',')]
+        if len(parts) == 2:
+            name_reversed = f"{parts[1]} {parts[0]}".strip()
+            reversed_similarity = SequenceMatcher(None, name_reversed, politician_normalized).ratio()
+            similarity = max(similarity, reversed_similarity)
+    
+    return similarity
+
+
+def find_matching_politician(name: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Find best matching politician for a name
+    """
+    if not name or not politicians:
+        return None
+    
+    best_match = None
+    best_score = 0.0
+    
+    for politician in politicians:
+        score = fuzzy_match_name(name, politician)
+        if score > best_score:
+            best_score = score
+            best_match = politician
+    
+    # Return match if above threshold
+    if best_score >= NAME_MATCH_THRESHOLD:
+        return {
+            **best_match,
+            'matchScore': best_score
+        }
+    
+    return None
+
 log_print("=" * 80)
 log_print("✅ Congress.gov Bill Fetcher Glue Job - Script Loaded Successfully")
 log_print("=" * 80)
@@ -82,9 +283,13 @@ ENVIRONMENT = args.get('ENVIRONMENT', 'staging')
 API_BASE_URL = args.get('CONGRESS_API_BASE_URL', 'https://api.congress.gov/v3')
 BILLS_TABLE_NAME = args.get('BILLS_TABLE_NAME')
 S3_BUCKET_NAME = args.get('S3_BUCKET_NAME')
+POLITICIAN_TRADES_S3_BUCKET = args.get('POLITICIAN_TRADES_S3_BUCKET')
 REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 MAX_RETRIES = int(args.get('MAX_RETRIES', '5'))
 RETRY_DELAY = int(args.get('RETRY_DELAY', '2'))
+
+# Name matching threshold (0.0 to 1.0)
+NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
 
 # Bill types to fetch
 BILL_TYPES = ["HR", "S", "HJRES", "SJRES", "HCONRES", "SCONRES", "HRES", "SRES"]
@@ -555,7 +760,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         "bill_id": f"{congress}-{bill_type}-{bill_number}",
         "congress": congress,
         "bill_type": bill_type,
-        "bill_number": bill_number,
+        "bill_number": int(bill_number) if bill_number else 0,  # Store as integer for GSI
         "bill_title": bill.get("title") or (details.get("title") if details else ""),
         "bill_url": bill.get("url") or (details.get("url") if details else ""),
         
@@ -599,9 +804,6 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         "summary_count": len(summaries),
         "summary_text": "",  # Will be populated below with fallback logic
         "summaries_json": json.dumps(summaries) if summaries else "",
-        
-        # Short description (for quick search/display - extracted from first summary or title)
-        "short_description": "",
         
         # Subjects
         "subjects_json": json.dumps(subjects) if subjects else "",
@@ -681,20 +883,73 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     summary_text = summary_text.strip()[:5000]  # Limit to 5000 chars for DynamoDB
     record["summary_text"] = summary_text
     
-    # Short description: Use bill title (primary) + first sentence of summary (if available)
-    # This makes bill_title the primary searchable field, with summary context as backup
-    bill_title = record.get("bill_title", "")
-    short_desc = bill_title  # Start with bill title
+    # Load legislators CSV and match sponsor/cosponsors (cache at module level)
+    if not hasattr(load_legislators_csv, '_cache'):
+        load_legislators_csv._cache = load_legislators_csv()
+        log_print(f"✅ Loaded {len(load_legislators_csv._cache)} legislators from CSV")
     
-    if summary_text and summary_text != bill_title:
-        # Use first sentence of summary_text (which may be from summaries or official title)
-        cleaned = summary_text.replace("<p>", " ").replace("</p>", " ").replace("<strong>", "").replace("</strong>", "").replace("<ul>", " ").replace("</ul>", " ").replace("<li>", " ").replace("</li>", " ").strip()
-        first_sentence = cleaned.split(".")[0] if "." in cleaned else cleaned[:200]
-        # Combine: "Bill Title. First sentence of summary"
-        if first_sentence and len(first_sentence) > 10:  # Only add if meaningful
-            short_desc = f"{bill_title}. {first_sentence[:200]}".strip()
+    politicians = load_legislators_csv._cache
     
-    record["short_description"] = short_desc[:500]  # Limit to 500 chars total
+    # Match sponsor to CSV
+    sponsor_name = record.get("sponsor_full_name", "")
+    if sponsor_name and politicians:
+        matched_sponsor = find_matching_politician(sponsor_name, politicians)
+        if matched_sponsor:
+            # Update from CSV
+            record["sponsor_party"] = matched_sponsor.get("party", record.get("sponsor_party", ""))
+            # Format state/district same as politician trades matchers (MA01 for House, MA for Senate)
+            state_district_formatted = format_state_district(matched_sponsor)
+            if state_district_formatted:
+                record["sponsor_state"] = state_district_formatted
+            if matched_sponsor.get("bioguide_id"):
+                record["sponsor_bioguide_id"] = matched_sponsor["bioguide_id"]
+    
+    # Match cosponsors to CSV and update parties
+    cosponsor_parties_list = []
+    if cosponsors and politicians:
+        for cosponsor in cosponsors:
+            cosponsor_name = cosponsor.get("fullName", "")
+            if cosponsor_name:
+                matched_cosponsor = find_matching_politician(cosponsor_name, politicians)
+                if matched_cosponsor:
+                    # Use party from CSV
+                    cosponsor_parties_list.append(matched_cosponsor.get("party", cosponsor.get("party", "")))
+                else:
+                    # Fallback to API party (first character)
+                    api_party = cosponsor.get("party", "")
+                    cosponsor_parties_list.append(api_party[0].upper() if api_party else "")
+    
+    # Update cosponsor_parties with matched values
+    if cosponsor_parties_list:
+        record["cosponsor_parties"] = "|".join(cosponsor_parties_list)
+    
+    # Calculate bipartisan: TRUE if sponsor party AND cosponsor parties contain both R and D
+    # Examples:
+    # - cosponsor_parties: "R|D|R" with sponsor R → TRUE (has both R and D)
+    # - cosponsor_parties: "R|R|R" with sponsor R → FALSE (only R)
+    # - cosponsor_parties: "" (empty) → FALSE
+    bipartisan = False
+    sponsor_party = record.get("sponsor_party", "").strip().upper()
+    cosponsor_parties_str = record.get("cosponsor_parties", "").strip()
+    
+    if not cosponsor_parties_str:
+        # Empty cosponsor parties = not bipartisan
+        bipartisan = False
+    elif sponsor_party:
+        # Get unique parties from sponsor + all cosponsors
+        all_parties = set([sponsor_party])
+        for party in cosponsor_parties_str.split("|"):
+            party_clean = party.strip().upper()
+            if party_clean:
+                all_parties.add(party_clean)
+        
+        # Bipartisan if both R and D are present
+        bipartisan = "R" in all_parties and "D" in all_parties
+    else:
+        # No sponsor party = not bipartisan
+        bipartisan = False
+    
+    record["bipartisan"] = bipartisan
     
     return record
 
@@ -836,4 +1091,5 @@ if __name__ == "__main__":
         logger.error(f"❌ Traceback:\n{error_traceback}")
         # Re-raise to trigger Glue job failure
         raise
+
 

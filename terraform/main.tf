@@ -2018,7 +2018,9 @@ module "congress_bills_table" {
     { name = "latest_action_date", type = "S" },
     { name = "congress", type = "N" },
     { name = "bill_type", type = "S" },
-    { name = "short_description", type = "S" }
+    { name = "bill_title", type = "S" },
+    { name = "bill_number", type = "N" },
+    { name = "bipartisan", type = "BOOL" }
   ]
 
   global_secondary_indexes = [
@@ -2047,17 +2049,41 @@ module "congress_bills_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "LatestActionDateIndex"
-      hash_key        = "latest_action_date"
-      range_key       = null
+      name            = "BillTypeDateIndex"
+      hash_key        = "bill_type"
+      range_key       = "introduced_date"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "ShortDescriptionIndex"
-      hash_key        = "short_description"
+      name            = "BillTitleDateIndex"
+      hash_key        = "bill_title"
       range_key       = "introduced_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "BillNumberDateIndex"
+      hash_key        = "bill_number"
+      range_key       = "introduced_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "BipartisanDateIndex"
+      hash_key        = "bipartisan"
+      range_key       = "introduced_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "LatestActionDateIndex"
+      hash_key        = "latest_action_date"
+      range_key       = null
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
@@ -2106,20 +2132,22 @@ module "congress_bills_fetcher_lambda" {
   source_dir = "${path.module}/../backend_app/src/congress_bills_fetcher/app"
 
   environment_variables = {
-    PROJECT_NAME          = var.project_name
-    ENVIRONMENT           = var.environment
-    CONGRESS_API_BASE_URL = "https://api.congress.gov/v3"
-    BILLS_TABLE_NAME      = module.congress_bills_table.table_name
-    S3_BUCKET_NAME        = module.congress_bills_data_s3.bucket_id
-    REQUEST_TIMEOUT       = "30"
-    MAX_RETRIES           = "3"
-    RETRY_DELAY           = "2"
+    PROJECT_NAME                = var.project_name
+    ENVIRONMENT                 = var.environment
+    CONGRESS_API_BASE_URL       = "https://api.congress.gov/v3"
+    BILLS_TABLE_NAME            = module.congress_bills_table.table_name
+    S3_BUCKET_NAME              = module.congress_bills_data_s3.bucket_id
+    POLITICIAN_TRADES_S3_BUCKET = module.politician_trades_s3.bucket_id
+    REQUEST_TIMEOUT             = "30"
+    MAX_RETRIES                 = "3"
+    RETRY_DELAY                 = "2"
   }
 
   additional_policy_arns = [
     module.congress_bills_table.table_policy_arn,
     module.kms.kms_access_policy_arn,
-    module.congress_api_secrets_manager.secret_access_policy_arn
+    module.congress_api_secrets_manager.secret_access_policy_arn,
+    aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
 
   tags = var.common_tags
@@ -2147,7 +2175,8 @@ module "congress_bills_fetcher_glue_job" {
   s3_bucket_arn = module.glue_scripts_s3.bucket_arn
   additional_s3_bucket_arns = [
     module.congress_bills_data_s3.bucket_arn,
-    module.static_hosting_bucket.bucket_arn
+    module.static_hosting_bucket.bucket_arn,
+    module.politician_trades_s3.bucket_arn
   ]
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
@@ -2161,19 +2190,21 @@ module "congress_bills_fetcher_glue_job" {
     module.kms.dynamodb_key_arn
   ]
 
-  # Additional IAM policies for Secrets Manager access
+  # Additional IAM policies for Secrets Manager and S3 access
   additional_policy_arns = [
-    module.congress_api_secrets_manager.secret_access_policy_arn
+    module.congress_api_secrets_manager.secret_access_policy_arn,
+    aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
 
   # Job arguments
   default_arguments = {
-    "--PROJECT_NAME"          = var.project_name
-    "--ENVIRONMENT"           = var.environment
-    "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
-    "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
-    "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
-    "--REQUEST_TIMEOUT"       = "30"
+    "--PROJECT_NAME"                = var.project_name
+    "--ENVIRONMENT"                 = var.environment
+    "--CONGRESS_API_BASE_URL"       = "https://api.congress.gov/v3"
+    "--BILLS_TABLE_NAME"            = module.congress_bills_table.table_name
+    "--S3_BUCKET_NAME"              = module.congress_bills_data_s3.bucket_id
+    "--POLITICIAN_TRADES_S3_BUCKET" = module.politician_trades_s3.bucket_id
+    "--REQUEST_TIMEOUT"             = "30"
   }
 
   job_bookmark_option = "job-bookmark-disable"
