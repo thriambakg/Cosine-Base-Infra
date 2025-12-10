@@ -10,12 +10,12 @@ from typing import Dict, Any
 def lambda_handler(event: Dict, context: Any) -> Dict:
     """
     Calculate days between start_date and end_date, return routing decision.
+    Congress number is auto-detected by the fetcher scripts, so we don't need to pass it.
     
     Expected event:
     {
         "start_date": "12/08/2025",  # mm/dd/yyyy format
-        "end_date": "12/09/2025",    # mm/dd/yyyy format
-        "congress": 119  # optional
+        "end_date": "12/09/2025"     # mm/dd/yyyy format
     }
     
     Returns:
@@ -23,13 +23,11 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         "use_glue": true/false,  # true if > 2 days
         "days_diff": 2,
         "start_date": "2025-12-08T00:00:00Z",  # ISO format for API
-        "end_date": "2025-12-09T23:59:59Z",     # ISO format for API
-        "congress": 119
+        "end_date": "2025-12-09T23:59:59Z"      # ISO format for API
     }
     """
     start_date_str = event.get("start_date")
     end_date_str = event.get("end_date")
-    congress = event.get("congress")
     
     if not start_date_str or not end_date_str:
         raise ValueError("start_date and end_date are required")
@@ -64,7 +62,6 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         "use_glue": use_glue,
         "days_diff": days_diff,
         "start_date": start_date_iso,
-        "end_date": end_date_iso,
-        "congress": congress
+        "end_date": end_date_iso
     }
 

@@ -2261,7 +2261,6 @@ module "congress_bills_fetcher_state_machine" {
         Parameters = {
           "start_date.$" : "$.start_date"
           "end_date.$" : "$.end_date"
-          "congress.$" : "$.congress"
         }
         ResultPath = "$.route"
         Next       = "RouteDecision"
@@ -2282,7 +2281,6 @@ module "congress_bills_fetcher_state_machine" {
         Resource = module.congress_bills_fetcher_lambda.function_arn
         Comment  = "Invoke Lambda for date ranges ≤2 days (15 min timeout)"
         Parameters = {
-          "congress.$" : "$.route.congress"
           "start_date.$" : "$.route.start_date"
           "end_date.$" : "$.route.end_date"
         }
@@ -2316,7 +2314,6 @@ module "congress_bills_fetcher_state_machine" {
             "--BILLS_TABLE_NAME" : module.congress_bills_table.table_name
             "--S3_BUCKET_NAME" : module.congress_bills_data_s3.bucket_id
             "--REQUEST_TIMEOUT" : "30"
-            "--CONGRESS.$" : "$.route.congress"
             "--START_DATE.$" : "$.route.start_date"
             "--END_DATE.$" : "$.route.end_date"
           }
