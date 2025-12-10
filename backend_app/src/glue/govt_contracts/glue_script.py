@@ -734,6 +734,7 @@ def check_s3_zip_exists(start_date: str, end_date: str, agency_name: str) -> Opt
 def extract_zip_from_s3_to_folder(zip_s3_key: str, start_date: str, end_date: str, agency_name: str) -> Dict[str, str]:
     """
     Extract ZIP file from S3 and extract CSV files to a folder with hyphenated agency name.
+    Checks if files already exist in the folder before extracting to avoid duplicates.
     
     Args:
         zip_s3_key: S3 key of the ZIP file
@@ -748,6 +749,14 @@ def extract_zip_from_s3_to_folder(zip_s3_key: str, start_date: str, end_date: st
     date_range_path = format_date_range_path(start_date, end_date)
     agency_filename = format_agency_name_for_s3(agency_name)
     folder_prefix = f"{date_range_path}/{agency_filename}/"
+    
+    # Check if folder already has CSV files
+    existing_csv_s3_keys = list_csv_files_from_folder(start_date, end_date, agency_name)
+    
+    if existing_csv_s3_keys:
+        log_print(f"✅ {agency_prefix}CSV files already exist in folder: {folder_prefix}")
+        log_print(f"📄 {agency_prefix}Found {len(existing_csv_s3_keys)} existing CSV file(s), skipping extraction")
+        return existing_csv_s3_keys
     
     log_print(f"📦 {agency_prefix}Extracting ZIP file from S3 to folder: {folder_prefix}")
     
@@ -776,6 +785,20 @@ def extract_zip_from_s3_to_folder(zip_s3_key: str, start_date: str, end_date: st
                 csv_content = zip_ref.read(csv_file)
                 csv_s3_key = f"{folder_prefix}{csv_file}"
                 
+                # Check if file already exists before uploading
+                try:
+                    s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
+                    log_print(f"   ⏭️  Skipping {csv_file} - already exists in S3")
+                    # Extract just the filename from the path
+                    filename = csv_file.split('/')[-1]
+                    csv_s3_keys[filename] = csv_s3_key
+                    del csv_content
+                    continue
+                except s3_client.exceptions.ClientError as e:
+                    if e.response['Error']['Code'] != '404':
+                        raise
+                
+                # File doesn't exist, upload it
                 s3_client.put_object(
                     Bucket=S3_BUCKET_NAME,
                     Key=csv_s3_key,
@@ -1171,24 +1194,46 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
                 log_print(f"⚠️ {agency_prefix}Failed to save ZIP to S3 (non-critical): {str(e)[:200]}")
         
         # Extract CSV files to S3 individually to avoid loading all into memory
-        log_print(f"📦 {agency_prefix}Extracting CSV files to S3...")
-        for csv_file in csv_files:
-            try:
-                csv_content = zip_ref.read(csv_file)
-                # Use full department name in path for readability
-                csv_s3_key = f"{date_range_path}/{agency_filename}/{csv_file}"
-                s3_client.put_object(
-                    Bucket=S3_BUCKET_NAME,
-                    Key=csv_s3_key,
-                    Body=csv_content,
-                    ContentType='text/csv'
-                )
-                csv_s3_keys[csv_file] = csv_s3_key
-                log_print(f"   ✅ Extracted {csv_file} to S3")
-                # Clear CSV content from memory immediately
-                del csv_content
-            except Exception as e:
-                log_print(f"   ⚠️ Failed to extract {csv_file} to S3: {str(e)[:200]}")
+        # Check if folder already has files first
+        folder_prefix = f"{date_range_path}/{agency_filename}/"
+        existing_csv_s3_keys = list_csv_files_from_folder(start_date, end_date, agency_name)
+        
+        if existing_csv_s3_keys:
+            log_print(f"✅ {agency_prefix}CSV files already exist in folder: {folder_prefix}")
+            log_print(f"📄 {agency_prefix}Found {len(existing_csv_s3_keys)} existing CSV file(s), skipping extraction")
+            csv_s3_keys = existing_csv_s3_keys
+        else:
+            log_print(f"📦 {agency_prefix}Extracting CSV files to S3...")
+            for csv_file in csv_files:
+                try:
+                    csv_content = zip_ref.read(csv_file)
+                    # Use full department name in path for readability
+                    csv_s3_key = f"{folder_prefix}{csv_file}"
+                    
+                    # Check if file already exists before uploading
+                    try:
+                        s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
+                        log_print(f"   ⏭️  Skipping {csv_file} - already exists in S3")
+                        csv_s3_keys[csv_file] = csv_s3_key
+                        del csv_content
+                        continue
+                    except s3_client.exceptions.ClientError as e:
+                        if e.response['Error']['Code'] != '404':
+                            raise
+                    
+                    # File doesn't exist, upload it
+                    s3_client.put_object(
+                        Bucket=S3_BUCKET_NAME,
+                        Key=csv_s3_key,
+                        Body=csv_content,
+                        ContentType='text/csv'
+                    )
+                    csv_s3_keys[csv_file] = csv_s3_key
+                    log_print(f"   ✅ Extracted {csv_file} to S3")
+                    # Clear CSV content from memory immediately
+                    del csv_content
+                except Exception as e:
+                    log_print(f"   ⚠️ Failed to extract {csv_file} to S3: {str(e)[:200]}")
         
         # Store file lists for later reading
         prime_file_list = prime_files.copy()
