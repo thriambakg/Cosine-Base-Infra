@@ -692,7 +692,7 @@ def main():
         log_print(f"      ✅ Found {len(bills)} {bill_type} bills")
     
     log_print(f"\n✅ Total bills found: {len(all_bills)}")
-    log_print()
+    log_print("")  # Empty line for readability
     
     # Build comprehensive records and store to DynamoDB
     log_print("🔍 Building comprehensive bill records and storing to DynamoDB...")
@@ -728,7 +728,7 @@ def main():
     if error_count > 0:
         log_print(f"⚠️ {error_count} bills had errors")
     
-    log_print()
+    log_print("")  # Empty line for readability
     log_print("=" * 80)
     log_print("✅ Glue job completed successfully!")
     log_print("=" * 80)

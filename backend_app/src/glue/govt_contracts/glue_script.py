@@ -22,6 +22,7 @@ import urllib3
 import gc
 import codecs
 import gzip
+import re
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from decimal import Decimal
@@ -555,26 +556,28 @@ def poll_download_status(file_name: str, max_wait: int = 14400, poll_interval: i
     raise Exception(f"Bulk download timeout after {max_wait} seconds ({max_wait // 60} minutes)")
 
 def format_agency_name_for_s3(agency_name: str) -> str:
-    """Convert agency name to S3 filename format"""
-    if agency_name.startswith("Department of "):
-        rest = agency_name.replace("Department of ", "").strip()
-        return "DO" + rest.capitalize()
-    
-    if agency_name.startswith("Department "):
-        rest = agency_name.replace("Department ", "").strip()
-        return "D" + rest.capitalize()
-    
-    words = agency_name.split()
-    if not words:
+    """
+    Convert agency name to S3-safe format using full name.
+    Sanitizes for S3 compatibility while keeping it readable.
+    """
+    if not agency_name:
         return "Unknown"
     
-    if len(words) == 1:
-        return words[0].capitalize()
+    # Keep the full name, just sanitize for S3
+    # Replace spaces with hyphens, remove special characters
+    sanitized = agency_name.strip()
+    # Replace multiple spaces with single space
+    sanitized = " ".join(sanitized.split())
+    # Replace spaces with hyphens
+    sanitized = sanitized.replace(" ", "-")
+    # Remove or replace special characters that aren't S3-safe
+    sanitized = re.sub(r'[^a-zA-Z0-9\-_]', '', sanitized)
+    # Remove multiple consecutive hyphens
+    sanitized = re.sub(r'-+', '-', sanitized)
+    # Remove leading/trailing hyphens
+    sanitized = sanitized.strip('-')
     
-    first_letters = "".join([word[0].upper() for word in words if word])
-    if len(words[-1]) > 1:
-        return first_letters + words[-1][1:].capitalize()
-    return first_letters
+    return sanitized if sanitized else "Unknown"
 
 def format_date_range_path(start_date: str, end_date: str) -> str:
     """Format date range as MMDDYYYY-MMDDYYYY for S3 path"""
@@ -940,6 +943,7 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
         for csv_file in csv_files:
             try:
                 csv_content = zip_ref.read(csv_file)
+                # Use full department name in path for readability
                 csv_s3_key = f"{date_range_path}/{agency_filename}/{csv_file}"
                 s3_client.put_object(
                     Bucket=S3_BUCKET_NAME,
