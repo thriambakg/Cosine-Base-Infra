@@ -928,6 +928,10 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         
         record["legislative_subjects"] = "|".join(subject_names)
     
+    # Ensure policy_area is not empty (DynamoDB GSI hash key cannot be empty string)
+    if not record.get("policy_area") or record.get("policy_area").strip() == "":
+        record["policy_area"] = "Other"
+    
     # Build summary_text with fallback logic
     # Priority: 1) Summaries, 2) Official Title as Introduced, 3) Display Title
     summary_text = ""
