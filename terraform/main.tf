@@ -1245,6 +1245,46 @@ module "stock_data_historical_loader_state_machine" {
 
 # EventBridge Scheduler for Daily Historical Data Loading (4:30 PM ET after market close)
 # Runs Monday-Friday at 4:30 PM ET to fetch EOD data from Yahoo Finance
+
+# IAM Role for EventBridge to invoke Historical Loader Step Function
+resource "aws_iam_role" "historical_loader_scheduler_role" {
+  name = "${var.project_name}-historical-loader-scheduler-role-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for EventBridge to start Historical Loader Step Function
+resource "aws_iam_role_policy" "historical_loader_scheduler_policy" {
+  name = "${var.project_name}-historical-loader-scheduler-policy-${var.environment}"
+  role = aws_iam_role.historical_loader_scheduler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = module.stock_data_historical_loader_state_machine.state_machine_arn
+      }
+    ]
+  })
+}
+
 module "historical_loader_scheduler" {
   source = "./modules/eventbridge-scheduler"
 
@@ -1259,7 +1299,7 @@ module "historical_loader_scheduler" {
 
   # For Step Functions, we need to provide a role
   target_type     = "stepfunctions"
-  target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
+  target_role_arn = aws_iam_role.historical_loader_scheduler_role.arn
 
   target_input = jsonencode({
     source    = "scheduler-eod"
@@ -1270,7 +1310,11 @@ module "historical_loader_scheduler" {
   environment = var.environment
   tags        = var.common_tags
 
-  depends_on = [module.stock_data_historical_loader_state_machine]
+  depends_on = [
+    module.stock_data_historical_loader_state_machine,
+    aws_iam_role.historical_loader_scheduler_role,
+    aws_iam_role_policy.historical_loader_scheduler_policy
+  ]
 }
 
 # ==============================================================================
@@ -1471,37 +1515,10 @@ module "eod_aggregator_state_machine" {
 
 # EventBridge Scheduler for Daily EOD Aggregation (5:00 PM ET, 30 min after historical loader)
 # Runs Monday-Friday at 5:00 PM ET = 9:00 PM UTC (DST) or 10:00 PM UTC (Standard)
-module "eod_aggregator_scheduler" {
-  source = "./modules/eventbridge-scheduler"
 
-  rule_name           = "${var.project_name}-eod-aggregator-${var.environment}"
-  rule_description    = "Trigger EOD aggregator daily at 5:00 PM ET (30 min after historical loader) to update DynamoDB from S3"
-  schedule_expression = "cron(0 21 ? * MON-FRI *)" # 5:00 PM ET = 9:00 PM UTC during DST
-  enabled             = true
-
-  # Target is Step Functions state machine, not Lambda
-  target_arn = module.eod_aggregator_state_machine.state_machine_arn
-  target_id  = "EODAggregatorScheduler"
-
-  # For Step Functions, we need to provide a role
-  target_type     = "stepfunctions"
-  target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
-
-  target_input = jsonencode({
-    source    = "scheduler-eod"
-    timestamp = "scheduled"
-  })
-
-  purpose     = "EODDataAggregation"
-  environment = var.environment
-  tags        = var.common_tags
-
-  depends_on = [module.eod_aggregator_state_machine]
-}
-
-# IAM Role for EventBridge to invoke Step Functions
-resource "aws_iam_role" "eventbridge_stepfunctions_role" {
-  name = "${var.project_name}-eventbridge-stepfunctions-${var.environment}"
+# IAM Role for EventBridge to invoke EOD Aggregator Step Function
+resource "aws_iam_role" "eod_aggregator_scheduler_role" {
+  name = "${var.project_name}-eod-aggregator-scheduler-role-${var.environment}"
 
   assume_role_policy = jsonencode({
     Version = "2012-10-17"
@@ -1519,10 +1536,10 @@ resource "aws_iam_role" "eventbridge_stepfunctions_role" {
   tags = var.common_tags
 }
 
-# IAM Policy for EventBridge to start Step Functions
-resource "aws_iam_role_policy" "eventbridge_stepfunctions_policy" {
-  name = "stepfunctions-execution"
-  role = aws_iam_role.eventbridge_stepfunctions_role.id
+# IAM Policy for EventBridge to start EOD Aggregator Step Function
+resource "aws_iam_role_policy" "eod_aggregator_scheduler_policy" {
+  name = "${var.project_name}-eod-aggregator-scheduler-policy-${var.environment}"
+  role = aws_iam_role.eod_aggregator_scheduler_role.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -1532,17 +1549,44 @@ resource "aws_iam_role_policy" "eventbridge_stepfunctions_policy" {
         Action = [
           "states:StartExecution"
         ]
-        Resource = [
-          module.eod_aggregator_state_machine.state_machine_arn,
-          module.stock_data_historical_loader_state_machine.state_machine_arn,
-          module.politician_trades_state_machine.state_machine_arn,
-          module.usaspending_bulk_indexing_state_machine.state_machine_arn,
-          module.congress_bills_fetcher_state_machine.state_machine_arn
-        ]
+        Resource = module.eod_aggregator_state_machine.state_machine_arn
       }
     ]
   })
 }
+
+module "eod_aggregator_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-eod-aggregator-${var.environment}"
+  rule_description    = "Trigger EOD aggregator daily at 5:00 PM ET (30 min after historical loader) to update DynamoDB from S3"
+  schedule_expression = "cron(0 21 ? * MON-FRI *)" # 5:00 PM ET = 9:00 PM UTC during DST
+  enabled             = true
+
+  # Target is Step Functions state machine, not Lambda
+  target_arn = module.eod_aggregator_state_machine.state_machine_arn
+  target_id  = "EODAggregatorScheduler"
+
+  # For Step Functions, we need to provide a role
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.eod_aggregator_scheduler_role.arn
+
+  target_input = jsonencode({
+    source    = "scheduler-eod"
+    timestamp = "scheduled"
+  })
+
+  purpose     = "EODDataAggregation"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [
+    module.eod_aggregator_state_machine,
+    aws_iam_role.eod_aggregator_scheduler_role,
+    aws_iam_role_policy.eod_aggregator_scheduler_policy
+  ]
+}
+
 
 # ==============================================================================
 # POLITICIAN TRADES AGGREGATION SYSTEM
@@ -2494,6 +2538,46 @@ module "congress_bills_fetcher_state_machine" {
 }
 
 # EventBridge Scheduler for Daily Congress Bills Fetcher (12:00 AM UTC)
+
+# IAM Role for EventBridge to invoke Congress Bills Fetcher Step Function
+resource "aws_iam_role" "congress_bills_fetcher_scheduler_role" {
+  name = "${var.project_name}-congress-bills-fetcher-scheduler-role-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for EventBridge to start Congress Bills Fetcher Step Function
+resource "aws_iam_role_policy" "congress_bills_fetcher_scheduler_policy" {
+  name = "${var.project_name}-congress-bills-fetcher-scheduler-policy-${var.environment}"
+  role = aws_iam_role.congress_bills_fetcher_scheduler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = module.congress_bills_fetcher_state_machine.state_machine_arn
+      }
+    ]
+  })
+}
+
 resource "aws_cloudwatch_event_rule" "congress_bills_fetcher_scheduler" {
   name                = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
   description         = "Trigger Congress bills fetcher daily at 12:00 AM UTC to fetch yesterday's data"
@@ -2513,7 +2597,7 @@ resource "aws_cloudwatch_event_target" "congress_bills_fetcher_scheduler_target"
   rule      = aws_cloudwatch_event_rule.congress_bills_fetcher_scheduler.name
   target_id = "CongressBillsFetcherScheduler"
   arn       = module.congress_bills_fetcher_state_machine.state_machine_arn
-  role_arn  = aws_iam_role.eventbridge_stepfunctions_role.arn
+  role_arn  = aws_iam_role.congress_bills_fetcher_scheduler_role.arn
 
   # Input payload for scheduler: null dates with source="scheduler"
   # Router lambda will calculate yesterday's date
@@ -2522,6 +2606,11 @@ resource "aws_cloudwatch_event_target" "congress_bills_fetcher_scheduler_target"
     end_date   = null
     source     = "scheduler"
   })
+
+  depends_on = [
+    aws_iam_role.congress_bills_fetcher_scheduler_role,
+    aws_iam_role_policy.congress_bills_fetcher_scheduler_policy
+  ]
 }
 
 resource "aws_iam_policy" "lambda_politician_trades_textract_policy" {
@@ -3530,6 +3619,46 @@ module "politician_trades_state_machine" {
 }
 
 # EventBridge Scheduler for Daily Politician Trades Aggregation (2:00 AM EST)
+
+# IAM Role for EventBridge to invoke Politician Trades Step Function
+resource "aws_iam_role" "politician_trades_scheduler_role" {
+  name = "${var.project_name}-politician-trades-scheduler-role-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for EventBridge to start Politician Trades Step Function
+resource "aws_iam_role_policy" "politician_trades_scheduler_policy" {
+  name = "${var.project_name}-politician-trades-scheduler-policy-${var.environment}"
+  role = aws_iam_role.politician_trades_scheduler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = module.politician_trades_state_machine.state_machine_arn
+      }
+    ]
+  })
+}
+
 module "politician_trades_scheduler" {
   source = "./modules/eventbridge-scheduler"
 
@@ -3544,7 +3673,7 @@ module "politician_trades_scheduler" {
 
   # For Step Functions, we need to provide a role
   target_type     = "stepfunctions"
-  target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
+  target_role_arn = aws_iam_role.politician_trades_scheduler_role.arn
 
   target_input = jsonencode({
     backdate = null
@@ -3556,7 +3685,11 @@ module "politician_trades_scheduler" {
   environment = var.environment
   tags        = var.common_tags
 
-  depends_on = [module.politician_trades_state_machine]
+  depends_on = [
+    module.politician_trades_state_machine,
+    aws_iam_role.politician_trades_scheduler_role,
+    aws_iam_role_policy.politician_trades_scheduler_policy
+  ]
 }
 
 
