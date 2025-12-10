@@ -1254,8 +1254,74 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         existing_item = award_record.get('existing_item')
         
         if update_from_dynamodb and existing_item:
-            # Update existing item with subawards only (preserve all other fields)
+            # Update existing item with subawards AND transactions (if present in bulk download)
+            # This handles cases where:
+            # 1. Orphan sub-award: parent not in bulk download but exists in DynamoDB
+            # 2. Transaction adjustments: parent appears in bulk download with updated transactions
             db_item = existing_item.copy()
+            
+            # Merge transactions if present in bulk download (transaction adjustments)
+            if transactions:
+                existing_transactions = db_item.get('transactions', [])
+                if existing_transactions:
+                    # Deduplicate transactions by transaction_id or action_date + modification_number
+                    existing_tx_ids = set()
+                    for tx in existing_transactions:
+                        tx_id = tx.get('transaction_id') or tx.get('award_id_fpds') or tx.get('modification_number')
+                        if tx_id:
+                            existing_tx_ids.add(str(tx_id))
+                        else:
+                            # Fallback: use action_date + modification_number as unique key
+                            action_date = tx.get('action_date')
+                            mod_num = tx.get('modification_number')
+                            if action_date and mod_num:
+                                existing_tx_ids.add(f"{action_date}_{mod_num}")
+                    
+                    new_transactions = []
+                    for tx in transactions:
+                        tx_id = tx.get('transaction_id') or tx.get('award_id_fpds') or tx.get('modification_number')
+                        if tx_id:
+                            tx_key = str(tx_id)
+                        else:
+                            action_date = tx.get('action_date')
+                            mod_num = tx.get('modification_number')
+                            if action_date and mod_num:
+                                tx_key = f"{action_date}_{mod_num}"
+                            else:
+                                tx_key = None
+                        
+                        if not tx_key or tx_key not in existing_tx_ids:
+                            new_transactions.append(tx)
+                    
+                    if new_transactions:
+                        db_item['transactions'] = existing_transactions + convert_floats_to_decimal(new_transactions)
+                        # Recalculate total_obligation from all transactions
+                        total_obligation = Decimal('0')
+                        for tx in db_item['transactions']:
+                            obligation = tx.get('total_dollars_obligated') or tx.get('federal_action_obligation')
+                            if obligation:
+                                try:
+                                    total_obligation += Decimal(str(obligation))
+                                except:
+                                    pass
+                        db_item['total_obligation'] = total_obligation
+                        db_item['transaction_count'] = len(db_item['transactions'])
+                        log_print(f"   📊 Updated award {award_id}: Added {len(new_transactions)} new transaction(s), recalculated total_obligation")
+                else:
+                    # No existing transactions, use new ones
+                    db_item['transactions'] = convert_floats_to_decimal(transactions)
+                    # Calculate total_obligation from transactions
+                    total_obligation = Decimal('0')
+                    for tx in transactions:
+                        obligation = tx.get('total_dollars_obligated') or tx.get('federal_action_obligation')
+                        if obligation:
+                            try:
+                                total_obligation += Decimal(str(obligation))
+                            except:
+                                pass
+                    db_item['total_obligation'] = total_obligation
+                    db_item['transaction_count'] = transaction_count
+                    log_print(f"   📊 Updated award {award_id}: Added {transaction_count} transaction(s) from bulk download")
             
             # Merge subawards (append to existing if any)
             existing_subawards = db_item.get('subawards', [])
@@ -1275,12 +1341,15 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 
                 if new_subawards:
                     db_item['subawards'] = existing_subawards + convert_floats_to_decimal(new_subawards)
+                    log_print(f"   📊 Updated award {award_id}: Added {len(new_subawards)} new sub-award(s)")
                 else:
                     db_item['subawards'] = existing_subawards
             elif subawards:
                 db_item['subawards'] = convert_floats_to_decimal(subawards)
+                log_print(f"   📊 Updated award {award_id}: Added {len(subawards)} sub-award(s)")
             
             # Update counts and timestamp
+            db_item['transaction_count'] = len(db_item.get('transactions', []))
             db_item['subaward_count'] = len(db_item.get('subawards', []))
             db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
             

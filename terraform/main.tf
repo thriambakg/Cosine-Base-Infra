@@ -2149,8 +2149,7 @@ module "congress_bills_fetcher_lambda" {
 
   additional_policy_arns = [
     module.congress_bills_table.table_policy_arn,
-    module.kms.main_key_policy_arn,
-    module.kms.dynamodb_key_policy_arn,
+    module.kms.kms_access_policy_arn,
     module.congress_api_secrets_manager.secret_access_policy_arn
   ]
 

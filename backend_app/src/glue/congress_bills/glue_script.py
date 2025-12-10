@@ -749,3 +749,4 @@ if __name__ == "__main__":
         logger.error(f"❌ Traceback:\n{error_traceback}")
         # Re-raise to trigger Glue job failure
         raise
+
