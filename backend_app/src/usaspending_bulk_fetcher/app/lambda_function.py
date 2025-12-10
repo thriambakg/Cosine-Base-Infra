@@ -609,6 +609,51 @@ def format_agency_name_for_s3(agency_name: str) -> str:
     
     return sanitized if sanitized else "Unknown"
 
+def format_agency_name_old_abbreviation(agency_name: str) -> str:
+    """
+    Convert agency name to old abbreviation format matching the original Glue script logic.
+    Pattern: First letter of each word + rest of last word (capitalized).
+    Special handling for "Department of " and "Department " prefixes.
+    
+    Examples:
+    - "Department of Agriculture" -> "DOAgriculture"
+    - "Department Defense" -> "DDefense"
+    - "Administrative Board of Management Commission" -> "ABOMCommission"
+    - "Administrative Board" -> "ABOard"
+    """
+    if not agency_name:
+        return "Unknown"
+    
+    # Special handling for "Department of " prefix
+    if agency_name.startswith("Department of "):
+        rest = agency_name.replace("Department of ", "").strip()
+        return "DO" + rest.capitalize()
+    
+    # Special handling for "Department " prefix
+    if agency_name.startswith("Department "):
+        rest = agency_name.replace("Department ", "").strip()
+        return "D" + rest.capitalize()
+    
+    # Split into words (no filtering - uses ALL words)
+    words = agency_name.strip().split()
+    if not words:
+        return "Unknown"
+    
+    # Single word - just capitalize it
+    if len(words) == 1:
+        return words[0].capitalize()
+    
+    # Get first letter of each word (uppercase)
+    first_letters = "".join([word[0].upper() for word in words if word])
+    
+    # Append rest of last word (capitalized)
+    last_word = words[-1]
+    if len(last_word) > 1:
+        rest_of_last = last_word[1:].capitalize()
+        return first_letters + rest_of_last
+    else:
+        return first_letters
+
 def format_date_range_path(start_date: str, end_date: str) -> str:
     """Format date range as MMDDYYYY-MMDDYYYY for S3 path"""
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
@@ -622,6 +667,7 @@ def format_date_range_path(start_date: str, end_date: str) -> str:
 def check_s3_zip_exists(start_date: str, end_date: str, agency_name: str) -> Optional[str]:
     """
     Check if a ZIP file exists in S3 for the given date range and agency.
+    Checks both new format (hyphenated full name) and old format (abbreviation).
     
     Args:
         start_date: Start date in YYYY-MM-DD format
@@ -629,22 +675,33 @@ def check_s3_zip_exists(start_date: str, end_date: str, agency_name: str) -> Opt
         agency_name: Agency name
     
     Returns:
-        S3 key of ZIP file if exists, None otherwise
+        S3 key of ZIP file if exists (in either format), None otherwise
     """
     date_range_path = format_date_range_path(start_date, end_date)
-    agency_filename = format_agency_name_for_s3(agency_name)
-    zip_s3_key = f"{date_range_path}/{agency_filename}.zip"
     
-    try:
-        s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
-        log_print(f"✅ Found existing ZIP file in S3: {zip_s3_key}")
-        return zip_s3_key
-    except s3_client.exceptions.ClientError as e:
-        if e.response['Error']['Code'] == '404':
-            return None
-        else:
-            log_print(f"⚠️ Error checking S3 for ZIP file {zip_s3_key}: {str(e)[:200]}")
-            return None
+    # Check new format first (hyphenated full name)
+    agency_filename_new = format_agency_name_for_s3(agency_name)
+    zip_s3_key_new = f"{date_range_path}/{agency_filename_new}.zip"
+    
+    # Check old format (abbreviation)
+    agency_filename_old = format_agency_name_old_abbreviation(agency_name)
+    zip_s3_key_old = f"{date_range_path}/{agency_filename_old}.zip"
+    
+    zip_keys_to_check = [zip_s3_key_new, zip_s3_key_old]
+    
+    for zip_s3_key in zip_keys_to_check:
+        try:
+            s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
+            log_print(f"✅ Found existing ZIP file in S3: {zip_s3_key}")
+            return zip_s3_key
+        except s3_client.exceptions.ClientError as e:
+            if e.response['Error']['Code'] == '404':
+                continue
+            else:
+                log_print(f"⚠️ Error checking S3 for ZIP file {zip_s3_key}: {str(e)[:200]}")
+                continue
+    
+    return None
 
 def list_csv_files_from_folder(start_date: str, end_date: str, agency_name: str) -> Dict[str, str]:
     """
