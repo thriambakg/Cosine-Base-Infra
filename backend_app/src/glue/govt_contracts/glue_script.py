@@ -244,6 +244,76 @@ def convert_floats_to_decimal(obj: Any) -> Any:
     else:
         return obj
 
+def normalize_common_fields(record: Dict[str, Any], record_type: str = "prime") -> Dict[str, Any]:
+    """
+    Normalize common fields between contracts and assistance to reduce blanks in DynamoDB.
+    Maps contract-specific and assistance-specific fields to common field names.
+    Original fields are preserved, common fields are added to reduce blanks.
+    
+    Args:
+        record: Dictionary of CSV fields
+        record_type: "prime", "transaction", or "subaward"
+    
+    Returns:
+        Dictionary with normalized fields added (original fields preserved)
+    """
+    normalized = record.copy()
+    
+    if record_type == "prime":
+        # Award identifier mappings - both represent the award ID
+        if 'award_id_piid' in record and record['award_id_piid']:
+            normalized['award_identifier'] = record['award_id_piid']
+        elif 'award_id_fain' in record and record['award_id_fain']:
+            normalized['award_identifier'] = record['award_id_fain']
+        
+        # Obligation amount mappings - both represent total obligation
+        if 'total_dollars_obligated' in record and record['total_dollars_obligated']:
+            if 'total_obligated_amount' not in normalized or not normalized.get('total_obligated_amount'):
+                normalized['total_obligated_amount'] = record['total_dollars_obligated']
+        elif 'total_obligated_amount' in record and record['total_obligated_amount']:
+            if 'total_dollars_obligated' not in normalized or not normalized.get('total_dollars_obligated'):
+                normalized['total_dollars_obligated'] = record['total_obligated_amount']
+        
+        # Award type mappings - both represent award type
+        if 'assistance_type_description' in record and record['assistance_type_description']:
+            if 'award_type' not in normalized or not normalized.get('award_type'):
+                normalized['award_type'] = record['assistance_type_description']
+        elif 'award_type' in record and record['award_type']:
+            if 'assistance_type_description' not in normalized or not normalized.get('assistance_type_description'):
+                normalized['assistance_type_description'] = record['award_type']
+        
+        # State code mappings (already handled in GSI mapping, but ensure both exist)
+        if 'recipient_state_code' in record and record['recipient_state_code']:
+            if 'recipient_location_state' not in normalized or not normalized.get('recipient_location_state'):
+                normalized['recipient_location_state'] = record['recipient_state_code']
+    
+    elif record_type == "transaction":
+        # Transaction obligation mappings - both represent transaction obligation
+        if 'total_dollars_obligated' in record and record['total_dollars_obligated']:
+            if 'total_obligated_amount' not in normalized or not normalized.get('total_obligated_amount'):
+                normalized['total_obligated_amount'] = record['total_dollars_obligated']
+        elif 'total_obligated_amount' in record and record['total_obligated_amount']:
+            if 'total_dollars_obligated' not in normalized or not normalized.get('total_dollars_obligated'):
+                normalized['total_dollars_obligated'] = record['total_obligated_amount']
+        
+        # Transaction unique key mappings - both represent transaction identifier
+        if 'contract_transaction_unique_key' in record and record['contract_transaction_unique_key']:
+            normalized['transaction_unique_key'] = record['contract_transaction_unique_key']
+        elif 'assistance_transaction_unique_key' in record and record['assistance_transaction_unique_key']:
+            normalized['transaction_unique_key'] = record['assistance_transaction_unique_key']
+    
+    elif record_type == "subaward":
+        # Parent award identifier mappings - both represent parent award ID
+        if 'prime_award_piid' in record and record['prime_award_piid']:
+            normalized['prime_award_identifier'] = record['prime_award_piid']
+        elif 'prime_award_fain' in record and record['prime_award_fain']:
+            normalized['prime_award_identifier'] = record['prime_award_fain']
+        
+        # Subawardee name mappings (both use same field name, but ensure consistency)
+        # Both contracts and assistance subawards have subawardee_name, so no mapping needed
+    
+    return normalized
+
 def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
     """
     Extract only GSI fields and essential metadata for DynamoDB.
@@ -579,6 +649,51 @@ def format_agency_name_for_s3(agency_name: str) -> str:
     
     return sanitized if sanitized else "Unknown"
 
+def format_agency_name_old_abbreviation(agency_name: str) -> str:
+    """
+    Convert agency name to old abbreviation format matching the original Glue script logic.
+    Pattern: First letter of each word + rest of last word (capitalized).
+    Special handling for "Department of " and "Department " prefixes.
+    
+    Examples:
+    - "Department of Agriculture" -> "DOAgriculture"
+    - "Department Defense" -> "DDefense"
+    - "Administrative Board of Management Commission" -> "ABOMCommission"
+    - "Administrative Board" -> "ABOard"
+    """
+    if not agency_name:
+        return "Unknown"
+    
+    # Special handling for "Department of " prefix
+    if agency_name.startswith("Department of "):
+        rest = agency_name.replace("Department of ", "").strip()
+        return "DO" + rest.capitalize()
+    
+    # Special handling for "Department " prefix
+    if agency_name.startswith("Department "):
+        rest = agency_name.replace("Department ", "").strip()
+        return "D" + rest.capitalize()
+    
+    # Split into words (no filtering - uses ALL words)
+    words = agency_name.strip().split()
+    if not words:
+        return "Unknown"
+    
+    # Single word - just capitalize it
+    if len(words) == 1:
+        return words[0].capitalize()
+    
+    # Get first letter of each word (uppercase)
+    first_letters = "".join([word[0].upper() for word in words if word])
+    
+    # Append rest of last word (capitalized)
+    last_word = words[-1]
+    if len(last_word) > 1:
+        rest_of_last = last_word[1:].capitalize()
+        return first_letters + rest_of_last
+    else:
+        return first_letters
+
 def format_date_range_path(start_date: str, end_date: str) -> str:
     """Format date range as MMDDYYYY-MMDDYYYY for S3 path"""
     start_dt = datetime.strptime(start_date, '%Y-%m-%d')
@@ -588,6 +703,111 @@ def format_date_range_path(start_date: str, end_date: str) -> str:
     end_formatted = f"{end_dt.month}{end_dt.day}{end_dt.year}"
     
     return f"{start_formatted}-{end_formatted}"
+
+def check_s3_date_range_exists(start_date: str, end_date: str, agency_name: Optional[str] = None) -> bool:
+    """
+    Check if a date range folder already exists in S3 with CSV files.
+    Checks both new format (hyphenated full name) and old format (abbreviation).
+    
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        agency_name: Optional agency name to check for agency-specific folder
+    
+    Returns:
+        True if folder exists with CSV files (in either format), False otherwise
+    """
+    date_range_path = format_date_range_path(start_date, end_date)
+    
+    if agency_name:
+        # Check new format first (hyphenated full name)
+        agency_filename_new = format_agency_name_for_s3(agency_name)
+        prefix_new = f"{date_range_path}/{agency_filename_new}/"
+        
+        # Check old format (abbreviation)
+        agency_filename_old = format_agency_name_old_abbreviation(agency_name)
+        prefix_old = f"{date_range_path}/{agency_filename_old}/"
+        
+        prefixes_to_check = [prefix_new, prefix_old]
+    else:
+        prefix = f"{date_range_path}/"
+        prefixes_to_check = [prefix]
+    
+    for prefix in prefixes_to_check:
+        try:
+            # List objects with the prefix
+            response = s3_client.list_objects_v2(
+                Bucket=S3_BUCKET_NAME,
+                Prefix=prefix,
+                MaxKeys=10  # Only need to check if any CSV files exist
+            )
+            
+            if 'Contents' in response:
+                # Check if any CSV files exist
+                csv_files = [obj['Key'] for obj in response['Contents'] if obj['Key'].lower().endswith('.csv')]
+                if len(csv_files) > 0:
+                    log_print(f"✅ Found existing S3 folder: {prefix}")
+                    return True
+        except Exception as e:
+            log_print(f"⚠️ Error checking S3 for existing folder {prefix}: {str(e)[:200]}")
+            continue
+    
+    return False
+
+def list_s3_csv_files(start_date: str, end_date: str, agency_name: Optional[str] = None) -> Dict[str, str]:
+    """
+    List all CSV files in the S3 date range folder and return mapping of filename -> S3 key.
+    Checks both new format (hyphenated full name) and old format (abbreviation).
+    
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        agency_name: Optional agency name to check for agency-specific folder
+    
+    Returns:
+        Dict mapping CSV filename -> S3 key
+    """
+    date_range_path = format_date_range_path(start_date, end_date)
+    
+    if agency_name:
+        # Check new format first (hyphenated full name)
+        agency_filename_new = format_agency_name_for_s3(agency_name)
+        prefix_new = f"{date_range_path}/{agency_filename_new}/"
+        
+        # Check old format (abbreviation)
+        agency_filename_old = format_agency_name_old_abbreviation(agency_name)
+        prefix_old = f"{date_range_path}/{agency_filename_old}/"
+        
+        prefixes_to_check = [prefix_new, prefix_old]
+    else:
+        prefix = f"{date_range_path}/"
+        prefixes_to_check = [prefix]
+    
+    csv_s3_keys = {}
+    
+    for prefix in prefixes_to_check:
+        try:
+            paginator = s3_client.get_paginator('list_objects_v2')
+            pages = paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=prefix)
+            
+            for page in pages:
+                if 'Contents' in page:
+                    for obj in page['Contents']:
+                        key = obj['Key']
+                        if key.lower().endswith('.csv'):
+                            # Extract just the filename from the S3 key
+                            filename = key.split('/')[-1]
+                            csv_s3_keys[filename] = key
+            
+            # If we found files in this prefix, use it (prefer new format if both exist)
+            if csv_s3_keys:
+                log_print(f"✅ Found CSV files in S3 folder: {prefix}")
+                break
+        except Exception as e:
+            log_print(f"⚠️ Error listing S3 CSV files for {prefix}: {str(e)[:200]}")
+            continue
+    
+    return csv_s3_keys
 
 def save_zip_to_s3(zip_content: bytes, start_date: str, end_date: str, agency_name: str) -> str:
     """Save downloaded ZIP file to S3"""
@@ -635,11 +855,15 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
         if row_count % 100000 == 0:
             log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
         
-        # Get award ID - primary key for grouping
+        # Get award ID - primary key for grouping and DynamoDB primary key
+        # For contracts: uses contract_award_unique_key
+        # For assistance: uses assistance_award_unique_key (this becomes the award_id primary key)
+        # Check both contract and assistance award unique keys
         award_id = (
-            row.get('contract_award_unique_key') or
-            row.get('generated_unique_award_id') or
-            row.get('award_id') or
+            row.get('contract_award_unique_key') or      # For contracts
+            row.get('assistance_award_unique_key') or    # For assistance awards (becomes primary key award_id)
+            row.get('generated_unique_award_id') or     # Generic fallback (works for both)
+            row.get('award_id') or                       # Generic fallback
             None
         )
         
@@ -660,7 +884,7 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
                     continue
                 
                 # Try to convert numeric values
-                if key in ['federal_action_obligation', 'total_dollars_obligated', 
+                if key in ['federal_action_obligation', 'total_dollars_obligated', 'total_obligated_amount',
                           'total_outlayed_amount_for_overall_award', 'base_and_exercised_options_value',
                           'current_total_value_of_award', 'base_and_all_options_value',
                           'potential_total_value_of_award', 'action_date_fiscal_year']:
@@ -671,7 +895,11 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
                 else:
                     award_record[key] = normalize_string(value)
             
+            # Normalize common fields to reduce blanks (maps contract/assistance fields to common names)
+            award_record = normalize_common_fields(award_record, record_type="prime")
+            
             # Add computed fields
+            # award_id is the primary key in DynamoDB - for assistance awards this matches assistance_award_unique_key
             award_record['award_id'] = award_id
             award_record['fiscal_year'] = fiscal_year
             award_record['transaction_count'] = 0
@@ -696,7 +924,7 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
         for key, value in row.items():
             if value is None or value == '':
                 continue
-            if key in ['federal_action_obligation', 'total_dollars_obligated']:
+            if key in ['federal_action_obligation', 'total_dollars_obligated', 'total_obligated_amount']:
                 try:
                     transaction_record[key] = Decimal(str(value))
                 except:
@@ -704,10 +932,19 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
             else:
                 transaction_record[key] = normalize_string(value)
         
+        # Normalize common fields to reduce blanks
+        transaction_record = normalize_common_fields(transaction_record, record_type="transaction")
+        
         award['transactions'].append(transaction_record)
         
         # Update total obligation (sum from transactions)
-        obligation_str = row.get('total_dollars_obligated') or row.get('federal_action_obligation') or '0'
+        # Handle both contract and assistance fields
+        obligation_str = (
+            row.get('total_dollars_obligated') or 
+            row.get('federal_action_obligation') or 
+            row.get('total_obligated_amount') or  # Assistance field
+            '0'
+        )
         try:
             obligation = Decimal(str(obligation_str))
             if 'total_obligation' not in award or award.get('total_obligation') is None:
@@ -783,6 +1020,9 @@ def parse_subaward_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str, L
                     subaward_record[key] = normalize_string(value)
             else:
                 subaward_record[key] = normalize_string(value)
+        
+        # Normalize common fields to reduce blanks
+        subaward_record = normalize_common_fields(subaward_record, record_type="subaward")
         
         # Group sub-awards by parent award
         if parent_award_id not in subawards_by_parent:
@@ -983,6 +1223,67 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     # Only parse files that were successfully extracted
     prime_file_list = [f for f in prime_file_list if f in csv_s3_keys]
     subaward_file_list = [f for f in subaward_file_list if f in csv_s3_keys]
+    
+    return _parse_csvs_from_s3(csv_s3_keys, prime_file_list, subaward_file_list, agency_name, start_date, end_date)
+
+def parse_csvs_from_s3(start_date: str, end_date: str, agency_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Parse CSV files directly from S3 for a given date range and agency.
+    This is used when the files already exist in S3 from a previous run.
+    
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        agency_name: Optional agency name
+    
+    Returns:
+        Dict with:
+        - 'prime_awards': Dict of award_id -> award_record
+        - 'subawards_by_parent': Dict of parent_award_id -> list of sub-award records
+    """
+    agency_prefix = f"[{agency_name}] " if agency_name else ""
+    parse_start_time = time.time()
+    
+    log_print(f"📂 {agency_prefix}Parsing CSV files from existing S3 folder...")
+    
+    # List CSV files from S3
+    csv_s3_keys = list_s3_csv_files(start_date, end_date, agency_name)
+    
+    if not csv_s3_keys:
+        raise Exception(f"{agency_prefix}No CSV files found in S3 for date range {start_date} to {end_date}")
+    
+    log_print(f"📄 {agency_prefix}Found {len(csv_s3_keys)} CSV file(s) in S3")
+    
+    # Separate prime and sub-award files
+    prime_file_list = [f for f in csv_s3_keys.keys() if 'subaward' not in f.lower()]
+    subaward_file_list = [f for f in csv_s3_keys.keys() if 'subaward' in f.lower()]
+    
+    log_print(f"   - {len(prime_file_list)} Prime award file(s)")
+    log_print(f"   - {len(subaward_file_list)} Sub-award file(s)")
+    
+    return _parse_csvs_from_s3(csv_s3_keys, prime_file_list, subaward_file_list, agency_name, start_date, end_date)
+
+def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str], subaward_file_list: List[str], 
+                        agency_name: Optional[str] = None, start_date: Optional[str] = None, end_date: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Internal function to parse CSV files from S3 keys.
+    Used by both download_and_parse_all_csvs and parse_csvs_from_s3.
+    
+    Args:
+        csv_s3_keys: Dict mapping CSV filename -> S3 key
+        prime_file_list: List of prime award CSV filenames
+        subaward_file_list: List of subaward CSV filenames
+        agency_name: Optional agency name for logging
+        start_date: Optional start date for logging
+        end_date: Optional end date for logging
+    
+    Returns:
+        Dict with:
+        - 'prime_awards': Dict of award_id -> award_record
+        - 'subawards_by_parent': Dict of parent_award_id -> list of sub-award records
+    """
+    agency_prefix = f"[{agency_name}] " if agency_name else ""
+    parse_start_time = time.time()
     
     # Parse all prime award files in parallel (read from S3)
     all_prime_awards = {}
@@ -1234,6 +1535,23 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         if recipient_name:
             db_item['recipient_name_normalized'] = recipient_name.lower().strip()
         
+        # Map assistance-specific fields to common GSI fields
+        # For assistance: total_obligated_amount → total_obligation
+        if 'total_obligated_amount' in db_item and 'total_obligation' not in db_item:
+            db_item['total_obligation'] = db_item['total_obligated_amount']
+        # For assistance: assistance_type_description → award_type
+        if 'assistance_type_description' in db_item and 'award_type' not in db_item:
+            db_item['award_type'] = db_item['assistance_type_description']
+        # For assistance: recipient_state_code → recipient_location_state
+        if 'recipient_state_code' in db_item and 'recipient_location_state' not in db_item:
+            db_item['recipient_location_state'] = db_item['recipient_state_code']
+        # For assistance: action_date_fiscal_year → fiscal_year (if fiscal_year not already set)
+        if 'action_date_fiscal_year' in db_item and ('fiscal_year' not in db_item or db_item.get('fiscal_year') is None):
+            try:
+                db_item['fiscal_year'] = int(db_item['action_date_fiscal_year'])
+            except:
+                pass
+        
         # Ensure total_obligation is Decimal
         if 'total_obligation' in db_item and not isinstance(db_item['total_obligation'], Decimal):
             try:
@@ -1302,7 +1620,11 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         # Recalculate total_obligation from all transactions
                         total_obligation = Decimal('0')
                         for tx in db_item['transactions']:
-                            obligation = tx.get('total_dollars_obligated') or tx.get('federal_action_obligation')
+                            obligation = (
+                                tx.get('total_dollars_obligated') or 
+                                tx.get('federal_action_obligation') or 
+                                tx.get('total_obligated_amount')  # Assistance field
+                            )
                             if obligation:
                                 try:
                                     total_obligation += Decimal(str(obligation))
@@ -1317,7 +1639,11 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     # Calculate total_obligation from transactions
                     total_obligation = Decimal('0')
                     for tx in transactions:
-                        obligation = tx.get('total_dollars_obligated') or tx.get('federal_action_obligation')
+                        obligation = (
+                            tx.get('total_dollars_obligated') or 
+                            tx.get('federal_action_obligation') or 
+                            tx.get('total_obligated_amount')  # Assistance field
+                        )
                         if obligation:
                             try:
                                 total_obligation += Decimal(str(obligation))
@@ -1539,31 +1865,46 @@ def main():
             log_print(f"📅 Date Range: {start_date} to {end_date}")
             log_print(f"{'=' * 80}")
             
-            # PHASE 1: GET - Request and wait for bulk download
-            log_print(f"\n🔵 PHASE 1: GET - Requesting Bulk Download for {agency_name}")
-            log_print(f"{'─' * 80}")
-            get_phase_start = time.time()
+            # Check if date range already exists in S3
+            log_print(f"\n🔍 Checking if date range already exists in S3...")
+            s3_exists = check_s3_date_range_exists(start_date, end_date, agency_name=agency_name)
             
-            download_info = initiate_bulk_download(start_date, end_date, agency=agency)
-            file_name = download_info['file_name']
-            log_print(f"📋 File Name: {file_name}")
-            
-            status_info = poll_download_status(file_name, max_wait=14400, poll_interval=30, agency_name=agency_name)
-            file_url = status_info.get('file_url')
-            
-            if not file_url:
-                raise Exception(f"No file_url in download status response for {agency_name}")
-            
-            get_phase_duration = time.time() - get_phase_start
-            log_print(f"✅ GET Phase Complete: {int(get_phase_duration // 60)}m {int(get_phase_duration % 60)}s")
-            log_print(f"📁 File URL: {file_url}")
-            
-            # PHASE 2: PARSE - Download and parse all CSV files
-            log_print(f"\n🟡 PHASE 2: PARSE - Downloading and Parsing All CSV Files for {agency_name}")
-            log_print(f"{'─' * 80}")
-            parse_phase_start = time.time()
-            
-            parse_results = download_and_parse_all_csvs(file_url, agency_name=agency_name, start_date=start_date, end_date=end_date)
+            if s3_exists:
+                log_print(f"✅ Found existing S3 folder for date range {start_date} to {end_date}")
+                log_print(f"⏭️  Skipping bulk download - using existing CSV files from S3")
+                
+                # PHASE 2: PARSE - Parse CSV files directly from S3
+                log_print(f"\n🟡 PHASE 2: PARSE - Parsing CSV Files from S3 for {agency_name}")
+                log_print(f"{'─' * 80}")
+                parse_phase_start = time.time()
+                
+                parse_results = parse_csvs_from_s3(start_date, end_date, agency_name=agency_name)
+            else:
+                # PHASE 1: GET - Request and wait for bulk download
+                log_print(f"\n🔵 PHASE 1: GET - Requesting Bulk Download for {agency_name}")
+                log_print(f"{'─' * 80}")
+                get_phase_start = time.time()
+                
+                download_info = initiate_bulk_download(start_date, end_date, agency=agency)
+                file_name = download_info['file_name']
+                log_print(f"📋 File Name: {file_name}")
+                
+                status_info = poll_download_status(file_name, max_wait=14400, poll_interval=30, agency_name=agency_name)
+                file_url = status_info.get('file_url')
+                
+                if not file_url:
+                    raise Exception(f"No file_url in download status response for {agency_name}")
+                
+                get_phase_duration = time.time() - get_phase_start
+                log_print(f"✅ GET Phase Complete: {int(get_phase_duration // 60)}m {int(get_phase_duration % 60)}s")
+                log_print(f"📁 File URL: {file_url}")
+                
+                # PHASE 2: PARSE - Download and parse all CSV files
+                log_print(f"\n🟡 PHASE 2: PARSE - Downloading and Parsing All CSV Files for {agency_name}")
+                log_print(f"{'─' * 80}")
+                parse_phase_start = time.time()
+                
+                parse_results = download_and_parse_all_csvs(file_url, agency_name=agency_name, start_date=start_date, end_date=end_date)
             prime_awards = parse_results['prime_awards']
             
             if not prime_awards:
