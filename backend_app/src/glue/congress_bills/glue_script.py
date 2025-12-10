@@ -895,8 +895,10 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     if sponsor_name and politicians:
         matched_sponsor = find_matching_politician(sponsor_name, politicians)
         if matched_sponsor:
-            # Update from CSV
-            record["sponsor_party"] = matched_sponsor.get("party", record.get("sponsor_party", ""))
+            # Update from CSV - use full name from CSV (cleaner than API format)
+            record["sponsor_full_name"] = matched_sponsor.get("name", record.get("sponsor_full_name", ""))
+            # Use full party name from CSV (e.g., "Republican" not just "R")
+            record["sponsor_party"] = matched_sponsor.get("party_full", record.get("sponsor_party", ""))
             # Format state/district same as politician trades matchers (MA01 for House, MA for Senate)
             state_district_formatted = format_state_district(matched_sponsor)
             if state_district_formatted:
@@ -904,7 +906,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
             if matched_sponsor.get("bioguide_id"):
                 record["sponsor_bioguide_id"] = matched_sponsor["bioguide_id"]
     
-    # Match cosponsors to CSV and update parties
+    # Match cosponsors to CSV and update parties (use full party names)
     cosponsor_parties_list = []
     if cosponsors and politicians:
         for cosponsor in cosponsors:
@@ -912,12 +914,12 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
             if cosponsor_name:
                 matched_cosponsor = find_matching_politician(cosponsor_name, politicians)
                 if matched_cosponsor:
-                    # Use party from CSV
-                    cosponsor_parties_list.append(matched_cosponsor.get("party", cosponsor.get("party", "")))
+                    # Use full party name from CSV (e.g., "Republican" not just "R")
+                    cosponsor_parties_list.append(matched_cosponsor.get("party_full", cosponsor.get("party", "")))
                 else:
-                    # Fallback to API party (first character)
+                    # Fallback to API party (use as-is, might be full name or abbreviation)
                     api_party = cosponsor.get("party", "")
-                    cosponsor_parties_list.append(api_party[0].upper() if api_party else "")
+                    cosponsor_parties_list.append(api_party if api_party else "")
     
     # Update cosponsor_parties with matched values
     if cosponsor_parties_list:
@@ -929,19 +931,24 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     # - cosponsor_parties: "R|R|R" with sponsor R → FALSE (only R)
     # - cosponsor_parties: "" (empty) → FALSE
     bipartisan = False
-    sponsor_party = record.get("sponsor_party", "").strip().upper()
+    # Get first character of sponsor party (full name like "Republican" -> "R")
+    sponsor_party_full = record.get("sponsor_party", "").strip()
+    sponsor_party = sponsor_party_full[0].upper() if sponsor_party_full else ""
     cosponsor_parties_str = record.get("cosponsor_parties", "").strip()
     
     if not cosponsor_parties_str:
         # Empty cosponsor parties = not bipartisan
         bipartisan = False
     elif sponsor_party:
-        # Get unique parties from sponsor + all cosponsors
+        # Get unique parties from sponsor + all cosponsors (use first character for comparison)
         all_parties = set([sponsor_party])
         for party in cosponsor_parties_str.split("|"):
             party_clean = party.strip().upper()
             if party_clean:
-                all_parties.add(party_clean)
+                # Get first character if it's a full party name
+                party_char = party_clean[0] if party_clean else ""
+                if party_char:
+                    all_parties.add(party_char)
         
         # Bipartisan if both R and D are present
         bipartisan = "R" in all_parties and "D" in all_parties
