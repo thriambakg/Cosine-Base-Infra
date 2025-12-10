@@ -339,3 +339,11 @@ variable "automatic_secret_rotation" {
     error_message = "CKV_AWS_304: Automatic rotation must be configured between 1 and 90 days to meet compliance requirements. All values must be <= 90 days."
   }
 }
+
+# Congress.gov API Configuration
+variable "congress_api_key" {
+  description = "Congress.gov API key for accessing the API"
+  type        = string
+  default     = ""
+  sensitive   = true
+}

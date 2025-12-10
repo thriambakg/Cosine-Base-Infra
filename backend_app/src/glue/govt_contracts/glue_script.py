@@ -21,6 +21,7 @@ import zipfile
 import urllib3
 import gc
 import codecs
+import gzip
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from decimal import Decimal
@@ -241,6 +242,110 @@ def convert_floats_to_decimal(obj: Any) -> Any:
         return [convert_floats_to_decimal(item) for item in obj]
     else:
         return obj
+
+def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract only GSI fields and essential metadata for DynamoDB.
+    Used when item exceeds 400KB limit.
+    
+    GSI fields to preserve:
+    - Primary key: award_id
+    - GSI hash keys: awarding_agency_code, awarding_agency_name, recipient_name_normalized, 
+                     recipient_location_state, award_type, fiscal_year
+    - GSI range keys: fiscal_year, total_obligation, period_start_date, period_end_date
+    - Essential metadata: transaction_count, subaward_count, full_indexing_complete, 
+                          last_updated, indexed_at, data_source, api_version, ttl
+    """
+    gsi_fields = {
+        # Primary key (required)
+        'award_id': full_item.get('award_id'),
+        
+        # GSI hash keys
+        'awarding_agency_code': full_item.get('awarding_agency_code'),
+        'awarding_agency_name': full_item.get('awarding_agency_name'),
+        'recipient_name_normalized': full_item.get('recipient_name_normalized'),
+        'recipient_location_state': full_item.get('recipient_location_state'),
+        'award_type': full_item.get('award_type'),
+        'fiscal_year': full_item.get('fiscal_year'),
+        
+        # GSI range keys (map CSV field names to GSI attribute names)
+        'total_obligation': full_item.get('total_obligation'),
+        # Map period_of_performance_start_date to period_start_date for GSI
+        'period_start_date': (full_item.get('period_start_date') or 
+                             full_item.get('period_of_performance_start_date')),
+        # Map period_of_performance_end_date to period_end_date for GSI
+        'period_end_date': (full_item.get('period_end_date') or 
+                           full_item.get('period_of_performance_end_date')),
+        
+        # Essential metadata
+        'transaction_count': full_item.get('transaction_count', 0),
+        'subaward_count': full_item.get('subaward_count', 0),
+        'full_indexing_complete': full_item.get('full_indexing_complete', True),
+        'last_updated': full_item.get('last_updated'),
+        'indexed_at': full_item.get('indexed_at'),
+        'data_source': full_item.get('data_source', 'usaspending_bulk_download'),
+        'api_version': full_item.get('api_version', 'bulk_csv_v2'),
+        'ttl': full_item.get('ttl'),
+        
+        # Oversize flags
+        'is_oversized': True,
+    }
+    
+    # Remove None values (but keep False/0 values)
+    cleaned = {}
+    for k, v in gsi_fields.items():
+        if v is not None:
+            cleaned[k] = v
+    
+    return cleaned
+
+
+def convert_decimal_for_json(obj: Any) -> Any:
+    """Recursively convert Decimal to float/string for JSON serialization"""
+    if isinstance(obj, Decimal):
+        # Convert Decimal to float for JSON (preserves precision for most cases)
+        try:
+            return float(obj)
+        except (OverflowError, ValueError):
+            # If float conversion fails, use string representation
+            return str(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_decimal_for_json(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_decimal_for_json(item) for item in obj]
+    else:
+        return obj
+
+
+def store_oversized_item_to_s3(award_id: str, full_item: Dict[str, Any]) -> str:
+    """
+    Store oversized item to S3 in oversize/ folder.
+    Returns the S3 key.
+    """
+    # Create S3 key: oversize/{award_id}.json.gz
+    s3_key = f"oversize/{award_id}.json.gz"
+    
+    # Convert Decimal values to JSON-serializable types
+    json_ready_item = convert_decimal_for_json(full_item)
+    
+    # Convert to JSON
+    json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2)
+    
+    # Compress and upload to S3
+    json_bytes = json_data.encode('utf-8')
+    compressed_data = gzip.compress(json_bytes)
+    
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_key,
+        Body=compressed_data,
+        ContentType='application/json',
+        ContentEncoding='gzip'
+    )
+    
+    log_print(f"   💾 Stored oversized award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
+    return s3_key
+
 
 def normalize_string(value: Any) -> Optional[str]:
     """Normalize string value for DynamoDB (handle None, empty strings, etc.)"""
@@ -1132,6 +1237,12 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             except:
                 db_item['total_obligation'] = Decimal('0')
         
+        # Map period_of_performance fields to period_start_date/period_end_date for GSI compatibility
+        if 'period_of_performance_start_date' in db_item and 'period_start_date' not in db_item:
+            db_item['period_start_date'] = db_item['period_of_performance_start_date']
+        if 'period_of_performance_end_date' in db_item and 'period_end_date' not in db_item:
+            db_item['period_end_date'] = db_item['period_of_performance_end_date']
+        
         # Get transactions and subawards (already in award_record from CSV parsing)
         transactions = award_record.get('transactions', [])
         subawards = award_record.get('subawards', [])
@@ -1176,7 +1287,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             # Ensure all fields are properly converted
             db_item = convert_floats_to_decimal(db_item)
             
-            # Update item in DynamoDB with retry logic for throttling
+            # Update item in DynamoDB with retry logic for throttling and oversized items
             max_put_retries = 3
             for put_attempt in range(max_put_retries):
                 try:
@@ -1184,12 +1295,35 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     break
                 except Exception as put_error:
                     error_str = str(put_error)
-                    if 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                    
+                    # Handle oversized items (ValidationException)
+                    if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
+                        log_print(f"⚠️ Updated award {award_id} exceeds DynamoDB size limit, storing to S3...")
+                        
+                        # Store full item to S3
+                        oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
+                        
+                        # Extract only GSI fields for DynamoDB
+                        gsi_only_item = extract_gsi_fields_only(db_item)
+                        gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                        
+                        # Try to store GSI-only item
+                        try:
+                            awards_table.put_item(Item=gsi_only_item)
+                            log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
+                            break
+                        except Exception as gsi_error:
+                            log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
+                            raise
+                    
+                    # Handle throttling
+                    elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
                         if put_attempt < max_put_retries - 1:
                             wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
                             log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
                             time.sleep(wait_time)
                             continue
+                    
                     # Re-raise if not throttling or out of retries
                     raise
         else:
@@ -1209,7 +1343,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             db_item['full_indexing_complete'] = True
             db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
             
-            # Store to DynamoDB with retry logic for throttling
+            # Store to DynamoDB with retry logic for throttling and oversized items
             max_put_retries = 3
             for put_attempt in range(max_put_retries):
                 try:
@@ -1217,12 +1351,35 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     break
                 except Exception as put_error:
                     error_str = str(put_error)
-                    if 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                    
+                    # Handle oversized items (ValidationException)
+                    if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
+                        log_print(f"⚠️ Award {award_id} exceeds DynamoDB size limit, storing to S3...")
+                        
+                        # Store full item to S3
+                        oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
+                        
+                        # Extract only GSI fields for DynamoDB
+                        gsi_only_item = extract_gsi_fields_only(db_item)
+                        gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                        
+                        # Try to store GSI-only item
+                        try:
+                            awards_table.put_item(Item=gsi_only_item)
+                            log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
+                            break
+                        except Exception as gsi_error:
+                            log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
+                            raise
+                    
+                    # Handle throttling
+                    elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
                         if put_attempt < max_put_retries - 1:
                             wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
                             log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
                             time.sleep(wait_time)
                             continue
+                    
                     # Re-raise if not throttling or out of retries
                     raise
         

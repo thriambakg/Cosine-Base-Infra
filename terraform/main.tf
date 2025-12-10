@@ -104,6 +104,34 @@ module "newsdata_secrets_manager" {
   depends_on = [module.kms]
 }
 
+# Secrets Manager for Congress.gov API key
+module "congress_api_secrets_manager" {
+  source = "./modules/secrets-manager"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  tags                 = var.common_tags
+  kms_key_id           = module.kms.main_key_id
+  recovery_window_days = var.secrets_recovery_window_days
+  policy_name_suffix   = "congress-api"
+
+  # No automatic rotation for API keys
+  automatic_rotation = {}
+
+  # Create empty secret for console population
+  secrets = {
+    congress-api = {
+      description = "Congress.gov API key for legislative data (populated manually)"
+      secret_data = {
+        # Placeholder value - will be updated manually in console
+        api_key = "PLACEHOLDER_CONGRESS_API_KEY"
+      }
+    }
+  }
+
+  depends_on = [module.kms]
+}
+
 # Cognito User Pool for authentication
 module "cognito" {
   source = "./modules/cognito"
@@ -1932,6 +1960,414 @@ module "usaspending_bulk_indexing_state_machine" {
 
 #   depends_on = [module.usaspending_bulk_indexing_state_machine]
 # }
+
+# ==============================================================================
+# CONGRESS.GOV BILL DATA INGESTION SYSTEM
+# ==============================================================================
+# System to fetch comprehensive bill data from Congress.gov API
+# Uses Lambda for short date ranges (≤2 days) and Glue for longer ranges (>2 days)
+
+# S3 Bucket for Congress.gov Glue Scripts
+module "congress_bills_glue_scripts_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-congress-bills-glue-scripts-${var.environment}"
+  environment = var.environment
+  purpose     = "CongressBillsGlueScripts"
+
+  kms_key_arn = module.kms.main_key_arn
+
+  # No lifecycle transitions for scripts
+  enable_lifecycle_transitions = false
+
+  tags = var.common_tags
+}
+
+# S3 Bucket for Congress.gov Raw Data
+module "congress_bills_data_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-congress-bills-data-${var.environment}"
+  environment = var.environment
+  purpose     = "CongressBillsData"
+
+  kms_key_arn = module.kms.main_key_arn
+
+  # Enable lifecycle transitions to Glacier for cost optimization
+  enable_lifecycle_transitions = true
+  transition_to_ia_days        = 30
+  transition_to_glacier_days   = 90
+
+  tags = var.common_tags
+}
+
+# Congress Bills DynamoDB Table
+# Primary Key: bill_id (e.g., "119-HR-1949")
+# GSIs for sorting by proposer, party, and dates
+module "congress_bills_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "congress-bills"
+
+  hash_key  = "bill_id"
+  range_key = null
+
+  attributes = [
+    { name = "bill_id", type = "S" },
+    { name = "sponsor_full_name", type = "S" },
+    { name = "sponsor_party", type = "S" },
+    { name = "introduced_date", type = "S" },
+    { name = "latest_action_date", type = "S" },
+    { name = "congress", type = "N" },
+    { name = "bill_type", type = "S" },
+    { name = "bill_number", type = "N" },
+    { name = "short_description", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "SponsorPartyDateIndex"
+      hash_key        = "sponsor_party"
+      range_key       = "introduced_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "SponsorNameDateIndex"
+      hash_key        = "sponsor_full_name"
+      range_key       = "introduced_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "CongressBillTypeIndex"
+      hash_key        = "congress"
+      range_key       = "bill_type"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "LatestActionDateIndex"
+      hash_key        = "latest_action_date"
+      range_key       = null
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "ShortDescriptionIndex"
+      hash_key        = "short_description"
+      range_key       = "introduced_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode = "PAY_PER_REQUEST"
+  kms_key_arn  = module.kms.dynamodb_key_arn
+
+  table_type    = "Data"
+  table_purpose = "CongressBills"
+
+  tags = var.common_tags
+}
+
+# Upload Glue script to S3
+resource "aws_s3_object" "congress_bills_glue_script" {
+  bucket = module.congress_bills_glue_scripts_s3.bucket_id
+  key    = "congress_bills/glue_script.py"
+  source = "${path.module}/../backend_app/src/glue/congress_bills/glue_script.py"
+
+  # Use file hash to detect changes
+  etag = filemd5("${path.module}/../backend_app/src/glue/congress_bills/glue_script.py")
+
+  tags = merge(var.common_tags, {
+    Name    = "congress-bills-glue-script"
+    Purpose = "GlueScript"
+  })
+
+  depends_on = [module.congress_bills_glue_scripts_s3]
+}
+
+# Lambda Function for Congress Bills Router (calculates days and routes)
+module "congress_bills_router_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-congress-bills-router-${var.environment}"
+  description   = "Routes Congress.gov bill fetcher to Lambda or Glue based on date range"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 60 # 1 minute max
+  memory_size   = 128
+
+  source_dir = "${path.module}/../backend_app/src/congress_bills_router/app"
+
+  environment_variables = {}
+
+  tags = var.common_tags
+}
+
+# Lambda Function for Congress Bills Fetcher (≤2 days)
+module "congress_bills_fetcher_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
+  description   = "Fetches comprehensive Congress.gov bill data for date ranges ≤2 days"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 900 # 15 minutes max
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/congress_bills_fetcher/app"
+
+  environment_variables = {
+    PROJECT_NAME          = var.project_name
+    ENVIRONMENT           = var.environment
+    CONGRESS_API_BASE_URL = "https://api.congress.gov/v3"
+    BILLS_TABLE_NAME      = module.congress_bills_table.table_name
+    S3_BUCKET_NAME        = module.congress_bills_data_s3.bucket_id
+    REQUEST_TIMEOUT       = "30"
+    MAX_RETRIES           = "3"
+    RETRY_DELAY           = "2"
+  }
+
+  additional_policy_arns = [
+    module.congress_bills_table.table_policy_arn,
+    module.kms.main_key_policy_arn,
+    module.kms.dynamodb_key_policy_arn,
+    module.congress_api_secrets_manager.secret_access_policy_arn
+  ]
+
+  tags = var.common_tags
+}
+
+# Glue Job for Congress Bills Fetcher (>2 days)
+module "congress_bills_fetcher_glue_job" {
+  source = "./modules/glue-job"
+
+  job_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
+
+  # Script location - uploaded to glue scripts bucket
+  script_location = "s3://${module.congress_bills_glue_scripts_s3.bucket_id}/congress_bills/glue_script.py"
+  python_version  = "3"
+  glue_version    = "4.0"
+
+  # Job configuration
+  max_retries           = 1
+  timeout               = 2880 # 2 days (48 hours)
+  concurrent_executions = 1    # Only allow 1 concurrent run
+  worker_type           = "G.1X"
+  number_of_workers     = 2
+
+  # S3 buckets
+  s3_bucket_arn = module.congress_bills_glue_scripts_s3.bucket_arn
+  additional_s3_bucket_arns = [
+    module.congress_bills_data_s3.bucket_arn,
+    module.static_hosting_bucket.bucket_arn
+  ]
+  spark_logs_bucket = module.static_hosting_bucket.bucket_id
+  temp_bucket       = module.static_hosting_bucket.bucket_id
+
+  # DynamoDB access
+  dynamodb_table_arn = module.congress_bills_table.table_arn
+
+  # KMS for encryption
+  kms_key_arn = module.kms.main_key_arn
+  additional_kms_key_arns = [
+    module.kms.dynamodb_key_arn
+  ]
+
+  # Additional IAM policies for Secrets Manager access
+  additional_policy_arns = [
+    module.congress_api_secrets_manager.secret_access_policy_arn
+  ]
+
+  # Job arguments
+  default_arguments = {
+    "--PROJECT_NAME"          = var.project_name
+    "--ENVIRONMENT"           = var.environment
+    "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
+    "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
+    "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"       = "30"
+  }
+
+  job_bookmark_option = "job-bookmark-disable"
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.congress_bills_glue_scripts_s3,
+    module.congress_bills_data_s3,
+    module.static_hosting_bucket,
+    module.congress_bills_table,
+    module.kms,
+    module.congress_api_secrets_manager,
+    aws_s3_object.congress_bills_glue_script
+  ]
+}
+
+# Grant Glue job role access to DynamoDB KMS key
+resource "aws_kms_grant" "congress_bills_glue_dynamodb_key_access" {
+  name              = "${var.project_name}-congress-bills-fetcher-${var.environment}-dynamodb-key-grant"
+  key_id            = module.kms.dynamodb_key_id
+  grantee_principal = module.congress_bills_fetcher_glue_job.role_arn
+  operations = [
+    "Decrypt",
+    "Encrypt",
+    "GenerateDataKey",
+    "DescribeKey"
+  ]
+
+  depends_on = [
+    module.congress_bills_fetcher_glue_job,
+    module.kms
+  ]
+}
+
+# Step Functions State Machine for Congress Bills Fetcher
+# Routes to Lambda (≤2 days) or Glue (>2 days) based on date range
+module "congress_bills_fetcher_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
+  environment        = var.environment
+
+  # Step Functions definition - routes based on date range
+  # Input should include: start_date, end_date, congress (optional)
+  # Automatically calculates days and routes to Lambda (≤2 days) or Glue (>2 days)
+  definition = jsonencode({
+    Comment = "Congress.gov Bill Data Fetcher - Routes to Lambda (≤2 days) or Glue (>2 days)"
+    StartAt = "CalculateRoute"
+    States = {
+      CalculateRoute = {
+        Type     = "Task"
+        Resource = module.congress_bills_router_lambda.function_arn
+        Comment  = "Calculate date range and determine routing (Lambda vs Glue)"
+        Parameters = {
+          "start_date.$" : "$.start_date"
+          "end_date.$" : "$.end_date"
+          "congress.$" : "$.congress"
+        }
+        ResultPath = "$.route"
+        Next       = "RouteDecision"
+      }
+      RouteDecision = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable      = "$.route.use_glue"
+            BooleanEquals = true
+            Next          = "StartGlueJob"
+          }
+        ]
+        Default = "InvokeLambda"
+      }
+      InvokeLambda = {
+        Type     = "Task"
+        Resource = module.congress_bills_fetcher_lambda.function_arn
+        Comment  = "Invoke Lambda for date ranges ≤2 days (15 min timeout)"
+        Parameters = {
+          "congress.$" : "$.route.congress"
+          "start_date.$" : "$.route.start_date"
+          "end_date.$" : "$.route.end_date"
+        }
+        Retry = [
+          {
+            ErrorEquals     = ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
+            IntervalSeconds = 2
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "HandleError"
+          }
+        ]
+        Next = "Success"
+      }
+      StartGlueJob = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Comment  = "Start Glue job for date ranges >2 days (2 day timeout)"
+        Parameters = {
+          "JobName" : module.congress_bills_fetcher_glue_job.job_name
+          "Arguments" : {
+            "--PROJECT_NAME" : var.project_name
+            "--ENVIRONMENT" : var.environment
+            "--CONGRESS_API_BASE_URL" : "https://api.congress.gov/v3"
+            "--BILLS_TABLE_NAME" : module.congress_bills_table.table_name
+            "--S3_BUCKET_NAME" : module.congress_bills_data_s3.bucket_id
+            "--REQUEST_TIMEOUT" : "30"
+            "--CONGRESS.$" : "$.route.congress"
+            "--START_DATE.$" : "$.route.start_date"
+            "--END_DATE.$" : "$.route.end_date"
+          }
+        }
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "HandleError"
+          }
+        ]
+        Next = "Success"
+      }
+      Success = {
+        Type    = "Succeed"
+        Comment = "Congress bills fetched and stored successfully"
+      }
+      HandleError = {
+        Type  = "Fail"
+        Error = "CongressBillsFetchFailed"
+        Cause = "The Congress.gov bill fetching job failed. Check CloudWatch logs for details."
+      }
+    }
+  })
+
+  # Lambda function ARNs for IAM permissions
+  lambda_function_arns = [
+    module.congress_bills_router_lambda.function_arn,
+    module.congress_bills_fetcher_lambda.function_arn
+  ]
+
+  # Glue job name for IAM permissions
+  glue_job_names = [
+    module.congress_bills_fetcher_glue_job.job_name
+  ]
+
+  # Logging configuration
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.congress_bills_router_lambda,
+    module.congress_bills_fetcher_lambda,
+    module.congress_bills_fetcher_glue_job
+  ]
+}
 
 resource "aws_iam_policy" "lambda_politician_trades_textract_policy" {
   name        = "${var.project_name}-lambda-politician-trades-textract-access-${var.environment}"
