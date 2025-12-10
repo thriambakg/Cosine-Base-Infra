@@ -949,7 +949,8 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         # No sponsor party = not bipartisan
         bipartisan = False
     
-    record["bipartisan"] = bipartisan
+    # Store bipartisan as number for DynamoDB (0 = false, 1 = true)
+    record["bipartisan"] = 1 if bipartisan else 0
     
     return record
 

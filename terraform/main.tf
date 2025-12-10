@@ -2020,7 +2020,7 @@ module "congress_bills_table" {
     { name = "bill_type", type = "S" },
     { name = "bill_title", type = "S" },
     { name = "bill_number", type = "N" },
-    { name = "bipartisan", type = "BOOL" }
+    { name = "bipartisan", type = "N" }
   ]
 
   global_secondary_indexes = [
