@@ -414,6 +414,59 @@ def fetch_bill_subjects(congress: int, bill_type: str, bill_number: int, api_key
         return data.get("subjects", {})
     return {}
 
+def fetch_bill_titles(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
+    """Fetch all titles for a bill, including official titles."""
+    titles = []
+    offset = 0
+    limit = 250
+    
+    while True:
+        url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/titles"
+        params = {
+            "format": "json",
+            "offset": offset,
+            "limit": limit
+        }
+        
+        data = make_api_request(url, params, api_key)
+        if not data:
+            break
+        
+        title_list = []
+        if isinstance(data, list):
+            title_list = data
+        elif "titles" in data:
+            titles_data = data["titles"]
+            if isinstance(titles_data, dict):
+                title_list = titles_data.get("item", [])
+            elif isinstance(titles_data, list):
+                title_list = titles_data
+        
+        if not title_list:
+            break
+        
+        titles.extend(title_list)
+        
+        # Check pagination
+        pagination = {}
+        if isinstance(data, dict):
+            if "titles" in data and isinstance(data["titles"], dict):
+                pagination = data["titles"].get("pagination", {})
+            elif "pagination" in data:
+                pagination = data["pagination"]
+        
+        count = pagination.get("count", 0) if pagination else 0
+        if count > 0 and offset + limit >= count:
+            break
+        
+        # If we got fewer items than limit, we're done
+        if len(title_list) < limit:
+            break
+        
+        offset += limit
+    
+    return titles
+
 
 def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, api_key: str) -> Optional[Dict]:
     """
@@ -433,6 +486,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     cosponsors = fetch_bill_cosponsors(congress, bill_type, bill_number, api_key)
     summaries = fetch_bill_summaries(congress, bill_type, bill_number, api_key)
     subjects = fetch_bill_subjects(congress, bill_type, bill_number, api_key)
+    titles = fetch_bill_titles(congress, bill_type, bill_number, api_key)
     
     # Extract primary sponsor (first sponsor from details)
     primary_sponsor = {}
@@ -495,10 +549,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         
         # Summaries (for text search)
         "summary_count": len(summaries),
-        "summary_text": " ".join([
-            s.get("text", "").replace("<p>", " ").replace("</p>", " ").replace("<strong>", "").replace("</strong>", "")
-            for s in summaries if s.get("text")
-        ])[:5000],  # Limit to 5000 chars for DynamoDB
+        "summary_text": "",  # Will be populated below with fallback logic
         "summaries_json": json.dumps(summaries) if summaries else "",
         
         # Short description (for quick search/display - extracted from first summary or title)
@@ -544,20 +595,56 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         
         record["legislative_subjects"] = "|".join(subject_names)
     
+    # Build summary_text with fallback logic
+    # Priority: 1) Summaries, 2) Official Title as Introduced, 3) Display Title
+    summary_text = ""
+    if summaries and len(summaries) > 0:
+        # Use summaries if available
+        summary_text = " ".join([
+            s.get("text", "").replace("<p>", " ").replace("</p>", " ").replace("<strong>", "").replace("</strong>", "")
+            for s in summaries if s.get("text")
+        ])
+    elif titles:
+        # Fallback to Official Title as Introduced (titleTypeCode 6)
+        official_title = None
+        for title_item in titles:
+            if isinstance(title_item, dict):
+                title_type_code = title_item.get("titleTypeCode")
+                if title_type_code == 6 or (isinstance(title_type_code, str) and title_type_code == "6"):
+                    official_title = title_item.get("title", "")
+                    break
+        
+        if official_title:
+            summary_text = official_title
+        else:
+            # Use first available title as last resort
+            for title_item in titles:
+                if isinstance(title_item, dict):
+                    title_text = title_item.get("title", "")
+                    if title_text:
+                        summary_text = title_text
+                        break
+    
+    # If still no summary text, use display title
+    if not summary_text:
+        summary_text = record.get("bill_title", "")
+    
+    # Clean and limit summary_text
+    summary_text = summary_text.strip()[:5000]  # Limit to 5000 chars for DynamoDB
+    record["summary_text"] = summary_text
+    
     # Short description: Use bill title (primary) + first sentence of summary (if available)
     # This makes bill_title the primary searchable field, with summary context as backup
     bill_title = record.get("bill_title", "")
     short_desc = bill_title  # Start with bill title
     
-    if summaries and len(summaries) > 0:
-        first_summary = summaries[0].get("text", "")
-        if first_summary:
-            # Clean HTML and get first sentence
-            cleaned = first_summary.replace("<p>", " ").replace("</p>", " ").replace("<strong>", "").replace("</strong>", "").replace("<ul>", " ").replace("</ul>", " ").replace("<li>", " ").replace("</li>", " ").strip()
-            first_sentence = cleaned.split(".")[0] if "." in cleaned else cleaned[:200]
-            # Combine: "Bill Title. First sentence of summary"
-            if first_sentence and len(first_sentence) > 10:  # Only add if meaningful
-                short_desc = f"{bill_title}. {first_sentence[:200]}".strip()
+    if summary_text and summary_text != bill_title:
+        # Use first sentence of summary_text (which may be from summaries or official title)
+        cleaned = summary_text.replace("<p>", " ").replace("</p>", " ").replace("<strong>", "").replace("</strong>", "").replace("<ul>", " ").replace("</ul>", " ").replace("<li>", " ").replace("</li>", " ").strip()
+        first_sentence = cleaned.split(".")[0] if "." in cleaned else cleaned[:200]
+        # Combine: "Bill Title. First sentence of summary"
+        if first_sentence and len(first_sentence) > 10:  # Only add if meaningful
+            short_desc = f"{bill_title}. {first_sentence[:200]}".strip()
     
     record["short_description"] = short_desc[:500]  # Limit to 500 chars total
     
