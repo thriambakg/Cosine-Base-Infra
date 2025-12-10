@@ -704,109 +704,101 @@ def format_date_range_path(start_date: str, end_date: str) -> str:
     
     return f"{start_formatted}-{end_formatted}"
 
-def check_s3_date_range_exists(start_date: str, end_date: str, agency_name: Optional[str] = None) -> bool:
+def check_s3_zip_exists(start_date: str, end_date: str, agency_name: str) -> Optional[str]:
     """
-    Check if a date range folder already exists in S3 with CSV files.
-    Checks both new format (hyphenated full name) and old format (abbreviation).
+    Check if a ZIP file exists in S3 for the given date range and agency.
     
     Args:
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
-        agency_name: Optional agency name to check for agency-specific folder
+        agency_name: Agency name
     
     Returns:
-        True if folder exists with CSV files (in either format), False otherwise
+        S3 key of ZIP file if exists, None otherwise
     """
     date_range_path = format_date_range_path(start_date, end_date)
+    agency_filename = format_agency_name_for_s3(agency_name)
+    zip_s3_key = f"{date_range_path}/{agency_filename}.zip"
     
-    if agency_name:
-        # Check new format first (hyphenated full name)
-        agency_filename_new = format_agency_name_for_s3(agency_name)
-        prefix_new = f"{date_range_path}/{agency_filename_new}/"
-        
-        # Check old format (abbreviation)
-        agency_filename_old = format_agency_name_old_abbreviation(agency_name)
-        prefix_old = f"{date_range_path}/{agency_filename_old}/"
-        
-        prefixes_to_check = [prefix_new, prefix_old]
-    else:
-        prefix = f"{date_range_path}/"
-        prefixes_to_check = [prefix]
-    
-    for prefix in prefixes_to_check:
-        try:
-            # List objects with the prefix
-            response = s3_client.list_objects_v2(
-                Bucket=S3_BUCKET_NAME,
-                Prefix=prefix,
-                MaxKeys=10  # Only need to check if any CSV files exist
-            )
-            
-            if 'Contents' in response:
-                # Check if any CSV files exist
-                csv_files = [obj['Key'] for obj in response['Contents'] if obj['Key'].lower().endswith('.csv')]
-                if len(csv_files) > 0:
-                    log_print(f"✅ Found existing S3 folder: {prefix}")
-                    return True
-        except Exception as e:
-            log_print(f"⚠️ Error checking S3 for existing folder {prefix}: {str(e)[:200]}")
-            continue
-    
-    return False
+    try:
+        s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
+        log_print(f"✅ Found existing ZIP file in S3: {zip_s3_key}")
+        return zip_s3_key
+    except s3_client.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            return None
+        else:
+            log_print(f"⚠️ Error checking S3 for ZIP file {zip_s3_key}: {str(e)[:200]}")
+            return None
 
-def list_s3_csv_files(start_date: str, end_date: str, agency_name: Optional[str] = None) -> Dict[str, str]:
+def extract_zip_from_s3_to_folder(zip_s3_key: str, start_date: str, end_date: str, agency_name: str) -> Dict[str, str]:
     """
-    List all CSV files in the S3 date range folder and return mapping of filename -> S3 key.
-    Checks both new format (hyphenated full name) and old format (abbreviation).
+    Extract ZIP file from S3 and extract CSV files to a folder with hyphenated agency name.
     
     Args:
+        zip_s3_key: S3 key of the ZIP file
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
-        agency_name: Optional agency name to check for agency-specific folder
+        agency_name: Agency name
     
     Returns:
-        Dict mapping CSV filename -> S3 key
+        Dict mapping CSV filename -> S3 key of extracted CSV file
     """
+    agency_prefix = f"[{agency_name}] " if agency_name else ""
     date_range_path = format_date_range_path(start_date, end_date)
+    agency_filename = format_agency_name_for_s3(agency_name)
+    folder_prefix = f"{date_range_path}/{agency_filename}/"
     
-    if agency_name:
-        # Check new format first (hyphenated full name)
-        agency_filename_new = format_agency_name_for_s3(agency_name)
-        prefix_new = f"{date_range_path}/{agency_filename_new}/"
-        
-        # Check old format (abbreviation)
-        agency_filename_old = format_agency_name_old_abbreviation(agency_name)
-        prefix_old = f"{date_range_path}/{agency_filename_old}/"
-        
-        prefixes_to_check = [prefix_new, prefix_old]
-    else:
-        prefix = f"{date_range_path}/"
-        prefixes_to_check = [prefix]
+    log_print(f"📦 {agency_prefix}Extracting ZIP file from S3 to folder: {folder_prefix}")
     
+    # Download ZIP from S3
+    log_print(f"📥 {agency_prefix}Downloading ZIP from S3: {zip_s3_key}")
+    zip_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
+    zip_content = zip_obj['Body'].read()
+    
+    # Extract ZIP and upload CSV files to folder
     csv_s3_keys = {}
+    zip_file = BytesIO(zip_content)
     
-    for prefix in prefixes_to_check:
-        try:
-            paginator = s3_client.get_paginator('list_objects_v2')
-            pages = paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=prefix)
-            
-            for page in pages:
-                if 'Contents' in page:
-                    for obj in page['Contents']:
-                        key = obj['Key']
-                        if key.lower().endswith('.csv'):
-                            # Extract just the filename from the S3 key
-                            filename = key.split('/')[-1]
-                            csv_s3_keys[filename] = key
-            
-            # If we found files in this prefix, use it (prefer new format if both exist)
-            if csv_s3_keys:
-                log_print(f"✅ Found CSV files in S3 folder: {prefix}")
-                break
-        except Exception as e:
-            log_print(f"⚠️ Error listing S3 CSV files for {prefix}: {str(e)[:200]}")
-            continue
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        file_list = zip_ref.namelist()
+        log_print(f"📋 {agency_prefix}ZIP contains {len(file_list)} file(s)")
+        
+        # Find CSV files
+        csv_files = [f for f in file_list if f.lower().endswith('.csv')]
+        if not csv_files:
+            raise Exception("No CSV files found in ZIP")
+        
+        log_print(f"📄 {agency_prefix}Extracting {len(csv_files)} CSV file(s) to S3 folder...")
+        
+        for csv_file in csv_files:
+            try:
+                csv_content = zip_ref.read(csv_file)
+                csv_s3_key = f"{folder_prefix}{csv_file}"
+                
+                s3_client.put_object(
+                    Bucket=S3_BUCKET_NAME,
+                    Key=csv_s3_key,
+                    Body=csv_content,
+                    ContentType='text/csv'
+                )
+                
+                # Extract just the filename from the path
+                filename = csv_file.split('/')[-1]
+                csv_s3_keys[filename] = csv_s3_key
+                log_print(f"   ✅ Extracted {filename} to {csv_s3_key}")
+                
+                # Clear CSV content from memory immediately
+                del csv_content
+            except Exception as e:
+                log_print(f"   ⚠️ Failed to extract {csv_file} to S3: {str(e)[:200]}")
     
+    # Clear ZIP from memory
+    del zip_content
+    del zip_file
+    gc.collect()
+    
+    log_print(f"✅ {agency_prefix}Extracted {len(csv_s3_keys)} CSV file(s) to S3 folder: {folder_prefix}")
     return csv_s3_keys
 
 def save_zip_to_s3(zip_content: bytes, start_date: str, end_date: str, agency_name: str) -> str:
@@ -1226,15 +1218,51 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     
     return _parse_csvs_from_s3(csv_s3_keys, prime_file_list, subaward_file_list, agency_name, start_date, end_date)
 
-def parse_csvs_from_s3(start_date: str, end_date: str, agency_name: Optional[str] = None) -> Dict[str, Any]:
+def list_csv_files_from_folder(start_date: str, end_date: str, agency_name: str) -> Dict[str, str]:
     """
-    Parse CSV files directly from S3 for a given date range and agency.
-    This is used when the files already exist in S3 from a previous run.
+    List all CSV files in the S3 folder for the given date range and agency.
     
     Args:
         start_date: Start date in YYYY-MM-DD format
         end_date: End date in YYYY-MM-DD format
-        agency_name: Optional agency name
+        agency_name: Agency name
+    
+    Returns:
+        Dict mapping CSV filename -> S3 key
+    """
+    date_range_path = format_date_range_path(start_date, end_date)
+    agency_filename = format_agency_name_for_s3(agency_name)
+    folder_prefix = f"{date_range_path}/{agency_filename}/"
+    
+    csv_s3_keys = {}
+    
+    try:
+        paginator = s3_client.get_paginator('list_objects_v2')
+        pages = paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=folder_prefix)
+        
+        for page in pages:
+            if 'Contents' in page:
+                for obj in page['Contents']:
+                    key = obj['Key']
+                    if key.lower().endswith('.csv'):
+                        # Extract just the filename from the S3 key
+                        filename = key.split('/')[-1]
+                        csv_s3_keys[filename] = key
+        
+        return csv_s3_keys
+    except Exception as e:
+        log_print(f"⚠️ Error listing S3 CSV files for {folder_prefix}: {str(e)[:200]}")
+        return csv_s3_keys
+
+def parse_csvs_from_s3(start_date: str, end_date: str, agency_name: str) -> Dict[str, Any]:
+    """
+    Parse CSV files from S3 folder for the given date range and agency.
+    This is used when CSV files already exist in S3 folder (extracted from ZIP).
+    
+    Args:
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        agency_name: Agency name
     
     Returns:
         Dict with:
@@ -1242,17 +1270,16 @@ def parse_csvs_from_s3(start_date: str, end_date: str, agency_name: Optional[str
         - 'subawards_by_parent': Dict of parent_award_id -> list of sub-award records
     """
     agency_prefix = f"[{agency_name}] " if agency_name else ""
-    parse_start_time = time.time()
     
-    log_print(f"📂 {agency_prefix}Parsing CSV files from existing S3 folder...")
+    log_print(f"📂 {agency_prefix}Parsing CSV files from S3 folder...")
     
-    # List CSV files from S3
-    csv_s3_keys = list_s3_csv_files(start_date, end_date, agency_name)
+    # List CSV files from S3 folder
+    csv_s3_keys = list_csv_files_from_folder(start_date, end_date, agency_name)
     
     if not csv_s3_keys:
-        raise Exception(f"{agency_prefix}No CSV files found in S3 for date range {start_date} to {end_date}")
+        raise Exception(f"{agency_prefix}No CSV files found in S3 folder for date range {start_date} to {end_date}")
     
-    log_print(f"📄 {agency_prefix}Found {len(csv_s3_keys)} CSV file(s) in S3")
+    log_print(f"📄 {agency_prefix}Found {len(csv_s3_keys)} CSV file(s) in S3 folder")
     
     # Separate prime and sub-award files
     prime_file_list = [f for f in csv_s3_keys.keys() if 'subaward' not in f.lower()]
@@ -1285,7 +1312,8 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
     agency_prefix = f"[{agency_name}] " if agency_name else ""
     parse_start_time = time.time()
     
-    # Parse all prime award files in parallel (read from S3)
+    # Parse all prime award files (read from S3)
+    # Use same parallel processing as before (no sequential processing needed since we deduplicated)
     all_prime_awards = {}
     parse_workers = len(prime_file_list) * 5
     
@@ -1306,7 +1334,6 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                 csv_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
                 
                 # Stream CSV content in chunks to avoid loading entire file into memory
-                # Use TextIOWrapper to decode on the fly
                 stream = csv_obj['Body']
                 decoder = codecs.getreader('utf-8')
                 csv_file_obj = decoder(stream)
@@ -1361,7 +1388,6 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                 csv_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=csv_s3_key)
                 
                 # Stream CSV content in chunks to avoid loading entire file into memory
-                # Use TextIOWrapper to decode on the fly
                 stream = csv_obj['Body']
                 decoder = codecs.getreader('utf-8')
                 csv_file_obj = decoder(stream)
@@ -1865,20 +1891,31 @@ def main():
             log_print(f"📅 Date Range: {start_date} to {end_date}")
             log_print(f"{'=' * 80}")
             
-            # Check if date range already exists in S3
-            log_print(f"\n🔍 Checking if date range already exists in S3...")
-            s3_exists = check_s3_date_range_exists(start_date, end_date, agency_name=agency_name)
+            # Check if ZIP file already exists in S3
+            log_print(f"\n🔍 Checking if ZIP file already exists in S3...")
+            zip_s3_key = check_s3_zip_exists(start_date, end_date, agency_name)
             
-            if s3_exists:
-                log_print(f"✅ Found existing S3 folder for date range {start_date} to {end_date}")
-                log_print(f"⏭️  Skipping bulk download - using existing CSV files from S3")
+            if zip_s3_key:
+                log_print(f"✅ Found existing ZIP file in S3 for date range {start_date} to {end_date}")
+                log_print(f"⏭️  Skipping bulk download - extracting ZIP and using CSV files from S3")
                 
-                # PHASE 2: PARSE - Parse CSV files directly from S3
+                # Extract ZIP to folder
+                log_print(f"\n📦 Extracting ZIP file to S3 folder...")
+                extract_phase_start = time.time()
+                csv_s3_keys = extract_zip_from_s3_to_folder(zip_s3_key, start_date, end_date, agency_name)
+                extract_phase_duration = time.time() - extract_phase_start
+                log_print(f"✅ Extraction Complete: {int(extract_phase_duration // 60)}m {int(extract_phase_duration % 60)}s")
+                
+                # PHASE 2: PARSE - Parse CSV files from extracted folder
                 log_print(f"\n🟡 PHASE 2: PARSE - Parsing CSV Files from S3 for {agency_name}")
                 log_print(f"{'─' * 80}")
                 parse_phase_start = time.time()
                 
-                parse_results = parse_csvs_from_s3(start_date, end_date, agency_name=agency_name)
+                # Separate prime and sub-award files
+                prime_file_list = [f for f in csv_s3_keys.keys() if 'subaward' not in f.lower()]
+                subaward_file_list = [f for f in csv_s3_keys.keys() if 'subaward' in f.lower()]
+                
+                parse_results = _parse_csvs_from_s3(csv_s3_keys, prime_file_list, subaward_file_list, agency_name, start_date, end_date)
             else:
                 # PHASE 1: GET - Request and wait for bulk download
                 log_print(f"\n🔵 PHASE 1: GET - Requesting Bulk Download for {agency_name}")
