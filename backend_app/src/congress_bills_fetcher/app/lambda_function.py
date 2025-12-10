@@ -174,8 +174,14 @@ def load_legislators_csv() -> List[Dict[str, Any]]:
             state = row.get('state', '').strip() if row.get('state') else ''
             district = row.get('district', '').strip() if row.get('district') else ''
             
+            # Get first and last name from CSV columns
+            first_name = row.get('first_name', '').strip() if row.get('first_name') else ''
+            last_name = row.get('last_name', '').strip() if row.get('last_name') else ''
+            
             politicians.append({
                 'name': primary_name,
+                'first_name': first_name,
+                'last_name': last_name,
                 'party': party,
                 'party_full': party_full,
                 'state': state,
@@ -195,7 +201,7 @@ def load_legislators_csv() -> List[Dict[str, Any]]:
 def fuzzy_match_name(name: str, politician: Dict[str, Any]) -> float:
     """
     Fuzzy match a name to a politician using Levenshtein distance
-    Handles various name formats
+    Handles various name formats including API format like "Rep. Begich, Nicholas J. [R-AK-At Large]"
     """
     # Normalize names (lowercase, strip)
     name_normalized = name.lower().strip()
@@ -203,6 +209,10 @@ def fuzzy_match_name(name: str, politician: Dict[str, Any]) -> float:
     
     # Remove position markers like "(Senator)", "(Representative)" from name
     name_clean = re.sub(r'\s*\([^)]*(?:senator|representative)[^)]*\)', '', name_normalized, flags=re.IGNORECASE)
+    
+    # Remove API format markers like "Rep. ", "Sen. ", and brackets like "[R-AK-At Large]"
+    name_clean = re.sub(r'^(?:rep\.|sen\.|representative|senator)\s+', '', name_clean, flags=re.IGNORECASE)
+    name_clean = re.sub(r'\s*\[[^\]]+\]', '', name_clean)  # Remove [R-AK-At Large] type brackets
     name_clean = name_clean.strip()
     
     # Check exact match first (after cleaning)
@@ -244,9 +254,27 @@ def fuzzy_match_name(name: str, politician: Dict[str, Any]) -> float:
     return similarity
 
 
-def find_matching_politician(name: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+def find_matching_politician(name: str, politicians: List[Dict[str, Any]], 
+                            first_name: str = "", last_name: str = "", 
+                            party: str = "", state: str = "") -> Optional[Dict[str, Any]]:
     """
-    Find best matching politician for a name
+    Find best matching politician using multiple criteria:
+    1. Name matching (fuzzy)
+    2. First name match
+    3. Last name match
+    4. Party match
+    5. State match
+    
+    Args:
+        name: Full name to match
+        politicians: List of politician dicts
+        first_name: First name from API (optional)
+        last_name: Last name from API (optional)
+        party: Party from API (optional, first character: R, D, I)
+        state: State from API (optional)
+    
+    Returns:
+        Matched politician dict with matchScore, or None
     """
     if not name or not politicians:
         return None
@@ -254,14 +282,69 @@ def find_matching_politician(name: str, politicians: List[Dict[str, Any]]) -> Op
     best_match = None
     best_score = 0.0
     
+    # Normalize input criteria
+    first_name_norm = first_name.strip().lower() if first_name else ""
+    last_name_norm = last_name.strip().lower() if last_name else ""
+    party_norm = party.strip().upper()[0] if party and len(party.strip()) > 0 else ""
+    state_norm = state.strip().upper() if state else ""
+    
     for politician in politicians:
-        score = fuzzy_match_name(name, politician)
+        score = 0.0
+        match_count = 0
+        
+        # 1. Name matching (weighted heavily)
+        name_score = fuzzy_match_name(name, politician)
+        if name_score > 0.7:  # Only count if reasonably close
+            score += name_score * 0.5  # 50% weight
+            match_count += 1
+        
+        # 2. First name match (exact or fuzzy)
+        if first_name_norm:
+            pol_first = (politician.get('first_name') or '').strip().lower()
+            if pol_first:
+                if pol_first == first_name_norm:
+                    score += 0.2  # Exact match
+                    match_count += 1
+                elif first_name_norm in pol_first or pol_first in first_name_norm:
+                    score += 0.15  # Partial match
+                    match_count += 1
+        
+        # 3. Last name match (exact or fuzzy)
+        if last_name_norm:
+            pol_last = (politician.get('last_name') or '').strip().lower()
+            if pol_last:
+                if pol_last == last_name_norm:
+                    score += 0.2  # Exact match
+                    match_count += 1
+                elif last_name_norm in pol_last or pol_last in last_name_norm:
+                    score += 0.15  # Partial match
+                    match_count += 1
+        
+        # 4. Party match (exact)
+        if party_norm:
+            pol_party = (politician.get('party') or '').strip().upper()
+            if pol_party and pol_party[0] == party_norm:
+                score += 0.1  # Party match
+                match_count += 1
+        
+        # 5. State match (exact)
+        if state_norm:
+            pol_state = (politician.get('state') or '').strip().upper()
+            if pol_state == state_norm:
+                score += 0.1  # State match
+                match_count += 1
+        
+        # Bonus for multiple criteria matching
+        if match_count >= 3:
+            score += 0.1  # Bonus for multiple matches
+        
         if score > best_score:
             best_score = score
             best_match = politician
     
-    # Return match if above threshold
-    if best_score >= NAME_MATCH_THRESHOLD:
+    # Return match if above threshold (lower threshold since we have multiple criteria)
+    threshold = 0.6 if (first_name_norm or last_name_norm or party_norm or state_norm) else NAME_MATCH_THRESHOLD
+    if best_score >= threshold:
         return {
             **best_match,
             'matchScore': best_score
@@ -735,10 +818,10 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         "sponsor_district": primary_sponsor.get("district", ""),
         "sponsor_url": primary_sponsor.get("url", ""),
         
-        # Cosponsors (comma-separated for easy viewing)
+        # Cosponsors (will be populated with matched CSV data later)
         "cosponsor_count": len(cosponsors),
-        "cosponsor_names": "|".join([c.get("fullName", "") for c in cosponsors if c.get("fullName")]),
-        "cosponsor_parties": "|".join([c.get("party", "") for c in cosponsors if c.get("party")]),
+        "cosponsors": "",  # Will be populated as JSON array with matched CSV data
+        "cosponsor_parties": "|".join([c.get("party", "") for c in cosponsors if c.get("party")]),  # Temporary, will be updated
         "cosponsors_json": json.dumps(cosponsors) if cosponsors else "",
         
         # Actions (full history - JSON for detailed access)
@@ -846,38 +929,122 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     
     politicians = _legislators_cache
     
-    # Match sponsor to CSV
+    # Match sponsor to CSV using multiple criteria
     sponsor_name = record.get("sponsor_full_name", "")
+    sponsor_first = record.get("sponsor_first_name", "")
+    sponsor_last = record.get("sponsor_last_name", "")
+    sponsor_party_api = record.get("sponsor_party", "")  # From API (might be "R" or full name)
+    sponsor_state_api = record.get("sponsor_state", "")
+    
+    # Extract first character of party if it's a full name
+    if sponsor_party_api and len(sponsor_party_api) > 1:
+        sponsor_party_char = sponsor_party_api[0].upper()
+    else:
+        sponsor_party_char = sponsor_party_api.upper() if sponsor_party_api else ""
+    
     if sponsor_name and politicians:
-        matched_sponsor = find_matching_politician(sponsor_name, politicians)
+        matched_sponsor = find_matching_politician(
+            sponsor_name, 
+            politicians,
+            first_name=sponsor_first,
+            last_name=sponsor_last,
+            party=sponsor_party_char,
+            state=sponsor_state_api
+        )
         if matched_sponsor:
-            # Update from CSV - use full name from CSV (cleaner than API format)
-            record["sponsor_full_name"] = matched_sponsor.get("name", record.get("sponsor_full_name", ""))
+            # Update all sponsor fields from CSV match
+            csv_name = matched_sponsor.get("name", "")
+            if csv_name:
+                record["sponsor_full_name"] = csv_name
+            
+            # Use first_name and last_name from CSV if available
+            if matched_sponsor.get("first_name"):
+                record["sponsor_first_name"] = matched_sponsor.get("first_name")
+            if matched_sponsor.get("last_name"):
+                record["sponsor_last_name"] = matched_sponsor.get("last_name")
+            
             # Use full party name from CSV (e.g., "Republican" not just "R")
             record["sponsor_party"] = matched_sponsor.get("party_full", record.get("sponsor_party", ""))
+            
             # Format state/district same as politician trades matchers (MA01 for House, MA for Senate)
             state_district_formatted = format_state_district(matched_sponsor)
             if state_district_formatted:
                 record["sponsor_state"] = state_district_formatted
+            
+            # Update district from CSV
+            if matched_sponsor.get("district"):
+                record["sponsor_district"] = matched_sponsor.get("district")
+            
+            # Update bioguide_id from CSV
             if matched_sponsor.get("bioguide_id"):
                 record["sponsor_bioguide_id"] = matched_sponsor["bioguide_id"]
     
-    # Match cosponsors to CSV and update parties (use full party names)
+    # Match cosponsors from cosponsors_json and build structured cosponsors array
+    cosponsors_list = []
     cosponsor_parties_list = []
-    if cosponsors and politicians:
-        for cosponsor in cosponsors:
-            cosponsor_name = cosponsor.get("fullName", "")
-            if cosponsor_name:
-                matched_cosponsor = find_matching_politician(cosponsor_name, politicians)
-                if matched_cosponsor:
-                    # Use full party name from CSV (e.g., "Republican" not just "R")
-                    cosponsor_parties_list.append(matched_cosponsor.get("party_full", cosponsor.get("party", "")))
-                else:
-                    # Fallback to API party (use as-is, might be full name or abbreviation)
-                    api_party = cosponsor.get("party", "")
-                    cosponsor_parties_list.append(api_party if api_party else "")
     
-    # Update cosponsor_parties with matched values
+    # Parse cosponsors from JSON string
+    cosponsors_json_str = record.get("cosponsors_json", "")
+    if cosponsors_json_str and politicians:
+        try:
+            cosponsors_data = json.loads(cosponsors_json_str) if isinstance(cosponsors_json_str, str) else cosponsors_json_str
+            if isinstance(cosponsors_data, list):
+                for cosponsor in cosponsors_data:
+                    cosponsor_name = cosponsor.get("fullName", "")
+                    cosponsor_first = cosponsor.get("firstName", "")
+                    cosponsor_last = cosponsor.get("lastName", "")
+                    cosponsor_party_api = cosponsor.get("party", "")
+                    cosponsor_state_api = cosponsor.get("state", "")
+                    
+                    # Extract first character of party
+                    if cosponsor_party_api and len(cosponsor_party_api) > 1:
+                        cosponsor_party_char = cosponsor_party_api[0].upper()
+                    else:
+                        cosponsor_party_char = cosponsor_party_api.upper() if cosponsor_party_api else ""
+                    
+                    if cosponsor_name:
+                        matched_cosponsor = find_matching_politician(
+                            cosponsor_name,
+                            politicians,
+                            first_name=cosponsor_first,
+                            last_name=cosponsor_last,
+                            party=cosponsor_party_char,
+                            state=cosponsor_state_api
+                        )
+                        
+                        # Build cosponsor object with matched CSV data
+                        cosponsor_obj = {}
+                        if matched_cosponsor:
+                            # Use matched CSV name
+                            cosponsor_obj["name"] = matched_cosponsor.get("name", cosponsor_name)
+                            # Format state/district same as politician trades matchers
+                            state_district_formatted = format_state_district(matched_cosponsor)
+                            cosponsor_obj["state"] = state_district_formatted if state_district_formatted else cosponsor_state_api
+                            # Use full party name from CSV
+                            cosponsor_obj["party"] = matched_cosponsor.get("party_full", cosponsor_party_api)
+                            # Add position (House/Senate) from CSV
+                            cosponsor_obj["position"] = matched_cosponsor.get("position", "")
+                            cosponsor_parties_list.append(matched_cosponsor.get("party_full", cosponsor_party_api))
+                        else:
+                            # Fallback to API data if no match - try to infer position from district
+                            cosponsor_obj["name"] = cosponsor_name
+                            cosponsor_obj["state"] = cosponsor_state_api
+                            cosponsor_obj["party"] = cosponsor_party_api if cosponsor_party_api else ""
+                            # Infer position: if district is 0 or empty, likely Senate; otherwise House
+                            district_val = cosponsor.get("district", "")
+                            if district_val == 0 or district_val == "" or district_val is None:
+                                cosponsor_obj["position"] = "Senate"
+                            else:
+                                cosponsor_obj["position"] = "House"
+                            cosponsor_parties_list.append(cosponsor_party_api if cosponsor_party_api else "")
+                        
+                        cosponsors_list.append(cosponsor_obj)
+        except (json.JSONDecodeError, TypeError) as e:
+            log_print(f"⚠️ Error parsing cosponsors_json: {e}")
+    
+    # Update cosponsors (JSON array) and cosponsor_parties (pipe-separated for bipartisan calculation)
+    if cosponsors_list:
+        record["cosponsors"] = json.dumps(cosponsors_list)
     if cosponsor_parties_list:
         record["cosponsor_parties"] = "|".join(cosponsor_parties_list)
     

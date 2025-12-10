@@ -2020,7 +2020,8 @@ module "congress_bills_table" {
     { name = "bill_type", type = "S" },
     { name = "bill_title", type = "S" },
     { name = "bill_number", type = "N" },
-    { name = "bipartisan", type = "N" }
+    { name = "bipartisan", type = "N" },
+    { name = "policy_area", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -2087,11 +2088,21 @@ module "congress_bills_table" {
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PolicyAreaDateIndex"
+      hash_key        = "policy_area"
+      range_key       = "introduced_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
     }
   ]
 
   billing_mode = "PAY_PER_REQUEST"
   kms_key_arn  = module.kms.dynamodb_key_arn
+
+  deletion_protection_enabled = var.dynamodb_deletion_protection_enabled
 
   table_type    = "Data"
   table_purpose = "CongressBills"
