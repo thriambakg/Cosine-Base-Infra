@@ -1860,6 +1860,62 @@ resource "aws_kms_grant" "glue_dynamodb_key_access" {
   ]
 }
 
+# Lambda Function for USAspending Bulk Router
+module "usaspending_bulk_router_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-usaspending-bulk-router-${var.environment}"
+  description   = "Routes USAspending bulk indexing to Lambda or Glue based on date range"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 60 # 1 minute max
+  memory_size   = 128
+
+  source_dir = "${path.module}/../backend_app/src/usaspending_bulk_router/app"
+
+  environment_variables = {}
+
+  tags = var.common_tags
+}
+
+# Lambda Function for USAspending Bulk Fetcher (≤2 days)
+module "usaspending_bulk_fetcher_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-usaspending-bulk-fetcher-${var.environment}"
+  description   = "Fetches USAspending bulk contract data for date ranges ≤2 days"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 900  # 15 minutes max
+  memory_size   = 1024 # Increased for processing large CSV files
+
+  source_dir = "${path.module}/../backend_app/src/usaspending_bulk_fetcher/app"
+
+  environment_variables = {
+    USASPENDING_BASE_URL   = "https://api.usaspending.gov"
+    USASPENDING_USER_AGENT = "Cosine Financial Platform (contact@cosine.financial)"
+    AWARDS_TABLE_NAME      = module.usaspending_awards_index_table.table_name
+    S3_BUCKET_NAME         = module.usaspending_data_s3.bucket_id
+    REQUEST_TIMEOUT        = "30"
+    MAX_RETRIES            = "5"
+    RETRY_BASE_DELAY       = "2.0"
+  }
+
+  additional_policy_arns = [
+    module.usaspending_awards_index_table.table_policy_arn,
+    module.kms.kms_access_policy_arn,
+    aws_iam_policy.lambda_usaspending_data_s3_policy.arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.usaspending_awards_index_table,
+    module.usaspending_data_s3,
+    module.kms
+  ]
+}
+
 # Step Functions State Machine for USAspending Daily Bulk Indexing
 module "usaspending_bulk_indexing_state_machine" {
   source = "./modules/step-functions"
@@ -1867,35 +1923,85 @@ module "usaspending_bulk_indexing_state_machine" {
   state_machine_name = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition - uses glue:startJobRun.sync to wait for completion
+  # Step Functions definition - routes based on date range
+  # Input should include: JobName, AWARDS_TABLE_NAME, S3_BUCKET_NAME, START_DATE (optional), END_DATE (optional)
+  # Automatically calculates days and routes to Lambda (≤2 days) or Glue (>2 days)
   definition = jsonencode({
-    Comment = "Daily USAspending Bulk Indexing - Runs Glue job to index all new contracts from previous day"
-    StartAt = "BuildGlueParameters"
+    Comment = "USAspending Bulk Indexing - Routes to Lambda (≤2 days) or Glue (>2 days)"
+    StartAt = "CalculateRoute"
     States = {
-      BuildGlueParameters = {
-        Type = "Pass"
+      CalculateRoute = {
+        Type     = "Task"
+        Resource = module.usaspending_bulk_router_lambda.function_arn
+        Comment  = "Calculate date range and determine routing (Lambda vs Glue)"
         Parameters = {
           "JobName.$" : "$.JobName"
+          "AWARDS_TABLE_NAME.$" : "$.AWARDS_TABLE_NAME"
+          "S3_BUCKET_NAME.$" : "$.S3_BUCKET_NAME"
+          "START_DATE.$" : "$.START_DATE"
+          "END_DATE.$" : "$.END_DATE"
+        }
+        ResultPath = "$.route"
+        Next       = "RouteDecision"
+      }
+      RouteDecision = {
+        Type = "Choice"
+        Choices = [
+          {
+            Variable      = "$.route.use_glue"
+            BooleanEquals = true
+            Next          = "StartGlueJob"
+          }
+        ]
+        Default = "InvokeLambda"
+      }
+      InvokeLambda = {
+        Type     = "Task"
+        Resource = module.usaspending_bulk_fetcher_lambda.function_arn
+        Comment  = "Invoke Lambda for date ranges ≤2 days (15 min timeout)"
+        Parameters = {
+          "USASPENDING_BASE_URL" : "https://api.usaspending.gov"
+          "USASPENDING_USER_AGENT" : "Cosine Financial Platform (contact@cosine.financial)"
+          "AWARDS_TABLE_NAME.$" : "$.route.AWARDS_TABLE_NAME"
+          "S3_BUCKET_NAME.$" : "$.route.S3_BUCKET_NAME"
+          "REQUEST_TIMEOUT" : "30"
+          "MAX_RETRIES" : "5"
+          "RETRY_BASE_DELAY" : "2.0"
+          "START_DATE.$" : "$.route.START_DATE"
+          "END_DATE.$" : "$.route.END_DATE"
+        }
+        Retry = [
+          {
+            ErrorEquals     = ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
+            IntervalSeconds = 2
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "HandleError"
+          }
+        ]
+        Next = "Success"
+      }
+      StartGlueJob = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Comment  = "Start Glue job for date ranges >2 days (2 day timeout)"
+        Parameters = {
+          "JobName.$" : "$.route.JobName"
           "Arguments" : {
             "--USASPENDING_BASE_URL" : "https://api.usaspending.gov"
             "--USASPENDING_USER_AGENT" : "Cosine Financial Platform (contact@cosine.financial)"
-            "--AWARDS_TABLE_NAME.$" : "$.AWARDS_TABLE_NAME"
-            "--S3_BUCKET_NAME.$" : "$.S3_BUCKET_NAME"
+            "--AWARDS_TABLE_NAME.$" : "$.route.AWARDS_TABLE_NAME"
+            "--S3_BUCKET_NAME.$" : "$.route.S3_BUCKET_NAME"
             "--REQUEST_TIMEOUT" : "30"
-            "--START_DATE.$" : "$.START_DATE"
-            "--END_DATE.$" : "$.END_DATE"
+            "--START_DATE.$" : "$.route.START_DATE"
+            "--END_DATE.$" : "$.route.END_DATE"
           }
-        }
-        ResultPath = "$.glue_params"
-        Next       = "StartBulkIndexing"
-      }
-      StartBulkIndexing = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::glue:startJobRun.sync"
-        Comment  = "Start Glue job - no retry logic. Failures will be caught and handled."
-        Parameters = {
-          "JobName.$" : "$.glue_params.JobName"
-          "Arguments.$" : "$.glue_params.Arguments"
         }
         Catch = [
           {
@@ -1904,19 +2010,25 @@ module "usaspending_bulk_indexing_state_machine" {
             Next        = "HandleError"
           }
         ]
-        Next = "IndexingComplete"
+        Next = "Success"
       }
-      IndexingComplete = {
+      Success = {
         Type    = "Succeed"
         Comment = "Bulk indexing completed successfully"
       }
       HandleError = {
         Type  = "Fail"
         Error = "BulkIndexingFailed"
-        Cause = "The daily bulk indexing job failed. Check CloudWatch logs for details."
+        Cause = "The bulk indexing job failed. Check CloudWatch logs for details."
       }
     }
   })
+
+  # Lambda function ARNs for IAM permissions
+  lambda_function_arns = [
+    module.usaspending_bulk_router_lambda.function_arn,
+    module.usaspending_bulk_fetcher_lambda.function_arn
+  ]
 
   # Glue job name for IAM permissions
   glue_job_names = [
@@ -1930,7 +2042,11 @@ module "usaspending_bulk_indexing_state_machine" {
 
   tags = var.common_tags
 
-  depends_on = [module.usaspending_bulk_indexing_glue_job]
+  depends_on = [
+    module.usaspending_bulk_router_lambda,
+    module.usaspending_bulk_fetcher_lambda,
+    module.usaspending_bulk_indexing_glue_job
+  ]
 }
 
 # EventBridge Scheduler for Daily USAspending Bulk Indexing (2:00 AM UTC)
