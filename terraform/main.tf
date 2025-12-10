@@ -1536,7 +1536,8 @@ resource "aws_iam_role_policy" "eventbridge_stepfunctions_policy" {
           module.eod_aggregator_state_machine.state_machine_arn,
           module.stock_data_historical_loader_state_machine.state_machine_arn,
           module.politician_trades_state_machine.state_machine_arn,
-          module.usaspending_bulk_indexing_state_machine.state_machine_arn
+          module.usaspending_bulk_indexing_state_machine.state_machine_arn,
+          module.congress_bills_fetcher_state_machine.state_machine_arn
         ]
       }
     ]
@@ -2388,6 +2389,7 @@ module "congress_bills_fetcher_state_machine" {
         Parameters = {
           "start_date.$" : "$.start_date"
           "end_date.$" : "$.end_date"
+          "source.$" : "$.source"
         }
         ResultPath = "$.route"
         Next       = "RouteDecision"
@@ -2489,6 +2491,37 @@ module "congress_bills_fetcher_state_machine" {
     module.congress_bills_fetcher_lambda,
     module.congress_bills_fetcher_glue_job
   ]
+}
+
+# EventBridge Scheduler for Daily Congress Bills Fetcher (12:00 AM UTC)
+resource "aws_cloudwatch_event_rule" "congress_bills_fetcher_scheduler" {
+  name                = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
+  description         = "Trigger Congress bills fetcher daily at 12:00 AM UTC to fetch yesterday's data"
+  schedule_expression = "cron(0 0 * * ? *)" # 12:00 AM UTC daily
+  state               = "ENABLED"
+
+  tags = merge(var.common_tags, {
+    Name        = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
+    Type        = "EventBridgeRule"
+    Purpose     = "CongressBillsFetching"
+    Environment = var.environment
+  })
+}
+
+# EventBridge Target for Step Function
+resource "aws_cloudwatch_event_target" "congress_bills_fetcher_scheduler_target" {
+  rule      = aws_cloudwatch_event_rule.congress_bills_fetcher_scheduler.name
+  target_id = "CongressBillsFetcherScheduler"
+  arn       = module.congress_bills_fetcher_state_machine.state_machine_arn
+  role_arn  = aws_iam_role.eventbridge_stepfunctions_role.arn
+
+  # Input payload for scheduler: null dates with source="scheduler"
+  # Router lambda will calculate yesterday's date
+  input = jsonencode({
+    start_date = null
+    end_date   = null
+    source     = "scheduler"
+  })
 }
 
 resource "aws_iam_policy" "lambda_politician_trades_textract_policy" {

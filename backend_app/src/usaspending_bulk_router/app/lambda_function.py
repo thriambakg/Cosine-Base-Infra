@@ -72,3 +72,4 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         "START_DATE": start_date_str,
         "END_DATE": end_date_str
     }
+
