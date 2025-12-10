@@ -47,14 +47,14 @@ args = getResolvedOptions(sys.argv, [
     'REQUEST_TIMEOUT'
 ])
 
-# Get optional date parameters
-try:
-    optional_args = getResolvedOptions(sys.argv, ['CONGRESS', 'START_DATE', 'END_DATE'])
-    args.update(optional_args)
-    print(f"✅ Successfully parsed optional arguments: CONGRESS={optional_args.get('CONGRESS')}, START_DATE={optional_args.get('START_DATE')}, END_DATE={optional_args.get('END_DATE')}", flush=True)
-except Exception as e:
-    print(f"ℹ️ Optional date arguments not provided (will default in main()): {str(e)[:200]}", flush=True)
-    pass
+# Get optional date parameters (parse manually to avoid errors if not provided)
+# getResolvedOptions requires all arguments, so we parse manually for optional ones
+optional_params = ['CONGRESS', 'START_DATE', 'END_DATE']
+for param in optional_params:
+    for i, arg in enumerate(sys.argv):
+        if arg == f'--{param}' and i + 1 < len(sys.argv):
+            args[param] = sys.argv[i + 1]
+            break
 
 # Initialize Glue context
 sc = SparkContext()
@@ -678,7 +678,7 @@ def main():
         congress = int(congress)
         log_print(f"✅ Using provided Congress: {congress}")
     
-    log_print()
+    log_print("")  # Empty line for readability
     
     # Fetch all bills
     log_print("📋 Fetching Bills...")

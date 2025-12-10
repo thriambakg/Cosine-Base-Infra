@@ -1763,11 +1763,16 @@ module "glue_scripts_s3" {
 
   kms_key_arn = module.kms.main_key_arn
 
-  # Upload Glue script to S3
+  # Upload Glue scripts to S3
   static_files = [
     {
       source_path  = "${path.module}/../backend_app/src/glue/govt_contracts/glue_script.py"
       s3_key       = "govt_contracts/glue_script.py"
+      content_type = "text/x-python"
+    },
+    {
+      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/glue_script.py"
+      s3_key       = "congress_bills/glue_script.py"
       content_type = "text/x-python"
     }
   ]
@@ -1968,25 +1973,6 @@ module "usaspending_bulk_indexing_state_machine" {
 # Uses Lambda for short date ranges (≤2 days) and Glue for longer ranges (>2 days)
 
 # S3 Bucket for Congress.gov Glue Scripts
-module "congress_bills_glue_scripts_s3" {
-  source = "./modules/s3"
-
-  providers = {
-    aws         = aws
-    aws.replica = aws.replica
-  }
-
-  bucket_name = "${var.project_name}-congress-bills-glue-scripts-${var.environment}"
-  environment = var.environment
-  purpose     = "CongressBillsGlueScripts"
-
-  kms_key_arn = module.kms.main_key_arn
-
-  # No lifecycle transitions for scripts
-  enable_lifecycle_transitions = false
-
-  tags = var.common_tags
-}
 
 # S3 Bucket for Congress.gov Raw Data
 module "congress_bills_data_s3" {
@@ -2087,22 +2073,6 @@ module "congress_bills_table" {
   tags = var.common_tags
 }
 
-# Upload Glue script to S3
-resource "aws_s3_object" "congress_bills_glue_script" {
-  bucket = module.congress_bills_glue_scripts_s3.bucket_id
-  key    = "congress_bills/glue_script.py"
-  source = "${path.module}/../backend_app/src/glue/congress_bills/glue_script.py"
-
-  # Use file hash to detect changes
-  etag = filemd5("${path.module}/../backend_app/src/glue/congress_bills/glue_script.py")
-
-  tags = merge(var.common_tags, {
-    Name    = "congress-bills-glue-script"
-    Purpose = "GlueScript"
-  })
-
-  depends_on = [module.congress_bills_glue_scripts_s3]
-}
 
 # Lambda Function for Congress Bills Router (calculates days and routes)
 module "congress_bills_router_lambda" {
@@ -2162,7 +2132,7 @@ module "congress_bills_fetcher_glue_job" {
   job_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
 
   # Script location - uploaded to glue scripts bucket
-  script_location = "s3://${module.congress_bills_glue_scripts_s3.bucket_id}/congress_bills/glue_script.py"
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/glue_script.py"
   python_version  = "3"
   glue_version    = "4.0"
 
@@ -2174,7 +2144,7 @@ module "congress_bills_fetcher_glue_job" {
   number_of_workers     = 2
 
   # S3 buckets
-  s3_bucket_arn = module.congress_bills_glue_scripts_s3.bucket_arn
+  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
   additional_s3_bucket_arns = [
     module.congress_bills_data_s3.bucket_arn,
     module.static_hosting_bucket.bucket_arn
@@ -2211,13 +2181,12 @@ module "congress_bills_fetcher_glue_job" {
   tags = var.common_tags
 
   depends_on = [
-    module.congress_bills_glue_scripts_s3,
+    module.glue_scripts_s3,
     module.congress_bills_data_s3,
     module.static_hosting_bucket,
     module.congress_bills_table,
     module.kms,
-    module.congress_api_secrets_manager,
-    aws_s3_object.congress_bills_glue_script
+    module.congress_api_secrets_manager
   ]
 }
 
