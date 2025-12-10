@@ -2032,7 +2032,6 @@ module "congress_bills_table" {
     { name = "latest_action_date", type = "S" },
     { name = "congress", type = "N" },
     { name = "bill_type", type = "S" },
-    { name = "bill_number", type = "N" },
     { name = "short_description", type = "S" }
   ]
 
