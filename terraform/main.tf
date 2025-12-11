@@ -2272,63 +2272,9 @@ module "congress_bills_table" {
 }
 
 
-# Lambda Function for Congress Bills Router (calculates days and routes)
-module "congress_bills_router_lambda" {
-  source = "./modules/lambda"
-
-  function_name = "${var.project_name}-congress-bills-router-${var.environment}"
-  description   = "Routes Congress.gov bill fetcher to Lambda or Glue based on date range"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.11"
-  timeout       = 60 # 1 minute max
-  memory_size   = 128
-
-  source_dir = "${path.module}/../backend_app/src/congress_bills_router/app"
-
-  environment_variables = {}
-
-  tags = var.common_tags
-}
-
-# Lambda Function for Congress Bills Fetcher (≤2 days)
-module "congress_bills_fetcher_lambda" {
-  source = "./modules/lambda"
-
-  function_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
-  description   = "Fetches comprehensive Congress.gov bill data for date ranges ≤2 days"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.11"
-  timeout       = 900  # 15 minutes max
-  memory_size   = 1024 # Increased for better parallel processing performance
-
-  source_dir = "${path.module}/../backend_app/src/congress_bills_fetcher/app"
-
-  environment_variables = {
-    PROJECT_NAME                = var.project_name
-    ENVIRONMENT                 = var.environment
-    CONGRESS_API_BASE_URL       = "https://api.congress.gov/v3"
-    BILLS_TABLE_NAME            = module.congress_bills_table.table_name
-    S3_BUCKET_NAME              = module.congress_bills_data_s3.bucket_id
-    POLITICIAN_TRADES_S3_BUCKET = module.politician_trades_s3.bucket_id
-    REQUEST_TIMEOUT             = "30"
-    MAX_RETRIES                 = "3"
-    RETRY_DELAY                 = "2"
-  }
-
-  # Lambda layers (Python 3.11) - includes requests module
-  layers = [
-    module.core_layer.layer_arn
-  ]
-
-  additional_policy_arns = [
-    module.congress_bills_table.table_policy_arn,
-    module.kms.kms_access_policy_arn,
-    module.congress_api_secrets_manager.secret_access_policy_arn,
-    aws_iam_policy.lambda_politician_trades_s3_policy.arn
-  ]
-
-  tags = var.common_tags
-}
+# Lambda Functions for Congress Bills Router and Fetcher - DEPRECATED
+# Moved to deprecated folder - removed from infrastructure due to timeout limitations
+# All bill fetching now handled by Glue job only
 
 # Glue Job for Congress Bills Fetcher (>2 days)
 module "congress_bills_fetcher_glue_job" {
@@ -2417,72 +2363,23 @@ resource "aws_kms_grant" "congress_bills_glue_dynamodb_key_access" {
 }
 
 # Step Functions State Machine for Congress Bills Fetcher
-# Routes to Lambda (≤2 days) or Glue (>2 days) based on date range
+# Uses Glue job only (Lambda removed due to timeout limitations with large bill counts)
 module "congress_bills_fetcher_state_machine" {
   source = "./modules/step-functions"
 
   state_machine_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition - routes based on date range
+  # Step Functions definition - directly invokes Glue job
   # Input should include: start_date, end_date, congress (optional)
-  # Automatically calculates days and routes to Lambda (≤2 days) or Glue (>2 days)
   definition = jsonencode({
-    Comment = "Congress.gov Bill Data Fetcher - Routes to Lambda (≤2 days) or Glue (>2 days)"
-    StartAt = "CalculateRoute"
+    Comment = "Congress.gov Bill Data Fetcher - Uses Glue job only"
+    StartAt = "StartGlueJob"
     States = {
-      CalculateRoute = {
-        Type     = "Task"
-        Resource = module.congress_bills_router_lambda.function_arn
-        Comment  = "Calculate date range and determine routing (Lambda vs Glue)"
-        Parameters = {
-          "start_date.$" : "$.start_date"
-          "end_date.$" : "$.end_date"
-          "source.$" : "$.source"
-        }
-        ResultPath = "$.route"
-        Next       = "RouteDecision"
-      }
-      RouteDecision = {
-        Type = "Choice"
-        Choices = [
-          {
-            Variable      = "$.route.use_glue"
-            BooleanEquals = true
-            Next          = "StartGlueJob"
-          }
-        ]
-        Default = "InvokeLambda"
-      }
-      InvokeLambda = {
-        Type     = "Task"
-        Resource = module.congress_bills_fetcher_lambda.function_arn
-        Comment  = "Invoke Lambda for date ranges ≤2 days (15 min timeout)"
-        Parameters = {
-          "start_date.$" : "$.route.start_date"
-          "end_date.$" : "$.route.end_date"
-        }
-        Retry = [
-          {
-            ErrorEquals     = ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
-            IntervalSeconds = 2
-            MaxAttempts     = 3
-            BackoffRate     = 2.0
-          }
-        ]
-        Catch = [
-          {
-            ErrorEquals = ["States.ALL"]
-            ResultPath  = "$.error"
-            Next        = "HandleError"
-          }
-        ]
-        Next = "Success"
-      }
       StartGlueJob = {
         Type     = "Task"
         Resource = "arn:aws:states:::glue:startJobRun.sync"
-        Comment  = "Start Glue job for date ranges >2 days (2 day timeout)"
+        Comment  = "Start Glue job for Congress bills fetching (2 day timeout)"
         Parameters = {
           "JobName" : module.congress_bills_fetcher_glue_job.job_name
           "Arguments" : {
@@ -2492,8 +2389,8 @@ module "congress_bills_fetcher_state_machine" {
             "--BILLS_TABLE_NAME" : module.congress_bills_table.table_name
             "--S3_BUCKET_NAME" : module.congress_bills_data_s3.bucket_id
             "--REQUEST_TIMEOUT" : "30"
-            "--START_DATE.$" : "$.route.start_date"
-            "--END_DATE.$" : "$.route.end_date"
+            "--START_DATE.$" : "$.start_date"
+            "--END_DATE.$" : "$.end_date"
           }
         }
         Catch = [
@@ -2517,11 +2414,8 @@ module "congress_bills_fetcher_state_machine" {
     }
   })
 
-  # Lambda function ARNs for IAM permissions
-  lambda_function_arns = [
-    module.congress_bills_router_lambda.function_arn,
-    module.congress_bills_fetcher_lambda.function_arn
-  ]
+  # Lambda function ARNs for IAM permissions (removed - no longer using Lambda)
+  lambda_function_arns = []
 
   # Glue job name for IAM permissions
   glue_job_names = [
@@ -2536,8 +2430,6 @@ module "congress_bills_fetcher_state_machine" {
   tags = var.common_tags
 
   depends_on = [
-    module.congress_bills_router_lambda,
-    module.congress_bills_fetcher_lambda,
     module.congress_bills_fetcher_glue_job
   ]
 }

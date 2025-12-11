@@ -24,6 +24,7 @@ import requests
 import gc
 import csv
 import re
+import gzip
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from io import StringIO
@@ -1158,28 +1159,141 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     return record
 
 
+def convert_decimal_for_json(obj: Any) -> Any:
+    """Recursively convert Decimal to float/string for JSON serialization"""
+    from decimal import Decimal
+    if isinstance(obj, Decimal):
+        try:
+            return float(obj)
+        except (OverflowError, ValueError):
+            return str(obj)
+    elif isinstance(obj, dict):
+        return {key: convert_decimal_for_json(value) for key, value in obj.items()}
+    elif isinstance(obj, list):
+        return [convert_decimal_for_json(item) for item in obj]
+    else:
+        return obj
+
+
+def store_oversized_item_to_s3(bill_id: str, full_item: Dict[str, Any]) -> str:
+    """
+    Store oversized bill item to S3 in oversize/ folder.
+    Returns the S3 key.
+    """
+    # Create S3 key: oversize/{bill_id}.json.gz
+    s3_key = f"oversize/{bill_id}.json.gz"
+    
+    # Convert Decimal values to JSON-serializable types
+    json_ready_item = convert_decimal_for_json(full_item)
+    
+    # Convert to JSON
+    json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2)
+    
+    # Compress and upload to S3
+    json_bytes = json_data.encode('utf-8')
+    compressed_data = gzip.compress(json_bytes)
+    
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_key,
+        Body=compressed_data,
+        ContentType='application/json',
+        ContentEncoding='gzip'
+    )
+    
+    log_print(f"      💾 Stored oversized bill {bill_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
+    return s3_key
+
+
+def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Extract only GSI fields and essential metadata for DynamoDB.
+    Used when item exceeds 400KB limit.
+    
+    GSI fields to preserve:
+    - Primary key: bill_id
+    - GSI hash keys: sponsor_party, sponsor_full_name, congress, bill_type, bill_title, bill_number, bipartisan
+    - GSI range keys: introduced_date
+    - Essential metadata: congress, bill_type, bill_number, bipartisan, policy_area
+    """
+    gsi_fields = {
+        # Primary key (required)
+        'bill_id': full_item.get('bill_id'),
+        
+        # GSI hash keys
+        'sponsor_party': full_item.get('sponsor_party'),
+        'sponsor_full_name': full_item.get('sponsor_full_name'),
+        'congress': full_item.get('congress'),
+        'bill_type': full_item.get('bill_type'),
+        'bill_title': full_item.get('bill_title'),
+        'bill_number': full_item.get('bill_number'),
+        'bipartisan': full_item.get('bipartisan'),
+        'policy_area': full_item.get('policy_area'),
+        
+        # GSI range keys
+        'introduced_date': full_item.get('introduced_date'),
+        'latest_action_date': full_item.get('latest_action_date'),
+        
+        # Essential metadata
+        'is_oversized': True,
+        'oversize_s3_key': f"oversize/{full_item.get('bill_id')}.json.gz",
+    }
+    
+    # Remove None values (but keep False/0 values)
+    cleaned = {}
+    for k, v in gsi_fields.items():
+        if v is not None:
+            cleaned[k] = v
+    
+    return cleaned
+
+
 def store_bill_to_dynamodb(record: Dict):
-    """Store bill record to DynamoDB with retry logic."""
+    """Store bill record to DynamoDB. Handles oversized items by storing to S3."""
     if not bills_table:
         log_print("⚠️ DynamoDB table not configured, skipping storage")
         return
     
-    max_retries = 3
-    for attempt in range(max_retries):
+    bill_id = record.get('bill_id', 'unknown')
+    max_put_retries = 3
+    
+    for put_attempt in range(max_put_retries):
         try:
             bills_table.put_item(Item=record)
-            log_print(f"      ✅ Stored {record['bill_id']} to DynamoDB")
+            log_print(f"      ✅ Stored {bill_id} to DynamoDB")
             return
-        except Exception as e:
-            error_str = str(e)
-            if 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 2
-                    log_print(f"      ⚠️ Throttling for {record['bill_id']}, retrying in {wait_time}s...")
+        except Exception as put_error:
+            error_str = str(put_error)
+            
+            # Handle oversized items (ValidationException)
+            if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
+                log_print(f"      ⚠️ Bill {bill_id} exceeds DynamoDB size limit, storing to S3...")
+                
+                oversize_s3_key = store_oversized_item_to_s3(bill_id, record)
+                gsi_only_item = extract_gsi_fields_only(record)
+                gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                
+                try:
+                    bills_table.put_item(Item=gsi_only_item)
+                    log_print(f"      ✅ Stored GSI fields for oversized bill {bill_id} to DynamoDB, full data in S3")
+                    return
+                except Exception as gsi_error:
+                    log_print(f"      ❌ Even GSI-only item too large for {bill_id}: {str(gsi_error)}")
+                    raise
+            
+            # Handle throttling
+            elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                if put_attempt < max_put_retries - 1:
+                    wait_time = (put_attempt + 1) * 2
+                    log_print(f"      ⚠️ DynamoDB throttled for bill {bill_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
                     time.sleep(wait_time)
                     continue
-            log_print(f"      ❌ Error storing {record.get('bill_id', 'unknown')} to DynamoDB: {error_str}")
+            
+            # Re-raise if not throttling or out of retries
             raise
+    
+    log_print(f"      ❌ Failed to store {bill_id} after {max_put_retries} attempts")
+    raise Exception(f"Failed to store bill {bill_id} to DynamoDB after retries")
 
 
 # ============================================================================
