@@ -937,6 +937,32 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
             award_record['full_indexing_complete'] = False
             award_record['ttl'] = int((datetime.now(timezone.utc).timestamp() + (90 * 24 * 60 * 60)))
             
+            # Detect IDV child awards (awards with parent_award_piid and award types A/B/C/D, not IDV_ types)
+            parent_award_piid = row.get('parent_award_piid') or row.get('parent_award_id_piid')
+            parent_award_agency_id = row.get('parent_award_agency_id') or row.get('parent_award_agency_code')
+            award_type = row.get('award_type') or row.get('contract_award_type') or ''
+            
+            # Check if this is an IDV child award (has parent_award_piid and award type is A/B/C/D)
+            is_idv_child = False
+            if parent_award_piid and parent_award_agency_id:
+                # Award types A, B, C, D are child awards (delivery orders/calls against IDVs)
+                # Award types starting with IDV_ are parent IDVs themselves
+                if award_type in ['A', 'B', 'C', 'D'] or (isinstance(award_type, str) and award_type.upper() in ['A', 'B', 'C', 'D']):
+                    is_idv_child = True
+                    # Build parent IDV ID: CONT_IDV_{piid}_{agency_id}
+                    # This matches the format used by USAspending for IDV awards
+                    parent_idv_id = f"CONT_IDV_{parent_award_piid}_{parent_award_agency_id}"
+                    award_record['parent_idv_id'] = parent_idv_id
+                    award_record['parent_award_piid'] = parent_award_piid
+                    award_record['parent_award_agency_id'] = parent_award_agency_id
+                    award_record['is_idv_child'] = True
+            
+            # Detect if this is a parent IDV (award type starts with IDV_)
+            if award_type and isinstance(award_type, str) and award_type.startswith('IDV_'):
+                award_record['is_idv_parent'] = True
+                award_record['child_awards'] = []
+                award_record['child_award_count'] = 0
+            
             awards[award_id] = award_record
         
         # Add transaction to award
@@ -1474,10 +1500,79 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
     
     log_print(f"✅ {agency_prefix}Linked {linked_count} parent awards with sub-awards from bulk file")
     
+    # Link IDV child awards to parent IDVs
+    log_print(f"🔗 {agency_prefix}Linking IDV child awards to parent IDVs...")
+    idv_child_linked = 0
+    idv_child_unlinked = {}
+    
+    for award_id, award_data in all_prime_awards.items():
+        parent_idv_id = award_data.get('parent_idv_id')
+        if parent_idv_id:
+            # This is an IDV child award
+            if parent_idv_id in all_prime_awards:
+                # Parent IDV is in current bulk file
+                parent_idv = all_prime_awards[parent_idv_id]
+                if 'child_awards' not in parent_idv:
+                    parent_idv['child_awards'] = []
+                if award_id not in parent_idv['child_awards']:
+                    parent_idv['child_awards'].append(award_id)
+                parent_idv['child_award_count'] = len(parent_idv['child_awards'])
+                idv_child_linked += 1
+            else:
+                # Parent IDV not in current bulk file - will check DynamoDB during indexing
+                if parent_idv_id not in idv_child_unlinked:
+                    idv_child_unlinked[parent_idv_id] = []
+                idv_child_unlinked[parent_idv_id].append(award_id)
+    
+    # Check DynamoDB for missing parent IDVs
+    if idv_child_unlinked:
+        log_print(f"🔍 {agency_prefix}Checking DynamoDB for {len(idv_child_unlinked)} missing parent IDVs...")
+        dynamodb_idv_linked = 0
+        
+        for parent_idv_id, child_award_ids in idv_child_unlinked.items():
+            try:
+                # Try to get parent IDV from DynamoDB
+                response = awards_table.get_item(Key={'award_id': parent_idv_id})
+                if 'Item' in response:
+                    # Parent IDV exists in DynamoDB - will update during indexing
+                    log_print(f"✅ {agency_prefix}Found parent IDV {parent_idv_id} in DynamoDB (will update during indexing)")
+                    # Store child awards to be added during indexing
+                    # Create a minimal parent IDV record that will trigger an update
+                    if parent_idv_id not in all_prime_awards:
+                        all_prime_awards[parent_idv_id] = {
+                            'award_id': parent_idv_id,
+                            'child_awards': child_award_ids,
+                            'child_award_count': len(child_award_ids),
+                            'update_from_dynamodb': True,
+                            'existing_item': response['Item'],
+                            'is_idv_parent': True
+                        }
+                    else:
+                        # Parent IDV already in awards (shouldn't happen, but handle it)
+                        if 'child_awards' not in all_prime_awards[parent_idv_id]:
+                            all_prime_awards[parent_idv_id]['child_awards'] = []
+                        all_prime_awards[parent_idv_id]['child_awards'].extend(child_award_ids)
+                        all_prime_awards[parent_idv_id]['child_award_count'] = len(all_prime_awards[parent_idv_id]['child_awards'])
+                    dynamodb_idv_linked += 1
+                else:
+                    log_print(f"⚠️ {agency_prefix}Parent IDV {parent_idv_id} not found in bulk file or DynamoDB for {len(child_award_ids)} child award(s)")
+            except Exception as e:
+                error_msg = f"Error checking DynamoDB for parent IDV {parent_idv_id}: {str(e)}"
+                log_print(f"⚠️ {agency_prefix}{error_msg}")
+                logger.error(f"⚠️ {agency_prefix}{error_msg}", exc_info=True)
+                # Continue processing other parents even if one fails
+        
+        if dynamodb_idv_linked > 0:
+            log_print(f"✅ {agency_prefix}Found {dynamodb_idv_linked} parent IDVs in DynamoDB")
+    
+    if idv_child_linked > 0:
+        log_print(f"✅ {agency_prefix}Linked {idv_child_linked} IDV child awards to parent IDVs from bulk file")
+    
     parse_duration = time.time() - parse_start_time
     log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
     log_print(f"   📊 Prime Awards: {len(all_prime_awards):,}")
     log_print(f"   📊 Sub-Awards: {sum(len(subs) for subs in all_subawards_by_parent.values()):,}")
+    log_print(f"   📊 IDV Child Awards: {sum(1 for a in all_prime_awards.values() if a.get('is_idv_child'))}")
     log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
     
     return {
@@ -1733,6 +1828,27 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 db_item['subawards'] = convert_floats_to_decimal(subawards)
                 log_print(f"   📊 Updated award {award_id}: Added {len(subawards)} sub-award(s)")
             
+            # Merge child awards for IDV parents (append to existing if any)
+            child_awards = award_record.get('child_awards', [])
+            if db_item.get('is_idv_parent') or award_record.get('is_idv_parent'):
+                existing_child_awards = db_item.get('child_awards', [])
+                if existing_child_awards and child_awards:
+                    # Combine and deduplicate child awards
+                    existing_child_ids = set(existing_child_awards)
+                    new_child_awards = [child_id for child_id in child_awards if child_id not in existing_child_ids]
+                    
+                    if new_child_awards:
+                        db_item['child_awards'] = existing_child_awards + new_child_awards
+                        log_print(f"   📊 Updated IDV {award_id}: Added {len(new_child_awards)} new child award(s)")
+                    else:
+                        db_item['child_awards'] = existing_child_awards
+                elif child_awards:
+                    db_item['child_awards'] = child_awards
+                    log_print(f"   📊 Updated IDV {award_id}: Added {len(child_awards)} child award(s)")
+                
+                # Update child award count
+                db_item['child_award_count'] = len(db_item.get('child_awards', []))
+            
             # Update counts and timestamp
             db_item['transaction_count'] = len(db_item.get('transactions', []))
             db_item['subaward_count'] = len(db_item.get('subawards', []))
@@ -1794,6 +1910,14 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             # Add completion flags and counts
             db_item['transaction_count'] = transaction_count
             db_item['subaward_count'] = subaward_count
+            
+            # Add child awards for IDV parents
+            child_awards = award_record.get('child_awards', [])
+            if award_record.get('is_idv_parent'):
+                db_item['child_awards'] = child_awards
+                db_item['child_award_count'] = len(child_awards)
+                db_item['is_idv_parent'] = True
+            
             db_item['full_indexing_complete'] = True
             db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
             
