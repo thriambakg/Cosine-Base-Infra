@@ -54,7 +54,8 @@ args = getResolvedOptions(sys.argv, [
     'USASPENDING_USER_AGENT',
     'AWARDS_TABLE_NAME',
     'S3_BUCKET_NAME',
-    'REQUEST_TIMEOUT'
+    'REQUEST_TIMEOUT',
+    'ORPHAN_SUBAWARD_SQS_URL'
 ])
 
 # Get optional date parameters
@@ -98,6 +99,10 @@ RETRY_BASE_DELAY = float(args.get('RETRY_BASE_DELAY', '2.0'))
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
 s3_client = boto3.client('s3')
+sqs_client = boto3.client('sqs')
+
+# SQS queue for orphan subawards
+ORPHAN_SUBAWARD_SQS_URL = args.get('ORPHAN_SUBAWARD_SQS_URL', '')
 awards_table = dynamodb.Table(AWARDS_TABLE_NAME)
 
 log_print(f"ℹ️ Configuration: Table={AWARDS_TABLE_NAME}, S3 Bucket={S3_BUCKET_NAME}, API={USASPENDING_BASE_URL}")
@@ -237,8 +242,8 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
         
         if not api_response:
             log_print(f"⚠️ No data returned from API for award {award_id}")
-            return None
-        
+        return None
+
         # Convert API response to our award record format
         # Store ALL fields from API response to match bulk file granularity
         award_record = {}
@@ -262,7 +267,7 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
                 except (ValueError, TypeError, Exception):
                     # If conversion fails, store as string or skip
                     award_record[key] = normalize_string(value)
-            else:
+    else:
                 award_record[key] = normalize_string(value) if isinstance(value, str) else value
         
         # Map API fields to our format (override with our field names where needed)
@@ -947,7 +952,7 @@ def poll_download_status(file_name: str, max_wait: int = 14400, poll_interval: i
                 except (ValueError, TypeError):
                     seconds_elapsed = None
             
-            file_url_check = response.get("file_url", "N/A")
+                file_url_check = response.get("file_url", "N/A")
             
             # Log status on every attempt
             log_print(f"📊 {agency_prefix}Status check {attempt}: status='{status}'")
@@ -957,8 +962,8 @@ def poll_download_status(file_name: str, max_wait: int = 14400, poll_interval: i
                 log_print(f"   API elapsed time: {seconds_elapsed_raw}s")
             log_print(f"   File URL: {'✅ present' if file_url_check != 'N/A' else '❌ missing'}")
             
-            if status not in ["running", "ready", "finished", "failed"]:
-                log_print(f"⚠️ {agency_prefix}Unexpected status '{status}'. Full response: {json.dumps(response, default=str)[:500]}")
+                if status not in ["running", "ready", "finished", "failed"]:
+                    log_print(f"⚠️ {agency_prefix}Unexpected status '{status}'. Full response: {json.dumps(response, default=str)[:500]}")
             
             if status == "ready" or status == "finished":
                 file_url = response.get("file_url")
@@ -967,16 +972,16 @@ def poll_download_status(file_name: str, max_wait: int = 14400, poll_interval: i
                     time.sleep(poll_interval)
                     continue
                 
-                log_print("=" * 80)
+                    log_print("=" * 80)
                 log_print(f"✅ {agency_prefix}DOWNLOAD STATUS: File Ready for Download")
                 log_print(f"   File Name: {file_name}")
-                if seconds_elapsed is not None:
-                    minutes = int(seconds_elapsed // 60)
-                    secs = int(seconds_elapsed % 60)
+                    if seconds_elapsed is not None:
+                        minutes = int(seconds_elapsed // 60)
+                        secs = int(seconds_elapsed % 60)
                     log_print(f"   Processing Time: {int(seconds_elapsed)} seconds ({minutes}m {secs}s)")
                 log_print(f"   Total Polling Time: {elapsed_minutes}m {elapsed_seconds % 60}s ({attempt} attempts)")
                 log_print(f"   File URL: {file_url}")
-                log_print("=" * 80)
+                    log_print("=" * 80)
                 
                 return response
             elif status == "failed":
@@ -1076,7 +1081,7 @@ def format_agency_name_old_abbreviation(agency_name: str) -> str:
         rest_of_last = last_word[1:].capitalize()
         return first_letters + rest_of_last
     else:
-        return first_letters
+    return first_letters
 
 def format_date_range_path(start_date: str, end_date: str) -> str:
     """Format date range as MMDDYYYY-MMDDYYYY for S3 path"""
@@ -1301,7 +1306,7 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
                           'potential_total_value_of_award', 'action_date_fiscal_year']:
                     try:
                         award_record[key] = Decimal(str(value))
-                    except:
+                except:
                         award_record[key] = normalize_string(value)
                 else:
                     award_record[key] = normalize_string(value)
@@ -1364,7 +1369,7 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
             if key in ['federal_action_obligation', 'total_dollars_obligated', 'total_obligated_amount']:
                 try:
                     transaction_record[key] = Decimal(str(value))
-                except:
+        except:
                     transaction_record[key] = normalize_string(value)
             else:
                 transaction_record[key] = normalize_string(value)
@@ -1439,7 +1444,7 @@ def parse_subaward_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str, L
                     subaward_record[key] = Decimal(str(value))
                 except:
                     subaward_record[key] = normalize_string(value)
-            else:
+                else:
                 subaward_record[key] = normalize_string(value)
         
         # Normalize common fields to reduce blanks
@@ -1551,12 +1556,12 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
             log_print("=" * 80)
             break
         except Exception as e:
-            if attempt < max_download_retries - 1:
+                if attempt < max_download_retries - 1:
                 wait_time = 30 * (attempt + 1)
                 log_print(f"❌ {agency_prefix}Download attempt {attempt + 1} failed: {str(e)[:200]}")
                 log_print(f"   Retrying in {wait_time}s...")
-                time.sleep(wait_time)
-                continue
+                    time.sleep(wait_time)
+                    continue
             log_print(f"❌ {agency_prefix}Download failed after {max_download_retries} attempts")
             raise
     
@@ -1592,12 +1597,12 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
         
         # Save ZIP to S3 if agency name and dates provided
         s3_zip_key = None
-        if agency_name and start_date and end_date:
-            try:
+                if agency_name and start_date and end_date:
+                    try:
                 s3_zip_key = save_zip_to_s3(content, start_date, end_date, agency_name)
                 log_print(f"💾 {agency_prefix}ZIP saved to S3, will extract CSV files to S3 to avoid memory issues")
-            except Exception as e:
-                log_print(f"⚠️ {agency_prefix}Failed to save ZIP to S3 (non-critical): {str(e)[:200]}")
+                    except Exception as e:
+                        log_print(f"⚠️ {agency_prefix}Failed to save ZIP to S3 (non-critical): {str(e)[:200]}")
         
         # Extract CSV files to S3 individually to avoid loading all into memory
         # Check if folder already has files first
@@ -1813,7 +1818,7 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                             # Merge transactions
                             all_prime_awards[award_id]['transactions'].extend(award_data['transactions'])
                             all_prime_awards[award_id]['transaction_count'] += award_data['transaction_count']
-                        else:
+            else:
                             all_prime_awards[award_id] = award_data
                 except Exception as e:
                     log_print(f"❌ {agency_prefix}Error processing results from {prime_file}: {str(e)[:200]}")
@@ -1865,7 +1870,7 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                     for parent_id, subawards in subawards_by_parent.items():
                         if parent_id in all_subawards_by_parent:
                             all_subawards_by_parent[parent_id].extend(subawards)
-                        else:
+                else:
                             all_subawards_by_parent[parent_id] = subawards
                 except Exception as e:
                     log_print(f"❌ {agency_prefix}Error processing results from {subaward_file}: {str(e)[:200]}")
@@ -1910,21 +1915,62 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                         all_prime_awards[parent_id]['subawards'] = subawards
                     dynamodb_linked += 1
                 else:
-                    # Parent not in DynamoDB - try fetching from API
-                    log_print(f"🔍 {agency_prefix}Parent award {parent_id} not in DynamoDB, fetching from API...")
-                    api_award = fetch_award_from_api(parent_id)
-                    if api_award:
-                        # Add subawards to the fetched award
-                        api_award['subawards'] = subawards
-                        api_award['subaward_count'] = len(subawards)
-                        api_award['full_indexing_complete'] = True
-                        
-                        # Add to all_prime_awards for indexing
-                        all_prime_awards[parent_id] = api_award
-                        log_print(f"✅ {agency_prefix}Fetched parent award {parent_id} from API and added {len(subawards)} sub-awards")
-                        dynamodb_linked += 1
+                    # Parent not in bulk CSV files or DynamoDB - send to SQS for Lambda processing
+                    log_print(f"🔍 {agency_prefix}Parent award {parent_id} not in bulk CSV files or DynamoDB, sending to SQS for Lambda processing...")
+                    
+                    if ORPHAN_SUBAWARD_SQS_URL:
+                        try:
+                            # Prepare message body
+                            message_body = {
+                                'parent_id': parent_id,
+                                'subawards': subawards
+                            }
+                            
+                            # Check message size (SQS limit is 256 KB)
+                            message_json = json.dumps(message_body, default=str)
+                            message_size_bytes = len(message_json.encode('utf-8'))
+                            max_message_size = 200 * 1024  # 200 KB (leave room for SQS overhead)
+                            
+                            if message_size_bytes > max_message_size:
+                                # Message too large - store subawards to S3 and send S3 key
+                                log_print(f"⚠️ {agency_prefix}Message for parent {parent_id} too large ({message_size_bytes:,} bytes), storing subawards to S3...")
+                                s3_key = f"orphan-subawards/{parent_id}.json.gz"
+                                
+                                # Compress and upload to S3
+                                json_bytes = message_json.encode('utf-8')
+                                compressed_data = gzip.compress(json_bytes)
+                                
+                                s3_client.put_object(
+                                    Bucket=S3_BUCKET_NAME,
+                                    Key=s3_key,
+                                    Body=compressed_data,
+                                    ContentType='application/json',
+                                    ContentEncoding='gzip'
+                                )
+                                
+                                # Send message with S3 key instead
+                                message_body = {
+                                    'parent_id': parent_id,
+                                    'subawards_s3_key': s3_key
+                                }
+                                message_json = json.dumps(message_body, default=str)
+                                log_print(f"💾 {agency_prefix}Stored {len(subawards)} subawards to S3: {s3_key}")
+                            
+                            # Send message to SQS queue
+                            response = sqs_client.send_message(
+                                QueueUrl=ORPHAN_SUBAWARD_SQS_URL,
+                                MessageBody=message_json
+                            )
+                            
+                            log_print(f"✅ {agency_prefix}Sent orphan subaward for parent {parent_id} ({len(subawards)} subawards) to SQS queue (MessageId: {response.get('MessageId')})")
+                            dynamodb_linked += 1
+                        except Exception as e:
+                            error_msg = f"Error sending orphan subaward to SQS for parent {parent_id}: {str(e)[:200]}"
+                            log_print(f"⚠️ {agency_prefix}{error_msg}")
+                            logger.error(f"⚠️ {agency_prefix}{error_msg}", exc_info=True)
+                            # Continue processing other parents even if one fails
                     else:
-                        log_print(f"⚠️ {agency_prefix}Parent award {parent_id} not found in bulk file, DynamoDB, or API for {len(subawards)} sub-awards")
+                        log_print(f"⚠️ {agency_prefix}ORPHAN_SUBAWARD_SQS_URL not configured, skipping orphan subaward for parent {parent_id}")
             except Exception as e:
                 error_msg = f"Error checking DynamoDB for parent {parent_id}: {str(e)}"
                 log_print(f"⚠️ {agency_prefix}{error_msg}")
@@ -2004,12 +2050,12 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
     if idv_child_linked > 0:
         log_print(f"✅ {agency_prefix}Linked {idv_child_linked} IDV child awards to parent IDVs from bulk file")
     
-    parse_duration = time.time() - parse_start_time
-    log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
+                parse_duration = time.time() - parse_start_time
+                log_print(f"✅ {agency_prefix}CSV Parsing Completed:")
     log_print(f"   📊 Prime Awards: {len(all_prime_awards):,}")
     log_print(f"   📊 Sub-Awards: {sum(len(subs) for subs in all_subawards_by_parent.values()):,}")
     log_print(f"   📊 IDV Child Awards: {sum(1 for a in all_prime_awards.values() if a.get('is_idv_child'))}")
-    log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
+                log_print(f"   ⏱️ Parse Time: {int(parse_duration // 60)}m {int(parse_duration % 60)}s")
     
     return {
         'prime_awards': all_prime_awards,
@@ -2066,7 +2112,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                             converted_list.append(Decimal(str(item)))
                         except:
                             converted_list.append(normalize_string(item))
-                    else:
+            else:
                         converted_list.append(normalize_string(item))
                 db_item[key] = converted_list
             elif isinstance(value, dict):
@@ -2393,12 +2439,12 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         if put_attempt < max_put_retries - 1:
                             wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
                             log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
-                            time.sleep(wait_time)
-                            continue
+                time.sleep(wait_time)
+                continue
                     
                     # Re-raise if not throttling or out of retries
                     raise
-        else:
+            else:
             # New item - store transactions and subawards directly in DynamoDB
             # Convert to DynamoDB-compatible format
             if transactions:
@@ -2450,7 +2496,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         break
                     except Exception as gsi_error:
                         log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
-                        raise
+                raise
                 
                 # Handle throttling
                 elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
@@ -2461,8 +2507,8 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         continue
                 
                 # Re-raise if not throttling or out of retries
-                raise
-        
+            raise
+    
         return {
             'success': True,
             'award_id': award_id,
@@ -2580,30 +2626,30 @@ def main():
                 
                 parse_results = _parse_csvs_from_s3(csv_s3_keys, prime_file_list, subaward_file_list, agency_name, start_date, end_date)
             else:
-                # PHASE 1: GET - Request and wait for bulk download
-                log_print(f"\n🔵 PHASE 1: GET - Requesting Bulk Download for {agency_name}")
-                log_print(f"{'─' * 80}")
-                get_phase_start = time.time()
-                
-                download_info = initiate_bulk_download(start_date, end_date, agency=agency)
-                file_name = download_info['file_name']
-                log_print(f"📋 File Name: {file_name}")
-                
+            # PHASE 1: GET - Request and wait for bulk download
+            log_print(f"\n🔵 PHASE 1: GET - Requesting Bulk Download for {agency_name}")
+            log_print(f"{'─' * 80}")
+            get_phase_start = time.time()
+            
+            download_info = initiate_bulk_download(start_date, end_date, agency=agency)
+            file_name = download_info['file_name']
+            log_print(f"📋 File Name: {file_name}")
+            
                 status_info = poll_download_status(file_name, max_wait=14400, poll_interval=30, agency_name=agency_name)
-                file_url = status_info.get('file_url')
-                
-                if not file_url:
-                    raise Exception(f"No file_url in download status response for {agency_name}")
-                
-                get_phase_duration = time.time() - get_phase_start
-                log_print(f"✅ GET Phase Complete: {int(get_phase_duration // 60)}m {int(get_phase_duration % 60)}s")
-                log_print(f"📁 File URL: {file_url}")
-                
+            file_url = status_info.get('file_url')
+            
+            if not file_url:
+                raise Exception(f"No file_url in download status response for {agency_name}")
+            
+            get_phase_duration = time.time() - get_phase_start
+            log_print(f"✅ GET Phase Complete: {int(get_phase_duration // 60)}m {int(get_phase_duration % 60)}s")
+            log_print(f"📁 File URL: {file_url}")
+            
                 # PHASE 2: PARSE - Download and parse all CSV files
                 log_print(f"\n🟡 PHASE 2: PARSE - Downloading and Parsing All CSV Files for {agency_name}")
-                log_print(f"{'─' * 80}")
-                parse_phase_start = time.time()
-                
+            log_print(f"{'─' * 80}")
+            parse_phase_start = time.time()
+            
                 parse_results = download_and_parse_all_csvs(file_url, agency_name=agency_name, start_date=start_date, end_date=end_date)
             prime_awards = parse_results['prime_awards']
             

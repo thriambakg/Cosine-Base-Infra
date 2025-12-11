@@ -1866,11 +1866,12 @@ module "usaspending_bulk_indexing_glue_job" {
 
   # Job arguments
   default_arguments = {
-    "--USASPENDING_BASE_URL"   = "https://api.usaspending.gov"
-    "--USASPENDING_USER_AGENT" = "Cosine Financial Platform (contact@cosine.financial)"
-    "--AWARDS_TABLE_NAME"      = module.usaspending_awards_index_table.table_name
-    "--S3_BUCKET_NAME"         = module.usaspending_data_s3.bucket_id
-    "--REQUEST_TIMEOUT"        = "30"
+    "--USASPENDING_BASE_URL"    = "https://api.usaspending.gov"
+    "--USASPENDING_USER_AGENT"  = "Cosine Financial Platform (contact@cosine.financial)"
+    "--AWARDS_TABLE_NAME"       = module.usaspending_awards_index_table.table_name
+    "--S3_BUCKET_NAME"          = module.usaspending_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"         = "30"
+    "--ORPHAN_SUBAWARD_SQS_URL" = module.usaspending_orphan_subaward_queue.queue_url
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -1882,7 +1883,8 @@ module "usaspending_bulk_indexing_glue_job" {
     module.static_hosting_bucket,
     module.usaspending_data_s3,
     module.usaspending_awards_index_table,
-    module.kms
+    module.kms,
+    module.usaspending_orphan_subaward_queue
   ]
 }
 
@@ -1902,6 +1904,126 @@ resource "aws_kms_grant" "glue_dynamodb_key_access" {
   depends_on = [
     module.usaspending_bulk_indexing_glue_job,
     module.kms
+  ]
+}
+
+# SQS Queue for Orphan Subaward Processing
+module "usaspending_orphan_subaward_queue" {
+  source = "./modules/sqs"
+
+  project_name = var.project_name
+  environment  = var.environment
+  queue_name   = "usaspending-orphan-subaward"
+  purpose      = "Queue for orphan subawards that need parent awards fetched from API"
+
+  message_retention_seconds     = 1209600 # 14 days
+  visibility_timeout_seconds    = 300     # 5 minutes (enough for API call + DynamoDB write)
+  max_receive_count             = 3
+  enable_dlq                    = true
+  dlq_message_retention_seconds = 1209600 # 14 days
+
+  kms_key_id = module.kms.main_key_id
+
+  tags = var.common_tags
+}
+
+# Lambda Function for USAspending Orphan Subaward Processor
+module "usaspending_orphan_subaward_processor_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-usaspending-orphan-subaward-processor-${var.environment}"
+  description   = "Processes orphan subawards by fetching parent awards from API and storing in DynamoDB"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 300 # 5 minutes (enough for API call + DynamoDB write)
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/usaspending_orphan_subaward_processor/app"
+
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  environment_variables = {
+    AWARDS_TABLE_NAME    = module.usaspending_awards_index_table.table_name
+    S3_BUCKET_NAME       = module.usaspending_data_s3.bucket_id
+    USASPENDING_BASE_URL = "https://api.usaspending.gov"
+    LOG_LEVEL            = "INFO"
+  }
+
+  additional_policy_arns = [
+    module.usaspending_awards_index_table.table_policy_arn,
+    module.kms.kms_access_policy_arn,
+    module.usaspending_orphan_subaward_queue.sqs_access_policy_arn,
+    aws_iam_policy.lambda_usaspending_data_s3_policy.arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.usaspending_awards_index_table,
+    module.usaspending_orphan_subaward_queue,
+    module.kms,
+    module.core_layer
+  ]
+}
+
+# SQS Event Source Mapping for Lambda
+resource "aws_lambda_event_source_mapping" "orphan_subaward_sqs_trigger" {
+  event_source_arn = module.usaspending_orphan_subaward_queue.queue_arn
+  function_name    = module.usaspending_orphan_subaward_processor_lambda.function_arn
+  batch_size       = 10
+  enabled          = true
+
+  depends_on = [
+    module.usaspending_orphan_subaward_processor_lambda,
+    module.usaspending_orphan_subaward_queue
+  ]
+}
+
+# IAM Policy for Glue Job to send messages to orphan subaward queue
+resource "aws_iam_policy" "glue_orphan_subaward_sqs_policy" {
+  name        = "${var.project_name}-glue-orphan-subaward-sqs-${var.environment}"
+  description = "Allows Glue job to send orphan subaward messages to SQS"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes"
+        ]
+        Resource = [
+          module.usaspending_orphan_subaward_queue.queue_arn
+        ]
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
+        ]
+        Resource = [
+          module.kms.main_key_arn
+        ]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# Attach SQS policy to Glue job role
+resource "aws_iam_role_policy_attachment" "glue_orphan_subaward_sqs" {
+  role       = module.usaspending_bulk_indexing_glue_job.role_name
+  policy_arn = aws_iam_policy.glue_orphan_subaward_sqs_policy.arn
+
+  depends_on = [
+    module.usaspending_bulk_indexing_glue_job,
+    aws_iam_policy.glue_orphan_subaward_sqs_policy
   ]
 }
 
