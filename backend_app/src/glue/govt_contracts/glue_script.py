@@ -2175,24 +2175,28 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             existing_item = None
         
         if existing_item:
-            # Update existing item - MERGE all fields from award_record into existing_item
-            # This preserves existing fields and adds/updates new ones
+            # Update existing item - MERGE all fields from award_record (NEW CSV data) into existing_item
+            # This preserves existing fields and adds/updates new ones from the CSV
             # This handles cases where:
             # 1. Orphan sub-award: parent not in bulk download but exists in DynamoDB
             # 2. Transaction adjustments: parent appears in bulk download with updated transactions
             # 3. API-fetched awards: merge API fields with existing DynamoDB fields
+            # IMPORTANT: When an existing award is updated, ALL fields from the NEW CSV are applied,
+            # not just transactions and obligated_amount. This ensures the award reflects the latest CSV data.
             db_item = existing_item.copy()
             
-            # Merge ALL fields from award_record into db_item (preserve existing, update with new)
-            # Skip internal fields that are handled separately
+            # Merge ALL fields from award_record (CSV) into db_item (preserve existing, update with new)
+            # This updates ALL fields from the CSV: agency info, recipient info, dates, amounts, etc.
+            # Skip internal fields that are handled separately (transactions/subawards merged later)
             skip_fields = {'transactions', 'subawards', 'child_awards', 'update_from_dynamodb', 'existing_item'}
+            fields_updated_count = 0
             for key, value in award_record.items():
                 if key in skip_fields:
                     continue
                 if value is None:
                     continue
                 
-                # Convert value to appropriate type
+                # Convert value to appropriate type and update db_item
                 if isinstance(value, (int, float)):
                     try:
                         db_item[key] = Decimal(str(value))
@@ -2220,6 +2224,11 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     db_item[key] = convert_floats_to_decimal(value)
                 else:
                     db_item[key] = normalize_string(value) if isinstance(value, str) else value
+                
+                fields_updated_count += 1
+            
+            if fields_updated_count > 0:
+                log_print(f"   📊 Updated award {award_id}: Merged {fields_updated_count} field(s) from CSV (all fields from NEW CSV data applied)")
             
             # Merge transactions if present in bulk download (transaction adjustments)
             if transactions:
@@ -2329,9 +2338,22 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 # Update child award count
                 db_item['child_award_count'] = len(db_item.get('child_awards', []))
             
-            # Update counts and timestamp
-            db_item['transaction_count'] = len(db_item.get('transactions', []))
-            db_item['subaward_count'] = len(db_item.get('subawards', []))
+            # Update counts from CSV data (authoritative source)
+            # The CSV's transaction_count and subaward_count are calculated from the CSV's arrays
+            # Use the CSV's calculated counts (transaction_count, subaward_count variables from CSV parsing)
+            # These represent the authoritative counts from the NEW CSV data
+            db_item['transaction_count'] = transaction_count  # From CSV (line 2166)
+            db_item['subaward_count'] = subaward_count  # From CSV (line 2167)
+            
+            # Note: The merge logic above (lines 2189-2222) already updates ALL other fields from award_record (CSV)
+            # This ensures that when an existing award is updated, ALL fields from the NEW CSV are applied,
+            # not just transactions and obligated_amount. This includes:
+            # - All agency fields (awarding_agency_code, awarding_agency_name, etc.)
+            # - All recipient fields (recipient_name, recipient_location_state, etc.)
+            # - All date fields (period_start_date, period_end_date, etc.)
+            # - All other metadata fields from the CSV
+            
+            # Update timestamp
             db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
             
             # Ensure all fields are properly converted
