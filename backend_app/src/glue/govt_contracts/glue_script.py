@@ -945,11 +945,6 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
         
         # Add transaction to award
         award = awards[award_id]
-        
-        # TEST MODE: Limit to first 10 transactions per award
-        if award['transaction_count'] >= 10:
-            continue
-        
         award['transaction_count'] += 1
         
         # Store transaction record (all columns)
@@ -1021,11 +1016,6 @@ def parse_subaward_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str, L
         
         if not parent_award_id:
             continue
-        
-        # TEST MODE: Limit to first 10 subawards per parent award
-        if parent_award_id in subawards_by_parent:
-            if len(subawards_by_parent[parent_award_id]) >= 10:
-                continue
         
         # Create sub-award record with ALL columns from CSV
         subaward_record = {}
@@ -1919,11 +1909,13 @@ def main():
         
         log_print(f"✅ Found {len(agencies)} agencies - starting processing...")
         
-        # TEST MODE: Filter to only Department of Agriculture (DOA)
-        agencies = [a for a in agencies if a.get('name', '').startswith('Department of Agriculture')]
-        if not agencies:
-            raise Exception("Department of Agriculture not found in agencies list")
-        log_print(f"🧪 TEST MODE: Processing only Department of Agriculture (first agency)")
+        # TEST MODE: Limit to first department (Department of Agriculture)
+        test_mode = True
+        if test_mode:
+            agencies = [a for a in agencies if a.get('name') == 'Department of Agriculture']
+            log_print(f"🧪 TEST MODE: Processing only Department of Agriculture (first department)")
+            if not agencies:
+                raise Exception("Department of Agriculture not found in agencies list")
         
         # Process each agency
         job_start_time = time.time()
@@ -2018,6 +2010,13 @@ def main():
             store_phase_start = time.time()
             
             award_list = list(prime_awards.values())
+            
+            # TEST MODE: Limit to first 10 awards
+            test_mode = True
+            if test_mode:
+                award_list = award_list[:10]
+                log_print(f"🧪 TEST MODE: Limiting to first 10 awards (out of {len(prime_awards)} total)")
+            
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (all columns preserved)")
             
             # Reduce write workers to avoid DynamoDB throttling
