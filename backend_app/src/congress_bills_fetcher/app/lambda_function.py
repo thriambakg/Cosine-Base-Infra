@@ -67,7 +67,7 @@ def get_congress_api_key() -> str:
         logger.error(f"Error retrieving Congress API key from Secrets Manager: {str(e)}")
         raise ValueError(f"Failed to retrieve Congress API key from Secrets Manager: {str(e)}")
 
-def log_print(message: str):
+def log_print(message: str = ""):
     """Print to both logger and stdout for maximum visibility"""
     logger.info(message)
     print(message, flush=True)

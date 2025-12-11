@@ -387,15 +387,18 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
         if 'recipient' in api_response:
             recipient = api_response['recipient']
             if isinstance(recipient, dict):
-                # Extract recipient name (matching Lambda approach)
-                recipient_name = recipient.get('name', '')
+                # Extract recipient name from recipient_recipient_name field in API response
+                # Store in uppercase to match USAspending standard and autocomplete behavior
+                recipient_name = recipient.get('recipient_name', '')
                 if recipient_name:
-                    award_record['recipient_name'] = recipient_name
-                    award_record['recipient_name_normalized'] = recipient_name.lower()
+                    # Store raw recipient_name in uppercase (matches USAspending standard)
+                    recipient_name_upper = recipient_name.upper() if isinstance(recipient_name, str) else recipient_name
+                    award_record['recipient_name'] = recipient_name_upper
+                    award_record['recipient_name_normalized'] = recipient_name_upper.lower()
                 
                 # Process other recipient fields
                 for recipient_key, recipient_value in recipient.items():
-                    if recipient_value is None or recipient_key == 'name':
+                    if recipient_value is None or recipient_key == 'recipient_name':
                         continue
                     if recipient_key == 'location':
                         if isinstance(recipient_value, dict):
@@ -2088,10 +2091,16 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 db_item['fiscal_year'] = now.year + 1 if now.month >= 10 else now.year
         
         # Normalize recipient_name for GSI (required for RecipientNameFiscalYearIndex)
-        # Match Lambda approach: use .lower() without .strip()
+        # Store raw recipient_name in uppercase to match USAspending standard and autocomplete behavior
         recipient_name = db_item.get('recipient_name') or db_item.get('prime_awardee_name')
         if recipient_name:
-            db_item['recipient_name_normalized'] = recipient_name.lower()
+            # Ensure recipient_name is stored in uppercase (matches USAspending standard)
+            if isinstance(recipient_name, str):
+                recipient_name_upper = recipient_name.upper()
+                db_item['recipient_name'] = recipient_name_upper
+                db_item['recipient_name_normalized'] = recipient_name_upper.lower()
+            else:
+                db_item['recipient_name_normalized'] = str(recipient_name).lower()
         else:
             # If recipient_name is missing, set a default value for GSI (required field)
             # Use "unknown" as normalized value to ensure GSI can be queried
