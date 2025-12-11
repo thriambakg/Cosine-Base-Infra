@@ -2190,7 +2190,7 @@ module "congress_bills_table" {
       name            = "SponsorPartyDateIndex"
       hash_key        = "sponsor_party"
       range_key       = "introduced_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2198,7 +2198,7 @@ module "congress_bills_table" {
       name            = "SponsorNameDateIndex"
       hash_key        = "sponsor_full_name"
       range_key       = "introduced_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2206,7 +2206,7 @@ module "congress_bills_table" {
       name            = "CongressBillTypeIndex"
       hash_key        = "congress"
       range_key       = "bill_type"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2214,7 +2214,7 @@ module "congress_bills_table" {
       name            = "BillTypeDateIndex"
       hash_key        = "bill_type"
       range_key       = "introduced_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2222,7 +2222,7 @@ module "congress_bills_table" {
       name            = "BillTitleDateIndex"
       hash_key        = "bill_title"
       range_key       = "introduced_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2230,7 +2230,7 @@ module "congress_bills_table" {
       name            = "BillNumberDateIndex"
       hash_key        = "bill_number"
       range_key       = "introduced_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2238,7 +2238,7 @@ module "congress_bills_table" {
       name            = "BipartisanDateIndex"
       hash_key        = "bipartisan"
       range_key       = "introduced_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2246,7 +2246,7 @@ module "congress_bills_table" {
       name            = "LatestActionDateIndex"
       hash_key        = "latest_action_date"
       range_key       = null
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2254,7 +2254,7 @@ module "congress_bills_table" {
       name            = "PolicyAreaDateIndex"
       hash_key        = "policy_area"
       range_key       = "introduced_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     }
@@ -2808,7 +2808,7 @@ module "usaspending_awards_index_table" {
       name            = "AwardingAgencyCodeFiscalYearIndex"
       hash_key        = "awarding_agency_code"
       range_key       = "fiscal_year"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2816,7 +2816,7 @@ module "usaspending_awards_index_table" {
       name            = "AwardingAgencyNameFiscalYearIndex"
       hash_key        = "awarding_agency_name"
       range_key       = "fiscal_year"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2824,7 +2824,7 @@ module "usaspending_awards_index_table" {
       name            = "RecipientNameFiscalYearIndex"
       hash_key        = "recipient_name_normalized"
       range_key       = "fiscal_year"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2832,7 +2832,7 @@ module "usaspending_awards_index_table" {
       name            = "FiscalYearObligationIndex"
       hash_key        = "fiscal_year"
       range_key       = "total_obligated_amount"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2840,7 +2840,7 @@ module "usaspending_awards_index_table" {
       name            = "FiscalYearStartDateIndex"
       hash_key        = "fiscal_year"
       range_key       = "period_start_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2848,7 +2848,7 @@ module "usaspending_awards_index_table" {
       name            = "StateFiscalYearIndex"
       hash_key        = "recipient_location_state"
       range_key       = "fiscal_year"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2856,7 +2856,7 @@ module "usaspending_awards_index_table" {
       name            = "AwardTypeFiscalYearIndex"
       hash_key        = "award_type"
       range_key       = "fiscal_year"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2864,7 +2864,7 @@ module "usaspending_awards_index_table" {
       name            = "PeriodStartDateIndex"
       hash_key        = "fiscal_year"
       range_key       = "period_start_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2872,7 +2872,7 @@ module "usaspending_awards_index_table" {
       name            = "PeriodEndDateIndex"
       hash_key        = "fiscal_year"
       range_key       = "period_end_date"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -2880,7 +2880,7 @@ module "usaspending_awards_index_table" {
       name            = "IsAssistanceFiscalYearIndex"
       hash_key        = "is_assistance"
       range_key       = "fiscal_year"
-      projection_type = "ALL"
+      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     }
