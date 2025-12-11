@@ -323,7 +323,7 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
     - Primary key: award_id
     - GSI hash keys: awarding_agency_code, awarding_agency_name, recipient_name_normalized, 
                      recipient_location_state, award_type, fiscal_year
-    - GSI range keys: fiscal_year, total_obligation, period_start_date, period_end_date
+    - GSI range keys: fiscal_year, total_obligated_amount, period_start_date, period_end_date
     - Essential metadata: transaction_count, subaward_count, full_indexing_complete, 
                           last_updated, indexed_at, data_source, api_version, ttl
     """
@@ -339,8 +339,9 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
         'award_type': full_item.get('award_type'),
         'fiscal_year': full_item.get('fiscal_year'),
         
-        # GSI range keys (map CSV field names to GSI attribute names)
-        'total_obligation': full_item.get('total_obligation'),
+        # GSI range keys (use total_obligated_amount from CSV)
+        'total_obligated_amount': (full_item.get('total_obligated_amount') or 
+                                  full_item.get('total_dollars_obligated')),
         # Map period_of_performance_start_date to period_start_date for GSI
         'period_start_date': (full_item.get('period_start_date') or 
                              full_item.get('period_of_performance_start_date')),
@@ -963,22 +964,6 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
         transaction_record = normalize_common_fields(transaction_record, record_type="transaction")
         
         award['transactions'].append(transaction_record)
-        
-        # Update total obligation (sum from transactions)
-        # Handle both contract and assistance fields
-        obligation_str = (
-            row.get('total_dollars_obligated') or 
-            row.get('federal_action_obligation') or 
-            row.get('total_obligated_amount') or  # Assistance field
-            '0'
-        )
-        try:
-            obligation = Decimal(str(obligation_str))
-            if 'total_obligation' not in award or award.get('total_obligation') is None:
-                award['total_obligation'] = Decimal('0')
-            award['total_obligation'] += obligation
-        except:
-            pass
     
     log_print(f"✅ Parsed {csv_filename}: {len(awards)} unique awards, {sum(a['transaction_count'] for a in awards.values())} total transactions, {row_count:,} rows processed")
     return awards
@@ -1600,7 +1585,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         # Ensure required GSI fields are present
         # GSI hash keys: awarding_agency_code, awarding_agency_name, recipient_name_normalized, 
         #                recipient_location_state, award_type
-        # GSI range keys: fiscal_year, total_obligation, period_start_date, period_end_date
+        # GSI range keys: fiscal_year, total_obligated_amount, period_start_date, period_end_date
         
         # Set fiscal_year if missing (required for most GSIs)
         if 'fiscal_year' not in db_item or db_item.get('fiscal_year') is None:
@@ -1619,9 +1604,6 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             db_item['recipient_name_normalized'] = recipient_name.lower().strip()
         
         # Map assistance-specific fields to common GSI fields
-        # For assistance: total_obligated_amount → total_obligation
-        if 'total_obligated_amount' in db_item and 'total_obligation' not in db_item:
-            db_item['total_obligation'] = db_item['total_obligated_amount']
         # For assistance: assistance_type_description → award_type
         if 'assistance_type_description' in db_item and 'award_type' not in db_item:
             db_item['award_type'] = db_item['assistance_type_description']
@@ -1635,12 +1617,17 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             except:
                 pass
         
-        # Ensure total_obligation is Decimal
-        if 'total_obligation' in db_item and not isinstance(db_item['total_obligation'], Decimal):
+        # Ensure total_obligated_amount is Decimal (use from CSV, don't calculate)
+        # Normalize: use total_obligated_amount if available, otherwise total_dollars_obligated
+        if 'total_obligated_amount' not in db_item or not db_item.get('total_obligated_amount'):
+            if 'total_dollars_obligated' in db_item and db_item.get('total_dollars_obligated'):
+                db_item['total_obligated_amount'] = db_item['total_dollars_obligated']
+        
+        if 'total_obligated_amount' in db_item and not isinstance(db_item['total_obligated_amount'], Decimal):
             try:
-                db_item['total_obligation'] = Decimal(str(db_item['total_obligation']))
+                db_item['total_obligated_amount'] = Decimal(str(db_item['total_obligated_amount']))
             except:
-                db_item['total_obligation'] = Decimal('0')
+                db_item['total_obligated_amount'] = Decimal('0')
         
         # Map period_of_performance fields to period_start_date/period_end_date for GSI compatibility
         if 'period_of_performance_start_date' in db_item and 'period_start_date' not in db_item:
@@ -1654,11 +1641,15 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         transaction_count = len(transactions)
         subaward_count = len(subawards)
         
-        # Check if this is an update to an existing DynamoDB item
-        update_from_dynamodb = award_record.get('update_from_dynamodb', False)
-        existing_item = award_record.get('existing_item')
+        # Check if award already exists in DynamoDB (for transaction merging)
+        try:
+            existing_response = awards_table.get_item(Key={'award_id': award_id})
+            existing_item = existing_response.get('Item')
+        except Exception as e:
+            log_print(f"⚠️ Error checking DynamoDB for existing award {award_id}: {str(e)[:200]}")
+            existing_item = None
         
-        if update_from_dynamodb and existing_item:
+        if existing_item:
             # Update existing item with subawards AND transactions (if present in bulk download)
             # This handles cases where:
             # 1. Orphan sub-award: parent not in bulk download but exists in DynamoDB
@@ -1669,71 +1660,62 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             if transactions:
                 existing_transactions = db_item.get('transactions', [])
                 if existing_transactions:
-                    # Deduplicate transactions by transaction_id or action_date + modification_number
-                    existing_tx_ids = set()
+                    # Deduplicate transactions by transaction_unique_key, assistance_transaction_unique_key, or contract_transaction_unique_key
+                    existing_tx_keys = set()
                     for tx in existing_transactions:
-                        tx_id = tx.get('transaction_id') or tx.get('award_id_fpds') or tx.get('modification_number')
-                        if tx_id:
-                            existing_tx_ids.add(str(tx_id))
+                        # Try multiple transaction key fields
+                        tx_key = (
+                            tx.get('transaction_unique_key') or
+                            tx.get('assistance_transaction_unique_key') or
+                            tx.get('contract_transaction_unique_key') or
+                            None
+                        )
+                        if tx_key:
+                            existing_tx_keys.add(str(tx_key))
                         else:
                             # Fallback: use action_date + modification_number as unique key
                             action_date = tx.get('action_date')
                             mod_num = tx.get('modification_number')
                             if action_date and mod_num:
-                                existing_tx_ids.add(f"{action_date}_{mod_num}")
+                                existing_tx_keys.add(f"{action_date}_{mod_num}")
                     
                     new_transactions = []
                     for tx in transactions:
-                        tx_id = tx.get('transaction_id') or tx.get('award_id_fpds') or tx.get('modification_number')
-                        if tx_id:
-                            tx_key = str(tx_id)
-                        else:
+                        # Try multiple transaction key fields
+                        tx_key = (
+                            tx.get('transaction_unique_key') or
+                            tx.get('assistance_transaction_unique_key') or
+                            tx.get('contract_transaction_unique_key') or
+                            None
+                        )
+                        if not tx_key:
+                            # Fallback: use action_date + modification_number as unique key
                             action_date = tx.get('action_date')
                             mod_num = tx.get('modification_number')
                             if action_date and mod_num:
                                 tx_key = f"{action_date}_{mod_num}"
-                            else:
-                                tx_key = None
                         
-                        if not tx_key or tx_key not in existing_tx_ids:
+                        if not tx_key or tx_key not in existing_tx_keys:
                             new_transactions.append(tx)
                     
                     if new_transactions:
                         db_item['transactions'] = existing_transactions + convert_floats_to_decimal(new_transactions)
-                        # Recalculate total_obligation from all transactions
-                        total_obligation = Decimal('0')
-                        for tx in db_item['transactions']:
-                            obligation = (
-                                tx.get('total_dollars_obligated') or 
-                                tx.get('federal_action_obligation') or 
-                                tx.get('total_obligated_amount')  # Assistance field
-                            )
-                            if obligation:
-                                try:
-                                    total_obligation += Decimal(str(obligation))
-                                except:
-                                    pass
-                        db_item['total_obligation'] = total_obligation
                         db_item['transaction_count'] = len(db_item['transactions'])
-                        log_print(f"   📊 Updated award {award_id}: Added {len(new_transactions)} new transaction(s), recalculated total_obligation")
+                        # Update total_obligated_amount from the latest CSV row (don't recalculate)
+                        if 'total_obligated_amount' in award_record and award_record.get('total_obligated_amount'):
+                            db_item['total_obligated_amount'] = award_record['total_obligated_amount']
+                        elif 'total_dollars_obligated' in award_record and award_record.get('total_dollars_obligated'):
+                            db_item['total_obligated_amount'] = award_record['total_dollars_obligated']
+                        log_print(f"   📊 Updated award {award_id}: Added {len(new_transactions)} new transaction(s), updated total_obligated_amount from CSV")
                 else:
                     # No existing transactions, use new ones
                     db_item['transactions'] = convert_floats_to_decimal(transactions)
-                    # Calculate total_obligation from transactions
-                    total_obligation = Decimal('0')
-                    for tx in transactions:
-                        obligation = (
-                            tx.get('total_dollars_obligated') or 
-                            tx.get('federal_action_obligation') or 
-                            tx.get('total_obligated_amount')  # Assistance field
-                        )
-                        if obligation:
-                            try:
-                                total_obligation += Decimal(str(obligation))
-                            except:
-                                pass
-                    db_item['total_obligation'] = total_obligation
                     db_item['transaction_count'] = transaction_count
+                    # Use total_obligated_amount from CSV (don't calculate)
+                    if 'total_obligated_amount' in award_record and award_record.get('total_obligated_amount'):
+                        db_item['total_obligated_amount'] = award_record['total_obligated_amount']
+                    elif 'total_dollars_obligated' in award_record and award_record.get('total_dollars_obligated'):
+                        db_item['total_obligated_amount'] = award_record['total_dollars_obligated']
                     log_print(f"   📊 Updated award {award_id}: Added {transaction_count} transaction(s) from bulk download")
             
             # Merge subawards (append to existing if any)

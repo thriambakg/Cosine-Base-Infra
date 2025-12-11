@@ -2897,7 +2897,7 @@ module "usaspending_awards_index_table" {
     { name = "awarding_agency_code", type = "S" },
     { name = "awarding_agency_name", type = "S" },
     { name = "fiscal_year", type = "N" },
-    { name = "total_obligation", type = "N" },
+    { name = "total_obligated_amount", type = "N" },
     { name = "period_start_date", type = "S" },
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
@@ -2932,7 +2932,7 @@ module "usaspending_awards_index_table" {
     {
       name            = "FiscalYearObligationIndex"
       hash_key        = "fiscal_year"
-      range_key       = "total_obligation"
+      range_key       = "total_obligated_amount"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
