@@ -383,24 +383,21 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
                     else:
                         award_record[f'funding_agency_{agency_key}'] = normalize_string(agency_value) if isinstance(agency_value, str) else agency_value
         
-        # Flatten recipient information
+        # Flatten recipient information (matching Lambda approach)
         if 'recipient' in api_response:
             recipient = api_response['recipient']
             if isinstance(recipient, dict):
+                # Extract recipient name (matching Lambda approach)
+                recipient_name = recipient.get('name', '')
+                if recipient_name:
+                    award_record['recipient_name'] = recipient_name
+                    award_record['recipient_name_normalized'] = recipient_name.lower()
+                
+                # Process other recipient fields
                 for recipient_key, recipient_value in recipient.items():
-                    if recipient_value is None:
+                    if recipient_value is None or recipient_key == 'name':
                         continue
-                    if recipient_key == 'name':
-                        recipient_name = normalize_string(recipient_value)
-                        award_record['recipient_name'] = recipient_name
-                        # Normalize recipient_name for GSI
-                        if recipient_name:
-                            # Replace "REDACTED DUE TO PII" with full expansion
-                            if recipient_name.upper() == "REDACTED DUE TO PII":
-                                recipient_name = "REDACTED DUE TO PERSONALLY IDENTIFIABLE INFORMATION"
-                                award_record['recipient_name'] = recipient_name
-                            award_record['recipient_name_normalized'] = recipient_name.lower().strip()
-                    elif recipient_key == 'location':
+                    if recipient_key == 'location':
                         if isinstance(recipient_value, dict):
                             for loc_key, loc_value in recipient_value.items():
                                 if loc_value is None:
@@ -2091,19 +2088,13 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 db_item['fiscal_year'] = now.year + 1 if now.month >= 10 else now.year
         
         # Normalize recipient_name for GSI (required for RecipientNameFiscalYearIndex)
+        # Match Lambda approach: use .lower() without .strip()
         recipient_name = db_item.get('recipient_name') or db_item.get('prime_awardee_name')
         if recipient_name:
-            # Replace "REDACTED DUE TO PII" with full expansion
-            if recipient_name.upper() == "REDACTED DUE TO PII":
-                recipient_name = "REDACTED DUE TO PERSONALLY IDENTIFIABLE INFORMATION"
-                db_item['recipient_name'] = recipient_name
-                # Also update recipient_name_raw if it exists
-                if 'recipient_name_raw' in db_item:
-                    db_item['recipient_name_raw'] = recipient_name
-            db_item['recipient_name_normalized'] = recipient_name.lower().strip()
+            db_item['recipient_name_normalized'] = recipient_name.lower()
         else:
             # If recipient_name is missing, set a default value for GSI (required field)
-            # Use "UNKNOWN" as normalized value to ensure GSI can be queried
+            # Use "unknown" as normalized value to ensure GSI can be queried
             db_item['recipient_name_normalized'] = "unknown"
         
         # Map assistance-specific fields to common GSI fields
