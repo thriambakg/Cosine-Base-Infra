@@ -253,10 +253,14 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
                 continue
             
             # Convert numeric values to Decimal for consistency
+            # Handle None values - API can return None for nullable fields
+            if value is None:
+                continue
             if isinstance(value, (int, float)):
                 try:
                     award_record[key] = Decimal(str(value))
-                except:
+                except (ValueError, TypeError, Exception):
+                    # If conversion fails, store as string or skip
                     award_record[key] = normalize_string(value)
             else:
                 award_record[key] = normalize_string(value) if isinstance(value, str) else value
@@ -267,18 +271,62 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
         award_record['api_version'] = 'api_v2_direct_fetch'
         
         # Map total_obligation to total_obligated_amount (our standard field name)
+        # Handle null values - API can return None for financial fields
         if 'total_obligation' in api_response:
-            award_record['total_obligated_amount'] = Decimal(str(api_response['total_obligation']))
+            total_obligation_val = api_response['total_obligation']
+            if total_obligation_val is not None and total_obligation_val != '':
+                try:
+                    # Handle both numeric and string values
+                    if isinstance(total_obligation_val, (int, float)):
+                        award_record['total_obligated_amount'] = Decimal(str(total_obligation_val))
+                    elif isinstance(total_obligation_val, str) and total_obligation_val.strip():
+                        award_record['total_obligated_amount'] = Decimal(total_obligation_val.strip())
+                except (ValueError, TypeError, Exception) as e:
+                    # If conversion fails, skip this field
+                    log_print(f"⚠️ Could not convert total_obligation for {award_id}: {str(e)[:100]}")
+                    pass
         if 'total_obligation' in award_record and 'total_obligated_amount' not in award_record:
-            award_record['total_obligated_amount'] = award_record['total_obligation']
+            total_obligation_val = award_record.get('total_obligation')
+            if total_obligation_val is not None and total_obligation_val != '':
+                try:
+                    if isinstance(total_obligation_val, (int, float)):
+                        award_record['total_obligated_amount'] = Decimal(str(total_obligation_val))
+                    elif isinstance(total_obligation_val, str) and total_obligation_val.strip():
+                        award_record['total_obligated_amount'] = Decimal(total_obligation_val.strip())
+                except (ValueError, TypeError, Exception):
+                    pass
         
         # Map base_exercised_options to base_and_exercised_options_value
+        # API can return None for this field (especially for assistance awards)
         if 'base_exercised_options' in api_response:
-            award_record['base_and_exercised_options_value'] = Decimal(str(api_response['base_exercised_options']))
+            base_exercised_val = api_response['base_exercised_options']
+            if base_exercised_val is not None and base_exercised_val != '':
+                try:
+                    # Handle both numeric and string values
+                    if isinstance(base_exercised_val, (int, float)):
+                        award_record['base_and_exercised_options_value'] = Decimal(str(base_exercised_val))
+                    elif isinstance(base_exercised_val, str) and base_exercised_val.strip():
+                        award_record['base_and_exercised_options_value'] = Decimal(base_exercised_val.strip())
+                except (ValueError, TypeError, Exception) as e:
+                    # If conversion fails (e.g., None, empty string, invalid format), skip this field
+                    log_print(f"⚠️ Could not convert base_exercised_options for {award_id}: {str(e)[:100]}")
+                    pass
         
         # Map base_and_all_options to base_and_all_options_value
+        # API can return None for this field
         if 'base_and_all_options' in api_response:
-            award_record['base_and_all_options_value'] = Decimal(str(api_response['base_and_all_options']))
+            base_all_val = api_response['base_and_all_options']
+            if base_all_val is not None and base_all_val != '':
+                try:
+                    # Handle both numeric and string values
+                    if isinstance(base_all_val, (int, float)):
+                        award_record['base_and_all_options_value'] = Decimal(str(base_all_val))
+                    elif isinstance(base_all_val, str) and base_all_val.strip():
+                        award_record['base_and_all_options_value'] = Decimal(base_all_val.strip())
+                except (ValueError, TypeError, Exception) as e:
+                    # If conversion fails, skip this field
+                    log_print(f"⚠️ Could not convert base_and_all_options for {award_id}: {str(e)[:100]}")
+                    pass
         
         # Flatten nested objects to match bulk CSV structure
         # Agency information (flatten awarding_agency)
@@ -558,8 +606,13 @@ def extract_fiscal_year(date_str: Optional[str]) -> Optional[int]:
 
 def convert_floats_to_decimal(obj: Any) -> Any:
     """Recursively convert all float values to Decimal for DynamoDB compatibility"""
+    if obj is None:
+        return None
     if isinstance(obj, float):
-        return Decimal(str(obj))
+        try:
+            return Decimal(str(obj))
+        except (ValueError, TypeError, Exception):
+            return obj
     elif isinstance(obj, dict):
         return {key: convert_floats_to_decimal(value) for key, value in obj.items()}
     elif isinstance(obj, list):
@@ -657,7 +710,7 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
         # GSI hash keys
         'awarding_agency_code': full_item.get('awarding_agency_code'),
         'awarding_agency_name': full_item.get('awarding_agency_name'),
-        'recipient_name_normalized': full_item.get('recipient_name_normalized'),
+        'recipient_name_normalized': full_item.get('recipient_name_normalized') or 'unknown',
         'recipient_location_state': full_item.get('recipient_location_state'),
         'award_type': full_item.get('award_type'),
         'fiscal_year': full_item.get('fiscal_year'),
@@ -2037,7 +2090,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 now = datetime.now(timezone.utc)
                 db_item['fiscal_year'] = now.year + 1 if now.month >= 10 else now.year
         
-        # Normalize recipient_name for GSI
+        # Normalize recipient_name for GSI (required for RecipientNameFiscalYearIndex)
         recipient_name = db_item.get('recipient_name') or db_item.get('prime_awardee_name')
         if recipient_name:
             # Replace "REDACTED DUE TO PII" with full expansion
@@ -2048,6 +2101,10 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 if 'recipient_name_raw' in db_item:
                     db_item['recipient_name_raw'] = recipient_name
             db_item['recipient_name_normalized'] = recipient_name.lower().strip()
+        else:
+            # If recipient_name is missing, set a default value for GSI (required field)
+            # Use "UNKNOWN" as normalized value to ensure GSI can be queried
+            db_item['recipient_name_normalized'] = "unknown"
         
         # Map assistance-specific fields to common GSI fields
         # For assistance: assistance_type_description → award_type
