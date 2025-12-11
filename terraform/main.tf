@@ -1978,10 +1978,11 @@ module "usaspending_orphan_subaward_processor_lambda" {
 
 # SQS Event Source Mapping for Lambda
 resource "aws_lambda_event_source_mapping" "orphan_subaward_sqs_trigger" {
-  event_source_arn = module.usaspending_orphan_subaward_queue.queue_arn
-  function_name    = module.usaspending_orphan_subaward_processor_lambda.function_arn
-  batch_size       = 50 # Process up to 50 messages per invocation
-  enabled          = true
+  event_source_arn                   = module.usaspending_orphan_subaward_queue.queue_arn
+  function_name                      = module.usaspending_orphan_subaward_processor_lambda.function_arn
+  batch_size                         = 50 # Process up to 50 messages per invocation
+  maximum_batching_window_in_seconds = 3  # Wait up to 3 seconds to collect more messages (required when batch_size > 10)
+  enabled                            = true
 
   depends_on = [
     module.usaspending_orphan_subaward_processor_lambda,
