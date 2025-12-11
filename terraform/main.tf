@@ -2901,7 +2901,8 @@ module "usaspending_awards_index_table" {
     { name = "period_start_date", type = "S" },
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
-    { name = "award_type", type = "S" }
+    { name = "award_type", type = "S" },
+    { name = "is_assistance", type = "N" }
   ]
 
   global_secondary_indexes = [
@@ -2973,6 +2974,14 @@ module "usaspending_awards_index_table" {
       name            = "PeriodEndDateIndex"
       hash_key        = "fiscal_year"
       range_key       = "period_end_date"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "IsAssistanceFiscalYearIndex"
+      hash_key        = "is_assistance"
+      range_key       = "fiscal_year"
       projection_type = "ALL"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity

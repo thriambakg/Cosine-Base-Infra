@@ -1562,6 +1562,13 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         # Normalize recipient_name for GSI
         recipient_name = db_item.get('recipient_name') or db_item.get('prime_awardee_name')
         if recipient_name:
+            # Replace "REDACTED DUE TO PII" with full expansion
+            if recipient_name.upper() == "REDACTED DUE TO PII":
+                recipient_name = "REDACTED DUE TO PERSONALLY IDENTIFIABLE INFORMATION"
+                db_item['recipient_name'] = recipient_name
+                # Also update recipient_name_raw if it exists
+                if 'recipient_name_raw' in db_item:
+                    db_item['recipient_name_raw'] = recipient_name
             db_item['recipient_name_normalized'] = recipient_name.lower().strip()
         
         # Map assistance-specific fields to common GSI fields
@@ -1595,6 +1602,27 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             db_item['period_start_date'] = db_item['period_of_performance_start_date']
         if 'period_of_performance_end_date' in db_item and 'period_end_date' not in db_item:
             db_item['period_end_date'] = db_item['period_of_performance_end_date']
+        
+        # Set is_assistance binary field (0 = contract, 1 = assistance)
+        # Check if it's an assistance award by looking for assistance-specific fields
+        # Also check award_id format (ASST_ prefix indicates assistance)
+        is_assistance = False
+        if (db_item.get('assistance_award_unique_key') or 
+            db_item.get('award_id_fain') or 
+            award_record.get('assistance_award_unique_key') or 
+            award_record.get('award_id_fain')):
+            is_assistance = True
+        elif award_id and award_id.startswith('ASST_'):
+            # Award ID format indicates assistance
+            is_assistance = True
+        elif award_id and award_id.startswith('CONT_'):
+            # Award ID format indicates contract
+            is_assistance = False
+        else:
+            # Default to contract if we can't determine
+            is_assistance = False
+        
+        db_item['is_assistance'] = Decimal('1') if is_assistance else Decimal('0')
         
         # Get transactions and subawards (already in award_record from CSV parsing)
         transactions = award_record.get('transactions', [])
@@ -1892,7 +1920,7 @@ def lambda_handler(event, context):
         log_print(f"✅ Found {len(agencies)} agencies - starting processing...")
         
         # TEST MODE: Limit to first department (Department of Agriculture)
-        test_mode = True
+        test_mode = False
         if test_mode:
             agencies = [a for a in agencies if a.get('name') == 'Department of Agriculture']
             log_print(f"🧪 TEST MODE: Processing only Department of Agriculture (first department)")
@@ -1991,13 +2019,32 @@ def lambda_handler(event, context):
             log_print(f"{'─' * 80}")
             store_phase_start = time.time()
             
-            award_list = list(prime_awards.values())
-            
-            # TEST MODE: Limit to first 10 awards
-            test_mode = True
+            # TEST MODE: Limit to first 10 contracts AND 10 assistance awards (20 total)
+            test_mode = False
             if test_mode:
-                award_list = award_list[:10]
-                log_print(f"🧪 TEST MODE: Limiting to first 10 awards (out of {len(prime_awards)} total)")
+                # Separate contracts and assistance awards from prime_awards
+                contracts = []
+                assistance = []
+                
+                for award_id, award in prime_awards.items():
+                    # Check if it's an assistance award (has assistance_award_unique_key)
+                    if award.get('assistance_award_unique_key') or award.get('award_id_fain'):
+                        assistance.append(award)
+                    else:
+                        # Assume it's a contract (has contract_award_unique_key or award_id_piid)
+                        contracts.append(award)
+                
+                # Limit to first 10 of each
+                contracts = contracts[:10]
+                assistance = assistance[:10]
+                award_list = contracts + assistance
+                
+                log_print(f"🧪 TEST MODE: Limiting to first 10 contracts and 10 assistance awards")
+                log_print(f"   📊 Contracts: {len(contracts)}/{len([a for a in prime_awards.values() if not (a.get('assistance_award_unique_key') or a.get('award_id_fain'))])}")
+                log_print(f"   📊 Assistance: {len(assistance)}/{len([a for a in prime_awards.values() if (a.get('assistance_award_unique_key') or a.get('award_id_fain'))])}")
+                log_print(f"   📊 Total: {len(award_list)}/{len(prime_awards)} awards")
+            else:
+                award_list = list(prime_awards.values())
             
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (all columns preserved)")
             
