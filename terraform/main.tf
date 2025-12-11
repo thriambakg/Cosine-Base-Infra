@@ -2391,6 +2391,7 @@ module "congress_bills_fetcher_state_machine" {
             "--REQUEST_TIMEOUT" : "30"
             "--START_DATE.$" : "$.start_date"
             "--END_DATE.$" : "$.end_date"
+            "--SOURCE.$" : "$.source"
           }
         }
         Catch = [

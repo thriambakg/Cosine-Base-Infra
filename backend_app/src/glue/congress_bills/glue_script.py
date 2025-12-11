@@ -55,7 +55,7 @@ args = getResolvedOptions(sys.argv, [
 
 # Get optional date parameters (parse manually to avoid errors if not provided)
 # getResolvedOptions requires all arguments, so we parse manually for optional ones
-optional_params = ['CONGRESS', 'START_DATE', 'END_DATE', 'POLITICIAN_TRADES_S3_BUCKET']
+optional_params = ['CONGRESS', 'START_DATE', 'END_DATE', 'POLITICIAN_TRADES_S3_BUCKET', 'SOURCE']
 for param in optional_params:
     for i, arg in enumerate(sys.argv):
         if arg == f'--{param}' and i + 1 < len(sys.argv):
@@ -1320,9 +1320,58 @@ def main():
     congress = args.get("CONGRESS")
     start_date_str = args.get("START_DATE")
     end_date_str = args.get("END_DATE")
+    source = args.get("SOURCE")
     
-    # Calculate date range if not provided (default to last 7 days for Glue)
-    if not start_date_str or not end_date_str:
+    # Handle null/empty values (step function may pass "null" as string or empty string)
+    if start_date_str in [None, "", "null", "None"]:
+        start_date_str = None
+    if end_date_str in [None, "", "null", "None"]:
+        end_date_str = None
+    
+    # Calculate date range based on source (same logic as router Lambda)
+    if source == "scheduler":
+        # If source is "scheduler", calculate yesterday's date
+        now = datetime.now(timezone.utc)
+        yesterday = now - timedelta(days=1)
+        # Format as mm/dd/yyyy (matching router Lambda format)
+        start_date_str = yesterday.strftime("%m/%d/%Y")
+        end_date_str = yesterday.strftime("%m/%d/%Y")
+        log_print(f"📅 Source is scheduler, calculating yesterday's date: {start_date_str}")
+    
+    # Parse and normalize dates (handle both mm/dd/yyyy and ISO formats)
+    if start_date_str and end_date_str:
+        # Try parsing as mm/dd/yyyy first (router Lambda format)
+        try:
+            start_date = datetime.strptime(start_date_str, "%m/%d/%Y")
+            end_date = datetime.strptime(end_date_str, "%m/%d/%Y")
+            # Set timezone to UTC
+            start_date = start_date.replace(tzinfo=timezone.utc)
+            end_date = end_date.replace(tzinfo=timezone.utc)
+            # Set start_date to beginning of day (00:00:00)
+            start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+            # Set end_date to end of day (23:59:59)
+            end_date = end_date.replace(hour=23, minute=59, second=59, microsecond=999999)
+            # Convert to ISO format for API
+            start_date_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+            end_date_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        except ValueError:
+            # If mm/dd/yyyy parsing fails, assume it's already in ISO format
+            try:
+                # Validate ISO format (handle both with and without Z)
+                if start_date_str.endswith('Z'):
+                    start_date_parsed = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
+                else:
+                    start_date_parsed = datetime.fromisoformat(start_date_str)
+                if end_date_str.endswith('Z'):
+                    end_date_parsed = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+                else:
+                    end_date_parsed = datetime.fromisoformat(end_date_str)
+                # Already in ISO format, use as-is
+                pass
+            except ValueError:
+                raise ValueError(f"Invalid date format. Expected mm/dd/yyyy or ISO format, got: {start_date_str} or {end_date_str}")
+    else:
+        # Calculate date range if not provided (default to last 7 days for Glue)
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=7)
         start_date_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
