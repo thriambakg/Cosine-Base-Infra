@@ -23,6 +23,7 @@ import gc
 import codecs
 import gzip
 import re
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from decimal import Decimal
@@ -221,6 +222,329 @@ def call_usaspending_api(endpoint: str, method: str = 'GET', body: Optional[Dict
         raise last_exception
     raise Exception(f"Failed to call API after {MAX_RETRIES} retries")
 
+def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
+    """
+    Fetch award details from USAspending API and convert to our award record format.
+    
+    Args:
+        award_id: The award ID to fetch (e.g., ASST_NON_251VA307N1199_012)
+    
+    Returns:
+        Award record dict in our format, or None if fetch fails
+    """
+    try:
+        log_print(f"📡 Fetching award {award_id} from USAspending API...")
+        api_response = call_usaspending_api(f'/api/v2/awards/{award_id}/', method='GET')
+        
+        if not api_response:
+            log_print(f"⚠️ No data returned from API for award {award_id}")
+            return None
+        
+        # Convert API response to our award record format
+        # Store ALL fields from API response to match bulk file granularity
+        award_record = {}
+        
+        # First, copy all top-level fields from API response (preserve everything)
+        for key, value in api_response.items():
+            if value is None:
+                continue
+            
+            # Skip nested objects - we'll flatten them separately
+            if isinstance(value, (dict, list)):
+                continue
+            
+            # Convert numeric values to Decimal for consistency
+            if isinstance(value, (int, float)):
+                try:
+                    award_record[key] = Decimal(str(value))
+                except:
+                    award_record[key] = normalize_string(value)
+            else:
+                award_record[key] = normalize_string(value) if isinstance(value, str) else value
+        
+        # Map API fields to our format (override with our field names where needed)
+        award_record['award_id'] = api_response.get('generated_unique_award_id') or award_id
+        award_record['data_source'] = 'usaspending_api_direct'
+        award_record['api_version'] = 'api_v2_direct_fetch'
+        
+        # Map total_obligation to total_obligated_amount (our standard field name)
+        if 'total_obligation' in api_response:
+            award_record['total_obligated_amount'] = Decimal(str(api_response['total_obligation']))
+        if 'total_obligation' in award_record and 'total_obligated_amount' not in award_record:
+            award_record['total_obligated_amount'] = award_record['total_obligation']
+        
+        # Map base_exercised_options to base_and_exercised_options_value
+        if 'base_exercised_options' in api_response:
+            award_record['base_and_exercised_options_value'] = Decimal(str(api_response['base_exercised_options']))
+        
+        # Map base_and_all_options to base_and_all_options_value
+        if 'base_and_all_options' in api_response:
+            award_record['base_and_all_options_value'] = Decimal(str(api_response['base_and_all_options']))
+        
+        # Flatten nested objects to match bulk CSV structure
+        # Agency information (flatten awarding_agency)
+        if 'awarding_agency' in api_response:
+            agency = api_response['awarding_agency']
+            if isinstance(agency, dict):
+                for agency_key, agency_value in agency.items():
+                    if agency_value is None:
+                        continue
+                    # Flatten nested agency fields
+                    if agency_key == 'name':
+                        award_record['awarding_agency_name'] = normalize_string(agency_value)
+                    elif agency_key == 'id':
+                        award_record['awarding_agency_code'] = str(agency_value)
+                    elif agency_key == 'toptier_agency':
+                        if isinstance(agency_value, dict):
+                            if 'name' in agency_value:
+                                award_record['awarding_agency_name'] = normalize_string(agency_value['name'])
+                            if 'toptier_code' in agency_value:
+                                award_record['awarding_agency_code'] = normalize_string(agency_value['toptier_code'])
+                    elif agency_key == 'subtier_agency':
+                        if isinstance(agency_value, dict):
+                            if 'name' in agency_value:
+                                award_record['awarding_sub_agency_name'] = normalize_string(agency_value['name'])
+                            if 'subtier_code' in agency_value:
+                                award_record['awarding_sub_agency_code'] = normalize_string(agency_value['subtier_code'])
+                    else:
+                        # Store other agency fields with prefix
+                        award_record[f'awarding_agency_{agency_key}'] = normalize_string(agency_value) if isinstance(agency_value, str) else agency_value
+        
+        # Flatten funding_agency
+        if 'funding_agency' in api_response:
+            agency = api_response['funding_agency']
+            if isinstance(agency, dict):
+                for agency_key, agency_value in agency.items():
+                    if agency_value is None:
+                        continue
+                    if agency_key == 'name':
+                        award_record['funding_agency_name'] = normalize_string(agency_value)
+                    elif agency_key == 'id':
+                        award_record['funding_agency_code'] = str(agency_value)
+                    elif agency_key == 'toptier_agency':
+                        if isinstance(agency_value, dict):
+                            if 'name' in agency_value:
+                                award_record['funding_agency_name'] = normalize_string(agency_value['name'])
+                            if 'toptier_code' in agency_value:
+                                award_record['funding_agency_code'] = normalize_string(agency_value['toptier_code'])
+                    elif agency_key == 'subtier_agency':
+                        if isinstance(agency_value, dict):
+                            if 'name' in agency_value:
+                                award_record['funding_sub_agency_name'] = normalize_string(agency_value['name'])
+                            if 'subtier_code' in agency_value:
+                                award_record['funding_sub_agency_code'] = normalize_string(agency_value['subtier_code'])
+                    else:
+                        award_record[f'funding_agency_{agency_key}'] = normalize_string(agency_value) if isinstance(agency_value, str) else agency_value
+        
+        # Flatten recipient information
+        if 'recipient' in api_response:
+            recipient = api_response['recipient']
+            if isinstance(recipient, dict):
+                for recipient_key, recipient_value in recipient.items():
+                    if recipient_value is None:
+                        continue
+                    if recipient_key == 'name':
+                        recipient_name = normalize_string(recipient_value)
+                        award_record['recipient_name'] = recipient_name
+                        # Normalize recipient_name for GSI
+                        if recipient_name:
+                            # Replace "REDACTED DUE TO PII" with full expansion
+                            if recipient_name.upper() == "REDACTED DUE TO PII":
+                                recipient_name = "REDACTED DUE TO PERSONALLY IDENTIFIABLE INFORMATION"
+                                award_record['recipient_name'] = recipient_name
+                            award_record['recipient_name_normalized'] = recipient_name.lower().strip()
+                    elif recipient_key == 'location':
+                        if isinstance(recipient_value, dict):
+                            for loc_key, loc_value in recipient_value.items():
+                                if loc_value is None:
+                                    continue
+                                # Map location fields
+                                if loc_key == 'state_code':
+                                    award_record['recipient_location_state'] = normalize_string(loc_value)
+                                elif loc_key == 'state_name':
+                                    award_record['recipient_state_name'] = normalize_string(loc_value)
+                                elif loc_key == 'country_code':
+                                    award_record['recipient_location_country'] = normalize_string(loc_value)
+                                elif loc_key == 'country_name':
+                                    award_record['recipient_country_name'] = normalize_string(loc_value)
+                                elif loc_key == 'city_name':
+                                    award_record['recipient_city_name'] = normalize_string(loc_value)
+                                elif loc_key == 'county_name':
+                                    award_record['recipient_county_name'] = normalize_string(loc_value)
+                                elif loc_key == 'address_line1':
+                                    award_record['recipient_address_line_1'] = normalize_string(loc_value)
+                                elif loc_key == 'address_line2':
+                                    award_record['recipient_address_line_2'] = normalize_string(loc_value)
+                                elif loc_key == 'zip5' or loc_key == 'zip':
+                                    award_record['recipient_zip_code'] = normalize_string(loc_value)
+                                else:
+                                    award_record[f'recipient_location_{loc_key}'] = normalize_string(loc_value) if isinstance(loc_value, str) else loc_value
+                    elif recipient_key == 'uei':
+                        award_record['recipient_uei'] = normalize_string(recipient_value)
+                    elif recipient_key == 'duns':
+                        award_record['recipient_duns'] = normalize_string(recipient_value)
+                    else:
+                        award_record[f'recipient_{recipient_key}'] = normalize_string(recipient_value) if isinstance(recipient_value, str) else recipient_value
+        
+        # Flatten period_of_performance
+        if 'period_of_performance' in api_response:
+            pop = api_response['period_of_performance']
+            if isinstance(pop, dict):
+                for pop_key, pop_value in pop.items():
+                    if pop_value is None:
+                        continue
+                    if pop_key == 'start_date':
+                        award_record['period_of_performance_start_date'] = normalize_string(pop_value)
+                    elif pop_key == 'end_date' or pop_key == 'current_end_date':
+                        award_record['period_of_performance_end_date'] = normalize_string(pop_value)
+                    elif pop_key == 'potential_end_date':
+                        award_record['period_of_performance_potential_end_date'] = normalize_string(pop_value)
+                    else:
+                        award_record[f'period_of_performance_{pop_key}'] = normalize_string(pop_value) if isinstance(pop_value, str) else pop_value
+        
+        # Flatten place_of_performance
+        if 'place_of_performance' in api_response:
+            pop_loc = api_response['place_of_performance']
+            if isinstance(pop_loc, dict):
+                for pop_key, pop_value in pop_loc.items():
+                    if pop_value is None:
+                        continue
+                    award_record[f'place_of_performance_{pop_key}'] = normalize_string(pop_value) if isinstance(pop_value, str) else pop_value
+        
+        # Flatten parent_award
+        if 'parent_award' in api_response:
+            parent = api_response['parent_award']
+            if isinstance(parent, dict):
+                for parent_key, parent_value in parent.items():
+                    if parent_value is None:
+                        continue
+                    if parent_key == 'piid':
+                        award_record['parent_award_piid'] = normalize_string(parent_value)
+                    elif parent_key == 'agency_id':
+                        award_record['parent_award_agency_id'] = str(parent_value)
+                    else:
+                        award_record[f'parent_award_{parent_key}'] = normalize_string(parent_value) if isinstance(parent_value, str) else parent_value
+        
+        # Flatten NAICS hierarchy
+        if 'naics_hierarchy' in api_response:
+            naics = api_response['naics_hierarchy']
+            if isinstance(naics, dict):
+                for naics_key, naics_value in naics.items():
+                    if naics_value is None:
+                        continue
+                    if naics_key == 'naics_code':
+                        award_record['naics_code'] = normalize_string(naics_value)
+                    elif naics_key == 'naics_description':
+                        award_record['naics_description'] = normalize_string(naics_value)
+                    else:
+                        award_record[f'naics_{naics_key}'] = normalize_string(naics_value) if isinstance(naics_value, str) else naics_value
+        
+        # Flatten PSC hierarchy
+        if 'psc_hierarchy' in api_response:
+            psc = api_response['psc_hierarchy']
+            if isinstance(psc, dict):
+                for psc_key, psc_value in psc.items():
+                    if psc_value is None:
+                        continue
+                    if psc_key == 'psc_code':
+                        award_record['psc_code'] = normalize_string(psc_value)
+                    elif psc_key == 'psc_description':
+                        award_record['psc_description'] = normalize_string(psc_value)
+                    else:
+                        award_record[f'psc_{psc_key}'] = normalize_string(psc_value) if isinstance(psc_value, str) else psc_value
+        
+        # Flatten CFDA info (for assistance awards)
+        if 'cfda_info' in api_response:
+            cfda_list = api_response['cfda_info']
+            if isinstance(cfda_list, list) and len(cfda_list) > 0:
+                # Take first CFDA entry
+                cfda = cfda_list[0]
+                if isinstance(cfda, dict):
+                    if 'cfda_number' in cfda:
+                        award_record['cfda_number'] = normalize_string(cfda['cfda_number'])
+                    if 'cfda_title' in cfda:
+                        award_record['cfda_title'] = normalize_string(cfda['cfda_title'])
+                    # Store full CFDA info array
+                    award_record['cfda_info'] = cfda_list
+        
+        # Contract-specific field mappings
+        if 'piid' in api_response:
+            award_record['award_id_piid'] = normalize_string(api_response['piid'])
+        
+        # Assistance-specific field mappings
+        if 'fain' in api_response:
+            award_record['award_id_fain'] = normalize_string(api_response['fain'])
+        if 'uri' in api_response:
+            award_record['award_id_uri'] = normalize_string(api_response['uri'])
+        
+        # Store latest_transaction_contract_data as nested object (preserve structure)
+        if 'latest_transaction_contract_data' in api_response:
+            award_record['latest_transaction_contract_data'] = convert_floats_to_decimal(api_response['latest_transaction_contract_data'])
+        
+        # Store executive_details as nested object
+        if 'executive_details' in api_response:
+            award_record['executive_details'] = convert_floats_to_decimal(api_response['executive_details'])
+        
+        # Store account obligations/outlays arrays
+        if 'account_obligations_by_defc' in api_response:
+            award_record['account_obligations_by_defc'] = convert_floats_to_decimal(api_response['account_obligations_by_defc'])
+        if 'account_outlays_by_defc' in api_response:
+            award_record['account_outlays_by_defc'] = convert_floats_to_decimal(api_response['account_outlays_by_defc'])
+        
+        # Extract fiscal year
+        period_start = award_record.get('period_of_performance_start_date')
+        fiscal_year = extract_fiscal_year(period_start)
+        if fiscal_year:
+            award_record['fiscal_year'] = fiscal_year
+        else:
+            # Use current fiscal year as default
+            now = datetime.now(timezone.utc)
+            award_record['fiscal_year'] = now.year + 1 if now.month >= 10 else now.year
+        
+        # Map period_of_performance fields to period_start_date/period_end_date for GSI compatibility
+        if 'period_of_performance_start_date' in award_record and 'period_start_date' not in award_record:
+            award_record['period_start_date'] = award_record['period_of_performance_start_date']
+        if 'period_of_performance_end_date' in award_record and 'period_end_date' not in award_record:
+            award_record['period_end_date'] = award_record['period_of_performance_end_date']
+        
+        # Ensure total_obligated_amount is set (required for GSI)
+        if 'total_obligated_amount' not in award_record or not award_record.get('total_obligated_amount'):
+            award_record['total_obligated_amount'] = Decimal('0')
+        
+        # Initialize arrays and counts
+        award_record['transactions'] = []
+        award_record['subawards'] = []
+        award_record['transaction_count'] = 0
+        award_record['subaward_count'] = api_response.get('subaward_count', 0)
+        
+        # Metadata
+        award_record['indexed_at'] = datetime.now(timezone.utc).isoformat()
+        award_record['last_updated'] = datetime.now(timezone.utc).isoformat()
+        award_record['award_details_indexed'] = True
+        award_record['full_indexing_complete'] = False  # Will be set to True after subawards are added
+        award_record['ttl'] = int((datetime.now(timezone.utc).timestamp() + (90 * 24 * 60 * 60)))
+        
+        # Set is_assistance based on category
+        category = api_response.get('category', '').lower()
+        if category == 'assistance':
+            award_record['is_assistance'] = b'\x01'
+        else:
+            award_record['is_assistance'] = b'\x00'
+        
+        log_print(f"✅ Successfully fetched award {award_id} from API")
+        return award_record
+        
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            log_print(f"⚠️ Award {award_id} not found in USAspending API (404)")
+        else:
+            log_print(f"⚠️ HTTP error fetching award {award_id} from API: {e.response.status_code}")
+        return None
+    except Exception as e:
+        log_print(f"⚠️ Error fetching award {award_id} from API: {str(e)[:200]}")
+        logger.error(f"⚠️ Error fetching award {award_id} from API", exc_info=True)
+        return None
+
 def extract_fiscal_year(date_str: Optional[str]) -> Optional[int]:
     """Extract fiscal year from date string (YYYY-MM-DD)"""
     if not date_str:
@@ -338,6 +662,7 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
         'recipient_location_state': full_item.get('recipient_location_state'),
         'award_type': full_item.get('award_type'),
         'fiscal_year': full_item.get('fiscal_year'),
+        'is_assistance': full_item.get('is_assistance'),  # GSI hash key
         
         # GSI range keys (use total_obligated_amount from CSV)
         'total_obligated_amount': (full_item.get('total_obligated_amount') or 
@@ -373,7 +698,7 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def convert_decimal_for_json(obj: Any) -> Any:
-    """Recursively convert Decimal to float/string for JSON serialization"""
+    """Recursively convert Decimal and bytes to JSON-serializable types"""
     if isinstance(obj, Decimal):
         # Convert Decimal to float for JSON (preserves precision for most cases)
         try:
@@ -381,6 +706,14 @@ def convert_decimal_for_json(obj: Any) -> Any:
         except (OverflowError, ValueError):
             # If float conversion fails, use string representation
             return str(obj)
+    elif isinstance(obj, bytes):
+        # Convert bytes to JSON-serializable format
+        # For is_assistance field (b'\x00' or b'\x01'), convert to int for readability
+        if len(obj) == 1 and obj in (b'\x00', b'\x01'):
+            return int.from_bytes(obj, byteorder='big')
+        else:
+            # For other bytes, use base64 encoding
+            return base64.b64encode(obj).decode('utf-8')
     elif isinstance(obj, dict):
         return {key: convert_decimal_for_json(value) for key, value in obj.items()}
     elif isinstance(obj, list):
@@ -393,30 +726,57 @@ def store_oversized_item_to_s3(award_id: str, full_item: Dict[str, Any]) -> str:
     """
     Store oversized item to S3 in oversize/ folder.
     Returns the S3 key.
+    Handles JSON serialization errors gracefully.
     """
     # Create S3 key: oversize/{award_id}.json.gz
     s3_key = f"oversize/{award_id}.json.gz"
     
-    # Convert Decimal values to JSON-serializable types
-    json_ready_item = convert_decimal_for_json(full_item)
-    
-    # Convert to JSON
-    json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2)
-    
-    # Compress and upload to S3
-    json_bytes = json_data.encode('utf-8')
-    compressed_data = gzip.compress(json_bytes)
-    
-    s3_client.put_object(
-        Bucket=S3_BUCKET_NAME,
-        Key=s3_key,
-        Body=compressed_data,
-        ContentType='application/json',
-        ContentEncoding='gzip'
-    )
-    
-    log_print(f"   💾 Stored oversized award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
-    return s3_key
+    try:
+        # Convert Decimal and bytes values to JSON-serializable types
+        json_ready_item = convert_decimal_for_json(full_item)
+        
+        # Convert to JSON
+        json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2, default=str)
+        
+        # Compress and upload to S3
+        json_bytes = json_data.encode('utf-8')
+        compressed_data = gzip.compress(json_bytes)
+        
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=compressed_data,
+            ContentType='application/json',
+            ContentEncoding='gzip'
+        )
+        
+        log_print(f"   💾 Stored oversized award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
+        return s3_key
+    except Exception as e:
+        # If JSON serialization fails, try with a more permissive approach
+        log_print(f"⚠️ Error serializing oversized item for {award_id}: {str(e)[:200]}")
+        log_print(f"   Attempting fallback serialization...")
+        
+        try:
+            # Fallback: use default=str for any remaining non-serializable types
+            json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2, default=str)
+            json_bytes = json_data.encode('utf-8')
+            compressed_data = gzip.compress(json_bytes)
+            
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=s3_key,
+                Body=compressed_data,
+                ContentType='application/json',
+                ContentEncoding='gzip'
+            )
+            
+            log_print(f"   ✅ Fallback serialization successful for {award_id}")
+            return s3_key
+        except Exception as e2:
+            log_print(f"❌ Failed to store oversized item {award_id} to S3: {str(e2)[:200]}")
+            logger.error(f"❌ Failed to store oversized item {award_id} to S3", exc_info=True)
+            raise
 
 
 def normalize_string(value: Any) -> Optional[str]:
@@ -1527,7 +1887,21 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                         all_prime_awards[parent_id]['subawards'] = subawards
                     dynamodb_linked += 1
                 else:
-                    log_print(f"⚠️ {agency_prefix}Parent award {parent_id} not found in bulk file or DynamoDB for {len(subawards)} sub-awards")
+                    # Parent not in DynamoDB - try fetching from API
+                    log_print(f"🔍 {agency_prefix}Parent award {parent_id} not in DynamoDB, fetching from API...")
+                    api_award = fetch_award_from_api(parent_id)
+                    if api_award:
+                        # Add subawards to the fetched award
+                        api_award['subawards'] = subawards
+                        api_award['subaward_count'] = len(subawards)
+                        api_award['full_indexing_complete'] = True
+                        
+                        # Add to all_prime_awards for indexing
+                        all_prime_awards[parent_id] = api_award
+                        log_print(f"✅ {agency_prefix}Fetched parent award {parent_id} from API and added {len(subawards)} sub-awards")
+                        dynamodb_linked += 1
+                    else:
+                        log_print(f"⚠️ {agency_prefix}Parent award {parent_id} not found in bulk file, DynamoDB, or API for {len(subawards)} sub-awards")
             except Exception as e:
                 error_msg = f"Error checking DynamoDB for parent {parent_id}: {str(e)}"
                 log_print(f"⚠️ {agency_prefix}{error_msg}")
@@ -1774,11 +2148,51 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             existing_item = None
         
         if existing_item:
-            # Update existing item with subawards AND transactions (if present in bulk download)
+            # Update existing item - MERGE all fields from award_record into existing_item
+            # This preserves existing fields and adds/updates new ones
             # This handles cases where:
             # 1. Orphan sub-award: parent not in bulk download but exists in DynamoDB
             # 2. Transaction adjustments: parent appears in bulk download with updated transactions
+            # 3. API-fetched awards: merge API fields with existing DynamoDB fields
             db_item = existing_item.copy()
+            
+            # Merge ALL fields from award_record into db_item (preserve existing, update with new)
+            # Skip internal fields that are handled separately
+            skip_fields = {'transactions', 'subawards', 'child_awards', 'update_from_dynamodb', 'existing_item'}
+            for key, value in award_record.items():
+                if key in skip_fields:
+                    continue
+                if value is None:
+                    continue
+                
+                # Convert value to appropriate type
+                if isinstance(value, (int, float)):
+                    try:
+                        db_item[key] = Decimal(str(value))
+                    except:
+                        db_item[key] = normalize_string(value)
+                elif isinstance(value, bool):
+                    db_item[key] = value
+                elif isinstance(value, str):
+                    normalized = normalize_string(value)
+                    if normalized:
+                        db_item[key] = normalized
+                elif isinstance(value, list):
+                    # Convert list elements
+                    converted_list = []
+                    for item in value:
+                        if isinstance(item, (int, float)):
+                            try:
+                                converted_list.append(Decimal(str(item)))
+                            except:
+                                converted_list.append(normalize_string(item))
+                        else:
+                            converted_list.append(normalize_string(item) if isinstance(item, str) else item)
+                    db_item[key] = converted_list
+                elif isinstance(value, dict):
+                    db_item[key] = convert_floats_to_decimal(value)
+                else:
+                    db_item[key] = normalize_string(value) if isinstance(value, str) else value
             
             # Merge transactions if present in bulk download (transaction adjustments)
             if transactions:
@@ -1909,21 +2323,30 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
                         log_print(f"⚠️ Updated award {award_id} exceeds DynamoDB size limit, storing to S3...")
                         
-                        # Store full item to S3
-                        oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
-                        
-                        # Extract only GSI fields for DynamoDB
-                        gsi_only_item = extract_gsi_fields_only(db_item)
-                        gsi_only_item['oversize_s3_key'] = oversize_s3_key
-                        
-                        # Try to store GSI-only item
                         try:
-                            awards_table.put_item(Item=gsi_only_item)
-                            log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
-                            break
-                        except Exception as gsi_error:
-                            log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
-                            raise
+                            # Store full item to S3
+                            oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
+                            
+                            # Extract only GSI fields for DynamoDB
+                            gsi_only_item = extract_gsi_fields_only(db_item)
+                            gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                            
+                            # Try to store GSI-only item
+                            try:
+                                awards_table.put_item(Item=gsi_only_item)
+                                log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
+                                break
+                            except Exception as gsi_error:
+                                log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
+                                raise
+                        except Exception as s3_error:
+                            log_print(f"❌ Failed to store oversized award {award_id} to S3: {str(s3_error)[:200]}")
+                            logger.error(f"❌ Failed to store oversized award {award_id} to S3", exc_info=True)
+                            # Continue to next retry attempt or raise if out of retries
+                            if put_attempt < max_put_retries - 1:
+                                continue
+                            else:
+                                raise
                     
                     # Handle throttling
                     elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
@@ -1959,20 +2382,21 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         
         db_item['full_indexing_complete'] = True
         db_item['last_updated'] = datetime.now(timezone.utc).isoformat()
-            
-            # Store to DynamoDB with retry logic for throttling and oversized items
-            max_put_retries = 3
-            for put_attempt in range(max_put_retries):
-                try:
-                    awards_table.put_item(Item=db_item)
-                    break
-                except Exception as put_error:
-                    error_str = str(put_error)
+        
+        # Store to DynamoDB with retry logic for throttling and oversized items
+        max_put_retries = 3
+        for put_attempt in range(max_put_retries):
+            try:
+                awards_table.put_item(Item=db_item)
+                break
+            except Exception as put_error:
+                error_str = str(put_error)
+                
+                # Handle oversized items (ValidationException)
+                if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
+                    log_print(f"⚠️ Award {award_id} exceeds DynamoDB size limit, storing to S3...")
                     
-                    # Handle oversized items (ValidationException)
-                    if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
-                        log_print(f"⚠️ Award {award_id} exceeds DynamoDB size limit, storing to S3...")
-                        
+                    try:
                         # Store full item to S3
                         oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
                         
@@ -1988,17 +2412,25 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         except Exception as gsi_error:
                             log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
                             raise
-                    
-                    # Handle throttling
-                    elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                    except Exception as s3_error:
+                        log_print(f"❌ Failed to store oversized award {award_id} to S3: {str(s3_error)[:200]}")
+                        logger.error(f"❌ Failed to store oversized award {award_id} to S3", exc_info=True)
+                        # Continue to next retry attempt or raise if out of retries
                         if put_attempt < max_put_retries - 1:
-                            wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
-                            log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
-                            time.sleep(wait_time)
                             continue
-                    
-                    # Re-raise if not throttling or out of retries
-                    raise
+                        else:
+                            raise
+                
+                # Handle throttling
+                elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
+                    if put_attempt < max_put_retries - 1:
+                        wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
+                        log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                        time.sleep(wait_time)
+                        continue
+                
+                # Re-raise if not throttling or out of retries
+                raise
         
         return {
             'success': True,

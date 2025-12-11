@@ -22,6 +22,7 @@ import gc
 import codecs
 import gzip
 import re
+import base64
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional
 from decimal import Decimal
@@ -298,6 +299,7 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
         'recipient_location_state': full_item.get('recipient_location_state'),
         'award_type': full_item.get('award_type'),
         'fiscal_year': full_item.get('fiscal_year'),
+        'is_assistance': full_item.get('is_assistance'),  # GSI hash key
         
         # GSI range keys (use total_obligated_amount from CSV)
         'total_obligated_amount': (full_item.get('total_obligated_amount') or 
@@ -333,7 +335,7 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def convert_decimal_for_json(obj: Any) -> Any:
-    """Recursively convert Decimal to float/string for JSON serialization"""
+    """Recursively convert Decimal and bytes to JSON-serializable types"""
     if isinstance(obj, Decimal):
         # Convert Decimal to float for JSON (preserves precision for most cases)
         try:
@@ -341,6 +343,14 @@ def convert_decimal_for_json(obj: Any) -> Any:
         except (OverflowError, ValueError):
             # If float conversion fails, use string representation
             return str(obj)
+    elif isinstance(obj, bytes):
+        # Convert bytes to JSON-serializable format
+        # For is_assistance field (b'\x00' or b'\x01'), convert to int for readability
+        if len(obj) == 1 and obj in (b'\x00', b'\x01'):
+            return int.from_bytes(obj, byteorder='big')
+        else:
+            # For other bytes, use base64 encoding
+            return base64.b64encode(obj).decode('utf-8')
     elif isinstance(obj, dict):
         return {key: convert_decimal_for_json(value) for key, value in obj.items()}
     elif isinstance(obj, list):
@@ -353,30 +363,57 @@ def store_oversized_item_to_s3(award_id: str, full_item: Dict[str, Any]) -> str:
     """
     Store oversized item to S3 in oversize/ folder.
     Returns the S3 key.
+    Handles JSON serialization errors gracefully.
     """
     # Create S3 key: oversize/{award_id}.json.gz
     s3_key = f"oversize/{award_id}.json.gz"
     
-    # Convert Decimal values to JSON-serializable types
-    json_ready_item = convert_decimal_for_json(full_item)
-    
-    # Convert to JSON
-    json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2)
-    
-    # Compress and upload to S3
-    json_bytes = json_data.encode('utf-8')
-    compressed_data = gzip.compress(json_bytes)
-    
-    s3_client.put_object(
-        Bucket=S3_BUCKET_NAME,
-        Key=s3_key,
-        Body=compressed_data,
-        ContentType='application/json',
-        ContentEncoding='gzip'
-    )
-    
-    log_print(f"   💾 Stored oversized award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
-    return s3_key
+    try:
+        # Convert Decimal and bytes values to JSON-serializable types
+        json_ready_item = convert_decimal_for_json(full_item)
+        
+        # Convert to JSON
+        json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2, default=str)
+        
+        # Compress and upload to S3
+        json_bytes = json_data.encode('utf-8')
+        compressed_data = gzip.compress(json_bytes)
+        
+        s3_client.put_object(
+            Bucket=S3_BUCKET_NAME,
+            Key=s3_key,
+            Body=compressed_data,
+            ContentType='application/json',
+            ContentEncoding='gzip'
+        )
+        
+        log_print(f"   💾 Stored oversized award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
+        return s3_key
+    except Exception as e:
+        # If JSON serialization fails, try with a more permissive approach
+        log_print(f"⚠️ Error serializing oversized item for {award_id}: {str(e)[:200]}")
+        log_print(f"   Attempting fallback serialization...")
+        
+        try:
+            # Fallback: use default=str for any remaining non-serializable types
+            json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2, default=str)
+            json_bytes = json_data.encode('utf-8')
+            compressed_data = gzip.compress(json_bytes)
+            
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=s3_key,
+                Body=compressed_data,
+                ContentType='application/json',
+                ContentEncoding='gzip'
+            )
+            
+            log_print(f"   ✅ Fallback serialization successful for {award_id}")
+            return s3_key
+        except Exception as e2:
+            log_print(f"❌ Failed to store oversized item {award_id} to S3: {str(e2)[:200]}")
+            logger.error(f"❌ Failed to store oversized item {award_id} to S3", exc_info=True)
+            raise
 
 
 def normalize_string(value: Any) -> Optional[str]:
@@ -1870,21 +1907,30 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
                         log_print(f"⚠️ Updated award {award_id} exceeds DynamoDB size limit, storing to S3...")
                         
-                        # Store full item to S3
-                        oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
-                        
-                        # Extract only GSI fields for DynamoDB
-                        gsi_only_item = extract_gsi_fields_only(db_item)
-                        gsi_only_item['oversize_s3_key'] = oversize_s3_key
-                        
-                        # Try to store GSI-only item
                         try:
-                            awards_table.put_item(Item=gsi_only_item)
-                            log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
-                            break
-                        except Exception as gsi_error:
-                            log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
-                            raise
+                            # Store full item to S3
+                            oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
+                            
+                            # Extract only GSI fields for DynamoDB
+                            gsi_only_item = extract_gsi_fields_only(db_item)
+                            gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                            
+                            # Try to store GSI-only item
+                            try:
+                                awards_table.put_item(Item=gsi_only_item)
+                                log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
+                                break
+                            except Exception as gsi_error:
+                                log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
+                                raise
+                        except Exception as s3_error:
+                            log_print(f"❌ Failed to store oversized award {award_id} to S3: {str(s3_error)[:200]}")
+                            logger.error(f"❌ Failed to store oversized award {award_id} to S3", exc_info=True)
+                            # Continue to next retry attempt or raise if out of retries
+                            if put_attempt < max_put_retries - 1:
+                                continue
+                            else:
+                                raise
                     
                     # Handle throttling
                     elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
@@ -1934,21 +1980,30 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
                         log_print(f"⚠️ Award {award_id} exceeds DynamoDB size limit, storing to S3...")
                         
-                        # Store full item to S3
-                        oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
-                        
-                        # Extract only GSI fields for DynamoDB
-                        gsi_only_item = extract_gsi_fields_only(db_item)
-                        gsi_only_item['oversize_s3_key'] = oversize_s3_key
-                        
-                        # Try to store GSI-only item
                         try:
-                            awards_table.put_item(Item=gsi_only_item)
-                            log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
-                            break
-                        except Exception as gsi_error:
-                            log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
-                            raise
+                            # Store full item to S3
+                            oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
+                            
+                            # Extract only GSI fields for DynamoDB
+                            gsi_only_item = extract_gsi_fields_only(db_item)
+                            gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                            
+                            # Try to store GSI-only item
+                            try:
+                                awards_table.put_item(Item=gsi_only_item)
+                                log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
+                                break
+                            except Exception as gsi_error:
+                                log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
+                                raise
+                        except Exception as s3_error:
+                            log_print(f"❌ Failed to store oversized award {award_id} to S3: {str(s3_error)[:200]}")
+                            logger.error(f"❌ Failed to store oversized award {award_id} to S3", exc_info=True)
+                            # Continue to next retry attempt or raise if out of retries
+                            if put_attempt < max_put_retries - 1:
+                                continue
+                            else:
+                                raise
                     
                     # Handle throttling
                     elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
