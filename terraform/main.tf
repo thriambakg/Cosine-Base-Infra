@@ -2298,8 +2298,8 @@ module "congress_bills_fetcher_lambda" {
   description   = "Fetches comprehensive Congress.gov bill data for date ranges ≤2 days"
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.11"
-  timeout       = 900 # 15 minutes max
-  memory_size   = 512
+  timeout       = 900  # 15 minutes max
+  memory_size   = 1024 # Increased for better parallel processing performance
 
   source_dir = "${path.module}/../backend_app/src/congress_bills_fetcher/app"
 

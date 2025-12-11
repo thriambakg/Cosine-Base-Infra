@@ -15,9 +15,10 @@ import boto3
 import csv
 import re
 from datetime import datetime, timedelta, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from io import StringIO
 from difflib import SequenceMatcher
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import time
 
 # Configure logging
@@ -763,6 +764,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     """
     Build a comprehensive bill record with all related data.
     One row per bill with all information.
+    Uses parallel API calls to speed up processing.
     """
     bill_number = bill.get("number")
     if not bill_number:
@@ -770,14 +772,34 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     
     log_print(f"      📋 Processing {bill_type} {bill_number}...")
     
-    # Fetch all related data
-    details = fetch_bill_details(congress, bill_type, bill_number, api_key)
-    actions = fetch_bill_actions(congress, bill_type, bill_number, api_key)
-    amendments = fetch_bill_amendments(congress, bill_type, bill_number, api_key)
-    cosponsors = fetch_bill_cosponsors(congress, bill_type, bill_number, api_key)
-    summaries = fetch_bill_summaries(congress, bill_type, bill_number, api_key)
-    subjects = fetch_bill_subjects(congress, bill_type, bill_number, api_key)
-    titles = fetch_bill_titles(congress, bill_type, bill_number, api_key)
+    # Fetch all related data in parallel (7 API calls)
+    with ThreadPoolExecutor(max_workers=7) as executor:
+        futures = {
+            executor.submit(fetch_bill_details, congress, bill_type, bill_number, api_key): 'details',
+            executor.submit(fetch_bill_actions, congress, bill_type, bill_number, api_key): 'actions',
+            executor.submit(fetch_bill_amendments, congress, bill_type, bill_number, api_key): 'amendments',
+            executor.submit(fetch_bill_cosponsors, congress, bill_type, bill_number, api_key): 'cosponsors',
+            executor.submit(fetch_bill_summaries, congress, bill_type, bill_number, api_key): 'summaries',
+            executor.submit(fetch_bill_subjects, congress, bill_type, bill_number, api_key): 'subjects',
+            executor.submit(fetch_bill_titles, congress, bill_type, bill_number, api_key): 'titles',
+        }
+        
+        results = {}
+        for future in as_completed(futures):
+            key = futures[future]
+            try:
+                results[key] = future.result()
+            except Exception as e:
+                log_print(f"      ⚠️ Error fetching {key} for {bill_type} {bill_number}: {str(e)}")
+                results[key] = None
+        
+        details = results.get('details')
+        actions = results.get('actions', [])
+        amendments = results.get('amendments', [])
+        cosponsors = results.get('cosponsors', [])
+        summaries = results.get('summaries', [])
+        subjects = results.get('subjects', [])
+        titles = results.get('titles', [])
     
     # Extract primary sponsor (first sponsor from details)
     primary_sponsor = {}
@@ -1173,31 +1195,49 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     log_print(f"\n✅ Total bills found: {len(all_bills)}")
     log_print()
     
-    # Build comprehensive records and store to DynamoDB
+    # Build comprehensive records and store to DynamoDB (parallelized)
     log_print("🔍 Building comprehensive bill records and storing to DynamoDB...")
     log_print("-" * 80)
+    log_print(f"   🚀 Using parallel processing with up to 10 concurrent workers...")
     
     processed_count = 0
     error_count = 0
     
-    for i, bill in enumerate(all_bills):
+    def process_bill(bill: Dict) -> Tuple[bool, Optional[str]]:
+        """Process a single bill and return (success, error_message)"""
         bill_type = bill.get("type", "")
         if not bill_type:
-            continue
+            return False, "No bill type"
         
         try:
             record = build_comprehensive_bill_record(bill, congress, bill_type, api_key)
             if record:
                 store_bill_to_dynamodb(record)
-                processed_count += 1
+                return True, None
+            else:
+                return False, "No record built"
         except Exception as e:
-            error_count += 1
-            log_print(f"      ❌ Error processing {bill_type} {bill.get('number', 'unknown')}: {str(e)}")
+            error_msg = f"Error processing {bill_type} {bill.get('number', 'unknown')}: {str(e)}"
+            return False, error_msg
+    
+    # Process bills in parallel (max 10 concurrent to respect API rate limits)
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        future_to_bill = {executor.submit(process_bill, bill): bill for bill in all_bills}
         
-        if (i + 1) % 10 == 0:
-            log_print(f"      ✅ Processed {i + 1}/{len(all_bills)} bills...")
-        
-        time.sleep(0.3)  # Rate limiting
+        completed = 0
+        for future in as_completed(future_to_bill):
+            completed += 1
+            success, error_msg = future.result()
+            
+            if success:
+                processed_count += 1
+            else:
+                error_count += 1
+                if error_msg:
+                    log_print(f"      ❌ {error_msg}")
+            
+            if completed % 10 == 0:
+                log_print(f"      ✅ Processed {completed}/{len(all_bills)} bills...")
     
     log_print(f"\n✅ Processed {processed_count} bills successfully")
     if error_count > 0:
