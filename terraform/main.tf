@@ -1945,10 +1945,11 @@ module "usaspending_orphan_subaward_processor_lambda" {
   ]
 
   environment_variables = {
-    AWARDS_TABLE_NAME    = module.usaspending_awards_index_table.table_name
-    S3_BUCKET_NAME       = module.usaspending_data_s3.bucket_id
-    USASPENDING_BASE_URL = "https://api.usaspending.gov"
-    LOG_LEVEL            = "INFO"
+    AWARDS_TABLE_NAME         = module.usaspending_awards_index_table.table_name
+    S3_BUCKET_NAME            = module.usaspending_data_s3.bucket_id
+    ORPHAN_SUBAWARD_QUEUE_URL = module.usaspending_orphan_subaward_queue.queue_url
+    USASPENDING_BASE_URL      = "https://api.usaspending.gov"
+    LOG_LEVEL                 = "INFO"
   }
 
   additional_policy_arns = [
@@ -1972,7 +1973,7 @@ module "usaspending_orphan_subaward_processor_lambda" {
 resource "aws_lambda_event_source_mapping" "orphan_subaward_sqs_trigger" {
   event_source_arn = module.usaspending_orphan_subaward_queue.queue_arn
   function_name    = module.usaspending_orphan_subaward_processor_lambda.function_arn
-  batch_size       = 10
+  batch_size       = 50 # Process up to 50 messages per invocation
   enabled          = true
 
   depends_on = [

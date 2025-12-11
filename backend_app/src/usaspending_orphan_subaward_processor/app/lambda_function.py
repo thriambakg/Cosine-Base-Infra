@@ -19,15 +19,18 @@ logger.setLevel(os.environ.get('LOG_LEVEL', 'INFO').upper())
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
-sqs = boto3.client('sqs')
+sqs_client = boto3.client('sqs')
 s3_client = boto3.client('s3')
 
 # Environment variables
 AWARDS_TABLE_NAME = os.environ.get('AWARDS_TABLE_NAME', 'usaspending-awards-index')
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME', 'cosine-usaspending-data-production')
 USASPENDING_BASE_URL = os.environ.get('USASPENDING_BASE_URL', 'https://api.usaspending.gov')
+ORPHAN_SUBAWARD_QUEUE_URL = os.environ.get('ORPHAN_SUBAWARD_QUEUE_URL', '')
 MAX_RETRIES = 3
 RETRY_DELAY = 1  # seconds
+MAX_MESSAGES_PER_INVOCATION = 50
+POLL_WAIT_SECONDS = 3  # Wait time before polling for additional messages
 
 # Get DynamoDB table
 awards_table = dynamodb.Table(AWARDS_TABLE_NAME) if AWARDS_TABLE_NAME else None
@@ -465,9 +468,82 @@ def store_award_to_dynamodb(award_record: Dict[str, Any], subawards: list) -> bo
         return False
 
 
+def process_message(record: Dict[str, Any]) -> tuple[bool, Optional[str]]:
+    """
+    Process a single SQS message record.
+    
+    Returns:
+        Tuple of (success: bool, parent_id: Optional[str])
+    """
+    try:
+        # Parse SQS message body
+        if isinstance(record.get('body'), str):
+            message_body = json.loads(record['body'])
+        else:
+            message_body = record.get('body', {})
+        
+        parent_id = message_body.get('parent_id')
+        
+        if not parent_id:
+            logger.error("Missing parent_id in message")
+            return (False, None)
+        
+        # Get subawards from message or S3
+        subawards = []
+        if 'subawards' in message_body:
+            # Subawards directly in message
+            subawards = message_body.get('subawards', [])
+        elif 'subawards_s3_key' in message_body:
+            # Subawards stored in S3 (message was too large)
+            s3_key = message_body.get('subawards_s3_key')
+            logger.info(f"Fetching subawards from S3: {s3_key}")
+            
+            try:
+                # Download and decompress from S3
+                s3_response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+                compressed_data = s3_response['Body'].read()
+                json_data = gzip.decompress(compressed_data).decode('utf-8')
+                s3_message = json.loads(json_data)
+                subawards = s3_message.get('subawards', [])
+                logger.info(f"✅ Loaded {len(subawards)} subawards from S3")
+            except Exception as e:
+                logger.error(f"❌ Error loading subawards from S3 {s3_key}: {str(e)}", exc_info=True)
+                return (False, parent_id)
+        else:
+            logger.warning(f"No subawards or subawards_s3_key in message for parent {parent_id}")
+            return (False, parent_id)
+        
+        if not subawards:
+            logger.warning(f"No subawards found for parent {parent_id}")
+            return (False, parent_id)
+        
+        logger.info(f"Processing orphan subaward for parent {parent_id} with {len(subawards)} subaward(s)")
+        
+        # Fetch parent award from API
+        award_record = fetch_award_from_api(parent_id)
+        
+        if not award_record:
+            logger.error(f"Failed to fetch parent award {parent_id} from API")
+            return (False, parent_id)
+        
+        # Store to DynamoDB
+        if store_award_to_dynamodb(award_record, subawards):
+            logger.info(f"✅ Successfully processed orphan subaward for parent {parent_id}")
+            return (True, parent_id)
+        else:
+            logger.error(f"❌ Failed to store award {parent_id} to DynamoDB")
+            return (False, parent_id)
+            
+    except Exception as e:
+        logger.error(f"❌ Error processing SQS record: {str(e)}", exc_info=True)
+        return (False, None)
+
+
 def lambda_handler(event, context):
     """
-    Lambda handler for processing orphan subaward messages from SQS
+    Lambda handler for processing orphan subaward messages from SQS.
+    Processes up to 50 messages per invocation. If initial batch has fewer than 50,
+    waits 3 seconds and polls for additional messages.
     
     Expected message format:
     {
@@ -477,85 +553,103 @@ def lambda_handler(event, context):
         "subawards_s3_key": "orphan-subawards/ASST_NON_....json.gz"  // S3 key if message too large
     }
     """
-    logger.info(f"Processing {len(event.get('Records', []))} SQS message(s)")
+    # Collect all messages to process
+    all_records = list(event.get('Records', []))
+    initial_count = len(all_records)
+    
+    logger.info(f"Initial batch: {initial_count} message(s)")
+    
+    # If we have fewer than 50 messages, wait and poll for more
+    if initial_count < MAX_MESSAGES_PER_INVOCATION and ORPHAN_SUBAWARD_QUEUE_URL:
+        logger.info(f"Initial batch has {initial_count} messages (target: {MAX_MESSAGES_PER_INVOCATION}), waiting {POLL_WAIT_SECONDS} seconds before polling for additional messages...")
+        time.sleep(POLL_WAIT_SECONDS)
+        
+        # Poll for additional messages
+        messages_needed = MAX_MESSAGES_PER_INVOCATION - initial_count
+        try:
+            # Receive messages from SQS (max 10 per call, but we'll call multiple times if needed)
+            while len(all_records) < MAX_MESSAGES_PER_INVOCATION:
+                messages_to_fetch = min(10, MAX_MESSAGES_PER_INVOCATION - len(all_records))
+                response = sqs_client.receive_message(
+                    QueueUrl=ORPHAN_SUBAWARD_QUEUE_URL,
+                    MaxNumberOfMessages=messages_to_fetch,
+                    WaitTimeSeconds=0  # Short polling
+                )
+                
+                messages = response.get('Messages', [])
+                if not messages:
+                    logger.info("No additional messages available in queue")
+                    break
+                
+                logger.info(f"Received {len(messages)} additional message(s) from SQS")
+                
+                # Convert SQS message format to event record format
+                for msg in messages:
+                    if len(all_records) >= MAX_MESSAGES_PER_INVOCATION:
+                        break
+                    
+                    record = {
+                        'body': msg.get('Body', '{}'),
+                        'receiptHandle': msg.get('ReceiptHandle'),
+                        'messageId': msg.get('MessageId')
+                    }
+                    all_records.append(record)
+                
+                # If we got fewer than requested, no more messages available
+                if len(messages) < messages_to_fetch:
+                    break
+                    
+        except Exception as e:
+            logger.error(f"Error polling SQS for additional messages: {str(e)}", exc_info=True)
+    
+    total_to_process = len(all_records)
+    logger.info(f"Processing {total_to_process} message(s) total")
     
     success_count = 0
     failure_count = 0
+    processed_receipt_handles = []  # Track manually polled messages for deletion
     
-    for record in event.get('Records', []):
-        try:
-            # Parse SQS message body
-            if isinstance(record.get('body'), str):
-                message_body = json.loads(record['body'])
-            else:
-                message_body = record.get('body', {})
-            
-            parent_id = message_body.get('parent_id')
-            
-            if not parent_id:
-                logger.error("Missing parent_id in message")
-                failure_count += 1
-                continue
-            
-            # Get subawards from message or S3
-            subawards = []
-            if 'subawards' in message_body:
-                # Subawards directly in message
-                subawards = message_body.get('subawards', [])
-            elif 'subawards_s3_key' in message_body:
-                # Subawards stored in S3 (message was too large)
-                s3_key = message_body.get('subawards_s3_key')
-                logger.info(f"Fetching subawards from S3: {s3_key}")
-                
-                try:
-                    # Download and decompress from S3
-                    s3_response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
-                    compressed_data = s3_response['Body'].read()
-                    json_data = gzip.decompress(compressed_data).decode('utf-8')
-                    s3_message = json.loads(json_data)
-                    subawards = s3_message.get('subawards', [])
-                    logger.info(f"✅ Loaded {len(subawards)} subawards from S3")
-                except Exception as e:
-                    logger.error(f"❌ Error loading subawards from S3 {s3_key}: {str(e)}", exc_info=True)
-                    failure_count += 1
-                    continue
-            else:
-                logger.warning(f"No subawards or subawards_s3_key in message for parent {parent_id}")
-                continue
-            
-            if not subawards:
-                logger.warning(f"No subawards found for parent {parent_id}")
-                continue
-            
-            logger.info(f"Processing orphan subaward for parent {parent_id} with {len(subawards)} subaward(s)")
-            
-            # Fetch parent award from API
-            award_record = fetch_award_from_api(parent_id)
-            
-            if not award_record:
-                logger.error(f"Failed to fetch parent award {parent_id} from API")
-                failure_count += 1
-                continue
-            
-            # Store to DynamoDB
-            if store_award_to_dynamodb(award_record, subawards):
-                success_count += 1
-                logger.info(f"✅ Successfully processed orphan subaward for parent {parent_id}")
-            else:
-                failure_count += 1
-                logger.error(f"❌ Failed to store award {parent_id} to DynamoDB")
-                
-        except Exception as e:
-            logger.error(f"❌ Error processing SQS record: {str(e)}", exc_info=True)
+    # Process all collected messages
+    for i, record in enumerate(all_records):
+        # Track if this was a manually polled message (has receiptHandle but not from event)
+        is_manually_polled = i >= initial_count and 'receiptHandle' in record
+        
+        success, parent_id = process_message(record)
+        
+        if success:
+            success_count += 1
+            # Delete manually polled messages from queue after successful processing
+            if is_manually_polled and record.get('receiptHandle'):
+                processed_receipt_handles.append(record['receiptHandle'])
+        else:
             failure_count += 1
+            # Don't delete failed messages - let them go to DLQ after max retries
     
-    logger.info(f"Processing complete: {success_count} successful, {failure_count} failed")
+    # Delete successfully processed messages that were manually polled
+    if processed_receipt_handles:
+        try:
+            # Delete in batches of 10 (SQS limit)
+            for i in range(0, len(processed_receipt_handles), 10):
+                batch = processed_receipt_handles[i:i+10]
+                entries = [
+                    {'Id': str(j), 'ReceiptHandle': handle}
+                    for j, handle in enumerate(batch)
+                ]
+                sqs_client.delete_message_batch(
+                    QueueUrl=ORPHAN_SUBAWARD_QUEUE_URL,
+                    Entries=entries
+                )
+            logger.info(f"Deleted {len(processed_receipt_handles)} successfully processed message(s) from queue")
+        except Exception as e:
+            logger.warning(f"Failed to delete some messages from queue: {str(e)}")
+    
+    logger.info(f"Processing complete: {total_to_process} total processed, {success_count} successful, {failure_count} failed")
     
     return {
         'statusCode': 200,
         'body': json.dumps({
             'success': True,
-            'processed': len(event.get('Records', [])),
+            'processed': total_to_process,
             'successful': success_count,
             'failed': failure_count
         })
