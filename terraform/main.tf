@@ -1936,7 +1936,14 @@ module "usaspending_orphan_subaward_processor_lambda" {
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.11"
   timeout       = 300 # 5 minutes (enough for API call + DynamoDB write)
-  memory_size   = 512
+  # Memory calculation for 50 messages:
+  # - Message payloads (worst case: 50 × 200KB if not in S3): ~10MB
+  # - S3 downloads (decompressed, one at a time): ~5-10MB per message
+  # - API responses + DynamoDB operations: ~5-10MB per message
+  # - Python runtime overhead: ~100-150MB
+  # - Safety margin: ~200MB
+  # Total worst case: ~400-500MB, so 1024MB provides comfortable headroom
+  memory_size = 1024
 
   source_dir = "${path.module}/../backend_app/src/usaspending_orphan_subaward_processor/app"
 

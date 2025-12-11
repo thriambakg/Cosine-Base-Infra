@@ -29,7 +29,11 @@ USASPENDING_BASE_URL = os.environ.get('USASPENDING_BASE_URL', 'https://api.usasp
 ORPHAN_SUBAWARD_QUEUE_URL = os.environ.get('ORPHAN_SUBAWARD_QUEUE_URL', '')
 MAX_RETRIES = 3
 RETRY_DELAY = 1  # seconds
-MAX_MESSAGES_PER_INVOCATION = 50
+MAX_MESSAGES_PER_INVOCATION = 50  # Memory considerations:
+# - Message payloads: up to 50 × 200KB = ~10MB (if not in S3)
+# - Processing is sequential, so peak memory is per-message, not all 50
+# - S3 downloads (decompressed) can be large per message
+# - Lambda memory set to 1024MB to handle worst-case scenarios
 POLL_WAIT_SECONDS = 3  # Wait time before polling for additional messages
 
 # Get DynamoDB table
