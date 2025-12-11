@@ -2315,6 +2315,11 @@ module "congress_bills_fetcher_lambda" {
     RETRY_DELAY                 = "2"
   }
 
+  # Lambda layers (Python 3.11) - includes requests module
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
   additional_policy_arns = [
     module.congress_bills_table.table_policy_arn,
     module.kms.kms_access_policy_arn,
