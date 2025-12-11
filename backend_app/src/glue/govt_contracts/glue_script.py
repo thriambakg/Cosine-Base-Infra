@@ -945,6 +945,11 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
         
         # Add transaction to award
         award = awards[award_id]
+        
+        # TEST MODE: Limit to first 10 transactions per award
+        if award['transaction_count'] >= 10:
+            continue
+        
         award['transaction_count'] += 1
         
         # Store transaction record (all columns)
@@ -1016,6 +1021,11 @@ def parse_subaward_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str, L
         
         if not parent_award_id:
             continue
+        
+        # TEST MODE: Limit to first 10 subawards per parent award
+        if parent_award_id in subawards_by_parent:
+            if len(subawards_by_parent[parent_award_id]) >= 10:
+                continue
         
         # Create sub-award record with ALL columns from CSV
         subaward_record = {}
@@ -1908,6 +1918,12 @@ def main():
             raise Exception("No agencies found. Cannot proceed without agencies.")
         
         log_print(f"✅ Found {len(agencies)} agencies - starting processing...")
+        
+        # TEST MODE: Filter to only Department of Agriculture (DOA)
+        agencies = [a for a in agencies if a.get('name', '').startswith('Department of Agriculture')]
+        if not agencies:
+            raise Exception("Department of Agriculture not found in agencies list")
+        log_print(f"🧪 TEST MODE: Processing only Department of Agriculture (first agency)")
         
         # Process each agency
         job_start_time = time.time()
