@@ -2902,7 +2902,7 @@ module "usaspending_awards_index_table" {
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
     { name = "award_type", type = "S" },
-    { name = "is_assistance", type = "N" }
+    { name = "is_assistance", type = "B" }
   ]
 
   global_secondary_indexes = [

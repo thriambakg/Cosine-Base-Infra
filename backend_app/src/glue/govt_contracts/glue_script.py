@@ -1661,7 +1661,8 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             # Default to contract if we can't determine
             is_assistance = False
         
-        db_item['is_assistance'] = Decimal('1') if is_assistance else Decimal('0')
+        # Store as binary (bytes): b'\x00' for contract (0), b'\x01' for assistance (1)
+        db_item['is_assistance'] = b'\x01' if is_assistance else b'\x00'
         
         # Get transactions and subawards (already in award_record from CSV parsing)
         transactions = award_record.get('transactions', [])
