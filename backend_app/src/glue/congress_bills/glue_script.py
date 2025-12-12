@@ -806,6 +806,91 @@ def fetch_bill_titles(congress: int, bill_type: str, bill_number: int, api_key: 
     return titles
 
 
+def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
+    """Fetch all text versions available for a bill."""
+    url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/text"
+    params = {"format": "json"}
+    
+    data = make_api_request(url, params, api_key)
+    if not data:
+        return []
+    
+    # Handle different response structures
+    text_versions = []
+    if isinstance(data, list):
+        text_versions = data
+    elif "textVersions" in data:
+        versions_data = data["textVersions"]
+        if isinstance(versions_data, dict):
+            text_versions = versions_data.get("item", [])
+        elif isinstance(versions_data, list):
+            text_versions = versions_data
+    
+    return text_versions if isinstance(text_versions, list) else []
+
+
+def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Optional[bytes]:
+    """
+    Download bill text file (XML/HTML) from Congress.gov.
+    
+    Args:
+        text_url: URL to the bill text file (e.g., https://www.congress.gov/119/bills/hr303/BILLS-119hr303ih.xml)
+        retries: Number of retry attempts
+        
+    Returns:
+        File content as bytes, or None if download failed
+    """
+    for attempt in range(retries):
+        try:
+            response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2)  # Longer timeout for file downloads
+            response.raise_for_status()
+            return response.content
+        except requests.exceptions.RequestException as e:
+            if attempt < retries - 1:
+                wait_time = RETRY_DELAY * (attempt + 1)
+                log_print(f"      ⚠️ Download failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
+                time.sleep(wait_time)
+            else:
+                log_print(f"      ❌ Download failed after {retries} attempts: {str(e)[:100]}")
+                return None
+    return None
+
+
+def store_bill_text_to_s3(bill_id: str, text_content: bytes, text_version_type: str = "introduced") -> str:
+    """
+    Store bill text file to S3 in bill_text/ folder.
+    
+    Args:
+        bill_id: Bill ID (e.g., "119-HR-303")
+        text_content: Bill text content as bytes
+        text_version_type: Type of text version (e.g., "introduced", "enrolled")
+        
+    Returns:
+        S3 key where the file was stored
+    """
+    # Determine file extension based on content or default to .xml
+    # Most bill text files are XML, but some might be HTML
+    file_ext = ".xml"
+    if text_content.startswith(b'<!DOCTYPE html') or text_content.startswith(b'<html'):
+        file_ext = ".html"
+    
+    # Create S3 key: bill_text/{bill_id}_{text_version_type}{ext}
+    # Clean text_version_type to be filesystem-safe
+    safe_version_type = re.sub(r'[^a-zA-Z0-9_-]', '_', text_version_type.lower())
+    s3_key = f"bill_text/{bill_id}_{safe_version_type}{file_ext}"
+    
+    # Upload to S3 (S3 bucket encryption is handled at bucket level via Terraform)
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_key,
+        Body=text_content,
+        ContentType='application/xml' if file_ext == '.xml' else 'text/html'
+    )
+    
+    log_print(f"      💾 Stored bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
+    return s3_key
+
+
 def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, api_key: str) -> Optional[Dict]:
     """
     Build a comprehensive bill record with all related data.
@@ -820,9 +905,9 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     thread_id = threading.current_thread().name
     log_print(f"      📋 [{thread_id}] Processing {bill_type} {bill_number}...")
     
-    # Fetch all related data in parallel (7 API calls)
-    log_print(f"      🔄 [{thread_id}] Starting 7 parallel API calls for {bill_type} {bill_number}...")
-    with ThreadPoolExecutor(max_workers=7) as executor:
+    # Fetch all related data in parallel (8 API calls including text versions)
+    log_print(f"      🔄 [{thread_id}] Starting 8 parallel API calls for {bill_type} {bill_number}...")
+    with ThreadPoolExecutor(max_workers=8) as executor:
         futures = {
             executor.submit(fetch_bill_details, congress, bill_type, bill_number, api_key): 'details',
             executor.submit(fetch_bill_actions, congress, bill_type, bill_number, api_key): 'actions',
@@ -831,6 +916,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
             executor.submit(fetch_bill_summaries, congress, bill_type, bill_number, api_key): 'summaries',
             executor.submit(fetch_bill_subjects, congress, bill_type, bill_number, api_key): 'subjects',
             executor.submit(fetch_bill_titles, congress, bill_type, bill_number, api_key): 'titles',
+            executor.submit(fetch_bill_text_versions, congress, bill_type, bill_number, api_key): 'text_versions',
         }
         
         results = {}
@@ -849,6 +935,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         summaries = results.get('summaries', [])
         subjects = results.get('subjects', [])
         titles = results.get('titles', [])
+        text_versions = results.get('text_versions', [])
     
     # Extract primary sponsor (first sponsor from details)
     primary_sponsor = {}
@@ -863,6 +950,41 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         elif isinstance(sponsors, list) and len(sponsors) > 0:
             primary_sponsor = sponsors[0]
     
+    # Fetch and store bill text (prefer "Introduced in House/Senate" version)
+    bill_text_s3_key = ""
+    if text_versions:
+        # Find the "Introduced" version first, fallback to first available
+        introduced_version = None
+        for version in text_versions:
+            version_type = version.get("type", "").lower()
+            if "introduced" in version_type:
+                introduced_version = version
+                break
+        
+        # Use introduced version if found, otherwise use first version
+        selected_version = introduced_version if introduced_version else text_versions[0]
+        
+        # Get the Formatted XML URL (preferred format)
+        formats = selected_version.get("formats", {})
+        if isinstance(formats, dict):
+            format_items = formats.get("item", [])
+            if isinstance(format_items, list):
+                for fmt_item in format_items:
+                    if fmt_item.get("type") == "Formatted XML":
+                        text_url = fmt_item.get("url")
+                        if text_url:
+                            log_print(f"      📄 [{thread_id}] Downloading bill text from {text_url}...")
+                            text_content = download_bill_text_file(text_url)
+                            if text_content:
+                                version_type_name = selected_version.get("type", "introduced")
+                                bill_text_s3_key = store_bill_text_to_s3(
+                                    f"{congress}-{bill_type}-{bill_number}",
+                                    text_content,
+                                    version_type_name
+                                )
+                                log_print(f"      ✅ [{thread_id}] Stored bill text to S3: {bill_text_s3_key}")
+                            break
+    
     # Build comprehensive record
     record = {
         # Bill Basic Info
@@ -872,6 +994,9 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         "bill_number": int(bill_number) if bill_number else 0,  # Store as integer for GSI
         "bill_title": bill.get("title") or (details.get("title") if details else ""),
         "bill_url": bill.get("url") or (details.get("url") if details else ""),
+        
+        # Bill Text S3 Key
+        "bill_text_s3_key": bill_text_s3_key,
         
         # Dates (for sorting)
         "introduced_date": details.get("introducedDate") if details else bill.get("introducedDate", ""),

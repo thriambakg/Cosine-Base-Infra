@@ -1819,6 +1819,11 @@ module "glue_scripts_s3" {
       source_path  = "${path.module}/../backend_app/src/glue/congress_bills/glue_script.py"
       s3_key       = "congress_bills/glue_script.py"
       content_type = "text/x-python"
+    },
+    {
+      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/backfill_bill_text.py"
+      s3_key       = "congress_bills/backfill_bill_text.py"
+      content_type = "text/x-python"
     }
   ]
 
@@ -2580,6 +2585,89 @@ module "congress_bills_fetcher_state_machine" {
 
   depends_on = [
     module.congress_bills_fetcher_glue_job
+  ]
+}
+
+# Temporary Glue Job for Congress Bills Bill Text Backfill
+# This job backfills bill_text_s3_key for existing bills in DynamoDB
+module "congress_bills_bill_text_backfill_glue_job" {
+  source = "./modules/glue-job"
+
+  job_name = "${var.project_name}-congress-bills-bill-text-backfill-${var.environment}"
+
+  # Script location - uploaded to glue scripts bucket
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/backfill_bill_text.py"
+  python_version  = "3"
+  glue_version    = "4.0"
+
+  # Job configuration
+  max_retries           = 1
+  timeout               = 2880 # 2 days (48 hours) - may take a while for large tables
+  concurrent_executions = 1    # Only allow 1 concurrent run
+  worker_type           = "G.1X"
+  number_of_workers     = 2
+
+  # S3 buckets
+  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
+  additional_s3_bucket_arns = [
+    module.congress_bills_data_s3.bucket_arn
+  ]
+  spark_logs_bucket = module.static_hosting_bucket.bucket_id
+  temp_bucket       = module.static_hosting_bucket.bucket_id
+
+  # DynamoDB access
+  dynamodb_table_arn = module.congress_bills_table.table_arn
+
+  # KMS for encryption
+  kms_key_arn = module.kms.main_key_arn
+  additional_kms_key_arns = [
+    module.kms.dynamodb_key_arn
+  ]
+
+  # Additional IAM policies for Secrets Manager
+  additional_policy_arns = [
+    module.congress_api_secrets_manager.secret_access_policy_arn
+  ]
+
+  # Job arguments
+  default_arguments = {
+    "--PROJECT_NAME"          = var.project_name
+    "--ENVIRONMENT"           = var.environment
+    "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
+    "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
+    "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"       = "30"
+  }
+
+  job_bookmark_option = "job-bookmark-disable"
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.glue_scripts_s3,
+    module.congress_bills_data_s3,
+    module.static_hosting_bucket,
+    module.congress_bills_table,
+    module.kms,
+    module.congress_api_secrets_manager
+  ]
+}
+
+# Grant backfill Glue job role access to DynamoDB KMS key
+resource "aws_kms_grant" "congress_bills_backfill_glue_dynamodb_key_access" {
+  name              = "${var.project_name}-congress-bills-backfill-${var.environment}-dynamodb-key-grant"
+  key_id            = module.kms.dynamodb_key_id
+  grantee_principal = module.congress_bills_bill_text_backfill_glue_job.role_arn
+  operations = [
+    "Decrypt",
+    "Encrypt",
+    "GenerateDataKey",
+    "DescribeKey"
+  ]
+
+  depends_on = [
+    module.congress_bills_bill_text_backfill_glue_job,
+    module.kms
   ]
 }
 
