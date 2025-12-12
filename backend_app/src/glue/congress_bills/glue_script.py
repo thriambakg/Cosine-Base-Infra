@@ -856,38 +856,29 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
     return None
 
 
-def store_bill_text_to_s3(bill_id: str, text_content: bytes, format_type: str = "xml") -> str:
+def store_bill_text_to_s3(bill_id: str, text_content: bytes) -> str:
     """
-    Store bill text file to S3 in congress-bills/files/{bill_id}/{format_type}/ folder.
+    Store bill text HTML file to S3 in billtext/ folder.
     
     Args:
         bill_id: Bill ID (e.g., "119-HR-303")
-        text_content: Bill text content as bytes
-        format_type: Format type - "xml" or "html"
+        text_content: Bill text HTML content as bytes
         
     Returns:
         S3 key where the file was stored
     """
-    # Determine file extension and content type
-    if format_type.lower() == "html":
-        file_ext = ".html"
-        content_type = 'text/html'
-    else:
-        file_ext = ".xml"
-        content_type = 'application/xml'
-    
-    # Create S3 key: congress-bills/files/{bill_id}/{format_type}/bill.{ext}
-    s3_key = f"congress-bills/files/{bill_id}/{format_type.lower()}/bill{file_ext}"
+    # Create S3 key: billtext/{bill_id}.html
+    s3_key = f"billtext/{bill_id}.html"
     
     # Upload to S3 (S3 bucket encryption is handled at bucket level via Terraform)
     s3_client.put_object(
         Bucket=S3_BUCKET_NAME,
         Key=s3_key,
         Body=text_content,
-        ContentType=content_type
+        ContentType='text/html'
     )
     
-    log_print(f"      💾 Stored {format_type.upper()} bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
+    log_print(f"      💾 Stored HTML bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
     return s3_key
 
 
@@ -950,8 +941,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         elif isinstance(sponsors, list) and len(sponsors) > 0:
             primary_sponsor = sponsors[0]
     
-    # Fetch and store bill text in both XML and HTML formats (prefer "Introduced in House/Senate" version)
-    bill_text_xml_s3_key = ""
+    # Fetch and store bill text HTML format (prefer "Introduced in House/Senate" version)
     bill_text_html_s3_key = ""
     bill_id_str = f"{congress}-{bill_type}-{bill_number}"
     
@@ -989,37 +979,16 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
                 format_items = list(formats.values()) if formats else []
         
         if format_items:
-            xml_url = None
             html_url = None
             
-            # Find both XML and HTML URLs
+            # Find HTML URL (Formatted Text)
             for fmt_item in format_items:
                 if isinstance(fmt_item, dict):
                     fmt_type = fmt_item.get("type", "")
                     fmt_url = fmt_item.get("url")
                     
-                    if fmt_type == "Formatted XML" and fmt_url and not xml_url:
-                        xml_url = fmt_url
-                    elif fmt_type == "Formatted Text" and fmt_url and not html_url:
+                    if fmt_type == "Formatted Text" and fmt_url and not html_url:
                         html_url = fmt_url
-            
-            # Download and store XML (with error handling)
-            if xml_url:
-                try:
-                    log_print(f"      📄 [{thread_id}] Downloading XML bill text from {xml_url}...")
-                    xml_content = download_bill_text_file(xml_url)
-                    if xml_content:
-                        bill_text_xml_s3_key = store_bill_text_to_s3(bill_id_str, xml_content, "xml")
-                        log_print(f"      ✅ [{thread_id}] Stored XML bill text to S3: {bill_text_xml_s3_key}")
-                    else:
-                        log_print(f"      ⚠️  [{thread_id}] Failed to download XML bill text, setting key to empty")
-                        bill_text_xml_s3_key = ""
-                except Exception as e:
-                    log_print(f"      ⚠️  [{thread_id}] Error downloading XML bill text: {str(e)}, setting key to empty")
-                    bill_text_xml_s3_key = ""
-            else:
-                log_print(f"      ⚠️  [{thread_id}] No XML URL found, setting key to empty")
-                bill_text_xml_s3_key = ""
             
             # Download and store HTML (with error handling)
             if html_url:
@@ -1027,7 +996,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
                     log_print(f"      📄 [{thread_id}] Downloading HTML bill text from {html_url}...")
                     html_content = download_bill_text_file(html_url)
                     if html_content:
-                        bill_text_html_s3_key = store_bill_text_to_s3(bill_id_str, html_content, "html")
+                        bill_text_html_s3_key = store_bill_text_to_s3(bill_id_str, html_content)
                         log_print(f"      ✅ [{thread_id}] Stored HTML bill text to S3: {bill_text_html_s3_key}")
                     else:
                         log_print(f"      ⚠️  [{thread_id}] Failed to download HTML bill text, setting key to empty")
@@ -1039,8 +1008,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
                 log_print(f"      ⚠️  [{thread_id}] No HTML URL found, setting key to empty")
                 bill_text_html_s3_key = ""
         else:
-            log_print(f"      ⚠️  [{thread_id}] No format items found, setting both keys to empty")
-            bill_text_xml_s3_key = ""
+            log_print(f"      ⚠️  [{thread_id}] No format items found, setting key to empty")
             bill_text_html_s3_key = ""
     
     # Build comprehensive record
@@ -1053,8 +1021,7 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         "bill_title": bill.get("title") or (details.get("title") if details else ""),
         "bill_url": bill.get("url") or (details.get("url") if details else ""),
         
-        # Bill Text S3 Keys (both XML and HTML)
-        "bill_text_xml_s3_key": bill_text_xml_s3_key,
+        # Bill Text S3 Key (HTML)
         "bill_text_html_s3_key": bill_text_html_s3_key,
         
         # Dates (for sorting)
