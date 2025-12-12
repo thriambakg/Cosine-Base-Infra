@@ -2103,9 +2103,6 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
         'subawards_by_parent': all_subawards_by_parent,
         'csv_s3_keys': csv_s3_keys  # Include CSV S3 keys for DLQ processing
     }
-        'prime_awards': all_prime_awards,
-        'subawards_by_parent': all_subawards_by_parent
-    }
 
 # ============================================================================
 # Indexing Functions
