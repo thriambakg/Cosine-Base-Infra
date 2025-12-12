@@ -2089,7 +2089,8 @@ module "usaspending_individual_award_processor_lambda" {
   additional_policy_arns = [
     module.usaspending_awards_index_table.table_policy_arn,
     module.kms.kms_access_policy_arn,
-    aws_iam_policy.lambda_usaspending_data_s3_policy.arn
+    aws_iam_policy.lambda_usaspending_data_s3_policy.arn,
+    module.usaspending_dlq_queue.sqs_access_policy_arn
   ]
 
   tags = var.common_tags
@@ -2098,7 +2099,8 @@ module "usaspending_individual_award_processor_lambda" {
     module.usaspending_awards_index_table,
     module.usaspending_data_s3,
     module.kms,
-    module.core_layer
+    module.core_layer,
+    module.usaspending_dlq_queue
   ]
 }
 
