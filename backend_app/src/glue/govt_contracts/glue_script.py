@@ -267,7 +267,7 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
                 except (ValueError, TypeError, Exception):
                     # If conversion fails, store as string or skip
                     award_record[key] = normalize_string(value)
-    else:
+            else:
                 award_record[key] = normalize_string(value) if isinstance(value, str) else value
         
         # Map API fields to our format (override with our field names where needed)
