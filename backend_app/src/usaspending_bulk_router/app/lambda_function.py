@@ -73,3 +73,4 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         "END_DATE": end_date_str
     }
 
+

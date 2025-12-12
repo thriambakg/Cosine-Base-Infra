@@ -55,7 +55,8 @@ args = getResolvedOptions(sys.argv, [
     'AWARDS_TABLE_NAME',
     'S3_BUCKET_NAME',
     'REQUEST_TIMEOUT',
-    'ORPHAN_SUBAWARD_SQS_URL'
+    'ORPHAN_SUBAWARD_SQS_URL',
+    'DLQ_SQS_URL'
 ])
 
 # Get optional date parameters
@@ -101,8 +102,9 @@ dynamodb = boto3.resource('dynamodb')
 s3_client = boto3.client('s3')
 sqs_client = boto3.client('sqs')
 
-# SQS queue for orphan subawards
+# SQS queues
 ORPHAN_SUBAWARD_SQS_URL = args.get('ORPHAN_SUBAWARD_SQS_URL', '')
+DLQ_SQS_URL = args.get('DLQ_SQS_URL', '')
 awards_table = dynamodb.Table(AWARDS_TABLE_NAME)
 
 log_print(f"ℹ️ Configuration: Table={AWARDS_TABLE_NAME}, S3 Bucket={S3_BUCKET_NAME}, API={USASPENDING_BASE_URL}")
@@ -576,12 +578,12 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
         award_record['full_indexing_complete'] = False  # Will be set to True after subawards are added
         award_record['ttl'] = int((datetime.now(timezone.utc).timestamp() + (90 * 24 * 60 * 60)))
         
-        # Set is_assistance based on category
+        # Set is_assistance based on category (0 = contract, 1 = assistance)
         category = api_response.get('category', '').lower()
         if category == 'assistance':
-            award_record['is_assistance'] = b'\x01'
+            award_record['is_assistance'] = 1
         else:
-            award_record['is_assistance'] = b'\x00'
+            award_record['is_assistance'] = 0
         
         log_print(f"✅ Successfully fetched award {award_id} from API")
         return award_record
@@ -813,6 +815,36 @@ def store_oversized_item_to_s3(award_id: str, full_item: Dict[str, Any]) -> str:
     )
     
     log_print(f"   💾 Stored oversized award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
+    return s3_key
+
+
+def store_failed_award_to_s3(award_id: str, award_record: Dict[str, Any]) -> str:
+    """
+    Store failed award to S3 in failed/ folder for DLQ processing.
+    Returns the S3 key.
+    """
+    # Create S3 key: failed/{award_id}.json.gz
+    s3_key = f"failed/{award_id}.json.gz"
+    
+    # Convert Decimal values to JSON-serializable types
+    json_ready_item = convert_decimal_for_json(award_record)
+    
+    # Convert to JSON
+    json_data = json.dumps(json_ready_item, ensure_ascii=False, indent=2)
+    
+    # Compress and upload to S3
+    json_bytes = json_data.encode('utf-8')
+    compressed_data = gzip.compress(json_bytes)
+    
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_key,
+        Body=compressed_data,
+        ContentType='application/json',
+        ContentEncoding='gzip'
+    )
+    
+    log_print(f"   💾 Stored failed award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
     return s3_key
 
 
@@ -2068,6 +2100,10 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
     
     return {
         'prime_awards': all_prime_awards,
+        'subawards_by_parent': all_subawards_by_parent,
+        'csv_s3_keys': csv_s3_keys  # Include CSV S3 keys for DLQ processing
+    }
+        'prime_awards': all_prime_awards,
         'subawards_by_parent': all_subawards_by_parent
     }
 
@@ -2193,7 +2229,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         if 'period_of_performance_end_date' in db_item and 'period_end_date' not in db_item:
             db_item['period_end_date'] = db_item['period_of_performance_end_date']
         
-        # Set is_assistance binary field (0 = contract, 1 = assistance)
+        # Set is_assistance number field (0 = contract, 1 = assistance)
         # Check if it's an assistance award by looking for assistance-specific fields
         # Also check award_id format (ASST_ prefix indicates assistance)
         is_assistance = False
@@ -2212,8 +2248,8 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             # Default to contract if we can't determine
             is_assistance = False
         
-        # Store as binary (bytes): b'\x00' for contract (0), b'\x01' for assistance (1)
-        db_item['is_assistance'] = b'\x01' if is_assistance else b'\x00'
+        # Store as number: 0 for contract, 1 for assistance
+        db_item['is_assistance'] = 1 if is_assistance else 0
         
         # Get transactions and subawards (already in award_record from CSV parsing)
         transactions = award_record.get('transactions', [])
@@ -2536,8 +2572,10 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
         }
     
     except Exception as e:
-        log_print(f"❌ Error indexing award {award_record.get('award_id', 'unknown')}: {str(e)}")
+        award_id = award_record.get('award_id', 'unknown')
+        log_print(f"❌ Error indexing award {award_id}: {str(e)}")
         logger.error(f"❌ Error indexing award: {str(e)}", exc_info=True)
+        # Re-raise to be caught by the calling code which will send to DLQ
         raise
 
 # ============================================================================
@@ -2644,6 +2682,8 @@ def main():
                 subaward_file_list = [f for f in csv_s3_keys.keys() if 'subaward' in f.lower()]
                 
                 parse_results = _parse_csvs_from_s3(csv_s3_keys, prime_file_list, subaward_file_list, agency_name, start_date, end_date)
+                # Add csv_s3_keys to parse_results for DLQ processing
+                parse_results['csv_s3_keys'] = csv_s3_keys
             else:
                 # PHASE 1: GET - Request and wait for bulk download
                 log_print(f"\n🔵 PHASE 1: GET - Requesting Bulk Download for {agency_name}")
@@ -2671,6 +2711,9 @@ def main():
                 
                 parse_results = download_and_parse_all_csvs(file_url, agency_name=agency_name, start_date=start_date, end_date=end_date)
             prime_awards = parse_results['prime_awards']
+            # Track prime CSV S3 keys for this agency (for DLQ processing)
+            csv_s3_keys_dict = parse_results.get('csv_s3_keys', {})
+            prime_csv_s3_keys = [s3_key for filename, s3_key in csv_s3_keys_dict.items() if 'subaward' not in filename.lower()]
             
             if not prime_awards:
                 parse_phase_duration = time.time() - parse_phase_start
@@ -2735,12 +2778,13 @@ def main():
             
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
                 future_to_award = {
-                    executor.submit(index_award_complete, award_record): award_record['award_id']
+                    executor.submit(index_award_complete, award_record): award_record
                     for award_record in award_list
                 }
                 
                 for future in as_completed(future_to_award):
-                    award_id = future_to_award[future]
+                    award_record = future_to_award[future]
+                    award_id = award_record['award_id']
                     try:
                         result = future.result()
                         with _progress_lock:
@@ -2762,6 +2806,29 @@ def main():
                         error_msg = f"Award {award_id}: {str(e)[:200]}"
                         agency_errors.append(error_msg)
                         log_print(f"❌ {error_msg}")
+                        
+                        # Store failed award to S3 and send to DLQ for individual processing
+                        if DLQ_SQS_URL:
+                            try:
+                                # Store failed award as zipped JSON in S3
+                                failed_award_s3_key = store_failed_award_to_s3(award_id, award_record)
+                                
+                                # Send S3 key to DLQ
+                                message_body = {
+                                    'award_id': award_id,
+                                    'failed_award_s3_key': failed_award_s3_key
+                                }
+                                message_json = json.dumps(message_body, default=str)
+                                
+                                sqs_client.send_message(
+                                    QueueUrl=DLQ_SQS_URL,
+                                    MessageBody=message_json
+                                )
+                                log_print(f"📤 Sent failed award {award_id} to DLQ (stored at {failed_award_s3_key})")
+                            except Exception as dlq_error:
+                                log_print(f"⚠️ Failed to send award {award_id} to DLQ: {str(dlq_error)[:200]}")
+                        else:
+                            log_print(f"⚠️ DLQ_SQS_URL not configured, skipping DLQ for failed award {award_id}")
             
             store_phase_duration = time.time() - store_phase_start
             agency_duration = time.time() - agency_start_time

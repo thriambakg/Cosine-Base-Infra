@@ -1877,6 +1877,7 @@ module "usaspending_bulk_indexing_glue_job" {
     "--S3_BUCKET_NAME"          = module.usaspending_data_s3.bucket_id
     "--REQUEST_TIMEOUT"         = "30"
     "--ORPHAN_SUBAWARD_SQS_URL" = module.usaspending_orphan_subaward_queue.queue_url
+    "--DLQ_SQS_URL"             = module.usaspending_dlq_queue.queue_url
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -2041,6 +2042,110 @@ resource "aws_iam_role_policy_attachment" "glue_orphan_subaward_sqs" {
   ]
 }
 
+# SQS Queue for Failed Awards DLQ (Dead Letter Queue)
+module "usaspending_dlq_queue" {
+  source = "./modules/sqs"
+
+  project_name = var.project_name
+  environment  = var.environment
+  queue_name   = "usaspending-dlq"
+  purpose      = "Queue for failed awards that need individual processing"
+
+  message_retention_seconds     = 1209600 # 14 days
+  visibility_timeout_seconds    = 600     # 10 minutes (enough for CSV parsing + processing)
+  max_receive_count             = 3
+  enable_dlq                    = true
+  dlq_message_retention_seconds = 1209600 # 14 days
+
+  kms_key_id = module.kms.main_key_id
+
+  tags = var.common_tags
+}
+
+# Lambda Function for USAspending Individual Award Processor
+module "usaspending_individual_award_processor_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-usaspending-individual-award-processor-${var.environment}"
+  description   = "Processes individual awards from DLQ with full functionality including oversize support"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 900  # 15 minutes (enough for CSV parsing + processing + DynamoDB writes)
+  memory_size   = 1024 # Enough for CSV parsing and processing
+
+  source_dir = "${path.module}/../backend_app/src/usaspending_individual_award_processor/app"
+
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  environment_variables = {
+    AWARDS_TABLE_NAME    = module.usaspending_awards_index_table.table_name
+    S3_BUCKET_NAME       = module.usaspending_data_s3.bucket_id
+    USASPENDING_BASE_URL = "https://api.usaspending.gov"
+    LOG_LEVEL            = "INFO"
+  }
+
+  additional_policy_arns = [
+    module.usaspending_awards_index_table.table_policy_arn,
+    module.kms.kms_access_policy_arn,
+    aws_iam_policy.lambda_usaspending_data_s3_policy.arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.usaspending_awards_index_table,
+    module.usaspending_data_s3,
+    module.kms,
+    module.core_layer
+  ]
+}
+
+# IAM Policy for Glue Job to send messages to DLQ
+resource "aws_iam_policy" "glue_dlq_sqs_policy" {
+  name        = "${var.project_name}-glue-dlq-sqs-${var.environment}"
+  description = "Allows Glue job to send failed award messages to DLQ"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage"
+        ]
+        Resource = module.usaspending_dlq_queue.queue_arn
+      }
+    ]
+  })
+}
+
+# Attach DLQ SQS policy to Glue job role
+resource "aws_iam_role_policy_attachment" "glue_dlq_sqs" {
+  role       = module.usaspending_bulk_indexing_glue_job.role_name
+  policy_arn = aws_iam_policy.glue_dlq_sqs_policy.arn
+
+  depends_on = [
+    module.usaspending_bulk_indexing_glue_job,
+    aws_iam_policy.glue_dlq_sqs_policy
+  ]
+}
+
+# SQS Event Source Mapping for DLQ to Lambda (SQS triggers Lambda directly)
+resource "aws_lambda_event_source_mapping" "dlq_sqs_trigger" {
+  event_source_arn                   = module.usaspending_dlq_queue.queue_arn
+  function_name                      = module.usaspending_individual_award_processor_lambda.function_arn
+  batch_size                         = 1 # Process one award at a time
+  maximum_batching_window_in_seconds = 0
+  enabled                            = true
+
+  depends_on = [
+    module.usaspending_dlq_queue,
+    module.usaspending_individual_award_processor_lambda
+  ]
+}
+
 # Lambda Function for USAspending Bulk Router
 module "usaspending_bulk_router_lambda" {
   source = "./modules/lambda"
@@ -2134,39 +2239,7 @@ module "usaspending_bulk_indexing_state_machine" {
             Next          = "StartGlueJob"
           }
         ]
-        Default = "InvokeLambda"
-      }
-      InvokeLambda = {
-        Type     = "Task"
-        Resource = module.usaspending_bulk_fetcher_lambda.function_arn
-        Comment  = "Invoke Lambda for date ranges ≤2 days (15 min timeout)"
-        Parameters = {
-          "USASPENDING_BASE_URL" : "https://api.usaspending.gov"
-          "USASPENDING_USER_AGENT" : "Cosine Financial Platform (contact@cosine.financial)"
-          "AWARDS_TABLE_NAME.$" : "$.route.AWARDS_TABLE_NAME"
-          "S3_BUCKET_NAME.$" : "$.route.S3_BUCKET_NAME"
-          "REQUEST_TIMEOUT" : "30"
-          "MAX_RETRIES" : "5"
-          "RETRY_BASE_DELAY" : "2.0"
-          "START_DATE.$" : "$.route.START_DATE"
-          "END_DATE.$" : "$.route.END_DATE"
-        }
-        Retry = [
-          {
-            ErrorEquals     = ["Lambda.ServiceException", "Lambda.AWSLambdaException", "Lambda.SdkClientException"]
-            IntervalSeconds = 2
-            MaxAttempts     = 3
-            BackoffRate     = 2.0
-          }
-        ]
-        Catch = [
-          {
-            ErrorEquals = ["States.ALL"]
-            ResultPath  = "$.error"
-            Next        = "HandleError"
-          }
-        ]
-        Next = "Success"
+        Default = "StartGlueJob" # Always use Glue job now (Lambda removed)
       }
       StartGlueJob = {
         Type     = "Task"
@@ -2207,8 +2280,7 @@ module "usaspending_bulk_indexing_state_machine" {
 
   # Lambda function ARNs for IAM permissions
   lambda_function_arns = [
-    module.usaspending_bulk_router_lambda.function_arn,
-    module.usaspending_bulk_fetcher_lambda.function_arn
+    module.usaspending_bulk_router_lambda.function_arn
   ]
 
   # Glue job name for IAM permissions
@@ -2225,7 +2297,6 @@ module "usaspending_bulk_indexing_state_machine" {
 
   depends_on = [
     module.usaspending_bulk_router_lambda,
-    module.usaspending_bulk_fetcher_lambda,
     module.usaspending_bulk_indexing_glue_job
   ]
 }
@@ -3036,7 +3107,7 @@ module "usaspending_awards_index_table" {
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
     { name = "award_type", type = "S" },
-    { name = "is_assistance", type = "B" }
+    { name = "is_assistance", type = "N" }
   ]
 
   global_secondary_indexes = [
