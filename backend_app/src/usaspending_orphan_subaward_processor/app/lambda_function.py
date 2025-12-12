@@ -271,8 +271,8 @@ def fetch_award_from_api(award_id: str) -> Optional[Dict[str, Any]]:
         award_record['is_idv_child'] = api_response.get('is_idv_child', False)
         award_record['parent_idv_id'] = normalize_string(api_response.get('parent_idv_id', ''))
         
-        # Handle is_assistance (binary field)
-        award_record['is_assistance'] = b'\x01' if api_response.get('assistance_type', {}).get('name') else b'\x00'
+        # Handle is_assistance (number field: 0 = contract, 1 = assistance)
+        award_record['is_assistance'] = 1 if api_response.get('assistance_type', {}).get('name') else 0
         
         # Set category based on award type
         if award_record.get('award_type') in ['A', 'B', 'C', 'D', 'IDV']:
