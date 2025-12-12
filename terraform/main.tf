@@ -2306,6 +2306,7 @@ module "congress_bills_table" {
     { name = "bill_id", type = "S" },
     { name = "sponsor_full_name", type = "S" },
     { name = "sponsor_party", type = "S" },
+    { name = "sponsor_state", type = "S" },
     { name = "introduced_date", type = "S" },
     { name = "latest_action_date", type = "S" },
     { name = "congress", type = "N" },
@@ -2386,6 +2387,22 @@ module "congress_bills_table" {
       hash_key        = "policy_area"
       range_key       = "introduced_date"
       projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "SponsorStateDateIndex"
+      hash_key        = "sponsor_state"
+      range_key       = "introduced_date"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "IntroducedDateIndex"
+      hash_key        = "introduced_date"
+      range_key       = null
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     }
