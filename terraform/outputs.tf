@@ -560,6 +560,38 @@ output "lambda_usaspending_data_s3_policy_arn" {
   value       = aws_iam_policy.lambda_usaspending_data_s3_policy.arn
 }
 
+# Congress Bills Table Outputs
+output "congress_bills_table_name" {
+  description = "Name of the congress bills DynamoDB table"
+  value       = module.congress_bills_table.table_name
+}
+
+output "congress_bills_table_arn" {
+  description = "ARN of the congress bills DynamoDB table"
+  value       = module.congress_bills_table.table_arn
+}
+
+output "congress_bills_table_id" {
+  description = "ID of the congress bills DynamoDB table"
+  value       = module.congress_bills_table.table_id
+}
+
+output "congress_bills_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing the congress bills table"
+  value       = module.congress_bills_table.table_policy_arn
+}
+
+# Congress Bills Data S3 Bucket Outputs
+output "congress_bills_data_s3_bucket_name" {
+  description = "Name of the congress bills data S3 bucket"
+  value       = module.congress_bills_data_s3.bucket_id
+}
+
+output "congress_bills_data_s3_bucket_arn" {
+  description = "ARN of the congress bills data S3 bucket"
+  value       = module.congress_bills_data_s3.bucket_arn
+}
+
 # OpenSearch Domain Outputs
 # DISABLED FOR MVP - OpenSearch is not being used
 # output "opensearch_domain_endpoint" {
