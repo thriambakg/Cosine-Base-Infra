@@ -231,11 +231,6 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
     """
     bill_id = item.get('bill_id', 'unknown')
     
-    # Skip if already has bill_text_html_s3_key
-    if item.get('bill_text_html_s3_key'):
-        log_print(f"      ⏭️  {bill_id} already has HTML bill text S3 key, skipping")
-        return True, None
-    
     try:
         # Extract congress, bill_type, bill_number from bill_id (format: "119-HR-303")
         parts = bill_id.split('-')
@@ -252,14 +247,13 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
         text_versions = fetch_bill_text_versions(congress, bill_type, bill_number, api_key)
         if not text_versions:
             log_print(f"      ⚠️  No text versions found for {bill_id}, setting key to empty")
-            # Update DynamoDB with empty key
-            if not item.get('bill_text_html_s3_key'):
-                bills_table.update_item(
-                    Key={'bill_id': bill_id},
-                    UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                    ExpressionAttributeValues={':html_key': ""}
-                )
-                log_print(f"      ✅ Updated {bill_id} with empty bill text S3 key")
+            # Update DynamoDB with empty key (overwrite existing)
+            bills_table.update_item(
+                Key={'bill_id': bill_id},
+                UpdateExpression="SET bill_text_html_s3_key = :html_key",
+                ExpressionAttributeValues={':html_key': ""}
+            )
+            log_print(f"      ✅ Updated {bill_id} with empty bill text S3 key")
             return True, None
         
         # Find the "Introduced" version first, fallback to first available
@@ -305,39 +299,30 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
                     if fmt_type == "Formatted Text" and fmt_url and not html_url:
                         html_url = fmt_url
             
-            # Download and store HTML (with error handling)
-            if not item.get('bill_text_html_s3_key'):
-                if html_url:
-                    try:
-                        log_print(f"      📄 Downloading HTML bill text from {html_url}...")
-                        html_content = download_bill_text_file(html_url)
-                        if html_content:
-                            bill_text_html_s3_key = store_bill_text_to_s3(bill_id, html_content)
-                            bills_table.update_item(
-                                Key={'bill_id': bill_id},
-                                UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                                ExpressionAttributeValues={':html_key': bill_text_html_s3_key}
-                            )
-                            log_print(f"      ✅ Stored HTML bill text to S3: {bill_text_html_s3_key}")
-                            return True, None
-                        else:
-                            log_print(f"      ⚠️  Failed to download HTML bill text, setting key to empty")
-                            bills_table.update_item(
-                                Key={'bill_id': bill_id},
-                                UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                                ExpressionAttributeValues={':html_key': ""}
-                            )
-                            return True, None
-                    except Exception as e:
-                        log_print(f"      ⚠️  Error downloading HTML bill text: {str(e)}, setting key to empty")
+            # Download and store HTML (with error handling) - always overwrite
+            if html_url:
+                try:
+                    log_print(f"      📄 Downloading HTML bill text from {html_url}...")
+                    html_content = download_bill_text_file(html_url)
+                    if html_content:
+                        bill_text_html_s3_key = store_bill_text_to_s3(bill_id, html_content)
+                        bills_table.update_item(
+                            Key={'bill_id': bill_id},
+                            UpdateExpression="SET bill_text_html_s3_key = :html_key",
+                            ExpressionAttributeValues={':html_key': bill_text_html_s3_key}
+                        )
+                        log_print(f"      ✅ Stored HTML bill text to S3: {bill_text_html_s3_key}")
+                        return True, None
+                    else:
+                        log_print(f"      ⚠️  Failed to download HTML bill text, setting key to empty")
                         bills_table.update_item(
                             Key={'bill_id': bill_id},
                             UpdateExpression="SET bill_text_html_s3_key = :html_key",
                             ExpressionAttributeValues={':html_key': ""}
                         )
                         return True, None
-                else:
-                    log_print(f"      ⚠️  No HTML URL found, setting key to empty")
+                except Exception as e:
+                    log_print(f"      ⚠️  Error downloading HTML bill text: {str(e)}, setting key to empty")
                     bills_table.update_item(
                         Key={'bill_id': bill_id},
                         UpdateExpression="SET bill_text_html_s3_key = :html_key",
@@ -345,7 +330,12 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
                     )
                     return True, None
             else:
-                # Key already exists, nothing to update
+                log_print(f"      ⚠️  No HTML URL found, setting key to empty")
+                bills_table.update_item(
+                    Key={'bill_id': bill_id},
+                    UpdateExpression="SET bill_text_html_s3_key = :html_key",
+                    ExpressionAttributeValues={':html_key': ""}
+                )
                 return True, None
         else:
             # No format items found, set key to empty
@@ -384,7 +374,7 @@ def main():
         raise
     
     # Scan all items from DynamoDB
-    log_print("📋 Scanning DynamoDB table for bills without bill_text_html_s3_key...")
+    log_print("📋 Scanning DynamoDB table for all bills...")
     log_print("-" * 80)
     
     items_to_process = []
@@ -399,15 +389,12 @@ def main():
         response = bills_table.scan(**scan_params)
         items = response.get('Items', [])
         
-        # Filter items that don't have bill_text_html_s3_key
-        for item in items:
-            bill_text_html_s3_key = item.get('bill_text_html_s3_key', '')
-            if not bill_text_html_s3_key or bill_text_html_s3_key == '':
-                items_to_process.append(item)
+        # Add all items (no filtering - will overwrite existing keys)
+        items_to_process.extend(items)
         
         scan_count += len(items)
         
-        log_print(f"   📊 Scanned {scan_count} items, found {len(items_to_process)} items missing HTML bill text S3 key")
+        log_print(f"   📊 Scanned {scan_count} items, total items to process: {len(items_to_process)}")
         
         last_evaluated_key = response.get('LastEvaluatedKey')
         if not last_evaluated_key:
@@ -417,28 +404,24 @@ def main():
     log_print("")
     
     if len(items_to_process) == 0:
-        log_print("✅ No items to process. All bills already have HTML bill text S3 key.")
+        log_print("✅ No items to process.")
         job.commit()
         return
     
     # Process items sequentially with backoff
     log_print("🔍 Processing bills and fetching bill text...")
     log_print("-" * 80)
-    log_print(f"   📋 Processing {len(items_to_process)} bills sequentially with backoff...")
+    log_print(f"   📋 Processing {len(items_to_process)} bills sequentially with backoff (will overwrite existing keys)...")
     
     processed_count = 0
     error_count = 0
-    skipped_count = 0
     
     # Process bills sequentially
     for idx, bill_item in enumerate(items_to_process, 1):
         try:
             success, error_msg = process_bill_item(bill_item, api_key)
-            skipped = (bill_item.get('bill_text_html_s3_key') is not None and bill_item.get('bill_text_html_s3_key') != '')
             
-            if skipped:
-                skipped_count += 1
-            elif success:
+            if success:
                 processed_count += 1
             else:
                 error_count += 1
@@ -449,7 +432,7 @@ def main():
             log_print(f"      ❌ Exception processing bill {bill_item.get('bill_id', 'unknown')}: {str(e)}")
         
         if idx % 10 == 0:
-            log_print(f"      ✅ Processed {idx}/{len(items_to_process)} bills... (success: {processed_count}, errors: {error_count}, skipped: {skipped_count})")
+            log_print(f"      ✅ Processed {idx}/{len(items_to_process)} bills... (success: {processed_count}, errors: {error_count})")
         
         # Rate limiting - be respectful to Congress.gov API
         # Delay between requests to avoid rate limiting
@@ -459,8 +442,6 @@ def main():
     log_print(f"\n✅ Processed {processed_count} bills successfully")
     if error_count > 0:
         log_print(f"⚠️ {error_count} bills had errors")
-    if skipped_count > 0:
-        log_print(f"⏭️  {skipped_count} bills were skipped (already have HTML bill text S3 key)")
     
     log_print("")
     log_print("=" * 80)
