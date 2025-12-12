@@ -97,14 +97,36 @@ def get_congress_api_key() -> str:
         raise ValueError(f"Failed to retrieve Congress API key from Secrets Manager: {str(e)}")
 
 def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
-    """Make API request with retry logic."""
+    """Make API request with retry logic and exponential backoff for rate limiting."""
     if "api_key" not in params:
         params["api_key"] = api_key
     for attempt in range(retries):
         try:
             response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            
+            # Handle 429 Too Many Requests with exponential backoff
+            if response.status_code == 429:
+                if attempt < retries - 1:
+                    # Exponential backoff: 2^attempt seconds, with a minimum of 5 seconds for 429
+                    wait_time = max(5, (2 ** attempt) * RETRY_DELAY)
+                    log_print(f"      ⚠️ Rate limited (429) - waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    log_print(f"      ❌ Rate limited (429) after {retries} attempts")
+                    return None
+            
             response.raise_for_status()
             return response.json()
+        except requests.exceptions.HTTPError as e:
+            if attempt < retries - 1:
+                # For other HTTP errors, use linear backoff
+                wait_time = RETRY_DELAY * (attempt + 1)
+                log_print(f"      ⚠️ Request failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
+                time.sleep(wait_time)
+            else:
+                log_print(f"      ❌ Request failed after {retries} attempts: {str(e)[:100]}")
+                return None
         except requests.exceptions.RequestException as e:
             if attempt < retries - 1:
                 wait_time = RETRY_DELAY * (attempt + 1)
@@ -138,12 +160,34 @@ def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, ap
     return text_versions if isinstance(text_versions, list) else []
 
 def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Optional[bytes]:
-    """Download bill text file (XML/HTML) from Congress.gov."""
+    """Download bill text file (XML/HTML) from Congress.gov with exponential backoff for rate limiting."""
     for attempt in range(retries):
         try:
             response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2)
+            
+            # Handle 429 Too Many Requests with exponential backoff
+            if response.status_code == 429:
+                if attempt < retries - 1:
+                    # Exponential backoff: 2^attempt seconds, with a minimum of 10 seconds for 429
+                    wait_time = max(10, (2 ** attempt) * RETRY_DELAY * 2)
+                    log_print(f"      ⚠️ Rate limited (429) - waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    log_print(f"      ❌ Rate limited (429) after {retries} attempts")
+                    return None
+            
             response.raise_for_status()
             return response.content
+        except requests.exceptions.HTTPError as e:
+            if attempt < retries - 1:
+                # For other HTTP errors, use linear backoff
+                wait_time = RETRY_DELAY * (attempt + 1)
+                log_print(f"      ⚠️ Download failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
+                time.sleep(wait_time)
+            else:
+                log_print(f"      ❌ Download failed after {retries} attempts: {str(e)[:100]}")
+                return None
         except requests.exceptions.RequestException as e:
             if attempt < retries - 1:
                 wait_time = RETRY_DELAY * (attempt + 1)
@@ -426,7 +470,8 @@ def main():
                 log_print(f"      ✅ Processed {completed}/{len(items_to_process)} bills... (success: {processed_count}, errors: {error_count}, skipped: {skipped_count})")
             
             # Rate limiting - be respectful to Congress.gov API
-            time.sleep(0.1)
+            # Increased delay to reduce 429 errors
+            time.sleep(0.5)
     
     log_print(f"\n✅ Processed {processed_count} bills successfully")
     if error_count > 0:

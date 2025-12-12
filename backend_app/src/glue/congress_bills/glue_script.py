@@ -452,18 +452,31 @@ def get_current_congress(api_key: str) -> int:
 
 
 def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
-    """Make API request with retry logic."""
+    """Make API request with retry logic and exponential backoff for rate limiting."""
     # Ensure API key is in params
     if "api_key" not in params:
         params["api_key"] = api_key
-    """Make API request with retry logic."""
     for attempt in range(retries):
         try:
             response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            
+            # Handle 429 Too Many Requests with exponential backoff
+            if response.status_code == 429:
+                if attempt < retries - 1:
+                    # Exponential backoff: 2^attempt seconds, with a minimum of 5 seconds for 429
+                    wait_time = max(5, (2 ** attempt) * RETRY_DELAY)
+                    log_print(f"      ⚠️ Rate limited (429) - waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    log_print(f"      ❌ Rate limited (429) after {retries} attempts")
+                    return None
+            
             response.raise_for_status()
             return response.json()
-        except requests.exceptions.RequestException as e:
+        except requests.exceptions.HTTPError as e:
             if attempt < retries - 1:
+                # For other HTTP errors, use linear backoff
                 wait_time = RETRY_DELAY * (attempt + 1)
                 log_print(f"      ⚠️ Request failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
                 time.sleep(wait_time)
@@ -831,10 +844,10 @@ def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, ap
 
 def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Optional[bytes]:
     """
-    Download bill text file (XML/HTML) from Congress.gov.
+    Download bill text file (XML/HTML) from Congress.gov with exponential backoff for rate limiting.
     
     Args:
-        text_url: URL to the bill text file (e.g., https://www.congress.gov/119/bills/hr303/BILLS-119hr303ih.xml)
+        text_url: URL to the bill text file (e.g., https://www.congress.gov/119/bills/hr303/BILLS-119hr303ih.html)
         retries: Number of retry attempts
         
     Returns:
@@ -843,8 +856,30 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
     for attempt in range(retries):
         try:
             response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2)  # Longer timeout for file downloads
+            
+            # Handle 429 Too Many Requests with exponential backoff
+            if response.status_code == 429:
+                if attempt < retries - 1:
+                    # Exponential backoff: 2^attempt seconds, with a minimum of 10 seconds for 429
+                    wait_time = max(10, (2 ** attempt) * RETRY_DELAY * 2)
+                    log_print(f"      ⚠️ Rate limited (429) - waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    log_print(f"      ❌ Rate limited (429) after {retries} attempts")
+                    return None
+            
             response.raise_for_status()
             return response.content
+        except requests.exceptions.HTTPError as e:
+            if attempt < retries - 1:
+                # For other HTTP errors, use linear backoff
+                wait_time = RETRY_DELAY * (attempt + 1)
+                log_print(f"      ⚠️ Download failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
+                time.sleep(wait_time)
+            else:
+                log_print(f"      ❌ Download failed after {retries} attempts: {str(e)[:100]}")
+                return None
         except requests.exceptions.RequestException as e:
             if attempt < retries - 1:
                 wait_time = RETRY_DELAY * (attempt + 1)
