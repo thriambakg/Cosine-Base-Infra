@@ -1,14 +1,14 @@
 """
 AWS Glue Job: Congress Bills Bill Text Backfill
-Temporary job to backfill bill_text_s3_key for existing bills in DynamoDB.
+Temporary job to backfill bill_text_xml_s3_key and bill_text_html_s3_key for existing bills in DynamoDB.
 
 This job:
 1. Scans all items in the congress-bills DynamoDB table
-2. For each item without bill_text_s3_key:
+2. For each item without bill_text_xml_s3_key or bill_text_html_s3_key:
    - Fetches bill text versions from Congress.gov API
-   - Downloads the bill text file (XML/HTML)
-   - Stores it in S3
-   - Updates the DynamoDB item with bill_text_s3_key
+   - Downloads both XML and HTML versions of the bill text
+   - Stores them in S3 under congress-bills/files/{bill_id}/xml/ and congress-bills/files/{bill_id}/html/
+   - Updates the DynamoDB item with bill_text_xml_s3_key and bill_text_html_s3_key
 
 This is a one-time migration job.
 """
@@ -154,26 +154,38 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
                 return None
     return None
 
-def store_bill_text_to_s3(bill_id: str, text_content: bytes, text_version_type: str = "introduced") -> str:
-    """Store bill text file to S3 in bill_text/ folder."""
-    # Determine file extension
-    file_ext = ".xml"
-    if text_content.startswith(b'<!DOCTYPE html') or text_content.startswith(b'<html'):
-        file_ext = ".html"
+def store_bill_text_to_s3(bill_id: str, text_content: bytes, format_type: str = "xml") -> str:
+    """
+    Store bill text file to S3 in congress-bills/files/{bill_id}/{format_type}/ folder.
     
-    # Create S3 key
-    safe_version_type = re.sub(r'[^a-zA-Z0-9_-]', '_', text_version_type.lower())
-    s3_key = f"bill_text/{bill_id}_{safe_version_type}{file_ext}"
+    Args:
+        bill_id: Bill ID (e.g., "119-HR-303")
+        text_content: Bill text content as bytes
+        format_type: Format type - "xml" or "html"
+        
+    Returns:
+        S3 key where the file was stored
+    """
+    # Determine file extension and content type
+    if format_type.lower() == "html":
+        file_ext = ".html"
+        content_type = 'text/html'
+    else:
+        file_ext = ".xml"
+        content_type = 'application/xml'
+    
+    # Create S3 key: congress-bills/files/{bill_id}/{format_type}/bill.{ext}
+    s3_key = f"congress-bills/files/{bill_id}/{format_type.lower()}/bill{file_ext}"
     
     # Upload to S3
     s3_client.put_object(
         Bucket=S3_BUCKET_NAME,
         Key=s3_key,
         Body=text_content,
-        ContentType='application/xml' if file_ext == '.xml' else 'text/html'
+        ContentType=content_type
     )
     
-    log_print(f"      💾 Stored bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
+    log_print(f"      💾 Stored {format_type.upper()} bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
     return s3_key
 
 def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optional[str]]:
@@ -185,9 +197,9 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
     """
     bill_id = item.get('bill_id', 'unknown')
     
-    # Skip if already has bill_text_s3_key
-    if item.get('bill_text_s3_key'):
-        log_print(f"      ⏭️  {bill_id} already has bill_text_s3_key, skipping")
+    # Skip if already has both bill_text_xml_s3_key and bill_text_html_s3_key
+    if item.get('bill_text_xml_s3_key') and item.get('bill_text_html_s3_key'):
+        log_print(f"      ⏭️  {bill_id} already has both XML and HTML bill text S3 keys, skipping")
         return True, None
     
     try:
@@ -218,39 +230,80 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
         
         selected_version = introduced_version if introduced_version else text_versions[0]
         
-        # Get the Formatted XML URL
+        # Get the formats
         formats = selected_version.get("formats", {})
-        if isinstance(formats, dict):
-            format_items = formats.get("item", [])
-            if isinstance(format_items, list):
-                for fmt_item in format_items:
-                    if fmt_item.get("type") == "Formatted XML":
-                        text_url = fmt_item.get("url")
-                        if text_url:
-                            log_print(f"      📄 Downloading bill text from {text_url}...")
-                            text_content = download_bill_text_file(text_url)
-                            if text_content:
-                                version_type_name = selected_version.get("type", "introduced")
-                                bill_text_s3_key = store_bill_text_to_s3(
-                                    bill_id,
-                                    text_content,
-                                    version_type_name
-                                )
-                                
-                                # Update DynamoDB item
-                                bills_table.update_item(
-                                    Key={'bill_id': bill_id},
-                                    UpdateExpression='SET bill_text_s3_key = :s3_key',
-                                    ExpressionAttributeValues={':s3_key': bill_text_s3_key}
-                                )
-                                
-                                log_print(f"      ✅ Updated {bill_id} with bill_text_s3_key: {bill_text_s3_key}")
-                                return True, None
-                            else:
-                                return False, "Failed to download bill text"
-                        break
+        format_items = []
         
-        return False, "No Formatted XML URL found"
+        # Handle different formats structures
+        if isinstance(formats, list):
+            # formats is already a list
+            format_items = formats
+        elif isinstance(formats, dict):
+            # formats is a dict, might have "item" key or be the list itself
+            if "item" in formats:
+                item_data = formats["item"]
+                if isinstance(item_data, list):
+                    format_items = item_data
+                elif isinstance(item_data, dict):
+                    # Single item wrapped in dict
+                    format_items = [item_data]
+            else:
+                # Check if dict values are format items
+                format_items = list(formats.values()) if formats else []
+        
+        if format_items:
+            xml_url = None
+            html_url = None
+            
+            # Find both XML and HTML URLs
+            for fmt_item in format_items:
+                if isinstance(fmt_item, dict):
+                    fmt_type = fmt_item.get("type", "")
+                    fmt_url = fmt_item.get("url")
+                    
+                    if fmt_type == "Formatted XML" and fmt_url and not xml_url:
+                        xml_url = fmt_url
+                    elif fmt_type == "Formatted Text" and fmt_url and not html_url:
+                        html_url = fmt_url
+            
+            # Track what we need to update
+            update_expression_parts = []
+            expression_attribute_values = {}
+            
+            # Download and store XML
+            if xml_url and not item.get('bill_text_xml_s3_key'):
+                log_print(f"      📄 Downloading XML bill text from {xml_url}...")
+                xml_content = download_bill_text_file(xml_url)
+                if xml_content:
+                    bill_text_xml_s3_key = store_bill_text_to_s3(bill_id, xml_content, "xml")
+                    update_expression_parts.append("bill_text_xml_s3_key = :xml_key")
+                    expression_attribute_values[':xml_key'] = bill_text_xml_s3_key
+                    log_print(f"      ✅ Stored XML bill text to S3: {bill_text_xml_s3_key}")
+            
+            # Download and store HTML
+            if html_url and not item.get('bill_text_html_s3_key'):
+                log_print(f"      📄 Downloading HTML bill text from {html_url}...")
+                html_content = download_bill_text_file(html_url)
+                if html_content:
+                    bill_text_html_s3_key = store_bill_text_to_s3(bill_id, html_content, "html")
+                    update_expression_parts.append("bill_text_html_s3_key = :html_key")
+                    expression_attribute_values[':html_key'] = bill_text_html_s3_key
+                    log_print(f"      ✅ Stored HTML bill text to S3: {bill_text_html_s3_key}")
+            
+            # Update DynamoDB item if we stored anything
+            if update_expression_parts:
+                bills_table.update_item(
+                    Key={'bill_id': bill_id},
+                    UpdateExpression=f"SET {', '.join(update_expression_parts)}",
+                    ExpressionAttributeValues=expression_attribute_values
+                )
+                
+                log_print(f"      ✅ Updated {bill_id} with bill text S3 keys")
+                return True, None
+            else:
+                return False, "No new bill text files to download"
+        
+        return False, "No format URLs found"
         
     except Exception as e:
         error_msg = f"Error processing {bill_id}: {str(e)}"
@@ -278,7 +331,7 @@ def main():
         raise
     
     # Scan all items from DynamoDB
-    log_print("📋 Scanning DynamoDB table for bills without bill_text_s3_key...")
+    log_print("📋 Scanning DynamoDB table for bills without bill_text_xml_s3_key or bill_text_html_s3_key...")
     log_print("-" * 80)
     
     items_to_process = []
@@ -293,15 +346,16 @@ def main():
         response = bills_table.scan(**scan_params)
         items = response.get('Items', [])
         
-        # Filter items that don't have bill_text_s3_key or have empty value
+        # Filter items that don't have both bill_text_xml_s3_key and bill_text_html_s3_key
         for item in items:
-            bill_text_s3_key = item.get('bill_text_s3_key', '')
-            if not bill_text_s3_key or bill_text_s3_key == '':
+            bill_text_xml_s3_key = item.get('bill_text_xml_s3_key', '')
+            bill_text_html_s3_key = item.get('bill_text_html_s3_key', '')
+            if not bill_text_xml_s3_key or bill_text_xml_s3_key == '' or not bill_text_html_s3_key or bill_text_html_s3_key == '':
                 items_to_process.append(item)
         
         scan_count += len(items)
         
-        log_print(f"   📊 Scanned {scan_count} items, found {len(items_to_process)} items without bill_text_s3_key")
+        log_print(f"   📊 Scanned {scan_count} items, found {len(items_to_process)} items missing XML or HTML bill text S3 keys")
         
         last_evaluated_key = response.get('LastEvaluatedKey')
         if not last_evaluated_key:
@@ -311,7 +365,7 @@ def main():
     log_print("")
     
     if len(items_to_process) == 0:
-        log_print("✅ No items to process. All bills already have bill_text_s3_key.")
+        log_print("✅ No items to process. All bills already have both XML and HTML bill text S3 keys.")
         job.commit()
         return
     
@@ -327,7 +381,8 @@ def main():
     def process_bill(bill_item: Dict) -> Tuple[bool, Optional[str], bool]:
         """Process a single bill and return (success, error_message, skipped)"""
         success, error_msg = process_bill_item(bill_item, api_key)
-        skipped = bill_item.get('bill_text_s3_key') is not None and bill_item.get('bill_text_s3_key') != ''
+        skipped = (bill_item.get('bill_text_xml_s3_key') is not None and bill_item.get('bill_text_xml_s3_key') != '' and
+                   bill_item.get('bill_text_html_s3_key') is not None and bill_item.get('bill_text_html_s3_key') != '')
         return success, error_msg, skipped
     
     # Process bills in parallel
@@ -369,7 +424,7 @@ def main():
     if error_count > 0:
         log_print(f"⚠️ {error_count} bills had errors")
     if skipped_count > 0:
-        log_print(f"⏭️  {skipped_count} bills were skipped (already have bill_text_s3_key)")
+        log_print(f"⏭️  {skipped_count} bills were skipped (already have both XML and HTML bill text S3 keys)")
     
     log_print("")
     log_print("=" * 80)
@@ -390,4 +445,5 @@ if __name__ == "__main__":
         logger.error(f"❌ {error_msg}", exc_info=True)
         logger.error(f"❌ Traceback:\n{error_traceback}")
         raise
+
 

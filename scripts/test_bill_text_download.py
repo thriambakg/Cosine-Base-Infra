@@ -62,20 +62,45 @@ def download_bill_text_file(text_url: str, output_path: Path):
     response = requests.get(text_url, timeout=60)
     response.raise_for_status()
     
-    # Determine file extension from URL or content
-    file_ext = ".xml"
     content = response.content
-    if text_url.endswith('.html') or content.startswith(b'<!DOCTYPE html') or content.startswith(b'<html'):
-        file_ext = ".html"
-    elif text_url.endswith('.xml'):
-        file_ext = ".xml"
+    
+    # Determine file extension and content type based on content (similar to SEC logic)
+    # Check first 1000 bytes for content type indicators
+    content_start = content[:1000] if len(content) >= 1000 else content
+    content_start_lower = content_start.lower()
+    
+    # Check for XML indicators first (XML declaration takes precedence)
+    is_xml = (content.startswith(b'<?xml') or 
+              b'<?xml version' in content_start_lower or
+              b'<bill' in content_start_lower or
+              b'<legis-body' in content_start_lower or
+              b'<!DOCTYPE bill' in content_start_lower)
+    
+    # Check for HTML indicators (but XML takes precedence)
+    is_html = (not is_xml and (
+        b'<!doctype html' in content_start_lower or
+        b'<html' in content_start_lower or
+        b'<head>' in content_start_lower or
+        b'<body>' in content_start_lower
+    ))
+    
+    # Determine content type for display
+    if is_xml:
+        content_type = 'application/xml'
+    elif is_html:
+        content_type = 'text/html'
+    else:
+        content_type = 'application/xml'
+    
+    # Always save as HTML file (even if content is XML)
+    file_ext = ".html"
     
     # Save to file
     output_file = output_path.with_suffix(file_ext)
     with open(output_file, 'wb') as f:
         f.write(content)
     
-    print(f"✅ Downloaded {len(content):,} bytes to: {output_file}")
+    print(f"✅ Downloaded {len(content):,} bytes to: {output_file} ({content_type})")
     return output_file
 
 def main():
@@ -125,19 +150,36 @@ def main():
         text_url = None
         format_type = None
         
-        if isinstance(formats, dict):
-            format_items = formats.get("item", [])
-            if isinstance(format_items, list):
-                # Try Formatted XML first
-                for fmt_item in format_items:
-                    if fmt_item.get("type") == "Formatted XML":
-                        text_url = fmt_item.get("url")
-                        format_type = "Formatted XML"
-                        break
-                
-                # Fallback to other formats if XML not available
-                if not text_url and format_items:
-                    fmt_item = format_items[0]
+        # Handle different formats structures
+        format_items = []
+        if isinstance(formats, list):
+            # formats is already a list
+            format_items = formats
+        elif isinstance(formats, dict):
+            # formats is a dict, might have "item" key or be the list itself
+            if "item" in formats:
+                item_data = formats["item"]
+                if isinstance(item_data, list):
+                    format_items = item_data
+                elif isinstance(item_data, dict):
+                    # Single item wrapped in dict
+                    format_items = [item_data]
+            else:
+                # Check if dict values are format items
+                format_items = list(formats.values()) if formats else []
+        
+        if format_items:
+            # Try Formatted XML first
+            for fmt_item in format_items:
+                if isinstance(fmt_item, dict) and fmt_item.get("type") == "Formatted XML":
+                    text_url = fmt_item.get("url")
+                    format_type = "Formatted XML"
+                    break
+            
+            # Fallback to other formats if XML not available
+            if not text_url and format_items:
+                fmt_item = format_items[0]
+                if isinstance(fmt_item, dict):
                     text_url = fmt_item.get("url")
                     format_type = fmt_item.get("type", "Unknown")
         

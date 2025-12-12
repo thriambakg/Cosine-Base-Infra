@@ -289,3 +289,4 @@ def lambda_handler(event, context):
             'failed': failure_count
         })
     }
+
