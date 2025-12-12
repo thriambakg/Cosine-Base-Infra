@@ -20,7 +20,7 @@ import time
 import requests
 import re
 from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional
+from typing import Dict, List, Any, Optional, Tuple
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from awsglue.utils import getResolvedOptions

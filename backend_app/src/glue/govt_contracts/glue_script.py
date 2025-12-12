@@ -754,7 +754,16 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def convert_decimal_for_json(obj: Any) -> Any:
-    """Recursively convert Decimal to float/string for JSON serialization"""
+    """Recursively convert Decimal, Binary, and bytes to JSON-serializable types"""
+    # Handle DynamoDB Binary type (from boto3.dynamodb.types)
+    try:
+        from boto3.dynamodb.types import Binary as DynamoDBBinary
+        if isinstance(obj, DynamoDBBinary):
+            # Convert DynamoDB Binary to bytes, then handle as bytes
+            obj = obj.value
+    except ImportError:
+        pass
+    
     if isinstance(obj, Decimal):
         # Convert Decimal to float for JSON (preserves precision for most cases)
         try:
