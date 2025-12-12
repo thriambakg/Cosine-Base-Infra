@@ -1003,21 +1003,45 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
                     elif fmt_type == "Formatted Text" and fmt_url and not html_url:
                         html_url = fmt_url
             
-            # Download and store XML
+            # Download and store XML (with error handling)
             if xml_url:
-                log_print(f"      📄 [{thread_id}] Downloading XML bill text from {xml_url}...")
-                xml_content = download_bill_text_file(xml_url)
-                if xml_content:
-                    bill_text_xml_s3_key = store_bill_text_to_s3(bill_id_str, xml_content, "xml")
-                    log_print(f"      ✅ [{thread_id}] Stored XML bill text to S3: {bill_text_xml_s3_key}")
+                try:
+                    log_print(f"      📄 [{thread_id}] Downloading XML bill text from {xml_url}...")
+                    xml_content = download_bill_text_file(xml_url)
+                    if xml_content:
+                        bill_text_xml_s3_key = store_bill_text_to_s3(bill_id_str, xml_content, "xml")
+                        log_print(f"      ✅ [{thread_id}] Stored XML bill text to S3: {bill_text_xml_s3_key}")
+                    else:
+                        log_print(f"      ⚠️  [{thread_id}] Failed to download XML bill text, setting key to empty")
+                        bill_text_xml_s3_key = ""
+                except Exception as e:
+                    log_print(f"      ⚠️  [{thread_id}] Error downloading XML bill text: {str(e)}, setting key to empty")
+                    bill_text_xml_s3_key = ""
+            else:
+                log_print(f"      ⚠️  [{thread_id}] No XML URL found, setting key to empty")
+                bill_text_xml_s3_key = ""
             
-            # Download and store HTML
+            # Download and store HTML (with error handling)
             if html_url:
-                log_print(f"      📄 [{thread_id}] Downloading HTML bill text from {html_url}...")
-                html_content = download_bill_text_file(html_url)
-                if html_content:
-                    bill_text_html_s3_key = store_bill_text_to_s3(bill_id_str, html_content, "html")
-                    log_print(f"      ✅ [{thread_id}] Stored HTML bill text to S3: {bill_text_html_s3_key}")
+                try:
+                    log_print(f"      📄 [{thread_id}] Downloading HTML bill text from {html_url}...")
+                    html_content = download_bill_text_file(html_url)
+                    if html_content:
+                        bill_text_html_s3_key = store_bill_text_to_s3(bill_id_str, html_content, "html")
+                        log_print(f"      ✅ [{thread_id}] Stored HTML bill text to S3: {bill_text_html_s3_key}")
+                    else:
+                        log_print(f"      ⚠️  [{thread_id}] Failed to download HTML bill text, setting key to empty")
+                        bill_text_html_s3_key = ""
+                except Exception as e:
+                    log_print(f"      ⚠️  [{thread_id}] Error downloading HTML bill text: {str(e)}, setting key to empty")
+                    bill_text_html_s3_key = ""
+            else:
+                log_print(f"      ⚠️  [{thread_id}] No HTML URL found, setting key to empty")
+                bill_text_html_s3_key = ""
+        else:
+            log_print(f"      ⚠️  [{thread_id}] No format items found, setting both keys to empty")
+            bill_text_xml_s3_key = ""
+            bill_text_html_s3_key = ""
     
     # Build comprehensive record
     record = {

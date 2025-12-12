@@ -217,8 +217,26 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
         # Fetch text versions
         text_versions = fetch_bill_text_versions(congress, bill_type, bill_number, api_key)
         if not text_versions:
-            log_print(f"      ⚠️  No text versions found for {bill_id}")
-            return False, "No text versions available"
+            log_print(f"      ⚠️  No text versions found for {bill_id}, setting both keys to empty")
+            # Update DynamoDB with empty keys
+            update_expression_parts = []
+            expression_attribute_values = {}
+            
+            if not item.get('bill_text_xml_s3_key'):
+                update_expression_parts.append("bill_text_xml_s3_key = :xml_key")
+                expression_attribute_values[':xml_key'] = ""
+            if not item.get('bill_text_html_s3_key'):
+                update_expression_parts.append("bill_text_html_s3_key = :html_key")
+                expression_attribute_values[':html_key'] = ""
+            
+            if update_expression_parts:
+                bills_table.update_item(
+                    Key={'bill_id': bill_id},
+                    UpdateExpression=f"SET {', '.join(update_expression_parts)}",
+                    ExpressionAttributeValues=expression_attribute_values
+                )
+                log_print(f"      ✅ Updated {bill_id} with empty bill text S3 keys")
+            return True, None
         
         # Find the "Introduced" version first, fallback to first available
         introduced_version = None
@@ -270,27 +288,55 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
             update_expression_parts = []
             expression_attribute_values = {}
             
-            # Download and store XML
-            if xml_url and not item.get('bill_text_xml_s3_key'):
-                log_print(f"      📄 Downloading XML bill text from {xml_url}...")
-                xml_content = download_bill_text_file(xml_url)
-                if xml_content:
-                    bill_text_xml_s3_key = store_bill_text_to_s3(bill_id, xml_content, "xml")
+            # Download and store XML (with error handling)
+            if not item.get('bill_text_xml_s3_key'):
+                if xml_url:
+                    try:
+                        log_print(f"      📄 Downloading XML bill text from {xml_url}...")
+                        xml_content = download_bill_text_file(xml_url)
+                        if xml_content:
+                            bill_text_xml_s3_key = store_bill_text_to_s3(bill_id, xml_content, "xml")
+                            update_expression_parts.append("bill_text_xml_s3_key = :xml_key")
+                            expression_attribute_values[':xml_key'] = bill_text_xml_s3_key
+                            log_print(f"      ✅ Stored XML bill text to S3: {bill_text_xml_s3_key}")
+                        else:
+                            log_print(f"      ⚠️  Failed to download XML bill text, setting key to empty")
+                            update_expression_parts.append("bill_text_xml_s3_key = :xml_key")
+                            expression_attribute_values[':xml_key'] = ""
+                    except Exception as e:
+                        log_print(f"      ⚠️  Error downloading XML bill text: {str(e)}, setting key to empty")
+                        update_expression_parts.append("bill_text_xml_s3_key = :xml_key")
+                        expression_attribute_values[':xml_key'] = ""
+                else:
+                    log_print(f"      ⚠️  No XML URL found, setting key to empty")
                     update_expression_parts.append("bill_text_xml_s3_key = :xml_key")
-                    expression_attribute_values[':xml_key'] = bill_text_xml_s3_key
-                    log_print(f"      ✅ Stored XML bill text to S3: {bill_text_xml_s3_key}")
+                    expression_attribute_values[':xml_key'] = ""
             
-            # Download and store HTML
-            if html_url and not item.get('bill_text_html_s3_key'):
-                log_print(f"      📄 Downloading HTML bill text from {html_url}...")
-                html_content = download_bill_text_file(html_url)
-                if html_content:
-                    bill_text_html_s3_key = store_bill_text_to_s3(bill_id, html_content, "html")
+            # Download and store HTML (with error handling)
+            if not item.get('bill_text_html_s3_key'):
+                if html_url:
+                    try:
+                        log_print(f"      📄 Downloading HTML bill text from {html_url}...")
+                        html_content = download_bill_text_file(html_url)
+                        if html_content:
+                            bill_text_html_s3_key = store_bill_text_to_s3(bill_id, html_content, "html")
+                            update_expression_parts.append("bill_text_html_s3_key = :html_key")
+                            expression_attribute_values[':html_key'] = bill_text_html_s3_key
+                            log_print(f"      ✅ Stored HTML bill text to S3: {bill_text_html_s3_key}")
+                        else:
+                            log_print(f"      ⚠️  Failed to download HTML bill text, setting key to empty")
+                            update_expression_parts.append("bill_text_html_s3_key = :html_key")
+                            expression_attribute_values[':html_key'] = ""
+                    except Exception as e:
+                        log_print(f"      ⚠️  Error downloading HTML bill text: {str(e)}, setting key to empty")
+                        update_expression_parts.append("bill_text_html_s3_key = :html_key")
+                        expression_attribute_values[':html_key'] = ""
+                else:
+                    log_print(f"      ⚠️  No HTML URL found, setting key to empty")
                     update_expression_parts.append("bill_text_html_s3_key = :html_key")
-                    expression_attribute_values[':html_key'] = bill_text_html_s3_key
-                    log_print(f"      ✅ Stored HTML bill text to S3: {bill_text_html_s3_key}")
+                    expression_attribute_values[':html_key'] = ""
             
-            # Update DynamoDB item if we stored anything
+            # Update DynamoDB item (always update, even if keys are empty)
             if update_expression_parts:
                 bills_table.update_item(
                     Key={'bill_id': bill_id},
@@ -301,9 +347,21 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
                 log_print(f"      ✅ Updated {bill_id} with bill text S3 keys")
                 return True, None
             else:
-                return False, "No new bill text files to download"
-        
-        return False, "No format URLs found"
+                # Both keys already exist, nothing to update
+                return True, None
+        else:
+            # No format items found, set both keys to empty
+            log_print(f"      ⚠️  No format items found, setting both keys to empty")
+            bills_table.update_item(
+                Key={'bill_id': bill_id},
+                UpdateExpression="SET bill_text_xml_s3_key = :xml_key, bill_text_html_s3_key = :html_key",
+                ExpressionAttributeValues={
+                    ':xml_key': "",
+                    ':html_key': ""
+                }
+            )
+            log_print(f"      ✅ Updated {bill_id} with empty bill text S3 keys")
+            return True, None
         
     except Exception as e:
         error_msg = f"Error processing {bill_id}: {str(e)}"
