@@ -2052,7 +2052,7 @@ module "usaspending_dlq_queue" {
   purpose      = "Queue for failed awards that need individual processing"
 
   message_retention_seconds     = 1209600 # 14 days
-  visibility_timeout_seconds    = 600     # 10 minutes (enough for CSV parsing + processing)
+  visibility_timeout_seconds    = 5400    # 90 minutes (6x Lambda timeout of 900s as required by AWS)
   max_receive_count             = 3
   enable_dlq                    = true
   dlq_message_retention_seconds = 1209600 # 14 days
