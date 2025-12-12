@@ -1122,11 +1122,15 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     if cosponsor_parties_list:
         record["cosponsor_parties"] = "|".join(cosponsor_parties_list)
     
-    # Calculate bipartisan: TRUE if sponsor party AND cosponsor parties contain both R and D
+    # Calculate bipartisan: TRUE if sponsor party is different from cosponsor parties
+    # OR if both R and D are present in sponsor + cosponsors combined
+    # This means the bill has support from both parties (sponsor + cosponsors)
     # Examples:
-    # - cosponsor_parties: "R|D|R" with sponsor R → TRUE (has both R and D)
-    # - cosponsor_parties: "R|R|R" with sponsor R → FALSE (only R)
-    # - cosponsor_parties: "" (empty) → FALSE
+    # - sponsor R, cosponsor_parties: "D|D" → TRUE (sponsor R different from cosponsors D)
+    # - sponsor R, cosponsor_parties: "R|D|R" → TRUE (has both R and D present)
+    # - sponsor R, cosponsor_parties: "R|R|R" → FALSE (sponsor R same as all cosponsors R, only one party)
+    # - sponsor D, cosponsor_parties: "R" → TRUE (sponsor D different from cosponsor R)
+    # - cosponsor_parties: "" (empty) → FALSE (no cosponsors to compare)
     bipartisan = False
     # Get first character of sponsor party (full name like "Republican" -> "R")
     sponsor_party_full = record.get("sponsor_party", "").strip()
@@ -1134,21 +1138,33 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     cosponsor_parties_str = record.get("cosponsor_parties", "").strip()
     
     if not cosponsor_parties_str:
-        # Empty cosponsor parties = not bipartisan
+        # Empty cosponsor parties = not bipartisan (no cosponsors to compare)
         bipartisan = False
     elif sponsor_party:
-        # Get unique parties from sponsor + all cosponsors (use first character for comparison)
-        all_parties = set([sponsor_party])
+        # Get unique cosponsor parties (use first character for comparison)
+        cosponsor_parties_set = set()
         for party in cosponsor_parties_str.split("|"):
             party_clean = party.strip().upper()
             if party_clean:
                 # Get first character if it's a full party name
                 party_char = party_clean[0] if party_clean else ""
                 if party_char:
-                    all_parties.add(party_char)
+                    cosponsor_parties_set.add(party_char)
         
-        # Bipartisan if both R and D are present
-        bipartisan = "R" in all_parties and "D" in all_parties
+        if cosponsor_parties_set:
+            # Check if sponsor party is different from cosponsor parties
+            # (i.e., sponsor party is not in the set of cosponsor parties)
+            sponsor_different_from_cosponsors = sponsor_party not in cosponsor_parties_set
+            
+            # Also check if both R and D are present in the combined set (sponsor + cosponsors)
+            all_parties = {sponsor_party} | cosponsor_parties_set
+            has_both_parties = "R" in all_parties and "D" in all_parties
+            
+            # Bipartisan if sponsor is different from cosponsors OR both parties are present
+            bipartisan = sponsor_different_from_cosponsors or has_both_parties
+        else:
+            # No valid cosponsor parties = not bipartisan
+            bipartisan = False
     else:
         # No sponsor party = not bipartisan
         bipartisan = False
