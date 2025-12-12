@@ -21,7 +21,6 @@ import requests
 import re
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
-from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -422,56 +421,40 @@ def main():
         job.commit()
         return
     
-    # Process items in parallel
+    # Process items sequentially with backoff
     log_print("🔍 Processing bills and fetching bill text...")
     log_print("-" * 80)
-    log_print(f"   🚀 Using parallel processing with up to 10 concurrent workers...")
+    log_print(f"   📋 Processing {len(items_to_process)} bills sequentially with backoff...")
     
     processed_count = 0
     error_count = 0
     skipped_count = 0
     
-    def process_bill(bill_item: Dict) -> Tuple[bool, Optional[str], bool]:
-        """Process a single bill and return (success, error_message, skipped)"""
-        success, error_msg = process_bill_item(bill_item, api_key)
-        skipped = (bill_item.get('bill_text_html_s3_key') is not None and bill_item.get('bill_text_html_s3_key') != '')
-        return success, error_msg, skipped
-    
-    # Process bills in parallel
-    log_print(f"   📤 Submitting {len(items_to_process)} bills for parallel processing...")
-    with ThreadPoolExecutor(max_workers=10) as executor:
-        future_to_bill = {}
-        for bill_item in items_to_process:
-            future = executor.submit(process_bill, bill_item)
-            future_to_bill[future] = bill_item
-        
-        log_print(f"   ✅ All {len(future_to_bill)} tasks submitted, processing in parallel...")
-        
-        completed = 0
-        for future in as_completed(future_to_bill):
-            completed += 1
-            try:
-                success, error_msg, skipped = future.result()
-                
-                if skipped:
-                    skipped_count += 1
-                elif success:
-                    processed_count += 1
-                else:
-                    error_count += 1
-                    if error_msg:
-                        log_print(f"      ❌ {error_msg}")
-            except Exception as e:
+    # Process bills sequentially
+    for idx, bill_item in enumerate(items_to_process, 1):
+        try:
+            success, error_msg = process_bill_item(bill_item, api_key)
+            skipped = (bill_item.get('bill_text_html_s3_key') is not None and bill_item.get('bill_text_html_s3_key') != '')
+            
+            if skipped:
+                skipped_count += 1
+            elif success:
+                processed_count += 1
+            else:
                 error_count += 1
-                bill_item = future_to_bill.get(future, {})
-                log_print(f"      ❌ Exception processing bill {bill_item.get('bill_id', 'unknown')}: {str(e)}")
-            
-            if completed % 10 == 0:
-                log_print(f"      ✅ Processed {completed}/{len(items_to_process)} bills... (success: {processed_count}, errors: {error_count}, skipped: {skipped_count})")
-            
-            # Rate limiting - be respectful to Congress.gov API
-            # Increased delay to reduce 429 errors
-            time.sleep(0.5)
+                if error_msg:
+                    log_print(f"      ❌ {error_msg}")
+        except Exception as e:
+            error_count += 1
+            log_print(f"      ❌ Exception processing bill {bill_item.get('bill_id', 'unknown')}: {str(e)}")
+        
+        if idx % 10 == 0:
+            log_print(f"      ✅ Processed {idx}/{len(items_to_process)} bills... (success: {processed_count}, errors: {error_count}, skipped: {skipped_count})")
+        
+        # Rate limiting - be respectful to Congress.gov API
+        # Delay between requests to avoid rate limiting
+        if idx < len(items_to_process):  # Don't sleep after the last item
+            time.sleep(1.0)  # 1 second delay between items
     
     log_print(f"\n✅ Processed {processed_count} bills successfully")
     if error_count > 0:
