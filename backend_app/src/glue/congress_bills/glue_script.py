@@ -50,7 +50,8 @@ args = getResolvedOptions(sys.argv, [
     'CONGRESS_API_BASE_URL',
     'BILLS_TABLE_NAME',
     'S3_BUCKET_NAME',
-    'REQUEST_TIMEOUT'
+    'REQUEST_TIMEOUT',
+    'BILL_TEXT_SQS_URL'
 ])
 
 # Get optional date parameters (parse manually to avoid errors if not provided)
@@ -372,6 +373,7 @@ POLITICIAN_TRADES_S3_BUCKET = args.get('POLITICIAN_TRADES_S3_BUCKET')
 REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 MAX_RETRIES = int(args.get('MAX_RETRIES', '5'))
 RETRY_DELAY = int(args.get('RETRY_DELAY', '2'))
+BILL_TEXT_SQS_URL = args.get('BILL_TEXT_SQS_URL', '')
 
 # Name matching threshold (0.0 to 1.0)
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
@@ -383,6 +385,7 @@ BILL_TYPES = ["HR", "S", "HJRES", "SJRES", "HCONRES", "SCONRES", "HRES", "SRES"]
 dynamodb = boto3.resource('dynamodb')
 s3_client = boto3.client('s3')
 secrets_client = boto3.client('secretsmanager')
+sqs_client = boto3.client('sqs')
 bills_table = dynamodb.Table(BILLS_TABLE_NAME) if BILLS_TABLE_NAME else None
 
 # ============================================================================
@@ -976,75 +979,30 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         elif isinstance(sponsors, list) and len(sponsors) > 0:
             primary_sponsor = sponsors[0]
     
-    # Fetch and store bill text HTML format (prefer "Introduced in House/Senate" version)
+    # Send bill text download request to SQS for Lambda processing
     bill_text_html_s3_key = ""
     bill_id_str = f"{congress}-{bill_type}-{bill_number}"
     
-    if text_versions:
-        # Find the "Introduced" version first, fallback to first available
-        introduced_version = None
-        for version in text_versions:
-            version_type = version.get("type", "").lower()
-            if "introduced" in version_type:
-                introduced_version = version
-                break
-        
-        # Use introduced version if found, otherwise use first version
-        selected_version = introduced_version if introduced_version else text_versions[0]
-        
-        # Get the formats
-        formats = selected_version.get("formats", {})
-        format_items = []
-        
-        # Handle different formats structures
-        if isinstance(formats, list):
-            # formats is already a list
-            format_items = formats
-        elif isinstance(formats, dict):
-            # formats is a dict, might have "item" key or be the list itself
-            if "item" in formats:
-                item_data = formats["item"]
-                if isinstance(item_data, list):
-                    format_items = item_data
-                elif isinstance(item_data, dict):
-                    # Single item wrapped in dict
-                    format_items = [item_data]
-            else:
-                # Check if dict values are format items
-                format_items = list(formats.values()) if formats else []
-        
-        if format_items:
-            html_url = None
+    if text_versions and BILL_TEXT_SQS_URL:
+        # Send message to SQS for Lambda to process
+        try:
+            message_body = {
+                'bill_id': bill_id_str
+            }
+            message_json = json.dumps(message_body, default=str)
             
-            # Find HTML URL (Formatted Text)
-            for fmt_item in format_items:
-                if isinstance(fmt_item, dict):
-                    fmt_type = fmt_item.get("type", "")
-                    fmt_url = fmt_item.get("url")
-                    
-                    if fmt_type == "Formatted Text" and fmt_url and not html_url:
-                        html_url = fmt_url
+            response = sqs_client.send_message(
+                QueueUrl=BILL_TEXT_SQS_URL,
+                MessageBody=message_json
+            )
             
-            # Download and store HTML (with error handling)
-            if html_url:
-                try:
-                    log_print(f"      📄 [{thread_id}] Downloading HTML bill text from {html_url}...")
-                    html_content = download_bill_text_file(html_url)
-                    if html_content:
-                        bill_text_html_s3_key = store_bill_text_to_s3(bill_id_str, html_content)
-                        log_print(f"      ✅ [{thread_id}] Stored HTML bill text to S3: {bill_text_html_s3_key}")
-                    else:
-                        log_print(f"      ⚠️  [{thread_id}] Failed to download HTML bill text, setting key to empty")
-                        bill_text_html_s3_key = ""
-                except Exception as e:
-                    log_print(f"      ⚠️  [{thread_id}] Error downloading HTML bill text: {str(e)}, setting key to empty")
-                    bill_text_html_s3_key = ""
-            else:
-                log_print(f"      ⚠️  [{thread_id}] No HTML URL found, setting key to empty")
-                bill_text_html_s3_key = ""
-        else:
-            log_print(f"      ⚠️  [{thread_id}] No format items found, setting key to empty")
-            bill_text_html_s3_key = ""
+            log_print(f"      📤 [{thread_id}] Sent bill text download request for {bill_id_str} to SQS (MessageId: {response.get('MessageId')})")
+            # Leave bill_text_html_s3_key as empty string - Lambda will update it
+        except Exception as e:
+            log_print(f"      ⚠️  [{thread_id}] Error sending bill text download to SQS: {str(e)[:200]}")
+            # Leave bill_text_html_s3_key as empty string on error
+    elif not BILL_TEXT_SQS_URL:
+        log_print(f"      ⚠️  [{thread_id}] BILL_TEXT_SQS_URL not configured, skipping bill text download for {bill_id_str}")
     
     # Build comprehensive record
     record = {

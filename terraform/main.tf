@@ -2554,6 +2554,7 @@ module "congress_bills_fetcher_glue_job" {
     "--S3_BUCKET_NAME"              = module.congress_bills_data_s3.bucket_id
     "--POLITICIAN_TRADES_S3_BUCKET" = module.politician_trades_s3.bucket_id
     "--REQUEST_TIMEOUT"             = "30"
+    "--BILL_TEXT_SQS_URL"           = module.congress_bills_bill_text_queue.queue_url
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -2566,7 +2567,8 @@ module "congress_bills_fetcher_glue_job" {
     module.static_hosting_bucket,
     module.congress_bills_table,
     module.kms,
-    module.congress_api_secrets_manager
+    module.congress_api_secrets_manager,
+    module.congress_bills_bill_text_queue
   ]
 }
 
@@ -2585,6 +2587,165 @@ resource "aws_kms_grant" "congress_bills_glue_dynamodb_key_access" {
   depends_on = [
     module.congress_bills_fetcher_glue_job,
     module.kms
+  ]
+}
+
+# SQS Queue for Congress Bills Bill Text Downloads
+module "congress_bills_bill_text_queue" {
+  source = "./modules/sqs"
+
+  project_name = var.project_name
+  environment  = var.environment
+  queue_name   = "congress-bills-bill-text"
+  purpose      = "Queue for bill text downloads that need to be processed by Lambda"
+
+  message_retention_seconds     = 1209600 # 14 days
+  visibility_timeout_seconds    = 900     # 15 minutes (enough for API calls + S3 upload + DynamoDB write)
+  max_receive_count             = 3
+  enable_dlq                    = true
+  dlq_message_retention_seconds = 1209600 # 14 days
+
+  kms_key_id = module.kms.main_key_id
+
+  tags = var.common_tags
+}
+
+# Lambda Function for Congress Bills Bill Text Processor
+module "congress_bills_bill_text_processor_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-congress-bills-bill-text-processor-${var.environment}"
+  description   = "Processes bill text download messages from SQS, downloads HTML bill text, and stores in S3/DynamoDB"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 900 # 15 minutes (enough for sequential processing of 10 bills)
+  memory_size   = 512 # Enough for API calls, downloads, and DynamoDB operations
+
+  source_dir = "${path.module}/../backend_app/src/congress_bills_bill_text_processor/app"
+
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  environment_variables = {
+    BILLS_TABLE_NAME      = module.congress_bills_table.table_name
+    S3_BUCKET_NAME        = module.congress_bills_data_s3.bucket_id
+    PROJECT_NAME          = var.project_name
+    ENVIRONMENT           = var.environment
+    CONGRESS_API_BASE_URL = "https://api.congress.gov/v3"
+    BILL_TEXT_QUEUE_URL   = module.congress_bills_bill_text_queue.queue_url
+    REQUEST_TIMEOUT       = "30"
+    LOG_LEVEL             = "INFO"
+  }
+
+  additional_policy_arns = [
+    module.congress_bills_table.table_policy_arn,
+    module.kms.kms_access_policy_arn,
+    module.congress_api_secrets_manager.secret_access_policy_arn,
+    module.congress_bills_bill_text_queue.sqs_access_policy_arn,
+    aws_iam_policy.lambda_congress_bills_data_s3_policy.arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.congress_bills_table,
+    module.congress_bills_data_s3,
+    module.kms,
+    module.core_layer,
+    module.congress_bills_bill_text_queue,
+    module.congress_api_secrets_manager
+  ]
+}
+
+# IAM Policy for Lambda to access Congress Bills Data S3 bucket
+resource "aws_iam_policy" "lambda_congress_bills_data_s3_policy" {
+  name        = "${var.project_name}-lambda-congress-bills-data-s3-${var.environment}"
+  description = "Allows Lambda to read/write Congress bills data in S3"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "${module.congress_bills_data_s3.bucket_arn}/billtext/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = module.congress_bills_data_s3.bucket_arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "billtext/*"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# SQS Event Source Mapping for Lambda (SQS triggers Lambda directly)
+resource "aws_lambda_event_source_mapping" "congress_bills_bill_text_sqs_trigger" {
+  event_source_arn                   = module.congress_bills_bill_text_queue.queue_arn
+  function_name                      = module.congress_bills_bill_text_processor_lambda.function_arn
+  batch_size                         = 10 # Process up to 10 messages per invocation (sequential processing)
+  maximum_batching_window_in_seconds = 0  # No batching window - process immediately
+  enabled                            = true
+
+  depends_on = [
+    module.congress_bills_bill_text_queue,
+    module.congress_bills_bill_text_processor_lambda
+  ]
+}
+
+# IAM Policy for Glue Job to send messages to bill text queue
+resource "aws_iam_policy" "glue_congress_bills_bill_text_sqs_policy" {
+  name        = "${var.project_name}-glue-congress-bills-bill-text-sqs-${var.environment}"
+  description = "Allows Glue job to send bill text download messages to SQS"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes"
+        ]
+        Resource = module.congress_bills_bill_text_queue.queue_arn
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "kms:Decrypt",
+          "kms:GenerateDataKey",
+          "kms:DescribeKey"
+        ]
+        Resource = module.kms.main_key_arn
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# Attach SQS policy to Glue job role
+resource "aws_iam_role_policy_attachment" "glue_congress_bills_bill_text_sqs" {
+  role       = module.congress_bills_fetcher_glue_job.role_name
+  policy_arn = aws_iam_policy.glue_congress_bills_bill_text_sqs_policy.arn
+
+  depends_on = [
+    module.congress_bills_fetcher_glue_job,
+    aws_iam_policy.glue_congress_bills_bill_text_sqs_policy
   ]
 }
 
