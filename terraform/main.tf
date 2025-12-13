@@ -2905,7 +2905,147 @@ resource "aws_kms_grant" "congress_bills_backfill_glue_dynamodb_key_access" {
   ]
 }
 
-# EventBridge Scheduler for Daily Congress Bills Fetcher (12:00 AM UTC)
+# Step Functions State Machine for Congress Bills Bill Text Prefill
+# Single stage that directly invokes the Glue job with EVENT="Begin prefill"
+module "congress_bills_bill_text_prefill_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-congress-bill-text-prefill-${var.environment}"
+  environment        = var.environment
+
+  # Step Functions definition - single stage with Glue job
+  definition = jsonencode({
+    Comment = "Congress Bills Bill Text Prefill - Directly invokes Glue job with EVENT='Begin prefill'"
+    StartAt = "StartGlueJob"
+    States = {
+      StartGlueJob = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Comment  = "Start Glue job for bill text prefill (crawls for bills with empty bill_text_html_s3_key)"
+        Parameters = {
+          "JobName" = module.congress_bills_bill_text_backfill_glue_job.job_name
+          "Arguments" = {
+            "--EVENT" = "Begin prefill"
+          }
+        }
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "HandleError"
+          }
+        ]
+        Next = "Success"
+      }
+      Success = {
+        Type    = "Succeed"
+        Comment = "Bill text prefill completed successfully"
+      }
+      HandleError = {
+        Type  = "Fail"
+        Error = "BillTextPrefillFailed"
+        Cause = "The bill text prefill job failed. Check CloudWatch logs for details."
+      }
+    }
+  })
+
+  # No Lambda functions needed
+  lambda_function_arns = []
+
+  # Glue job name for IAM permissions
+  glue_job_names = [
+    module.congress_bills_bill_text_backfill_glue_job.job_name
+  ]
+
+  # Logging configuration
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.congress_bills_bill_text_backfill_glue_job
+  ]
+}
+
+# EventBridge Scheduler for Daily Congress Bills Bill Text Prefill (2:00 PM UTC)
+# Runs 3 hours after the bills fetcher to crawl for bills with empty bill_text_html_s3_key
+
+# IAM Role for EventBridge to invoke Congress Bills Bill Text Prefill Step Function
+resource "aws_iam_role" "congress_bills_bill_text_prefill_scheduler_role" {
+  name = "${var.project_name}-congress-bill-text-prefill-role-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for EventBridge to start Congress Bills Bill Text Prefill Step Function
+resource "aws_iam_role_policy" "congress_bills_bill_text_prefill_scheduler_policy" {
+  name = "${var.project_name}-congress-bill-text-prefill-policy-${var.environment}"
+  role = aws_iam_role.congress_bills_bill_text_prefill_scheduler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = module.congress_bills_bill_text_prefill_state_machine.state_machine_arn
+      }
+    ]
+  })
+}
+
+# EventBridge Rule for Daily Bill Text Prefill
+resource "aws_cloudwatch_event_rule" "congress_bills_bill_text_prefill_scheduler" {
+  name                = "${var.project_name}-congress-bill-text-prefill-daily-${var.environment}"
+  description         = "Trigger Congress bills bill text prefill daily at 2:00 PM UTC (3 hours after bills fetcher) to crawl for bills with empty bill_text_html_s3_key"
+  schedule_expression = "cron(0 14 * * ? *)" # 2:00 PM UTC daily (9:00 AM EST / 10:00 AM EDT)
+  state               = "ENABLED"
+
+  tags = merge(var.common_tags, {
+    Name        = "${var.project_name}-congress-bills-bill-text-prefill-daily-${var.environment}"
+    Type        = "EventBridgeRule"
+    Purpose     = "CongressBillsBillTextPrefill"
+    Environment = var.environment
+  })
+}
+
+# EventBridge Target for Step Function
+resource "aws_cloudwatch_event_target" "congress_bills_bill_text_prefill_scheduler_target" {
+  rule      = aws_cloudwatch_event_rule.congress_bills_bill_text_prefill_scheduler.name
+  target_id = "CongressBillsBillTextPrefillScheduler"
+  arn       = module.congress_bills_bill_text_prefill_state_machine.state_machine_arn
+  role_arn  = aws_iam_role.congress_bills_bill_text_prefill_scheduler_role.arn
+
+  # Input payload for Step Function (empty - Step Function will use hardcoded parameters)
+  input = jsonencode({
+    source = "scheduler"
+  })
+
+  depends_on = [
+    aws_cloudwatch_event_rule.congress_bills_bill_text_prefill_scheduler,
+    aws_iam_role.congress_bills_bill_text_prefill_scheduler_role,
+    module.congress_bills_bill_text_prefill_state_machine
+  ]
+}
+
+# EventBridge Scheduler for Daily Congress Bills Fetcher (11:00 AM UTC)
 
 # IAM Role for EventBridge to invoke Congress Bills Fetcher Step Function
 resource "aws_iam_role" "congress_bills_fetcher_scheduler_role" {
@@ -2948,8 +3088,8 @@ resource "aws_iam_role_policy" "congress_bills_fetcher_scheduler_policy" {
 
 resource "aws_cloudwatch_event_rule" "congress_bills_fetcher_scheduler" {
   name                = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
-  description         = "Trigger Congress bills fetcher daily at 12:00 AM UTC to fetch yesterday's data"
-  schedule_expression = "cron(0 0 * * ? *)" # 12:00 AM UTC daily
+  description         = "Trigger Congress bills fetcher daily at 11:00 AM UTC (after Congress.gov's 10:00 AM data publication) to fetch yesterday's data"
+  schedule_expression = "cron(0 11 * * ? *)" # 11:00 AM UTC daily (6:00 AM EST / 7:00 AM EDT)
   state               = "ENABLED"
 
   tags = merge(var.common_tags, {
