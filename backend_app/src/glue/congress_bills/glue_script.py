@@ -1549,8 +1549,9 @@ def main():
                 pass
             except ValueError:
                 raise ValueError(f"Invalid date format. Expected mm/dd/yyyy or ISO format, got: {start_date_str} or {end_date_str}")
-    else:
+    elif not scheduler_mode:
         # Calculate date range if not provided (default to last 7 days for Glue)
+        # Skip this if we're in scheduler mode (dates already set)
         end_date = datetime.now(timezone.utc)
         start_date = end_date - timedelta(days=7)
         start_date_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
