@@ -2781,7 +2781,7 @@ def main():
                 
                 for future in as_completed(future_to_award):
                     award_record = future_to_award[future]
-                    award_id = award_record['award_id']
+                    award_id = award_record.get('award_id', 'unknown')
                     try:
                         result = future.result()
                         with _progress_lock:
@@ -2805,7 +2805,7 @@ def main():
                         log_print(f"❌ {error_msg}")
                         
                         # Store failed award to S3 and send to DLQ for individual processing
-                        if DLQ_SQS_URL:
+                        if DLQ_SQS_URL and award_id != 'unknown':
                             try:
                                 # Store failed award as zipped JSON in S3
                                 failed_award_s3_key = store_failed_award_to_s3(award_id, award_record)
@@ -2824,8 +2824,10 @@ def main():
                                 log_print(f"📤 Sent failed award {award_id} to DLQ (stored at {failed_award_s3_key})")
                             except Exception as dlq_error:
                                 log_print(f"⚠️ Failed to send award {award_id} to DLQ: {str(dlq_error)[:200]}")
-                        else:
+                        elif not DLQ_SQS_URL:
                             log_print(f"⚠️ DLQ_SQS_URL not configured, skipping DLQ for failed award {award_id}")
+                        elif award_id == 'unknown':
+                            log_print(f"⚠️ Cannot send award to DLQ: award_id is missing from award_record")
             
             store_phase_duration = time.time() - store_phase_start
             agency_duration = time.time() - agency_start_time
