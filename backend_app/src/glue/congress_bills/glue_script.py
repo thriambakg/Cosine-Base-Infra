@@ -1488,18 +1488,37 @@ def main():
     if end_date_str in [None, "", "null", "None"]:
         end_date_str = None
     
-    # Calculate date range based on source (same logic as router Lambda)
+    # Calculate date range based on source
+    scheduler_mode = False
     if source == "scheduler":
-        # If source is "scheduler", calculate yesterday's date
+        # If source is "scheduler", calculate previous day 11:00 AM UTC to current day 11:00 AM UTC
         now = datetime.now(timezone.utc)
-        yesterday = now - timedelta(days=1)
-        # Format as mm/dd/yyyy (matching router Lambda format)
-        start_date_str = yesterday.strftime("%m/%d/%Y")
-        end_date_str = yesterday.strftime("%m/%d/%Y")
-        log_print(f"📅 Source is scheduler, calculating yesterday's date: {start_date_str}")
-    
+
+        # Calculate previous day 11:00 AM UTC
+        previous_day_11am = now.replace(hour=11, minute=0, second=0, microsecond=0) - timedelta(days=1)
+
+        # Calculate current day 11:00 AM UTC
+        current_day_11am = now.replace(hour=11, minute=0, second=0, microsecond=0)
+
+        # If current time is before 11:00 AM UTC, use previous day 11:00 AM to previous day 11:00 AM (same day)
+        # Otherwise use previous day 11:00 AM to current day 11:00 AM
+        if now.hour < 11:
+            # Before 11:00 AM UTC, fetch previous day 11:00 AM to previous day 11:00 AM (same day)
+            start_date = previous_day_11am
+            end_date = previous_day_11am
+        else:
+            # At or after 11:00 AM UTC, fetch previous day 11:00 AM to current day 11:00 AM
+            start_date = previous_day_11am
+            end_date = current_day_11am
+
+        # Format directly as ISO (skip mm/dd/yyyy parsing)
+        start_date_str = start_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        end_date_str = end_date.strftime("%Y-%m-%dT%H:%M:%SZ")
+        scheduler_mode = True
+        log_print(f"📅 Source is scheduler, calculating date range: {start_date_str} to {end_date_str} (previous day 11:00 AM UTC to current day 11:00 AM UTC)")
+
     # Parse and normalize dates (handle both mm/dd/yyyy and ISO formats)
-    if start_date_str and end_date_str:
+    if start_date_str and end_date_str and not scheduler_mode:
         # Try parsing as mm/dd/yyyy first (router Lambda format)
         try:
             start_date = datetime.strptime(start_date_str, "%m/%d/%Y")

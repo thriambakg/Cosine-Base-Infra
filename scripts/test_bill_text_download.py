@@ -93,7 +93,7 @@ def download_bill_text_file(text_url: str, output_path: Path):
         content_type = 'application/xml'
     
     # Always save as HTML file
-    file_ext = ".html"
+        file_ext = ".html"
     
     # Save to file
     output_file = output_path.with_suffix(file_ext)
@@ -170,15 +170,15 @@ def main():
         
         if format_items:
             # Try Formatted Text (HTML) first
-            for fmt_item in format_items:
+                for fmt_item in format_items:
                 if isinstance(fmt_item, dict) and fmt_item.get("type") == "Formatted Text":
-                    text_url = fmt_item.get("url")
+                        text_url = fmt_item.get("url")
                     format_type = "Formatted Text"
-                    break
-            
+                        break
+                
             # Fallback to other formats if HTML not available
-            if not text_url and format_items:
-                fmt_item = format_items[0]
+                if not text_url and format_items:
+                    fmt_item = format_items[0]
                 if isinstance(fmt_item, dict):
                     text_url = fmt_item.get("url")
                     format_type = fmt_item.get("type", "Unknown")
