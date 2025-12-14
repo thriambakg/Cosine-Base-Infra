@@ -2803,11 +2803,6 @@ def main():
             total_transactions = 0
             total_subawards = 0
             
-            # Reset throttling tracking for this agency
-            with _throttling_lock:
-                _throttling_events['count'] = 0
-                _throttling_events['last_event_time'] = 0
-            
             with _progress_lock:
                 _progress_counter['processed'] = 0
                 _progress_counter['indexed'] = 0
