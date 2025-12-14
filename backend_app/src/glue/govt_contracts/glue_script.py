@@ -1302,30 +1302,39 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
     """
     awards = {}
     row_count = 0
+    last_gc_row = 0
+    gc_interval = 50000  # Run garbage collection every 50k rows
     
-    reader = csv.DictReader(csv_file_obj)
-    
-    for row in reader:
-        row_count += 1
+    try:
+        reader = csv.DictReader(csv_file_obj)
         
-        # Log progress for large files
-        if row_count % 100000 == 0:
-            log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
-        
-        # Get award ID - primary key for grouping and DynamoDB primary key
-        # For contracts: uses contract_award_unique_key
-        # For assistance: uses assistance_award_unique_key (this becomes the award_id primary key)
-        # Check both contract and assistance award unique keys
-        award_id = (
-            row.get('contract_award_unique_key') or      # For contracts
-            row.get('assistance_award_unique_key') or    # For assistance awards (becomes primary key award_id)
-            row.get('generated_unique_award_id') or     # Generic fallback (works for both)
-            row.get('award_id') or                       # Generic fallback
-            None
-        )
-        
-        if not award_id:
-            continue
+        for row in reader:
+            try:
+                row_count += 1
+                
+                # Log progress for large files
+                if row_count % 100000 == 0:
+                    log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
+                
+                # Periodic memory cleanup for very large files
+                if row_count - last_gc_row >= gc_interval:
+                    gc.collect()
+                    last_gc_row = row_count
+                
+                # Get award ID - primary key for grouping and DynamoDB primary key
+                # For contracts: uses contract_award_unique_key
+                # For assistance: uses assistance_award_unique_key (this becomes the award_id primary key)
+                # Check both contract and assistance award unique keys
+                award_id = (
+                    row.get('contract_award_unique_key') or      # For contracts
+                    row.get('assistance_award_unique_key') or    # For assistance awards (becomes primary key award_id)
+                    row.get('generated_unique_award_id') or     # Generic fallback (works for both)
+                    row.get('award_id') or                       # Generic fallback
+                    None
+                )
+                
+                if not award_id:
+                    continue
         
         # Initialize award record if first time seeing this award
         if award_id not in awards:
@@ -1415,13 +1424,32 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
             else:
                 transaction_record[key] = normalize_string(value)
         
-        # Normalize common fields to reduce blanks
-        transaction_record = normalize_common_fields(transaction_record, record_type="transaction")
+                # Normalize common fields to reduce blanks
+                transaction_record = normalize_common_fields(transaction_record, record_type="transaction")
+                
+                award['transactions'].append(transaction_record)
+            except Exception as row_error:
+                # Log row-level errors but continue processing
+                error_msg = f"Error processing row {row_count} in {csv_filename}: {str(row_error)[:200]}"
+                logger.warning(error_msg)
+                # Continue processing next row
+                continue
         
-        award['transactions'].append(transaction_record)
+        log_print(f"✅ Parsed {csv_filename}: {len(awards)} unique awards, {sum(a['transaction_count'] for a in awards.values())} total transactions, {row_count:,} rows processed")
+        return awards
     
-    log_print(f"✅ Parsed {csv_filename}: {len(awards)} unique awards, {sum(a['transaction_count'] for a in awards.values())} total transactions, {row_count:,} rows processed")
-    return awards
+    except MemoryError as mem_error:
+        error_msg = f"Memory error parsing {csv_filename} at row {row_count}: {str(mem_error)}"
+        log_print(f"❌ {error_msg}")
+        logger.error(error_msg, exc_info=True)
+        # Force garbage collection before re-raising
+        gc.collect()
+        raise Exception(f"Out of memory while parsing {csv_filename} at row {row_count:,}. File may be too large.")
+    except Exception as e:
+        error_msg = f"Error parsing {csv_filename} at row {row_count}: {str(e)}"
+        log_print(f"❌ {error_msg}")
+        logger.error(error_msg, exc_info=True)
+        raise
 
 def parse_prime_award_csv(csv_content: str, csv_filename: str) -> Dict[str, Dict[str, Any]]:
     """
@@ -1451,55 +1479,83 @@ def parse_subaward_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str, L
     """
     subawards_by_parent = {}
     row_count = 0
+    last_gc_row = 0
+    gc_interval = 50000  # Run garbage collection every 50k rows
     
-    reader = csv.DictReader(csv_file_obj)
-    
-    for row in reader:
-        row_count += 1
+    try:
+        reader = csv.DictReader(csv_file_obj)
         
-        # Log progress for large files
-        if row_count % 100000 == 0:
-            log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
-        
-        # Get parent award ID (links sub-award to prime award)
-        parent_award_id = (
-            row.get('prime_award_unique_key') or
-            row.get('prime_award_piid') or  # For contracts
-            row.get('prime_award_fain') or  # For assistance
-            None
-        )
-        
-        if not parent_award_id:
-            continue
-        
-        # Create sub-award record with ALL columns from CSV
-        subaward_record = {}
-        for key, value in row.items():
-            if value is None or value == '':
+        for row in reader:
+            try:
+                row_count += 1
+                
+                # Log progress for large files
+                if row_count % 100000 == 0:
+                    log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
+                
+                # Periodic memory cleanup for very large files
+                if row_count - last_gc_row >= gc_interval:
+                    gc.collect()
+                    last_gc_row = row_count
+                
+                # Get parent award ID (links sub-award to prime award)
+                parent_award_id = (
+                    row.get('prime_award_unique_key') or
+                    row.get('prime_award_piid') or  # For contracts
+                    row.get('prime_award_fain') or  # For assistance
+                    None
+                )
+                
+                if not parent_award_id:
+                    continue
+                
+                # Create sub-award record with ALL columns from CSV
+                subaward_record = {}
+                for key, value in row.items():
+                    if value is None or value == '':
+                        continue
+                    
+                    # Try to convert numeric values
+                    if key in ['subaward_amount', 'prime_award_amount', 'subaward_action_date_fiscal_year',
+                              'prime_award_base_action_date_fiscal_year', 'prime_award_latest_action_date_fiscal_year']:
+                        try:
+                            subaward_record[key] = Decimal(str(value))
+                        except:
+                            subaward_record[key] = normalize_string(value)
+                    else:
+                        subaward_record[key] = normalize_string(value)
+                
+                # Normalize common fields to reduce blanks
+                subaward_record = normalize_common_fields(subaward_record, record_type="subaward")
+                
+                # Group sub-awards by parent award
+                if parent_award_id not in subawards_by_parent:
+                    subawards_by_parent[parent_award_id] = []
+                
+                subawards_by_parent[parent_award_id].append(subaward_record)
+            except Exception as row_error:
+                # Log row-level errors but continue processing
+                error_msg = f"Error processing row {row_count} in {csv_filename}: {str(row_error)[:200]}"
+                logger.warning(error_msg)
+                # Continue processing next row
                 continue
-            
-            # Try to convert numeric values
-            if key in ['subaward_amount', 'prime_award_amount', 'subaward_action_date_fiscal_year',
-                      'prime_award_base_action_date_fiscal_year', 'prime_award_latest_action_date_fiscal_year']:
-                try:
-                    subaward_record[key] = Decimal(str(value))
-                except:
-                    subaward_record[key] = normalize_string(value)
-            else:
-                subaward_record[key] = normalize_string(value)
         
-        # Normalize common fields to reduce blanks
-        subaward_record = normalize_common_fields(subaward_record, record_type="subaward")
-        
-        # Group sub-awards by parent award
-        if parent_award_id not in subawards_by_parent:
-            subawards_by_parent[parent_award_id] = []
-        
-        subawards_by_parent[parent_award_id].append(subaward_record)
+        total_subawards = sum(len(subs) for subs in subawards_by_parent.values())
+        log_print(f"✅ Parsed {csv_filename}: {len(subawards_by_parent)} parent awards, {total_subawards} total sub-awards, {row_count:,} rows processed")
+        return subawards_by_parent
     
-    total_subawards = sum(len(subs) for subs in subawards_by_parent.values())
-    log_print(f"✅ Parsed {csv_filename}: {len(subawards_by_parent)} parent awards, {total_subawards} total sub-awards, {row_count:,} rows processed")
-    return subawards_by_parent
+    except MemoryError as mem_error:
+        error_msg = f"Memory error parsing {csv_filename} at row {row_count}: {str(mem_error)}"
+        log_print(f"❌ {error_msg}")
+        logger.error(error_msg, exc_info=True)
+        # Force garbage collection before re-raising
+        gc.collect()
+        raise Exception(f"Out of memory while parsing {csv_filename} at row {row_count:,}. File may be too large.")
+    except Exception as e:
+        error_msg = f"Error parsing {csv_filename} at row {row_count}: {str(e)}"
+        log_print(f"❌ {error_msg}")
+        logger.error(error_msg, exc_info=True)
+        raise
 
 def parse_subaward_csv(csv_content: str, csv_filename: str) -> Dict[str, List[Dict[str, Any]]]:
     """
@@ -1835,10 +1891,23 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                 decoder = codecs.getreader('utf-8')
                 csv_file_obj = decoder(stream)
                 
-                # Parse CSV directly from stream
-                return parse_prime_award_csv_streaming(csv_file_obj, file_name)
+                # Parse CSV directly from stream with improved error handling
+                try:
+                    return parse_prime_award_csv_streaming(csv_file_obj, file_name)
+                except MemoryError as mem_error:
+                    error_msg = f"Memory error parsing {file_name}: {str(mem_error)}"
+                    log_print(f"❌ {agency_prefix}{error_msg}")
+                    logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
+                    # Force garbage collection
+                    gc.collect()
+                    raise Exception(f"Out of memory while parsing {file_name}. File may be too large for available memory.")
+                except Exception as parse_error:
+                    error_msg = f"Error parsing {file_name}: {str(parse_error)}"
+                    log_print(f"❌ {agency_prefix}{error_msg}")
+                    logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
+                    raise
             except Exception as e:
-                error_msg = f"Error parsing {file_name}: {str(e)}"
+                error_msg = f"Error processing {file_name}: {str(e)[:300]}"
                 log_print(f"❌ {agency_prefix}{error_msg}")
                 logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
                 return {}
@@ -1889,10 +1958,23 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                 decoder = codecs.getreader('utf-8')
                 csv_file_obj = decoder(stream)
                 
-                # Parse CSV directly from stream
-                return parse_subaward_csv_streaming(csv_file_obj, file_name)
+                # Parse CSV directly from stream with improved error handling
+                try:
+                    return parse_subaward_csv_streaming(csv_file_obj, file_name)
+                except MemoryError as mem_error:
+                    error_msg = f"Memory error parsing {file_name}: {str(mem_error)}"
+                    log_print(f"❌ {agency_prefix}{error_msg}")
+                    logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
+                    # Force garbage collection
+                    gc.collect()
+                    raise Exception(f"Out of memory while parsing {file_name}. File may be too large for available memory.")
+                except Exception as parse_error:
+                    error_msg = f"Error parsing {file_name}: {str(parse_error)}"
+                    log_print(f"❌ {agency_prefix}{error_msg}")
+                    logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
+                    raise
             except Exception as e:
-                error_msg = f"Error parsing {file_name}: {str(e)}"
+                error_msg = f"Error processing {file_name}: {str(e)[:300]}"
                 log_print(f"❌ {agency_prefix}{error_msg}")
                 logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
                 return {}
