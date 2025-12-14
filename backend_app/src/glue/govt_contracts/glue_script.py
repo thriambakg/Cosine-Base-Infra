@@ -117,6 +117,10 @@ _last_api_call_time = 0
 _progress_lock = Lock()
 _progress_counter = {'indexed': 0, 'total': 0, 'processed': 0}
 
+# Thread-safe throttling tracking (for adaptive backoff)
+_throttling_lock = Lock()
+_throttling_events = {'count': 0, 'last_event_time': 0}
+
 # ============================================================================
 # Helper Functions
 # ============================================================================
@@ -2486,11 +2490,36 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                             log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
                             raise
                     
-                    # Handle throttling
+                    # Handle throttling with adaptive backoff
                     elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
                         if put_attempt < max_put_retries - 1:
-                            wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
-                            log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                            # Adaptive backoff: increase wait time based on throttling frequency
+                            # Base backoff: 2s, 4s, 6s
+                            # If multiple throttling events, increase backoff more aggressively
+                            base_wait = (put_attempt + 1) * 2
+                            
+                            # Check if we've had recent throttling events (within last 10 seconds)
+                            current_time = time.time()
+                            with _throttling_lock:
+                                if current_time - _throttling_events['last_event_time'] < 10:
+                                    _throttling_events['count'] += 1
+                                else:
+                                    _throttling_events['count'] = 1
+                                _throttling_events['last_event_time'] = current_time
+                                
+                                # Increase backoff if we're seeing frequent throttling
+                                if _throttling_events['count'] > 5:
+                                    # Very frequent throttling - use exponential backoff
+                                    wait_time = base_wait * (2 ** min(_throttling_events['count'] - 5, 3))
+                                    wait_time = min(wait_time, 60)  # Cap at 60 seconds
+                                elif _throttling_events['count'] > 2:
+                                    # Moderate throttling - use linear increase
+                                    wait_time = base_wait * _throttling_events['count']
+                                    wait_time = min(wait_time, 30)  # Cap at 30 seconds
+                                else:
+                                    wait_time = base_wait
+                            
+                            log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries} (throttling events: {_throttling_events['count']})")
                             time.sleep(wait_time)
                             continue
                     
@@ -2550,11 +2579,36 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
                         raise
                 
-                # Handle throttling
+                # Handle throttling with adaptive backoff
                 elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
                     if put_attempt < max_put_retries - 1:
-                        wait_time = (put_attempt + 1) * 2  # 2s, 4s, 6s
-                        log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                        # Adaptive backoff: increase wait time based on throttling frequency
+                        # Base backoff: 2s, 4s, 6s
+                        # If multiple throttling events, increase backoff more aggressively
+                        base_wait = (put_attempt + 1) * 2
+                        
+                        # Check if we've had recent throttling events (within last 10 seconds)
+                        current_time = time.time()
+                        with _throttling_lock:
+                            if current_time - _throttling_events['last_event_time'] < 10:
+                                _throttling_events['count'] += 1
+                            else:
+                                _throttling_events['count'] = 1
+                            _throttling_events['last_event_time'] = current_time
+                            
+                            # Increase backoff if we're seeing frequent throttling
+                            if _throttling_events['count'] > 5:
+                                # Very frequent throttling - use exponential backoff
+                                wait_time = base_wait * (2 ** min(_throttling_events['count'] - 5, 3))
+                                wait_time = min(wait_time, 60)  # Cap at 60 seconds
+                            elif _throttling_events['count'] > 2:
+                                # Moderate throttling - use linear increase
+                                wait_time = base_wait * _throttling_events['count']
+                                wait_time = min(wait_time, 30)  # Cap at 30 seconds
+                            else:
+                                wait_time = base_wait
+                        
+                        log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries} (throttling events: {_throttling_events['count']})")
                         time.sleep(wait_time)
                         continue
                 
@@ -2759,14 +2813,33 @@ def main():
             
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (all columns preserved)")
             
-            # Reduce write workers to avoid DynamoDB throttling
-            max_workers = min(10, len(award_list))
-            log_print(f"⚙️ Parallel Processing: {max_workers} workers (reduced to avoid throttling)")
+            # Adaptive worker count based on agency size and award count
+            # For large agencies (like DOD), use fewer workers to avoid throttling
+            # For smaller agencies, can use more workers
+            base_workers = 10
+            if len(award_list) > 50000:
+                # Very large agency (like DOD) - use fewer workers
+                max_workers = min(5, len(award_list))
+                log_print(f"⚙️ Large agency detected ({len(award_list):,} awards) - using reduced workers to avoid throttling")
+            elif len(award_list) > 20000:
+                # Large agency - use moderate workers
+                max_workers = min(7, len(award_list))
+                log_print(f"⚙️ Medium-large agency detected ({len(award_list):,} awards) - using moderate workers")
+            else:
+                # Smaller agency - can use more workers
+                max_workers = min(base_workers, len(award_list))
+            
+            log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
             agency_indexed = 0
             agency_errors = []
             total_transactions = 0
             total_subawards = 0
+            
+            # Reset throttling tracking for this agency
+            with _throttling_lock:
+                _throttling_events['count'] = 0
+                _throttling_events['last_event_time'] = 0
             
             with _progress_lock:
                 _progress_counter['processed'] = 0
