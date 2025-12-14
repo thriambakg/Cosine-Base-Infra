@@ -814,7 +814,7 @@ def store_oversized_item_to_s3(award_id: str, full_item: Dict[str, Any]) -> str:
         ContentEncoding='gzip'
     )
     
-    log_print(f"   💾 Stored oversized award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
+    logger.info(f"Stored oversized award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
     return s3_key
 
 
@@ -844,7 +844,7 @@ def store_failed_award_to_s3(award_id: str, award_record: Dict[str, Any]) -> str
         ContentEncoding='gzip'
     )
     
-    log_print(f"   💾 Stored failed award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
+    logger.info(f"Stored failed award {award_id} to S3: {s3_key} ({len(compressed_data):,} bytes compressed, {len(json_bytes):,} bytes uncompressed)")
     return s3_key
 
 
@@ -2315,9 +2315,6 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 
                 fields_updated_count += 1
             
-            if fields_updated_count > 0:
-                log_print(f"   📊 Updated award {award_id}: Merged {fields_updated_count} field(s) from CSV (all fields from NEW CSV data applied)")
-            
             # Merge transactions if present in bulk download (transaction adjustments)
             if transactions:
                 existing_transactions = db_item.get('transactions', [])
@@ -2368,7 +2365,6 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                             db_item['total_obligated_amount'] = award_record['total_obligated_amount']
                         elif 'total_dollars_obligated' in award_record and award_record.get('total_dollars_obligated'):
                             db_item['total_obligated_amount'] = award_record['total_dollars_obligated']
-                        log_print(f"   📊 Updated award {award_id}: Added {len(new_transactions)} new transaction(s), updated total_obligated_amount from CSV")
                 else:
                     # No existing transactions, use new ones
                     db_item['transactions'] = convert_floats_to_decimal(transactions)
@@ -2378,7 +2374,6 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         db_item['total_obligated_amount'] = award_record['total_obligated_amount']
                     elif 'total_dollars_obligated' in award_record and award_record.get('total_dollars_obligated'):
                         db_item['total_obligated_amount'] = award_record['total_dollars_obligated']
-                    log_print(f"   📊 Updated award {award_id}: Added {transaction_count} transaction(s) from bulk download")
             
             # Merge subawards (append to existing if any)
             existing_subawards = db_item.get('subawards', [])
@@ -2398,12 +2393,10 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 
                 if new_subawards:
                     db_item['subawards'] = existing_subawards + convert_floats_to_decimal(new_subawards)
-                    log_print(f"   📊 Updated award {award_id}: Added {len(new_subawards)} new sub-award(s)")
                 else:
                     db_item['subawards'] = existing_subawards
             elif subawards:
                 db_item['subawards'] = convert_floats_to_decimal(subawards)
-                log_print(f"   📊 Updated award {award_id}: Added {len(subawards)} sub-award(s)")
             
             # Merge child awards for IDV parents (append to existing if any)
             child_awards = award_record.get('child_awards', [])
@@ -2416,12 +2409,10 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     
                     if new_child_awards:
                         db_item['child_awards'] = existing_child_awards + new_child_awards
-                        log_print(f"   📊 Updated IDV {award_id}: Added {len(new_child_awards)} new child award(s)")
                     else:
                         db_item['child_awards'] = existing_child_awards
                 elif child_awards:
                     db_item['child_awards'] = child_awards
-                    log_print(f"   📊 Updated IDV {award_id}: Added {len(child_awards)} child award(s)")
                 
                 # Update child award count
                 db_item['child_award_count'] = len(db_item.get('child_awards', []))
@@ -2460,31 +2451,28 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                     if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
                         # Check if existing item already has an oversize_s3_key (from previous oversized state)
                         existing_oversize_key = db_item.get('oversize_s3_key')
-                        if existing_oversize_key:
-                            log_print(f"⚠️ Updated award {award_id} exceeds DynamoDB size limit (was already oversized), replacing S3 file with merged data...")
-                        else:
-                            log_print(f"⚠️ Updated award {award_id} exceeds DynamoDB size limit, storing to S3...")
                         
-                        # Store full merged item to S3 (will overwrite existing file if present)
-                        # This includes all merged transactions, subawards, and other fields from the new CSV
-                        oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
-                        
-                        # Extract only GSI fields for DynamoDB
-                        gsi_only_item = extract_gsi_fields_only(db_item)
-                        # Replace/update oversize_s3_key with the new one (contains merged data)
-                        gsi_only_item['oversize_s3_key'] = oversize_s3_key
-                        
-                        # Try to store GSI-only item (replaces existing row with updated GSI fields + new S3 key)
                         try:
+                            # Store full merged item to S3 (will overwrite existing file if present)
+                            # This includes all merged transactions, subawards, and other fields from the new CSV
+                            oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
+                            
+                            # Extract only GSI fields for DynamoDB
+                            gsi_only_item = extract_gsi_fields_only(db_item)
+                            # Replace/update oversize_s3_key with the new one (contains merged data)
+                            gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                            
+                            # Try to store GSI-only item (replaces existing row with updated GSI fields + new S3 key)
                             awards_table.put_item(Item=gsi_only_item)
                             if existing_oversize_key:
-                                log_print(f"✅ Replaced oversized award {award_id} in DynamoDB with merged data, updated S3 file")
+                                logger.info(f"Replaced oversized award {award_id} in DynamoDB with merged data, updated S3 file")
                             else:
-                                log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
+                                logger.info(f"Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
                             break
                         except Exception as gsi_error:
-                            log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
-                            raise
+                            error_msg = f"Even GSI-only item too large for {award_id}: {str(gsi_error)[:200]}"
+                            logger.error(error_msg)
+                            raise Exception(error_msg)
                     
                     # Handle throttling with simple exponential backoff
                     elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
@@ -2492,11 +2480,22 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                             # Simple exponential backoff: 2s, 4s, 8s
                             wait_time = 2 ** (put_attempt + 1)
                             wait_time = min(wait_time, 30)  # Cap at 30 seconds
-                            log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                            # Only log throttling on first attempt to reduce noise
+                            if put_attempt == 0:
+                                logger.warning(f"DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry")
                             time.sleep(wait_time)
                             continue
+                        else:
+                            # Out of retries - log error and re-raise
+                            logger.error(f"DynamoDB throttling persisted after {max_put_retries} retries for award {award_id}")
+                            raise
                     
-                    # Re-raise if not throttling or out of retries
+                    # Handle other DynamoDB errors
+                    elif 'ClientError' in error_str or 'Boto3Error' in error_str:
+                        logger.error(f"DynamoDB client error for award {award_id}: {error_str[:200]}")
+                        raise
+                    
+                    # Re-raise if not a known error type or out of retries
                     raise
         else:
             # New item - store transactions and subawards directly in DynamoDB
@@ -2534,23 +2533,24 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                 
                 # Handle oversized items (ValidationException)
                 if 'ValidationException' in error_str and 'Item size has exceeded' in error_str:
-                    log_print(f"⚠️ Award {award_id} exceeds DynamoDB size limit, storing to S3...")
+                    logger.warning(f"Award {award_id} exceeds DynamoDB size limit, storing to S3")
                     
                     # Store full item to S3
-                    oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
-                    
-                    # Extract only GSI fields for DynamoDB
-                    gsi_only_item = extract_gsi_fields_only(db_item)
-                    gsi_only_item['oversize_s3_key'] = oversize_s3_key
-                    
-                    # Try to store GSI-only item
                     try:
+                        oversize_s3_key = store_oversized_item_to_s3(award_id, db_item)
+                        
+                        # Extract only GSI fields for DynamoDB
+                        gsi_only_item = extract_gsi_fields_only(db_item)
+                        gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                        
+                        # Try to store GSI-only item
                         awards_table.put_item(Item=gsi_only_item)
-                        log_print(f"✅ Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
+                        logger.info(f"Stored GSI fields for oversized award {award_id} to DynamoDB, full data in S3")
                         break
                     except Exception as gsi_error:
-                        log_print(f"❌ Even GSI-only item too large for {award_id}: {str(gsi_error)}")
-                        raise
+                        error_msg = f"Even GSI-only item too large for {award_id}: {str(gsi_error)[:200]}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
                 
                 # Handle throttling with simple exponential backoff
                 elif 'ThrottlingException' in error_str or 'ProvisionedThroughputExceededException' in error_str:
@@ -2558,11 +2558,24 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         # Simple exponential backoff: 2s, 4s, 8s
                         wait_time = 2 ** (put_attempt + 1)
                         wait_time = min(wait_time, 30)  # Cap at 30 seconds
-                        log_print(f"⚠️ DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry {put_attempt + 1}/{max_put_retries}")
+                        # Only log throttling on first attempt to reduce noise
+                        if put_attempt == 0:
+                            logger.warning(f"DynamoDB throttled for award {award_id}, waiting {wait_time}s before retry")
                         time.sleep(wait_time)
                         continue
+                    else:
+                        # Out of retries - log error and re-raise
+                        error_msg = f"DynamoDB throttling persisted after {max_put_retries} retries for award {award_id}"
+                        logger.error(error_msg)
+                        raise Exception(error_msg)
                 
-                # Re-raise if not throttling or out of retries
+                # Handle other DynamoDB errors
+                elif 'ClientError' in error_str or 'Boto3Error' in error_str or 'botocore' in error_str.lower():
+                    error_msg = f"DynamoDB client error for award {award_id}: {error_str[:200]}"
+                    logger.error(error_msg)
+                    raise Exception(error_msg)
+                
+                # Re-raise if not a known error type or out of retries
                 raise
     
         return {
@@ -2574,8 +2587,12 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
     
     except Exception as e:
         award_id = award_record.get('award_id', 'unknown')
-        log_print(f"❌ Error indexing award {award_id}: {str(e)}")
-        logger.error(f"❌ Error indexing award: {str(e)}", exc_info=True)
+        error_type = type(e).__name__
+        error_msg = str(e)[:500]  # Limit error message length
+        
+        # Log error with context
+        logger.error(f"Error indexing award {award_id}: {error_type}: {error_msg}", exc_info=True)
+        
         # Re-raise to be caught by the calling code which will send to DLQ
         raise
 
@@ -2823,9 +2840,15 @@ def main():
                                 log_print(f"  📊 Progress: {processed}/{len(award_list)} awards ({agency_indexed} indexed)")
                                 log_print(f"     ⚡ Rate: {rate:.2f} awards/sec | ⏱️ ETA: {int(remaining // 60)}m {int(remaining % 60)}s")
                     except Exception as e:
-                        error_msg = f"Award {award_id}: {str(e)[:200]}"
-                        agency_errors.append(error_msg)
-                        log_print(f"❌ {error_msg}")
+                        error_type = type(e).__name__
+                        error_msg = str(e)[:300]  # Limit error message length
+                        full_error = f"{error_type}: {error_msg}"
+                        
+                        # Track error for summary
+                        agency_errors.append(f"Award {award_id}: {full_error}")
+                        
+                        # Log error (use logger instead of log_print to reduce noise)
+                        logger.error(f"Failed to index award {award_id}: {full_error}", exc_info=False)
                         
                         # Store failed award to S3 and send to DLQ for individual processing
                         if DLQ_SQS_URL and award_id != 'unknown':
@@ -2836,7 +2859,9 @@ def main():
                                 # Send S3 key to DLQ
                                 message_body = {
                                     'award_id': award_id,
-                                    'failed_award_s3_key': failed_award_s3_key
+                                    'failed_award_s3_key': failed_award_s3_key,
+                                    'error_type': error_type,
+                                    'error_message': error_msg
                                 }
                                 message_json = json.dumps(message_body, default=str)
                                 
@@ -2844,13 +2869,17 @@ def main():
                                     QueueUrl=DLQ_SQS_URL,
                                     MessageBody=message_json
                                 )
-                                log_print(f"📤 Sent failed award {award_id} to DLQ (stored at {failed_award_s3_key})")
+                                logger.info(f"Sent failed award {award_id} to DLQ (stored at {failed_award_s3_key})")
                             except Exception as dlq_error:
-                                log_print(f"⚠️ Failed to send award {award_id} to DLQ: {str(dlq_error)[:200]}")
+                                logger.warning(f"Failed to send award {award_id} to DLQ: {str(dlq_error)[:200]}")
                         elif not DLQ_SQS_URL:
-                            log_print(f"⚠️ DLQ_SQS_URL not configured, skipping DLQ for failed award {award_id}")
+                            logger.debug(f"DLQ_SQS_URL not configured, skipping DLQ for failed award {award_id}")
                         elif award_id == 'unknown':
-                            log_print(f"⚠️ Cannot send award to DLQ: award_id is missing from award_record")
+                            logger.warning(f"Cannot send award to DLQ: award_id is missing from award_record")
+                        
+                        # Update progress counter even on error
+                        with _progress_lock:
+                            _progress_counter['processed'] += 1
             
             store_phase_duration = time.time() - store_phase_start
             agency_duration = time.time() - agency_start_time
