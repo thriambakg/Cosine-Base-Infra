@@ -1335,95 +1335,95 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
                 
                 if not award_id:
                     continue
-        
-        # Initialize award record if first time seeing this award
-        if award_id not in awards:
-            # Extract fiscal year from period start date
-            period_start = row.get('period_of_performance_start_date')
-            fiscal_year = extract_fiscal_year(period_start)
-            
-            # Create award record with ALL columns from CSV
-            # Convert all values to appropriate types
-            award_record = {}
-            for key, value in row.items():
-                if value is None or value == '':
-                    continue
                 
-                # Try to convert numeric values
-                if key in ['federal_action_obligation', 'total_dollars_obligated', 'total_obligated_amount',
-                          'total_outlayed_amount_for_overall_award', 'base_and_exercised_options_value',
-                          'current_total_value_of_award', 'base_and_all_options_value',
-                          'potential_total_value_of_award', 'action_date_fiscal_year']:
-                    try:
-                        award_record[key] = Decimal(str(value))
-                    except:
-                        award_record[key] = normalize_string(value)
-                else:
-                    award_record[key] = normalize_string(value)
-            
-            # Normalize common fields to reduce blanks (maps contract/assistance fields to common names)
-            award_record = normalize_common_fields(award_record, record_type="prime")
-            
-            # Add computed fields
-            # award_id is the primary key in DynamoDB - for assistance awards this matches assistance_award_unique_key
-            award_record['award_id'] = award_id
-            award_record['fiscal_year'] = fiscal_year
-            award_record['transaction_count'] = 0
-            award_record['transactions'] = []
-            award_record['subawards'] = []
-            award_record['indexed_at'] = datetime.now(timezone.utc).isoformat()
-            award_record['last_updated'] = datetime.now(timezone.utc).isoformat()
-            award_record['data_source'] = 'usaspending_bulk_download'
-            award_record['api_version'] = 'bulk_csv_v2'
-            award_record['award_details_indexed'] = False
-            award_record['full_indexing_complete'] = False
-            award_record['ttl'] = int((datetime.now(timezone.utc).timestamp() + (90 * 24 * 60 * 60)))
-            
-            # Detect IDV child awards (awards with parent_award_piid and award types A/B/C/D, not IDV_ types)
-            parent_award_piid = row.get('parent_award_piid') or row.get('parent_award_id_piid')
-            parent_award_agency_id = row.get('parent_award_agency_id') or row.get('parent_award_agency_code')
-            award_type = row.get('award_type') or row.get('contract_award_type') or ''
-            
-            # Check if this is an IDV child award (has parent_award_piid and award type is A/B/C/D)
-            is_idv_child = False
-            if parent_award_piid and parent_award_agency_id:
-                # Award types A, B, C, D are child awards (delivery orders/calls against IDVs)
-                # Award types starting with IDV_ are parent IDVs themselves
-                if award_type in ['A', 'B', 'C', 'D'] or (isinstance(award_type, str) and award_type.upper() in ['A', 'B', 'C', 'D']):
-                    is_idv_child = True
-                    # Build parent IDV ID: CONT_IDV_{piid}_{agency_id}
-                    # This matches the format used by USAspending for IDV awards
-                    parent_idv_id = f"CONT_IDV_{parent_award_piid}_{parent_award_agency_id}"
-                    award_record['parent_idv_id'] = parent_idv_id
-                    award_record['parent_award_piid'] = parent_award_piid
-                    award_record['parent_award_agency_id'] = parent_award_agency_id
-                    award_record['is_idv_child'] = True
-            
-            # Detect if this is a parent IDV (award type starts with IDV_)
-            if award_type and isinstance(award_type, str) and award_type.startswith('IDV_'):
-                award_record['is_idv_parent'] = True
-                award_record['child_awards'] = []
-                award_record['child_award_count'] = 0
-            
-            awards[award_id] = award_record
-        
-        # Add transaction to award
-        award = awards[award_id]
-        award['transaction_count'] += 1
-        
-        # Store transaction record (all columns)
-        transaction_record = {}
-        for key, value in row.items():
-            if value is None or value == '':
-                continue
-            if key in ['federal_action_obligation', 'total_dollars_obligated', 'total_obligated_amount']:
-                try:
-                    transaction_record[key] = Decimal(str(value))
-                except:
-                    transaction_record[key] = normalize_string(value)
-            else:
-                transaction_record[key] = normalize_string(value)
-        
+                # Initialize award record if first time seeing this award
+                if award_id not in awards:
+                    # Extract fiscal year from period start date
+                    period_start = row.get('period_of_performance_start_date')
+                    fiscal_year = extract_fiscal_year(period_start)
+                    
+                    # Create award record with ALL columns from CSV
+                    # Convert all values to appropriate types
+                    award_record = {}
+                    for key, value in row.items():
+                        if value is None or value == '':
+                            continue
+                        
+                        # Try to convert numeric values
+                        if key in ['federal_action_obligation', 'total_dollars_obligated', 'total_obligated_amount',
+                                  'total_outlayed_amount_for_overall_award', 'base_and_exercised_options_value',
+                                  'current_total_value_of_award', 'base_and_all_options_value',
+                                  'potential_total_value_of_award', 'action_date_fiscal_year']:
+                            try:
+                                award_record[key] = Decimal(str(value))
+                            except:
+                                award_record[key] = normalize_string(value)
+                        else:
+                            award_record[key] = normalize_string(value)
+                    
+                    # Normalize common fields to reduce blanks (maps contract/assistance fields to common names)
+                    award_record = normalize_common_fields(award_record, record_type="prime")
+                    
+                    # Add computed fields
+                    # award_id is the primary key in DynamoDB - for assistance awards this matches assistance_award_unique_key
+                    award_record['award_id'] = award_id
+                    award_record['fiscal_year'] = fiscal_year
+                    award_record['transaction_count'] = 0
+                    award_record['transactions'] = []
+                    award_record['subawards'] = []
+                    award_record['indexed_at'] = datetime.now(timezone.utc).isoformat()
+                    award_record['last_updated'] = datetime.now(timezone.utc).isoformat()
+                    award_record['data_source'] = 'usaspending_bulk_download'
+                    award_record['api_version'] = 'bulk_csv_v2'
+                    award_record['award_details_indexed'] = False
+                    award_record['full_indexing_complete'] = False
+                    award_record['ttl'] = int((datetime.now(timezone.utc).timestamp() + (90 * 24 * 60 * 60)))
+                    
+                    # Detect IDV child awards (awards with parent_award_piid and award types A/B/C/D, not IDV_ types)
+                    parent_award_piid = row.get('parent_award_piid') or row.get('parent_award_id_piid')
+                    parent_award_agency_id = row.get('parent_award_agency_id') or row.get('parent_award_agency_code')
+                    award_type = row.get('award_type') or row.get('contract_award_type') or ''
+                    
+                    # Check if this is an IDV child award (has parent_award_piid and award type is A/B/C/D)
+                    is_idv_child = False
+                    if parent_award_piid and parent_award_agency_id:
+                        # Award types A, B, C, D are child awards (delivery orders/calls against IDVs)
+                        # Award types starting with IDV_ are parent IDVs themselves
+                        if award_type in ['A', 'B', 'C', 'D'] or (isinstance(award_type, str) and award_type.upper() in ['A', 'B', 'C', 'D']):
+                            is_idv_child = True
+                            # Build parent IDV ID: CONT_IDV_{piid}_{agency_id}
+                            # This matches the format used by USAspending for IDV awards
+                            parent_idv_id = f"CONT_IDV_{parent_award_piid}_{parent_award_agency_id}"
+                            award_record['parent_idv_id'] = parent_idv_id
+                            award_record['parent_award_piid'] = parent_award_piid
+                            award_record['parent_award_agency_id'] = parent_award_agency_id
+                            award_record['is_idv_child'] = True
+                    
+                    # Detect if this is a parent IDV (award type starts with IDV_)
+                    if award_type and isinstance(award_type, str) and award_type.startswith('IDV_'):
+                        award_record['is_idv_parent'] = True
+                        award_record['child_awards'] = []
+                        award_record['child_award_count'] = 0
+                    
+                    awards[award_id] = award_record
+                
+                # Add transaction to award
+                award = awards[award_id]
+                award['transaction_count'] += 1
+                
+                # Store transaction record (all columns)
+                transaction_record = {}
+                for key, value in row.items():
+                    if value is None or value == '':
+                        continue
+                    if key in ['federal_action_obligation', 'total_dollars_obligated', 'total_obligated_amount']:
+                        try:
+                            transaction_record[key] = Decimal(str(value))
+                        except:
+                            transaction_record[key] = normalize_string(value)
+                    else:
+                        transaction_record[key] = normalize_string(value)
+                
                 # Normalize common fields to reduce blanks
                 transaction_record = normalize_common_fields(transaction_record, record_type="transaction")
                 
