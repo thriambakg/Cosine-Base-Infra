@@ -2862,21 +2862,10 @@ def main():
             
             log_print(f"\n📦 Indexing {len(award_list)} awards in parallel (all columns preserved)")
             
-            # Adaptive worker count based on agency size and award count
-            # For large agencies (like DOD), use fewer workers to avoid throttling
-            # For smaller agencies, can use more workers
+            # Use fixed worker count regardless of agency size
+            # Size-based throttling removed - use consistent parallelism for all agencies
             base_workers = 10
-            if len(award_list) > 50000:
-                # Very large agency (like DOD) - use fewer workers
-                max_workers = min(5, len(award_list))
-                log_print(f"⚙️ Large agency detected ({len(award_list):,} awards) - using reduced workers to avoid throttling")
-            elif len(award_list) > 20000:
-                # Large agency - use moderate workers
-                max_workers = min(7, len(award_list))
-                log_print(f"⚙️ Medium-large agency detected ({len(award_list):,} awards) - using moderate workers")
-            else:
-                # Smaller agency - can use more workers
-                max_workers = min(base_workers, len(award_list))
+            max_workers = min(base_workers, len(award_list))
             
             log_print(f"⚙️ Parallel Processing: {max_workers} workers")
             
