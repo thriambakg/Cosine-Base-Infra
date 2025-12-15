@@ -1845,10 +1845,10 @@ module "usaspending_bulk_indexing_glue_job" {
 
   # Job configuration
   max_retries           = 1
-  timeout               = 2880 # 48 hours (max is 10080 minutes = 7 days, bulk downloads can take time)
-  concurrent_executions = 1    # Only allow 1 concurrent run to avoid conflicts
-  worker_type           = "G.1X"
-  number_of_workers     = 2
+  timeout               = 2880   # 48 hours (max is 10080 minutes = 7 days, bulk downloads can take time)
+  concurrent_executions = 1      # Only allow 1 concurrent run to avoid conflicts
+  worker_type           = "G.2X" # Increased from G.1X (32 GB memory per worker vs 16 GB)
+  number_of_workers     = 5      # Increased from 2 (5 × 32 GB = 160 GB total memory for large CSV processing)
 
   # S3 buckets
   s3_bucket_arn = module.glue_scripts_s3.bucket_arn
@@ -2175,7 +2175,7 @@ module "usaspending_bulk_fetcher_lambda" {
   handler       = "lambda_function.lambda_handler"
   runtime       = "python3.11"
   timeout       = 900  # 15 minutes max
-  memory_size   = 1024 # Increased for processing large CSV files
+  memory_size   = 3008 # Max memory for processing very large CSV files (300k+ rows)
 
   source_dir = "${path.module}/../backend_app/src/usaspending_bulk_fetcher/app"
 

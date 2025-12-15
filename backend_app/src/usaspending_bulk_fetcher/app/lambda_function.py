@@ -869,15 +869,32 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
     """
     awards = {}
     row_count = 0
+    last_gc_row = 0
+    gc_interval = 50000  # Run garbage collection every 50k rows
     
-    reader = csv.DictReader(csv_file_obj)
-    
-    for row in reader:
+    try:
+        reader = csv.DictReader(csv_file_obj)
+        
+        for row in reader:
         row_count += 1
         
         # Log progress for large files
         if row_count % 100000 == 0:
             log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
+            # Log memory usage if available
+            try:
+                import psutil
+                process = psutil.Process()
+                mem_info = process.memory_info()
+                mem_mb = mem_info.rss / 1024 / 1024
+                log_print(f"   💾 Memory usage: {mem_mb:.1f} MB, Awards in memory: {len(awards):,}")
+            except:
+                pass  # psutil not available, skip memory logging
+        
+        # Periodic memory cleanup for very large files
+        if row_count - last_gc_row >= gc_interval:
+            gc.collect()
+            last_gc_row = row_count
         
         # Get award ID - primary key for grouping and DynamoDB primary key
         # For contracts: uses contract_award_unique_key
@@ -987,8 +1004,24 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
         
         award['transactions'].append(transaction_record)
     
-    log_print(f"✅ Parsed {csv_filename}: {len(awards)} unique awards, {sum(a['transaction_count'] for a in awards.values())} total transactions, {row_count:,} rows processed")
-    return awards
+        # Final garbage collection before returning
+        gc.collect()
+        
+        log_print(f"✅ Parsed {csv_filename}: {len(awards)} unique awards, {sum(a['transaction_count'] for a in awards.values())} total transactions, {row_count:,} rows processed")
+        return awards
+    
+    except MemoryError as mem_error:
+        error_msg = f"Memory error parsing {csv_filename} at row {row_count:,}: {str(mem_error)}"
+        log_print(f"❌ {error_msg}")
+        logger.error(error_msg, exc_info=True)
+        # Force garbage collection before re-raising
+        gc.collect()
+        raise Exception(f"Out of memory while parsing {csv_filename} at row {row_count:,}. File may be too large. Awards in memory: {len(awards):,}")
+    except Exception as e:
+        error_msg = f"Error parsing {csv_filename} at row {row_count:,}: {str(e)}"
+        log_print(f"❌ {error_msg}")
+        logger.error(error_msg, exc_info=True)
+        raise
 
 def parse_prime_award_csv(csv_content: str, csv_filename: str) -> Dict[str, Dict[str, Any]]:
     """
@@ -1368,6 +1401,13 @@ def _parse_csvs_from_s3(csv_s3_keys: Dict[str, str], prime_file_list: List[str],
                 
                 # Parse CSV directly from stream
                 return parse_prime_award_csv_streaming(csv_file_obj, file_name)
+            except MemoryError as mem_error:
+                error_msg = f"Memory error parsing {file_name}: {str(mem_error)}"
+                log_print(f"❌ {agency_prefix}{error_msg}")
+                logger.error(f"❌ {agency_prefix}{error_msg}", exc_info=True)
+                # Force garbage collection
+                gc.collect()
+                raise Exception(f"Out of memory while parsing {file_name}. File may be too large for available memory (3008 MB). Consider splitting the date range.")
             except Exception as e:
                 error_msg = f"Error parsing {file_name}: {str(e)}"
                 log_print(f"❌ {agency_prefix}{error_msg}")
