@@ -437,7 +437,7 @@ def main():
         else:
             items_to_process.extend(items)
         
-        scan_count += len(response.get('ScannedCount', len(items)))
+        scan_count += response.get('ScannedCount', len(items))
         
         if PREFILL_MODE:
             log_print(f"   📊 Scanned {scan_count} items, found {filtered_count} items with empty bill_text_html_s3_key")
