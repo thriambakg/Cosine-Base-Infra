@@ -4,6 +4,7 @@ Processes bill text download messages from SQS, downloads HTML bill text, and st
 Processes messages sequentially with batch size of 10.
 """
 
+
 import json
 import os
 import logging
