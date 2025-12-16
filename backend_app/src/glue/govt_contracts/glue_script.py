@@ -1588,7 +1588,7 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
     
     # Verify file is accessible
     log_print(f"🔍 {agency_prefix}Verifying file accessibility before download...")
-    max_verification_retries = 15
+    max_verification_retries = 20  # Increased from 15 to allow more attempts
     verification_retry_delay = 60
     
     file_verified = False
@@ -1602,8 +1602,11 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
                 break
             elif head_response.status_code == 403:
                 if verify_attempt < max_verification_retries - 1:
-                    wait_time = min(60 * (2 ** min(verify_attempt, 5)), 600)
-                    log_print(f"⚠️ {agency_prefix}File not yet accessible (403 Forbidden). Waiting {wait_time}s before retry...")
+                    # Increased wait time: exponential backoff with higher cap (30 minutes = 1800s)
+                    # Formula: 60s * 2^attempt, capped at 1800s (30 minutes)
+                    wait_time = min(60 * (2 ** min(verify_attempt, 6)), 1800)
+                    wait_time_minutes = wait_time / 60
+                    log_print(f"⚠️ {agency_prefix}File not yet accessible (403 Forbidden). Waiting {wait_time}s ({wait_time_minutes:.1f} minutes) before retry...")
                     time.sleep(wait_time)
                     continue
                 else:
@@ -1612,9 +1615,11 @@ def download_and_parse_all_csvs(file_url: str, agency_name: Optional[str] = None
                 head_response.raise_for_status()
         except Exception as e:
             if verify_attempt < max_verification_retries - 1:
-                wait_time = min(60 * (2 ** min(verify_attempt, 5)), 600)
+                # Increased wait time: exponential backoff with higher cap (30 minutes = 1800s)
+                wait_time = min(60 * (2 ** min(verify_attempt, 6)), 1800)
+                wait_time_minutes = wait_time / 60
                 log_print(f"⚠️ {agency_prefix}Verification error (attempt {verify_attempt + 1}): {str(e)[:100]}")
-                log_print(f"   Waiting {wait_time}s before retry...")
+                log_print(f"   Waiting {wait_time}s ({wait_time_minutes:.1f} minutes) before retry...")
                 time.sleep(wait_time)
                 continue
             raise
