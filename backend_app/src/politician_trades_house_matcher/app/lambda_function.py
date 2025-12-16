@@ -1154,29 +1154,45 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
             exact_amount = None
             amount_range = None
             
-            # First try to match a range (like "$1,001 - $15,000" or "$1,001 $15,000")
-            amount_match = re.search(r'\$([\d,]+)\s*[-–]?\s*\$?([\d,]+)', trade_text)
+            # First try to match a range (like "$1,001 - $15,000" or "$1,001-$15,000")
+            # Pattern requires either a dash/separator OR two dollar signs to ensure it's a range
+            # This prevents matching a single amount followed by unrelated numbers
+            range_patterns = [
+                r'\$([\d,]+)\s*[-–—]\s*\$([\d,]+)',  # "$1,001 - $15,000" (with dash and both have $)
+                r'\$([\d,]+)\s+to\s+\$([\d,]+)',      # "$1,001 to $15,000"
+                r'\$([\d,]+)\s+through\s+\$([\d,]+)', # "$1,001 through $15,000"
+            ]
+            
+            amount_match = None
+            for pattern in range_patterns:
+                amount_match = re.search(pattern, trade_text, re.IGNORECASE)
+                if amount_match:
+                    break
+            
             if amount_match:
                 try:
                     min_str = amount_match.group(1).replace(',', '')
                     max_str = amount_match.group(2).replace(',', '')
                     amount_min = float(min_str)
                     amount_max = float(max_str)
-                    # If min and max are the same, it's actually a fixed amount
-                    if amount_min == amount_max:
+                    
+                    # Validate: for a range, min must be less than max
+                    if amount_min >= amount_max:
+                        # If min >= max, treat as fixed amount (could be OCR error or same value)
                         exact_amount = int(amount_min)
+                        logger.info(f"   ⚠️ Range validation: min ({amount_min}) >= max ({amount_max}), treating as fixed amount ${exact_amount:,}")
                         # Map fixed amount to standard range
                         standard_range = find_standard_range(amount_min)
                         if standard_range[1] is None:
-                            amount_range = [standard_range[0], 999999999]  # Use large number instead of None
+                            amount_range = [standard_range[0], 999999999]
                         else:
                             amount_range = [standard_range[0], standard_range[1]]
-                        # Set amountMin/amountMax to the standard range values (for GSI queries)
-                        # The exactAmount field preserves the original fixed value
                         amount_min = amount_range[0]
                         amount_max = amount_range[1] if amount_range[1] != 999999999 else None
                         logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
                     else:
+                        # Valid range: min < max
+                        logger.info(f"   ✅ Detected valid range: ${amount_min:,.0f} - ${amount_max:,.0f}")
                         # It's a range - map to standard range using midpoint
                         midpoint = (amount_min + amount_max) / 2
                         standard_range = find_standard_range(midpoint)
@@ -1187,15 +1203,21 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         # Update min/max to standard range values
                         amount_min = amount_range[0]
                         amount_max = amount_range[1] if amount_range[1] != 999999999 else None
-                except ValueError:
-                    pass
-            else:
-                # Try to match a single fixed amount (like "$15,000" or "$1,001")
-                fixed_amount_match = re.search(r'\$([\d,]+)', trade_text)
+                        logger.info(f"   ✅ Mapped range to standard range: ${amount_range[0]:,} - ${amount_range[1]:,}")
+                except ValueError as e:
+                    logger.warning(f"   ⚠️ Error parsing range: {e}")
+                    amount_match = None  # Reset to try fixed amount pattern
+            
+            # If no valid range found, try to match a single fixed amount
+            if not amount_match or amount_min is None:
+                # Try to match a single fixed amount (like "$15,000")
+                # Use word boundaries or end of string to avoid matching partial amounts
+                fixed_amount_match = re.search(r'\$([\d,]+)(?:\s|$|[^\d,])', trade_text)
                 if fixed_amount_match:
                     try:
                         amount_str = fixed_amount_match.group(1).replace(',', '')
                         exact_amount = int(float(amount_str))
+                        logger.info(f"   ✅ Detected fixed amount: ${exact_amount:,}")
                         # Map fixed amount to standard range
                         standard_range = find_standard_range(exact_amount)
                         if standard_range[1] is None:
@@ -1206,8 +1228,9 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         # The exactAmount field preserves the original fixed value
                         amount_min = amount_range[0]
                         amount_max = amount_range[1] if amount_range[1] != 999999999 else None
-                        logger.info(f"   ✅ Extracted fixed amount ${exact_amount:,} and mapped to range ${amount_range[0]:,} - ${amount_range[1]:,}")
-                    except (ValueError, TypeError):
+                        logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
+                    except (ValueError, TypeError) as e:
+                        logger.warning(f"   ⚠️ Error parsing fixed amount: {e}")
                         pass
             
             # Calculate average amount for backwards compatibility
