@@ -34,6 +34,38 @@ DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 # Name matching threshold (0.0 to 1.0)
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
 
+# Standard House PTR ranges (same as Senate PTR ranges)
+# Note: Minimum reporting threshold is $1,000, but we handle sub-$1k amounts
+HOUSE_PTR_RANGES = [
+    (0, 1000),  # $0 - $1,000 (handles sub-$1k amounts)
+    (1001, 15000),
+    (15001, 50000),
+    (50001, 100000),
+    (100001, 250000),
+    (250001, 500000),
+    (500001, 1000000),
+    (1000001, 5000000),
+    (5000001, 25000000),
+    (25000001, 50000000),
+    (50000001, None)  # Over $50,000,000 - max is None/unbounded
+]
+
+def find_standard_range(amount_value: float) -> tuple:
+    """Find the standard House PTR range that contains the given amount"""
+    # Handle zero or negative amounts (use first range)
+    if amount_value <= 0:
+        return HOUSE_PTR_RANGES[0]
+    
+    for range_min, range_max in HOUSE_PTR_RANGES:
+        if range_max is None:
+            if amount_value >= range_min:
+                return (range_min, None)
+        else:
+            if range_min <= amount_value <= range_max:
+                return (range_min, range_max)
+    # Fallback: if amount is less than minimum, use first range
+    return HOUSE_PTR_RANGES[0]
+
 # Module-level cache for asset codes mapping (loaded once per lambda container)
 _ASSET_CODES_CACHE: Optional[Dict[str, str]] = None
 
@@ -1116,7 +1148,13 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 except ValueError:
                     pass
                     
-            # Extract amount (range like "$1,001 - $15,000" or "$1,001 $15,000")
+            # Extract amount - handle both ranges and fixed amounts
+            amount_min = None
+            amount_max = None
+            exact_amount = None
+            amount_range = None
+            
+            # First try to match a range (like "$1,001 - $15,000" or "$1,001 $15,000")
             amount_match = re.search(r'\$([\d,]+)\s*[-–]?\s*\$?([\d,]+)', trade_text)
             if amount_match:
                 try:
@@ -1124,9 +1162,58 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                     max_str = amount_match.group(2).replace(',', '')
                     amount_min = float(min_str)
                     amount_max = float(max_str)
-                    amount = (amount_min + amount_max) / 2
+                    # If min and max are the same, it's actually a fixed amount
+                    if amount_min == amount_max:
+                        exact_amount = int(amount_min)
+                        # Map fixed amount to standard range
+                        standard_range = find_standard_range(amount_min)
+                        if standard_range[1] is None:
+                            amount_range = [standard_range[0], 999999999]  # Use large number instead of None
+                        else:
+                            amount_range = [standard_range[0], standard_range[1]]
+                        # Set amountMin/amountMax to the standard range values (for GSI queries)
+                        # The exactAmount field preserves the original fixed value
+                        amount_min = amount_range[0]
+                        amount_max = amount_range[1] if amount_range[1] != 999999999 else None
+                        logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
+                    else:
+                        # It's a range - map to standard range using midpoint
+                        midpoint = (amount_min + amount_max) / 2
+                        standard_range = find_standard_range(midpoint)
+                        if standard_range[1] is None:
+                            amount_range = [standard_range[0], 999999999]
+                        else:
+                            amount_range = [standard_range[0], standard_range[1]]
+                        # Update min/max to standard range values
+                        amount_min = amount_range[0]
+                        amount_max = amount_range[1] if amount_range[1] != 999999999 else None
                 except ValueError:
                     pass
+            else:
+                # Try to match a single fixed amount (like "$15,000" or "$1,001")
+                fixed_amount_match = re.search(r'\$([\d,]+)', trade_text)
+                if fixed_amount_match:
+                    try:
+                        amount_str = fixed_amount_match.group(1).replace(',', '')
+                        exact_amount = int(float(amount_str))
+                        # Map fixed amount to standard range
+                        standard_range = find_standard_range(exact_amount)
+                        if standard_range[1] is None:
+                            amount_range = [standard_range[0], 999999999]  # Use large number instead of None
+                        else:
+                            amount_range = [standard_range[0], standard_range[1]]
+                        # Set amountMin/amountMax to the standard range values (for GSI queries)
+                        # The exactAmount field preserves the original fixed value
+                        amount_min = amount_range[0]
+                        amount_max = amount_range[1] if amount_range[1] != 999999999 else None
+                        logger.info(f"   ✅ Extracted fixed amount ${exact_amount:,} and mapped to range ${amount_range[0]:,} - ${amount_range[1]:,}")
+                    except (ValueError, TypeError):
+                        pass
+            
+            # Calculate average amount for backwards compatibility
+            amount = None
+            if amount_min is not None and amount_max is not None:
+                amount = (amount_min + amount_max) / 2
                     
             # Extract asset information according to the structured format
             # Format: Asset name + (optional ticker) + [asset type] + Transaction type + Dates + Amount
@@ -1206,9 +1293,14 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 security_name = security_name.strip()
                 
                 # Only create trade if we have minimum required fields
-                if transaction_date and (security_name or security_symbol) and transaction_type and amount:
+                if transaction_date and (security_name or security_symbol) and transaction_type and (amount_min is not None or amount_max is not None):
                     # Use notification_date as filingDate if available, otherwise fall back to signature-based filing_date
                     trade_filing_date = notification_date if notification_date else filing_date
+                    
+                    # Build amountRange array
+                    if amount_range is None and amount_min is not None and amount_max is not None:
+                        amount_range = [amount_min, amount_max]
+                    
                     trade = {
                         'filerName': filer_name,
                         'filingDate': trade_filing_date,
@@ -1217,13 +1309,15 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         'securitySymbol': security_symbol,
                         'assetType': asset_type,
                         'transactionType': transaction_type,
-                        'amount': amount,
+                        'amount': amount,  # Average/midpoint for backwards compatibility
                         'amountMin': amount_min,
                         'amountMax': amount_max,
-                    'owner': owner,
+                        'amountRange': amount_range,  # Standard range [min, max] for GSI queries
+                        'exactAmount': exact_amount,  # Exact dollar amount if it was a fixed value
+                        'owner': owner,
                         'formType': 'house_ptr',
-                    'source': 'house',
-                    'metadata': trade_metadata.get('metadata')
+                        'source': 'house',
+                        'metadata': trade_metadata.get('metadata')
                     }
                     trades.append(trade)
                 logger.info(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max} (name: '{security_name}')")
@@ -1412,11 +1506,14 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                 else:
                     owner = None
                 
-                # Build amountRange array
+                # Build amountRange array - use from trade if available (already mapped to standard range)
                 amount_min = trade.get('amountMin')
                 amount_max = trade.get('amountMax')
-                amount_range = None
-                if amount_min is not None and amount_max is not None:
+                amount_range = trade.get('amountRange')  # Use pre-mapped range from trade if available
+                exact_amount = trade.get('exactAmount')  # Exact dollar amount if it was a fixed value
+                
+                # If amountRange not set but we have min/max, create it
+                if amount_range is None and amount_min is not None and amount_max is not None:
                     amount_range = [amount_min, amount_max]
                 
                 # Generate tradeId: trade_{filing_date}_house_{uuid}_{index}
@@ -1460,7 +1557,7 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'amountMin': amount_min,
                     'amountMax': amount_max,
                     'amountRange': amount_range,
-                    'exactAmount': None,
+                    'exactAmount': exact_amount,  # Exact dollar amount if it was a fixed value
                     'owner': owner,
                     'comment': '--',
                     'formS3Key': s3_key,

@@ -743,32 +743,54 @@ def parse_table_as_senate_transactions(table_data: List[List[str]], full_text: s
 
 def parse_amount_range(amount_str: str) -> Optional[List[int]]:
     """
-    Parse amount string like "$1,001-$15,000" or "$1,001 - $15,000" into [min, max]
+    Parse amount string like "$1,001-$15,000" or "$1,001 - $15,000" or fixed "$15,000" into [min, max]
+    For fixed amounts, maps to standard Senate PTR range.
     
     Args:
         amount_str: Amount string from document
     
     Returns:
-        [min, max] as list of integers, or None if parsing fails
+        [min, max] as list of integers (standard range), or None if parsing fails
     """
     if not amount_str:
         return None
     try:
         # Remove currency symbols and whitespace
-        amount_str = re.sub(r'[\$,\s]', '', amount_str)
+        amount_str_clean = re.sub(r'[\$,\s]', '', amount_str)
         
-        # Pattern: number-number or number - number
-        range_match = re.search(r'(\d+)\s*[-–—]\s*(\d+)', amount_str)
+        # Pattern: number-number or number - number (range)
+        range_match = re.search(r'(\d+)\s*[-–—]\s*(\d+)', amount_str_clean)
         if range_match:
             min_val = int(range_match.group(1))
             max_val = int(range_match.group(2))
-            return [min_val, max_val]
+            # If min and max are the same, it's actually a fixed amount
+            if min_val == max_val:
+                exact_amount = min_val
+                # Map fixed amount to standard range
+                standard_range = find_standard_range(exact_amount)
+                if standard_range[1] is None:
+                    return [standard_range[0], 999999999]  # Use large number instead of None
+                else:
+                    return [standard_range[0], standard_range[1]]
+            else:
+                # It's a range - map to standard range using midpoint
+                midpoint = (min_val + max_val) / 2
+                standard_range = find_standard_range(midpoint)
+                if standard_range[1] is None:
+                    return [standard_range[0], 999999999]
+                else:
+                    return [standard_range[0], standard_range[1]]
         
-        # Pattern: single number (use as both min and max)
-        single_match = re.search(r'(\d+)', amount_str)
+        # Pattern: single number (fixed amount) - map to standard range
+        single_match = re.search(r'(\d+)', amount_str_clean)
         if single_match:
             val = int(single_match.group(1))
-            return [val, val]
+            # Map fixed amount to standard range
+            standard_range = find_standard_range(val)
+            if standard_range[1] is None:
+                return [standard_range[0], 999999999]  # Use large number instead of None
+            else:
+                return [standard_range[0], standard_range[1]]
         
         return None
     except Exception as e:
@@ -820,13 +842,22 @@ def extract_transactions_from_text(text: str, s3_key: str) -> List[Dict[str, Any
                 if ticker_match:
                     trade['securitySymbol'] = ticker_match.group(1)
             
-            # Parse amount
+            # Parse amount (handles both ranges and fixed amounts, maps to standard ranges)
             if amount_str:
                 amount_range = parse_amount_range(amount_str)
                 if amount_range:
                     trade['amountMin'] = amount_range[0]
-                    trade['amountMax'] = amount_range[1]
+                    trade['amountMax'] = amount_range[1] if amount_range[1] != 999999999 else None
                     trade['amountRange'] = amount_range
+                    # If the original amount was a fixed value, try to extract it
+                    fixed_match = re.search(r'\$([\d,]+)', amount_str)
+                    if fixed_match and not re.search(r'[-–—]', amount_str):
+                        # It's a fixed amount (no dash/range indicator)
+                        try:
+                            exact_amount = int(float(re.sub(r'[^\d.]', '', fixed_match.group(1))))
+                            trade['exactAmount'] = exact_amount
+                        except:
+                            pass
             
             if trade:
                 trades.append(trade)
@@ -1154,15 +1185,34 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                     amount_val = row[amount_col]
                     amount_str = amount_val.strip() if amount_val else None
                     
+                    exact_amount = None
+                    
                     # Handle range format: "$100,001 - $250,000" or "$1,000 - $15,000"
                     if amount_str:
                         range_match = re.search(r'\$([\d,]+)\s*-\s*\$([\d,]+)', amount_str)
                         if range_match:
                             try:
-                                amount_min = float(re.sub(r'[^\d.]', '', range_match.group(1)))
-                                amount_max = float(re.sub(r'[^\d.]', '', range_match.group(2)))
+                                min_str = re.sub(r'[^\d.]', '', range_match.group(1))
+                                max_str = re.sub(r'[^\d.]', '', range_match.group(2))
+                                amount_min = float(min_str)
+                                amount_max = float(max_str)
+                                # If min and max are the same, it's actually a fixed amount
+                                if amount_min == amount_max:
+                                    exact_amount = int(amount_min)  # Store exact amount for later mapping
                             except:
                                 pass
+                        else:
+                            # Try to match a single fixed amount (like "$15,000")
+                            fixed_match = re.search(r'\$([\d,]+)', amount_str)
+                            if fixed_match:
+                                try:
+                                    amount_str_clean = re.sub(r'[^\d.]', '', fixed_match.group(1))
+                                    exact_amount = int(float(amount_str_clean))
+                                    amount_min = exact_amount
+                                    amount_max = exact_amount
+                                    logger.info(f"   ✅ Extracted fixed amount ${exact_amount:,} from Textract")
+                                except (ValueError, TypeError):
+                                    pass
                     
                     # Calculate price per share if we have shares and amount range
                     if shares and shares > 0 and amount_min and amount_max:
@@ -1173,15 +1223,43 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                 # Only create trade if we have minimum required data
                 # Don't create trade if transactionType is invalid (looks like amount)
                 if (transaction_date or security_name or security_symbol or amount_min) and transaction_type is not None:
-                    # Map amount range to standard Senate PTR ranges if we have amounts
+                    # Map amount to standard Senate PTR ranges if we have amounts
                     amount_range = None
                     if amount_min is not None and amount_max is not None:
-                        # Use midpoint to find standard range
-                        midpoint = (amount_min + amount_max) / 2
-                        amount_range = find_standard_range(midpoint)
+                        # If it's a fixed amount (min == max), map it to standard range
+                        if amount_min == amount_max:
+                            exact_amount = int(amount_min)
+                            standard_range = find_standard_range(amount_min)
+                            if standard_range[1] is None:
+                                amount_range = [standard_range[0], 999999999]  # Use large number instead of None
+                            else:
+                                amount_range = [standard_range[0], standard_range[1]]
+                            # Keep exact amount for reference
+                            logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
+                        else:
+                            # It's a range - use midpoint to find standard range
+                            midpoint = (amount_min + amount_max) / 2
+                            standard_range = find_standard_range(midpoint)
+                            if standard_range[1] is None:
+                                amount_range = [standard_range[0], 999999999]
+                            else:
+                                amount_range = [standard_range[0], standard_range[1]]
+                        
+                        # Update min/max to standard range values
                         if amount_range:
                             amount_min = amount_range[0]
-                            amount_max = amount_range[1]
+                            amount_max = amount_range[1] if amount_range[1] != 999999999 else None
+                    
+                    # Build amountRange array (convert tuple to list, handle None max)
+                    if amount_range:
+                        if isinstance(amount_range, tuple):
+                            amount_range_list = [amount_range[0], amount_range[1] if amount_range[1] is not None else 999999999]
+                        else:
+                            amount_range_list = amount_range
+                    elif amount_min is not None and amount_max is not None:
+                        amount_range_list = [amount_min, amount_max]
+                    else:
+                        amount_range_list = None
                     
                     trade = {
                         'filerName': filer_name,
@@ -1195,9 +1273,10 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                         'order': transaction_type,  # Map to order field for compatibility
                         'shares': shares,
                         'pricePerShare': price_per_share,
-                        'amountMin': amount_min,  # For range amounts
-                        'amountMax': amount_max,  # For range amounts
-                        'amountRange': amount_range if amount_range else ([amount_min, amount_max] if amount_min is not None and amount_max is not None else None),
+                        'amountMin': amount_min,  # For range amounts (mapped to standard range)
+                        'amountMax': amount_max,  # For range amounts (mapped to standard range)
+                        'amountRange': amount_range_list,  # Standard range [min, max] for GSI queries
+                        'exactAmount': exact_amount,  # Exact dollar amount if it was a fixed value
                         'formType': f'{source}_ptr',
                         'source': source
                     }
@@ -1439,11 +1518,29 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                                 raw_min = float(parts[0].strip())
                                 raw_max = float(parts[1].strip())
                                 
-                                # Most trades are in ranges - use the provided range as-is
-                                # amount_range is a list of two integers from the fixed Senate PTR ranges
-                                amount_min = int(raw_min)
-                                amount_max = int(raw_max)
-                                amount_range = [amount_min, amount_max]  # Use provided range
+                                # If min and max are the same, it's actually a fixed amount
+                                if raw_min == raw_max:
+                                    exact_amount = int(raw_min)
+                                    # Map fixed amount to standard range
+                                    standard_range = find_standard_range(raw_min)
+                                    if standard_range[1] is None:
+                                        amount_range = [standard_range[0], 999999999]
+                                    else:
+                                        amount_range = [standard_range[0], standard_range[1]]
+                                    amount_min = exact_amount
+                                    amount_max = exact_amount
+                                    logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
+                                else:
+                                    # It's a range - map to standard range using midpoint
+                                    midpoint = (raw_min + raw_max) / 2
+                                    standard_range = find_standard_range(midpoint)
+                                    if standard_range[1] is None:
+                                        amount_range = [standard_range[0], 999999999]
+                                    else:
+                                        amount_range = [standard_range[0], standard_range[1]]
+                                    # Update min/max to standard range values
+                                    amount_min = amount_range[0]
+                                    amount_max = amount_range[1] if amount_range[1] != 999999999 else None
                             except:
                                 pass
                     else:
@@ -1462,9 +1559,12 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                             else:
                                 amount_range = [standard_range[0], standard_range[1]]
                             
-                            # Also set amountMin/amountMax to the exact value for backwards compatibility
-                            amount_min = int(exact_value)
-                            amount_max = int(exact_value)
+                            # Set amountMin/amountMax to the standard range values (for GSI queries)
+                            # The exactAmount field preserves the original fixed value
+                            amount_min = amount_range[0]
+                            amount_max = amount_range[1] if amount_range[1] != 999999999 else None
+                            
+                            logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
                         except:
                             pass
                 
