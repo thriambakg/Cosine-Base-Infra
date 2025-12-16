@@ -1350,12 +1350,13 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
 def check_if_filing_processed(s3_key: str) -> bool:
     """
     Check if a House PTR filing has already been processed by checking DynamoDB
+    Also checks if amounts are missing/N/A, which would indicate the filing needs re-processing
     
     Args:
         s3_key: S3 key of the House PTR PDF (e.g., "trades/house/2025/20033394.pdf")
         
     Returns:
-        True if filing has been processed, False otherwise
+        True if filing has been processed AND has valid amounts, False otherwise (allows re-processing)
     """
     if not DYNAMODB_TABLE_NAME:
         logger.warning("⚠️ DYNAMODB_TABLE_NAME not set - skipping duplicate check")
@@ -1389,11 +1390,32 @@ def check_if_filing_processed(s3_key: str) -> bool:
                 ':uuid': uuid,
                 ':source': 'house'
             },
-            Limit=1  # We only need to know if at least one exists
+            Limit=10  # Check multiple trades to see if any have missing amounts
         )
         
         if response.get('Items') and len(response.get('Items', [])) > 0:
-            logger.info(f"✅ House PTR {uuid} has already been processed (found {len(response['Items'])} existing trade(s))")
+            # Check if any trades have missing amounts (need re-processing)
+            trades_with_missing_amounts = 0
+            for item in response['Items']:
+                # Check if amountRange, amountMin, or amountMax are missing/None
+                amount_range = item.get('amountRange')
+                amount_min = item.get('amountMin')
+                amount_max = item.get('amountMax')
+                
+                # If all amount fields are missing/None/zero, this trade needs re-processing
+                has_amount_range = amount_range and isinstance(amount_range, list) and len(amount_range) >= 2 and amount_range[0] is not None and amount_range[0] != 0
+                has_amount_min = amount_min is not None and amount_min != 0
+                has_amount_max = amount_max is not None and amount_max != 0
+                
+                if not has_amount_range and not has_amount_min and not has_amount_max:
+                    trades_with_missing_amounts += 1
+                    logger.info(f"   ⚠️ Trade {item.get('tradeId', 'unknown')} has missing amounts - needs re-processing")
+            
+            if trades_with_missing_amounts > 0:
+                logger.info(f"🔄 House PTR {uuid} was processed but {trades_with_missing_amounts} trade(s) have missing amounts - allowing re-processing")
+                return False  # Allow re-processing to fix missing amounts
+            
+            logger.info(f"✅ House PTR {uuid} has already been processed with valid amounts (found {len(response['Items'])} existing trade(s))")
             return True
         
         logger.info(f"📋 House PTR {uuid} has not been processed yet")
