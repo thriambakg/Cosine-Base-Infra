@@ -2211,37 +2211,27 @@ module "usaspending_bulk_indexing_state_machine" {
   state_machine_name = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition - routes based on date range
+  # Step Functions definition - calculates date range and invokes Glue job
   # Input should include: JobName, AWARDS_TABLE_NAME, S3_BUCKET_NAME, START_DATE (optional), END_DATE (optional)
-  # Automatically calculates days and routes to Lambda (≤2 days) or Glue (>2 days)
+  # Router Lambda calculates date range (especially for scheduled mode) and always routes to Glue
   definition = jsonencode({
-    Comment = "USAspending Bulk Indexing - Routes to Lambda (≤2 days) or Glue (>2 days)"
+    Comment = "USAspending Bulk Indexing - Always uses Glue job"
     StartAt = "CalculateRoute"
     States = {
       CalculateRoute = {
         Type     = "Task"
         Resource = module.usaspending_bulk_router_lambda.function_arn
-        Comment  = "Calculate date range and determine routing (Lambda vs Glue)"
+        Comment  = "Calculate date range (handles scheduled mode date calculation)"
         Parameters = {
           "JobName.$" : "$.JobName"
           "AWARDS_TABLE_NAME.$" : "$.AWARDS_TABLE_NAME"
           "S3_BUCKET_NAME.$" : "$.S3_BUCKET_NAME"
-          "START_DATE.$" : "$.START_DATE"
-          "END_DATE.$" : "$.END_DATE"
+          "START_DATE.$?" : "$.START_DATE"
+          "END_DATE.$?" : "$.END_DATE"
+          "source.$?" : "$.source"
         }
         ResultPath = "$.route"
-        Next       = "RouteDecision"
-      }
-      RouteDecision = {
-        Type = "Choice"
-        Choices = [
-          {
-            Variable      = "$.route.use_glue"
-            BooleanEquals = true
-            Next          = "StartGlueJob"
-          }
-        ]
-        Default = "StartGlueJob" # Always use Glue job now (Lambda removed)
+        Next       = "StartGlueJob"
       }
       StartGlueJob = {
         Type     = "Task"
@@ -2303,38 +2293,83 @@ module "usaspending_bulk_indexing_state_machine" {
   ]
 }
 
-# EventBridge Scheduler for Daily USAspending Bulk Indexing (2:00 AM UTC)
-# module "usaspending_bulk_indexing_scheduler" {
-#   source = "./modules/eventbridge-scheduler"
+# IAM Role for EventBridge to invoke USAspending Bulk Indexing Step Function
+resource "aws_iam_role" "usaspending_bulk_indexing_scheduler_role" {
+  name = "${var.project_name}-usaspending-bulk-indexing-scheduler-role-${var.environment}"
 
-#   rule_name           = "${var.project_name}-usaspending-bulk-indexing-${var.environment}"
-#   rule_description    = "Trigger daily bulk indexing of USAspending contracts at 2:00 AM UTC (runs for previous day's contracts)"
-#   schedule_expression = "cron(0 2 * * ? *)" # 2:00 AM UTC daily
-#   enabled             = true
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
 
-#   # Target is Step Functions state machine
-#   target_arn = module.usaspending_bulk_indexing_state_machine.state_machine_arn
-#   target_id  = "USASpendingBulkIndexingScheduler"
+  tags = var.common_tags
+}
 
-#   # For Step Functions, we need to provide a role
-#   target_type     = "stepfunctions"
-#   target_role_arn = aws_iam_role.eventbridge_stepfunctions_role.arn
+# IAM Policy for EventBridge to start USAspending Bulk Indexing Step Function
+resource "aws_iam_role_policy" "usaspending_bulk_indexing_scheduler_policy" {
+  name = "${var.project_name}-usaspending-bulk-indexing-scheduler-policy-${var.environment}"
+  role = aws_iam_role.usaspending_bulk_indexing_scheduler_role.id
 
-#   target_input = jsonencode({
-#     source            = "scheduler-daily"
-#     timestamp         = "scheduled"
-#     JobName           = module.usaspending_bulk_indexing_glue_job.job_name
-#     AWARDS_TABLE_NAME = module.usaspending_awards_index_table.table_name
-#     S3_BUCKET_NAME    = module.usaspending_data_s3.bucket_id
-#     # START_DATE and END_DATE omitted - will default to yesterday in Glue script
-#   })
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = module.usaspending_bulk_indexing_state_machine.state_machine_arn
+      }
+    ]
+  })
+}
 
-#   purpose     = "USASpendingBulkIndexing"
-#   environment = var.environment
-#   tags        = var.common_tags
+# EventBridge Scheduler for Daily USAspending Bulk Indexing (5:00 PM EST / 22:00 UTC)
+# Runs daily to process previous day's contract updates
+resource "aws_cloudwatch_event_rule" "usaspending_bulk_indexing_scheduler" {
+  name                = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
+  description         = "Trigger daily bulk indexing of USAspending contracts at 5:00 PM EST (22:00 UTC) - processes previous day's contract updates"
+  schedule_expression = "cron(0 22 * * ? *)" # 10:00 PM UTC = 5:00 PM EST (standard time)
+  state               = "ENABLED"
 
-#   depends_on = [module.usaspending_bulk_indexing_state_machine]
-# }
+  tags = merge(var.common_tags, {
+    Name        = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
+    Type        = "EventBridgeRule"
+    Purpose     = "USASpendingBulkIndexing"
+    Environment = var.environment
+  })
+}
+
+# EventBridge Target for Step Function
+resource "aws_cloudwatch_event_target" "usaspending_bulk_indexing_scheduler_target" {
+  rule      = aws_cloudwatch_event_rule.usaspending_bulk_indexing_scheduler.name
+  target_id = "USASpendingBulkIndexingScheduler"
+  arn       = module.usaspending_bulk_indexing_state_machine.state_machine_arn
+  role_arn  = aws_iam_role.usaspending_bulk_indexing_scheduler_role.arn
+
+  # Input payload for Step Function - scheduled mode will set dates in router Lambda
+  input = jsonencode({
+    source            = "scheduler-daily"
+    JobName           = module.usaspending_bulk_indexing_glue_job.job_name
+    AWARDS_TABLE_NAME = module.usaspending_awards_index_table.table_name
+    S3_BUCKET_NAME    = module.usaspending_data_s3.bucket_id
+    # START_DATE and END_DATE omitted - router Lambda will set to previous day and current day in scheduled mode
+  })
+
+  depends_on = [
+    aws_cloudwatch_event_rule.usaspending_bulk_indexing_scheduler,
+    aws_iam_role.usaspending_bulk_indexing_scheduler_role,
+    module.usaspending_bulk_indexing_state_machine
+  ]
+}
 
 # ==============================================================================
 # CONGRESS.GOV BILL DATA INGESTION SYSTEM

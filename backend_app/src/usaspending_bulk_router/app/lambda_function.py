@@ -17,8 +17,13 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         "AWARDS_TABLE_NAME": "cosine-usaspending-awards-index-production",
         "S3_BUCKET_NAME": "cosine-usaspending-data-production",
         "START_DATE": "2025-12-08",  # Optional, YYYY-MM-DD format
-        "END_DATE": "2025-12-09"     # Optional, YYYY-MM-DD format
+        "END_DATE": "2025-12-09",     # Optional, YYYY-MM-DD format
+        "source": "scheduler"         # Optional, if present and dates not provided, uses scheduled mode
     }
+    
+    Scheduled mode (when source is "scheduler" or "scheduler-daily" and dates not provided):
+    - start_date = previous day
+    - end_date = current day
     
     Returns:
     {
@@ -35,16 +40,32 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     job_name = event.get("JobName")
     awards_table_name = event.get("AWARDS_TABLE_NAME")
     s3_bucket_name = event.get("S3_BUCKET_NAME")
+    source = event.get("source", "")
     start_date_str = event.get("START_DATE")
     end_date_str = event.get("END_DATE")
     
-    # If dates not provided, default to yesterday
+    # Check if this is a scheduled execution
+    is_scheduled = source in ["scheduler", "scheduler-daily"]
+    
+    # If dates not provided, use scheduled mode defaults or fallback to yesterday
     if not start_date_str:
-        yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-        start_date_str = yesterday.strftime('%Y-%m-%d')
+        if is_scheduled:
+            # Scheduled mode: start_date = previous day
+            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+            start_date_str = yesterday.strftime('%Y-%m-%d')
+        else:
+            # Manual/default mode: default to yesterday
+            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
+            start_date_str = yesterday.strftime('%Y-%m-%d')
     
     if not end_date_str:
-        end_date_str = start_date_str
+        if is_scheduled:
+            # Scheduled mode: end_date = current day
+            today = datetime.now(timezone.utc)
+            end_date_str = today.strftime('%Y-%m-%d')
+        else:
+            # Manual/default mode: default to start_date
+            end_date_str = start_date_str
     
     # Parse YYYY-MM-DD format
     try:
@@ -72,6 +93,7 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
         "START_DATE": start_date_str,
         "END_DATE": end_date_str
     }
+
 
 
 
