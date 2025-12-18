@@ -65,6 +65,17 @@ except Exception as e:
     args['START_DATE'] = None
     args['END_DATE'] = None
 
+# Get optional testing parameter
+try:
+    testing_args = getResolvedOptions(sys.argv, ['TESTING'])
+    testing = testing_args.get('TESTING', '').lower() in ['true', '1', 'yes']
+    args['TESTING'] = testing
+    if testing:
+        print(f"🧪 Testing mode enabled - will limit to 10 records per type", flush=True)
+except Exception as e:
+    # Testing parameter is optional, default to False
+    args['TESTING'] = False
+
 # Initialize Glue context
 sc = SparkContext()
 glueContext = GlueContext(sc)
@@ -321,7 +332,8 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict):
             # Round to nearest 10k for partition key
             amount_bucket = int(float(amount) / 10000) * 10000
             item['GSI7PK'] = f"AMOUNT#{amount_bucket}"
-            item['GSI7SK'] = str(amount)
+            # Keep as Decimal (Number type) for DynamoDB - don't convert to string
+            item['GSI7SK'] = Decimal(str(amount)) if not isinstance(amount, Decimal) else amount
         
         # Save to DynamoDB
         filings_table.put_item(Item=item)
@@ -371,11 +383,14 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict):
         log_print(f"❌ Error saving contribution to DynamoDB: {str(e)[:200]}")
         raise
 
-def process_all_filings(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None):
+def process_all_filings(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing: bool = False):
     """Fetch and process all filings with pagination"""
     log_print("\n" + "="*80)
     log_print("📋 Processing Filings")
     log_print("="*80)
+    
+    if testing:
+        log_print("🧪 TESTING MODE: Limiting to 10 filings")
     
     # LDA API requires at least one query parameter for pagination
     if not start_date and not end_date:
@@ -389,6 +404,7 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     
     page = 1
     total_processed = 0
+    max_records = 10 if testing else None
     
     while True:
         params['page'] = page
@@ -434,9 +450,19 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                     if total_processed % 100 == 0:
                         log_print(f"   📊 Processed {total_processed} filings...")
                     
+                    # Stop if testing mode and reached limit
+                    if testing and total_processed >= max_records:
+                        log_print(f"🧪 Testing mode: Reached limit of {max_records} filings. Stopping.")
+                        break
+                    
                 except Exception as e:
                     log_print(f"   ❌ Error processing filing {filing_uuid}: {str(e)[:200]}")
                     continue
+            
+            # Stop if testing mode and reached limit
+            if testing and total_processed >= max_records:
+                log_print(f"✅ Finished processing filings (testing mode limit: {total_processed})")
+                break
             
             # Check if there's a next page
             if response.get('next'):
@@ -449,11 +475,14 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
             log_print(f"❌ Error fetching filings page {page}: {str(e)[:200]}")
             break
 
-def process_all_contributions(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None):
+def process_all_contributions(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing: bool = False):
     """Fetch and process all contributions with pagination"""
     log_print("\n" + "="*80)
     log_print("📋 Processing Contributions")
     log_print("="*80)
+    
+    if testing:
+        log_print("🧪 TESTING MODE: Limiting to 10 contributions")
     
     # LDA API requires at least one query parameter for pagination
     if not start_date and not end_date:
@@ -467,6 +496,7 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     
     page = 1
     total_processed = 0
+    max_records = 10 if testing else None
     
     while True:
         params['page'] = page
@@ -512,9 +542,19 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                     if total_processed % 100 == 0:
                         log_print(f"   📊 Processed {total_processed} contributions...")
                     
+                    # Stop if testing mode and reached limit
+                    if testing and total_processed >= max_records:
+                        log_print(f"🧪 Testing mode: Reached limit of {max_records} contributions. Stopping.")
+                        break
+                    
                 except Exception as e:
                     log_print(f"   ❌ Error processing contribution {filing_uuid}: {str(e)[:200]}")
                     continue
+            
+            # Stop if testing mode and reached limit
+            if testing and total_processed >= max_records:
+                log_print(f"✅ Finished processing contributions (testing mode limit: {total_processed})")
+                break
             
             # Check if there's a next page
             if response.get('next'):
@@ -561,11 +601,14 @@ def main():
     elif end_date:
         log_print(f"📅 End date: {end_date} (no start date - will fetch all records up to end date)")
     
+    # Get testing mode
+    testing = args.get('TESTING', False)
+    
     # Process filings
-    process_all_filings(session, start_date, end_date)
+    process_all_filings(session, start_date, end_date, testing=testing)
     
     # Process contributions
-    process_all_contributions(session, start_date, end_date)
+    process_all_contributions(session, start_date, end_date, testing=testing)
     
     log_print("\n" + "="*80)
     log_print("✅ LDA Disclosures Indexing Job Completed Successfully")
