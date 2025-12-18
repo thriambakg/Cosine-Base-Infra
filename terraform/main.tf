@@ -132,6 +132,34 @@ module "congress_api_secrets_manager" {
   depends_on = [module.kms]
 }
 
+# Secrets Manager for LDA Senate API key
+module "lda_api_secrets_manager" {
+  source = "./modules/secrets-manager"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  tags                 = var.common_tags
+  kms_key_id           = module.kms.main_key_id
+  recovery_window_days = var.secrets_recovery_window_days
+  policy_name_suffix   = "lda-api"
+
+  # No automatic rotation for API keys
+  automatic_rotation = {}
+
+  # Create empty secret for console population
+  secrets = {
+    lda-api = {
+      description = "LDA Senate API key for lobbying disclosure data (populated manually)"
+      secret_data = {
+        # Placeholder value - will be updated manually in console
+        api_key = "PLACEHOLDER_LDA_API_KEY"
+      }
+    }
+  }
+
+  depends_on = [module.kms]
+}
+
 # Cognito User Pool for authentication
 module "cognito" {
   source = "./modules/cognito"
@@ -1824,6 +1852,11 @@ module "glue_scripts_s3" {
       source_path  = "${path.module}/../backend_app/src/glue/congress_bills/backfill_bill_text.py"
       s3_key       = "congress_bills/backfill_bill_text.py"
       content_type = "text/x-python"
+    },
+    {
+      source_path  = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
+      s3_key       = "lda_disclosures/glue_script.py"
+      content_type = "text/x-python"
     }
   ]
 
@@ -3044,6 +3077,415 @@ resource "aws_iam_role_policy" "congress_bills_bill_text_prefill_scheduler_polic
       }
     ]
   })
+}
+
+# ==============================================================================
+# LDA SENATE LOBBYING DISCLOSURES INGESTION SYSTEM
+# ==============================================================================
+# System to fetch, index, and download all lobbying disclosure filings and contributions
+# from LDA Senate API
+
+# DynamoDB Table for LDA Filings (LD-1, LD-2)
+module "lda_filings_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "lda-filings"
+
+  hash_key  = "PK"
+  range_key = "SK"
+
+  attributes = [
+    { name = "PK", type = "S" },
+    { name = "SK", type = "S" },
+    { name = "GSI1PK", type = "S" },
+    { name = "GSI1SK", type = "S" },
+    { name = "GSI2PK", type = "S" },
+    { name = "GSI2SK", type = "S" },
+    { name = "GSI3PK", type = "S" },
+    { name = "GSI3SK", type = "S" },
+    { name = "GSI4PK", type = "S" },
+    { name = "GSI4SK", type = "S" },
+    { name = "GSI5PK", type = "S" },
+    { name = "GSI5SK", type = "S" },
+    { name = "GSI6PK", type = "S" },
+    { name = "GSI6SK", type = "S" },
+    { name = "GSI7PK", type = "S" },
+    { name = "GSI7SK", type = "N" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "FilingYearPostedDateIndex"
+      hash_key        = "GSI1PK"
+      range_key       = "GSI1SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FilingPeriodPostedDateIndex"
+      hash_key        = "GSI2PK"
+      range_key       = "GSI2SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FilingTypePostedDateIndex"
+      hash_key        = "GSI3PK"
+      range_key       = "GSI3SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "RegistrantNamePostedDateIndex"
+      hash_key        = "GSI4PK"
+      range_key       = "GSI4SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "ClientNamePostedDateIndex"
+      hash_key        = "GSI5PK"
+      range_key       = "GSI5SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "LobbyistNamePostedDateIndex"
+      hash_key        = "GSI6PK"
+      range_key       = "GSI6SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "AmountReportedIndex"
+      hash_key        = "GSI7PK"
+      range_key       = "GSI7SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = var.dynamodb_ttl_enabled
+  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "LobbyingData"
+  table_purpose = "LDAFilings"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# DynamoDB Table for LDA Contributions (LD-203)
+module "lda_contributions_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "lda-contributions"
+
+  hash_key  = "PK"
+  range_key = "SK"
+
+  attributes = [
+    { name = "PK", type = "S" },
+    { name = "SK", type = "S" },
+    { name = "GSI1PK", type = "S" },
+    { name = "GSI1SK", type = "S" },
+    { name = "GSI2PK", type = "S" },
+    { name = "GSI2SK", type = "S" },
+    { name = "GSI3PK", type = "S" },
+    { name = "GSI3SK", type = "S" },
+    { name = "GSI4PK", type = "S" },
+    { name = "GSI4SK", type = "S" },
+    { name = "GSI6PK", type = "S" },
+    { name = "GSI6SK", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "FilingYearPostedDateIndex"
+      hash_key        = "GSI1PK"
+      range_key       = "GSI1SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FilingPeriodPostedDateIndex"
+      hash_key        = "GSI2PK"
+      range_key       = "GSI2SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FilingTypePostedDateIndex"
+      hash_key        = "GSI3PK"
+      range_key       = "GSI3SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "RegistrantNamePostedDateIndex"
+      hash_key        = "GSI4PK"
+      range_key       = "GSI4SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "LobbyistNamePostedDateIndex"
+      hash_key        = "GSI6PK"
+      range_key       = "GSI6SK"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = var.dynamodb_ttl_enabled
+  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "LobbyingData"
+  table_purpose = "LDAContributions"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+# Upload LDA Glue script to S3
+resource "aws_s3_object" "lda_glue_script" {
+  bucket = module.glue_scripts_s3.bucket_id
+  key    = "lda_disclosures/glue_script.py"
+  source = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
+  etag   = filemd5("${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py")
+
+  content_type = "text/x-python"
+
+  tags = var.common_tags
+
+  depends_on = [module.glue_scripts_s3]
+}
+
+# Glue Job for LDA Disclosures Indexing
+module "lda_disclosures_glue_job" {
+  source = "./modules/glue-job"
+
+  job_name = "${var.project_name}-lda-disclosures-indexing-${var.environment}"
+
+  # Script location - uploaded to glue scripts bucket
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/lda_disclosures/glue_script.py"
+  python_version  = "3"
+  glue_version    = "4.0"
+
+  # Job configuration
+  max_retries           = 1
+  timeout               = 2880 # 48 hours (max is 10080 minutes = 7 days)
+  concurrent_executions = 1    # Only allow 1 concurrent run
+  worker_type           = "G.1X"
+  number_of_workers     = 2
+
+  # S3 buckets
+  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
+  additional_s3_bucket_arns = [
+    module.lda_disclosures_s3.bucket_arn,
+    module.static_hosting_bucket.bucket_arn
+  ]
+  spark_logs_bucket = module.static_hosting_bucket.bucket_id
+  temp_bucket       = module.static_hosting_bucket.bucket_id
+
+  # DynamoDB access
+  dynamodb_table_arn = module.lda_filings_table.table_arn
+
+  # KMS for encryption
+  kms_key_arn = module.kms.main_key_arn
+  additional_kms_key_arns = [
+    module.kms.dynamodb_key_arn
+  ]
+
+  # Additional IAM policies for Secrets Manager
+  additional_policy_arns = [
+    module.lda_api_secrets_manager.secret_access_policy_arn
+  ]
+
+  # Job arguments
+  default_arguments = {
+    "--LDA_API_BASE_URL"         = "https://lda.senate.gov/api/v1"
+    "--LDA_SECRET_NAME"          = module.lda_api_secrets_manager.secret_names["lda-api"]
+    "--FILINGS_TABLE_NAME"       = module.lda_filings_table.table_name
+    "--CONTRIBUTIONS_TABLE_NAME" = module.lda_contributions_table.table_name
+    "--S3_BUCKET_NAME"           = module.lda_disclosures_s3.bucket_id
+    "--REQUEST_TIMEOUT"          = "30"
+    "--RATE_LIMIT_DELAY"         = "0.5"
+  }
+
+  job_bookmark_option = "job-bookmark-disable"
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.glue_scripts_s3,
+    module.lda_disclosures_s3,
+    module.static_hosting_bucket,
+    module.lda_filings_table,
+    module.lda_contributions_table,
+    module.kms,
+    module.lda_api_secrets_manager,
+    aws_s3_object.lda_glue_script
+  ]
+}
+
+# IAM Policy for Glue job to access contributions table
+resource "aws_iam_role_policy" "lda_disclosures_glue_contributions_table_access" {
+  name = "${var.project_name}-lda-disclosures-contributions-table-access-${var.environment}"
+  role = module.lda_disclosures_glue_job.role_id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:PutItem",
+          "dynamodb:GetItem",
+          "dynamodb:UpdateItem",
+          "dynamodb:DeleteItem",
+          "dynamodb:Query",
+          "dynamodb:Scan",
+          "dynamodb:BatchGetItem",
+          "dynamodb:BatchWriteItem"
+        ]
+        Resource = [
+          module.lda_contributions_table.table_arn,
+          "${module.lda_contributions_table.table_arn}/*"
+        ]
+      }
+    ]
+  })
+
+  depends_on = [
+    module.lda_disclosures_glue_job,
+    module.lda_contributions_table
+  ]
+}
+
+# Grant Glue job role access to DynamoDB KMS key
+resource "aws_kms_grant" "lda_disclosures_glue_dynamodb_key_access" {
+  name              = "${var.project_name}-lda-disclosures-${var.environment}-dynamodb-key-grant"
+  key_id            = module.kms.dynamodb_key_id
+  grantee_principal = module.lda_disclosures_glue_job.role_arn
+  operations = [
+    "Decrypt",
+    "Encrypt",
+    "GenerateDataKey",
+    "DescribeKey"
+  ]
+
+  depends_on = [
+    module.lda_disclosures_glue_job,
+    module.kms
+  ]
+}
+
+# Step Functions State Machine for LDA Disclosures Indexing
+module "lda_disclosures_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-lda-disclosures-indexing-${var.environment}"
+  environment        = var.environment
+
+  # Step Functions definition - directly invokes Glue job
+  definition = jsonencode({
+    Comment = "LDA Senate Lobbying Disclosures Indexing - Uses Glue job"
+    StartAt = "StartGlueJob"
+    States = {
+      StartGlueJob = {
+        Type     = "Task"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Comment  = "Start Glue job for LDA disclosures indexing (48 hour timeout)"
+        Parameters = {
+          "JobName" = module.lda_disclosures_glue_job.job_name
+          "Arguments" = {
+            "--LDA_API_BASE_URL"         = "https://lda.senate.gov/api/v1"
+            "--LDA_SECRET_NAME"          = module.lda_api_secrets_manager.secret_names["lda-api"]
+            "--FILINGS_TABLE_NAME"       = module.lda_filings_table.table_name
+            "--CONTRIBUTIONS_TABLE_NAME" = module.lda_contributions_table.table_name
+            "--S3_BUCKET_NAME"           = module.lda_disclosures_s3.bucket_id
+            "--REQUEST_TIMEOUT"          = "30"
+            "--RATE_LIMIT_DELAY"         = "0.5"
+            "--START_DATE.$?"            = "$.START_DATE"
+            "--END_DATE.$?"              = "$.END_DATE"
+          }
+        }
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "HandleError"
+          }
+        ]
+        Next = "Success"
+      }
+      Success = {
+        Type    = "Succeed"
+        Comment = "LDA disclosures indexing completed successfully"
+      }
+      HandleError = {
+        Type  = "Fail"
+        Error = "LDADisclosuresIndexingFailed"
+        Cause = "The LDA disclosures indexing job failed. Check CloudWatch logs for details."
+      }
+    }
+  })
+
+  # No Lambda functions needed
+  lambda_function_arns = []
+
+  # Glue job name for IAM permissions
+  glue_job_names = [
+    module.lda_disclosures_glue_job.job_name
+  ]
+
+  # Logging configuration
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.lda_disclosures_glue_job
+  ]
 }
 
 # EventBridge Rule for Daily Bill Text Prefill
