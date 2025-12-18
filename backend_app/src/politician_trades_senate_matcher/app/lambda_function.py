@@ -2317,4 +2317,3 @@ def lambda_handler(event, context):
             "tradesSaved": 0,
             "saveErrors": 0
         }
-        
