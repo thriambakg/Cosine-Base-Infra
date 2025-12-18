@@ -2405,6 +2405,43 @@ resource "aws_cloudwatch_event_target" "usaspending_bulk_indexing_scheduler_targ
 }
 
 # ==============================================================================
+# LDA SENATE LOBBYING DISCLOSURES INGESTION SYSTEM
+# ==============================================================================
+# System to fetch, index, and download all lobbying disclosure filings and contributions
+# from LDA Senate API
+
+# S3 Bucket for LDA Disclosures Documents
+module "lda_disclosures_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-lda-disclosures-${var.environment}"
+  environment = var.environment
+  purpose     = "LDADisclosures"
+
+  # Enable lifecycle transitions for cost optimization
+  enable_lifecycle_transitions = true
+  transition_to_ia_days        = 90  # Move to IA after 90 days
+  transition_to_glacier_days   = 180 # Move to Glacier after 180 days
+
+  # No expiration - keep documents indefinitely
+  enable_expiration = false
+
+  # Abort incomplete multipart uploads after 1 day
+  abort_incomplete_multipart_upload_days = 1
+
+  # Noncurrent version expiration
+  noncurrent_version_expiration_days = 30
+
+  kms_key_arn = module.kms.main_key_arn
+  tags        = var.common_tags
+}
+
+# ==============================================================================
 # CONGRESS.GOV BILL DATA INGESTION SYSTEM
 # ==============================================================================
 # System to fetch comprehensive bill data from Congress.gov API
