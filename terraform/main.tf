@@ -3684,7 +3684,8 @@ module "politician_trades_senate_matcher" {
 
   # Environment variables
   environment_variables = {
-    S3_BUCKET = module.politician_trades_s3.bucket_id
+    S3_BUCKET           = module.politician_trades_s3.bucket_id
+    DYNAMODB_TABLE_NAME = module.politician_trades_table.table_name
   }
 
   # Lambda layers - includes document processing layer for Pillow (GIF to PNG conversion)
@@ -3697,12 +3698,13 @@ module "politician_trades_senate_matcher" {
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
     aws_iam_policy.lambda_politician_trades_textract_policy.arn,
+    module.politician_trades_table.table_policy_arn,
     module.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
 
-  depends_on = [module.politician_trades_s3, module.document_processing_layer]
+  depends_on = [module.politician_trades_s3, module.politician_trades_table, module.document_processing_layer]
 }
 
 # Lambda 4: Match House PTR Trades
