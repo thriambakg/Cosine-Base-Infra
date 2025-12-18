@@ -44,14 +44,23 @@ args = getResolvedOptions(sys.argv, [
     'RATE_LIMIT_DELAY'
 ])
 
-# Get optional date parameters (required for API pagination)
+# Get date parameters (required for API pagination)
+# Try to get them - they should be provided by Step Function
 try:
-    optional_args = getResolvedOptions(sys.argv, ['START_DATE', 'END_DATE'])
-    args.update(optional_args)
-    print(f"✅ Successfully parsed date arguments: START_DATE={optional_args.get('START_DATE')}, END_DATE={optional_args.get('END_DATE')}", flush=True)
+    date_args = getResolvedOptions(sys.argv, ['START_DATE', 'END_DATE'])
+    # Convert empty strings to None
+    start_date = date_args.get('START_DATE')
+    end_date = date_args.get('END_DATE')
+    if start_date == '':
+        start_date = None
+    if end_date == '':
+        end_date = None
+    args['START_DATE'] = start_date
+    args['END_DATE'] = end_date
+    print(f"✅ Successfully parsed date arguments: START_DATE={start_date}, END_DATE={end_date}", flush=True)
 except Exception as e:
-    print(f"⚠️ Date arguments not provided: {str(e)[:200]}", flush=True)
-    print(f"⚠️ LDA API requires at least one filter parameter for pagination. START_DATE and END_DATE are required.", flush=True)
+    print(f"⚠️ Date arguments not provided or failed to parse: {str(e)[:200]}", flush=True)
+    print(f"⚠️ LDA API requires at least one filter parameter for pagination. START_DATE and/or END_DATE are required.", flush=True)
     # Set to None - will be handled in main() to require dates
     args['START_DATE'] = None
     args['END_DATE'] = None

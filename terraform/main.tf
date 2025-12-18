@@ -3482,8 +3482,8 @@ module "lda_disclosures_state_machine" {
             "--S3_BUCKET_NAME"           = module.lda_disclosures_s3.bucket_id
             "--REQUEST_TIMEOUT"          = "30"
             "--RATE_LIMIT_DELAY"         = "0.5"
-            "--START_DATE.$?"            = "$.START_DATE"
-            "--END_DATE.$?"              = "$.END_DATE"
+            "--START_DATE.$"             = "$.START_DATE"
+            "--END_DATE.$"               = "$.END_DATE"
           }
         }
         Catch = [
