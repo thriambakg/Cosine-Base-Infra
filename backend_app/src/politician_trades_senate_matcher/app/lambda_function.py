@@ -1537,9 +1537,18 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 asset_name = ' '.join(asset_name.split()) if asset_name else ''
                 
                 # Validate that we got essential fields
-                if not transaction_type or not amount_str or amount_str in ['--', '']:
-                    logger.warning(f"⚠️ Row {row_num} missing essential fields (type: {transaction_type}, amount: {amount_str}), skipping")
+                # If amount is missing or unparseable, use default values instead of skipping
+                if not transaction_type:
+                    logger.warning(f"⚠️ Row {row_num} missing transaction type, skipping")
                     continue
+                
+                # If amount is missing or unparseable, use default values (don't skip the trade)
+                if not amount_str or amount_str in ['--', '']:
+                    logger.warning(f"⚠️ Row {row_num} missing amount field - using default values for unparsed trade")
+                    amount_min = UNPARSED_AMOUNT_VALUE
+                    amount_max = UNPARSED_AMOUNT_VALUE
+                    amount_range = [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE]
+                    exact_amount = None
                 
                 # Parse transaction date
                 transaction_date = None
@@ -1638,9 +1647,16 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                                 amount_max = amount_range[1] if amount_range[1] != 999999999 else None
                                 
                                 logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
-                        except (ValueError, TypeError) as e:
-                            logger.warning(f"   ⚠️ Error parsing fixed amount: {e}")
-                            pass
+                        except (ValueError, TypeError, Exception) as e:
+                            logger.warning(f"   ⚠️ Error parsing fixed amount '{amount_str}': {e}")
+                            # Use default values - mark as unparsed if we can't parse the amount
+                            # This ensures the trade is still indexed with default values
+                            if amount_min is None and amount_max is None and amount_range is None:
+                                logger.info(f"   📋 Using default values for unparseable amount - trade will be marked for manual review")
+                                amount_min = UNPARSED_AMOUNT_VALUE
+                                amount_max = UNPARSED_AMOUNT_VALUE
+                                amount_range = [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE]
+                                exact_amount = None
                 
                 # Map transaction type
                 transaction_code = None
@@ -1657,6 +1673,17 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                 else:
                     ticker = ticker.strip()
                 
+                # If amount parsing failed completely, ensure we have default values
+                if amount_min is None and amount_max is None and amount_range is None:
+                    logger.warning(f"⚠️ Row {row_num} amount parsing failed - using default values for unparsed trade")
+                    amount_min = UNPARSED_AMOUNT_VALUE
+                    amount_max = UNPARSED_AMOUNT_VALUE
+                    amount_range = [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE]
+                    exact_amount = None
+                
+                # Determine if this trade requires manual review (unparseable amounts)
+                is_unparsed_trade = (amount_min == UNPARSED_AMOUNT_VALUE and amount_max == UNPARSED_AMOUNT_VALUE)
+                
                 trade = {
                     'transactionDate': transaction_date.strftime('%Y-%m-%d') if transaction_date else '',
                     'transaction_code': transaction_code,
@@ -1672,7 +1699,9 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                     'shares': None,  # Not provided in Senate PTR HTML
                     'comment': comment,
                     'filerName': filer_name,  # Include filer name from HTML for matching
-                    'metadata': asset_metadata if asset_metadata else None  # Flexible JSON blob for asset metadata
+                    'metadata': asset_metadata if asset_metadata else None,  # Flexible JSON blob for asset metadata
+                    'isUnparsed': is_unparsed_trade,  # Flag if amount couldn't be parsed
+                    'requiresManualReview': is_unparsed_trade  # Flag for manual review if unparseable
                 }
                 
                 trades.append(trade)
@@ -1773,6 +1802,9 @@ def parse_senate_ptr(s3_key: str, event: Optional[Dict[str, Any]] = None) -> Lis
         logger.error(f"❌ Error parsing Senate PTR {s3_key}: {e}")
         import traceback
         logger.error(f"Traceback: {traceback.format_exc()}")
+        # Don't return empty list - let lambda_handler create placeholder trade
+        # This ensures the filing is still indexed even if parsing fails
+        logger.info(f"📋 Parsing failed, but filing will still be indexed with placeholder trade")
     
     return trades
 

@@ -34,6 +34,10 @@ DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 # Name matching threshold (0.0 to 1.0)
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
 
+# Constant for unparsed documents - use a large number that can be searched as "N/A"
+# This value represents unreadable/unparsed documents and allows "N/A" searches to map to it
+UNPARSED_AMOUNT_VALUE = 999999999999  # 999.999 billion - high enough to be clearly distinguishable
+
 # Standard House PTR ranges (same as Senate PTR ranges)
 # Note: Minimum reporting threshold is $1,000, but we handle sub-$1k amounts
 HOUSE_PTR_RANGES = [
@@ -1229,9 +1233,24 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         amount_min = amount_range[0]
                         amount_max = amount_range[1] if amount_range[1] != 999999999 else None
                         logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"   ⚠️ Error parsing fixed amount: {e}")
-                        pass
+                    except (ValueError, TypeError, Exception) as e:
+                        logger.warning(f"   ⚠️ Error parsing fixed amount '{trade_text}': {e}")
+                        # Use default values - mark as unparsed if we can't parse the amount
+                        # This ensures the trade is still indexed with default values
+                        if amount_min is None and amount_max is None and amount_range is None:
+                            logger.info(f"   📋 Using default values for unparseable amount - trade will be marked for manual review")
+                            amount_min = UNPARSED_AMOUNT_VALUE
+                            amount_max = UNPARSED_AMOUNT_VALUE
+                            amount_range = [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE]
+                            exact_amount = None
+            
+            # If amount parsing completely failed, use default values
+            if amount_min is None and amount_max is None and amount_range is None:
+                logger.warning(f"   ⚠️ Amount parsing failed completely - using default values for unparsed trade")
+                amount_min = UNPARSED_AMOUNT_VALUE
+                amount_max = UNPARSED_AMOUNT_VALUE
+                amount_range = [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE]
+                exact_amount = None
             
             # Calculate average amount for backwards compatibility
             amount = None
@@ -1316,13 +1335,25 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                 security_name = security_name.strip()
                 
                 # Only create trade if we have minimum required fields
-                if transaction_date and (security_name or security_symbol) and transaction_type and (amount_min is not None or amount_max is not None):
+                # Allow trades even if amount parsing failed (will use default values)
+                if transaction_date and (security_name or security_symbol) and transaction_type:
                     # Use notification_date as filingDate if available, otherwise fall back to signature-based filing_date
                     trade_filing_date = notification_date if notification_date else filing_date
                     
                     # Build amountRange array
                     if amount_range is None and amount_min is not None and amount_max is not None:
                         amount_range = [amount_min, amount_max]
+                    
+                    # If amount parsing failed, ensure we have default values
+                    if amount_min is None and amount_max is None and amount_range is None:
+                        logger.warning(f"   ⚠️ Amount parsing failed - using default values for unparsed trade")
+                        amount_min = UNPARSED_AMOUNT_VALUE
+                        amount_max = UNPARSED_AMOUNT_VALUE
+                        amount_range = [UNPARSED_AMOUNT_VALUE, UNPARSED_AMOUNT_VALUE]
+                        exact_amount = None
+                    
+                    # Determine if this trade requires manual review (unparseable amounts)
+                    is_unparsed_trade = (amount_min == UNPARSED_AMOUNT_VALUE and amount_max == UNPARSED_AMOUNT_VALUE)
                     
                     trade = {
                         'filerName': filer_name,
@@ -1340,7 +1371,10 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
                         'owner': owner,
                         'formType': 'house_ptr',
                         'source': 'house',
-                        'metadata': trade_metadata.get('metadata')
+                        'metadata': trade_metadata.get('metadata'),
+                        # Mark as unparsed if amount couldn't be parsed
+                        'isUnparsed': is_unparsed_trade,
+                        'requiresManualReview': is_unparsed_trade
                     }
                     trades.append(trade)
                 logger.info(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max} (name: '{security_name}')")
@@ -1461,12 +1495,9 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
         
         if not trades:
             logger.warning(f"⚠️ No trades extracted from House PTR: {s3_key}")
-            return {
-                'matchedTrades': [],
-                'unmatchedCount': 1,
-                's3Key': s3_key,
-                'formType': 'house_ptr'
-            }
+            # Don't return empty - let lambda_handler create placeholder trade if we have filer_name
+            # This ensures the filing is still indexed even if parsing fails
+            logger.info(f"📋 No trades extracted, but filing will still be indexed if filer_name available")
         
         # Get filing date from first trade (all trades from same filing have same filing date)
         filing_date = trades[0].get('filingDate') if trades else None
@@ -1586,8 +1617,8 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'formS3Key': s3_key,
                     'matchConfidence': politician.get('matchScore', 1.0),
                     'source': 'house',
-                    'isUnparsed': False,
-                    'requiresManualReview': False,
+                    'isUnparsed': trade.get('isUnparsed', False),  # Preserve unparsed flag from trade
+                    'requiresManualReview': trade.get('requiresManualReview', False),  # Preserve manual review flag
                     'stateDistrict': state_district,
                     'metadata': trade.get('metadata')
                 }
