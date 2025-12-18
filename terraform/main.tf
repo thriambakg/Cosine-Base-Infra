@@ -3233,94 +3233,6 @@ module "lda_filings_table" {
   depends_on = [module.kms]
 }
 
-# DynamoDB Table for LDA Contributions (LD-203)
-module "lda_contributions_table" {
-  source = "./modules/dynamodb-table"
-
-  project_name = var.project_name
-  environment  = var.environment
-  table_name   = "lda-contributions"
-
-  hash_key  = "PK"
-  range_key = "SK"
-
-  attributes = [
-    { name = "PK", type = "S" },
-    { name = "SK", type = "S" },
-    { name = "GSI1PK", type = "S" },
-    { name = "GSI1SK", type = "S" },
-    { name = "GSI2PK", type = "S" },
-    { name = "GSI2SK", type = "S" },
-    { name = "GSI3PK", type = "S" },
-    { name = "GSI3SK", type = "S" },
-    { name = "GSI4PK", type = "S" },
-    { name = "GSI4SK", type = "S" },
-    { name = "GSI6PK", type = "S" },
-    { name = "GSI6SK", type = "S" }
-  ]
-
-  global_secondary_indexes = [
-    {
-      name            = "FilingYearPostedDateIndex"
-      hash_key        = "GSI1PK"
-      range_key       = "GSI1SK"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "FilingPeriodPostedDateIndex"
-      hash_key        = "GSI2PK"
-      range_key       = "GSI2SK"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "FilingTypePostedDateIndex"
-      hash_key        = "GSI3PK"
-      range_key       = "GSI3SK"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "RegistrantNamePostedDateIndex"
-      hash_key        = "GSI4PK"
-      range_key       = "GSI4SK"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "LobbyistNamePostedDateIndex"
-      hash_key        = "GSI6PK"
-      range_key       = "GSI6SK"
-      projection_type = "ALL"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    }
-  ]
-
-  billing_mode                   = var.dynamodb_billing_mode
-  read_capacity                  = var.dynamodb_read_capacity
-  write_capacity                 = var.dynamodb_write_capacity
-  stream_enabled                 = var.dynamodb_stream_enabled
-  stream_view_type               = var.dynamodb_stream_view_type
-  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
-  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
-
-  kms_key_arn = module.kms.dynamodb_key_arn
-
-  table_type    = "LobbyingData"
-  table_purpose = "LDAContributions"
-
-  tags = var.common_tags
-
-  depends_on = [module.kms]
-}
 
 # Upload LDA Glue script to S3
 resource "aws_s3_object" "lda_glue_script" {
@@ -3379,13 +3291,12 @@ module "lda_disclosures_glue_job" {
 
   # Job arguments
   default_arguments = {
-    "--LDA_API_BASE_URL"         = "https://lda.senate.gov/api/v1"
-    "--LDA_SECRET_NAME"          = module.lda_api_secrets_manager.secret_names["lda-api"]
-    "--FILINGS_TABLE_NAME"       = module.lda_filings_table.table_name
-    "--CONTRIBUTIONS_TABLE_NAME" = module.lda_contributions_table.table_name
-    "--S3_BUCKET_NAME"           = module.lda_disclosures_s3.bucket_id
-    "--REQUEST_TIMEOUT"          = "30"
-    "--RATE_LIMIT_DELAY"         = "0.5"
+    "--LDA_API_BASE_URL"   = "https://lda.senate.gov/api/v1"
+    "--LDA_SECRET_NAME"    = module.lda_api_secrets_manager.secret_names["lda-api"]
+    "--FILINGS_TABLE_NAME" = module.lda_filings_table.table_name
+    "--S3_BUCKET_NAME"     = module.lda_disclosures_s3.bucket_id
+    "--REQUEST_TIMEOUT"    = "30"
+    "--RATE_LIMIT_DELAY"   = "0.5"
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -3397,46 +3308,12 @@ module "lda_disclosures_glue_job" {
     module.lda_disclosures_s3,
     module.static_hosting_bucket,
     module.lda_filings_table,
-    module.lda_contributions_table,
     module.kms,
     module.lda_api_secrets_manager,
     aws_s3_object.lda_glue_script
   ]
 }
 
-# IAM Policy for Glue job to access contributions table
-resource "aws_iam_role_policy" "lda_disclosures_glue_contributions_table_access" {
-  name = "${var.project_name}-lda-disclosures-contributions-table-access-${var.environment}"
-  role = module.lda_disclosures_glue_job.role_name
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "dynamodb:PutItem",
-          "dynamodb:GetItem",
-          "dynamodb:UpdateItem",
-          "dynamodb:DeleteItem",
-          "dynamodb:Query",
-          "dynamodb:Scan",
-          "dynamodb:BatchGetItem",
-          "dynamodb:BatchWriteItem"
-        ]
-        Resource = [
-          module.lda_contributions_table.table_arn,
-          "${module.lda_contributions_table.table_arn}/*"
-        ]
-      }
-    ]
-  })
-
-  depends_on = [
-    module.lda_disclosures_glue_job,
-    module.lda_contributions_table
-  ]
-}
 
 # Grant Glue job role access to DynamoDB KMS key
 resource "aws_kms_grant" "lda_disclosures_glue_dynamodb_key_access" {
@@ -3475,16 +3352,15 @@ module "lda_disclosures_state_machine" {
         Parameters = {
           "JobName" = module.lda_disclosures_glue_job.job_name
           "Arguments" = {
-            "--LDA_API_BASE_URL"         = "https://lda.senate.gov/api/v1"
-            "--LDA_SECRET_NAME"          = module.lda_api_secrets_manager.secret_names["lda-api"]
-            "--FILINGS_TABLE_NAME"       = module.lda_filings_table.table_name
-            "--CONTRIBUTIONS_TABLE_NAME" = module.lda_contributions_table.table_name
-            "--S3_BUCKET_NAME"           = module.lda_disclosures_s3.bucket_id
-            "--REQUEST_TIMEOUT"          = "30"
-            "--RATE_LIMIT_DELAY"         = "0.5"
-            "--START_DATE.$"             = "$.START_DATE"
-            "--END_DATE.$"               = "$.END_DATE"
-            "--TESTING.$"                = "$.TESTING"
+            "--LDA_API_BASE_URL"   = "https://lda.senate.gov/api/v1"
+            "--LDA_SECRET_NAME"    = module.lda_api_secrets_manager.secret_names["lda-api"]
+            "--FILINGS_TABLE_NAME" = module.lda_filings_table.table_name
+            "--S3_BUCKET_NAME"     = module.lda_disclosures_s3.bucket_id
+            "--REQUEST_TIMEOUT"    = "30"
+            "--RATE_LIMIT_DELAY"   = "0.5"
+            "--START_DATE.$"       = "$.START_DATE"
+            "--END_DATE.$"         = "$.END_DATE"
+            "--TESTING.$"          = "$.TESTING"
           }
         }
         Catch = [

@@ -38,7 +38,6 @@ args = getResolvedOptions(sys.argv, [
     'LDA_API_BASE_URL',
     'LDA_SECRET_NAME',
     'FILINGS_TABLE_NAME',
-    'CONTRIBUTIONS_TABLE_NAME',
     'S3_BUCKET_NAME',
     'REQUEST_TIMEOUT',
     'RATE_LIMIT_DELAY'
@@ -122,7 +121,6 @@ log_print("=" * 80)
 LDA_API_BASE_URL = args.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
 LDA_SECRET_NAME = args.get('LDA_SECRET_NAME')
 FILINGS_TABLE_NAME = args.get('FILINGS_TABLE_NAME')
-CONTRIBUTIONS_TABLE_NAME = args.get('CONTRIBUTIONS_TABLE_NAME')
 S3_BUCKET_NAME = args.get('S3_BUCKET_NAME')
 REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 RATE_LIMIT_DELAY = float(args.get('RATE_LIMIT_DELAY', '0.5'))
@@ -132,11 +130,10 @@ dynamodb = boto3.resource('dynamodb')
 s3_client = boto3.client('s3')
 secrets_client = boto3.client('secretsmanager')
 
-# DynamoDB tables
+# DynamoDB table (both filings and contributions use the same table)
 filings_table = dynamodb.Table(FILINGS_TABLE_NAME)
-contributions_table = dynamodb.Table(CONTRIBUTIONS_TABLE_NAME)
 
-log_print(f"ℹ️ Configuration: Filings Table={FILINGS_TABLE_NAME}, Contributions Table={CONTRIBUTIONS_TABLE_NAME}, S3 Bucket={S3_BUCKET_NAME}")
+log_print(f"ℹ️ Configuration: Table={FILINGS_TABLE_NAME} (filings and contributions), S3 Bucket={S3_BUCKET_NAME}")
 
 # ============================================================================
 # Helper Functions
@@ -310,7 +307,7 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
     
     return indexed
 
-def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict):
+def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional[str] = None):
     """Save filing to DynamoDB with all fields and indexed GSI fields"""
     try:
         # Prepare item with all filing data
@@ -318,6 +315,16 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict):
         
         # Add indexed fields for GSIs
         item.update(indexed_fields)
+        
+        # Add S3 key if provided
+        if s3_key:
+            item['s3_key'] = s3_key
+        
+        # Set null values for contribution-specific fields (not applicable to filings)
+        item['filer_type'] = None
+        item['filer_type_display'] = None
+        item['contribution_items'] = None
+        item['no_contributions'] = None
         
         # Set primary key
         item['PK'] = f"FILING#{item['filing_uuid']}"
@@ -340,14 +347,20 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict):
             item['GSI4PK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
             item['GSI4SK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI5 (client_name) - only for filings
         if indexed_fields.get('client_name'):
             item['GSI5PK'] = f"CLIENT#{indexed_fields['client_name']}"
             item['GSI5SK'] = indexed_fields.get('dt_posted', '')
+        else:
+            # Explicitly set to null if client_name is missing
+            item['GSI5PK'] = None
+            item['GSI5SK'] = None
         
         if indexed_fields.get('lobbyist_name'):
             item['GSI6PK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
             item['GSI6SK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI7 (amount_reported) - only for filings
         if indexed_fields.get('amount_reported'):
             # For numeric range queries, use a partition key format
             amount = indexed_fields['amount_reported']
@@ -356,6 +369,10 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict):
             item['GSI7PK'] = f"AMOUNT#{amount_bucket}"
             # Keep as Decimal (Number type) for DynamoDB - don't convert to string
             item['GSI7SK'] = Decimal(str(amount)) if not isinstance(amount, Decimal) else amount
+        else:
+            # Explicitly set to null if amount_reported is missing
+            item['GSI7PK'] = None
+            item['GSI7SK'] = None
         
         # Save to DynamoDB
         filings_table.put_item(Item=item)
@@ -364,14 +381,31 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict):
         log_print(f"❌ Error saving filing to DynamoDB: {str(e)[:200]}")
         raise
 
-def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict):
-    """Save contribution to DynamoDB with all fields and indexed GSI fields"""
+def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_key: Optional[str] = None):
+    """Save contribution to DynamoDB with all fields and indexed GSI fields (same table as filings)"""
     try:
         # Prepare item with all contribution data
         item = json.loads(json.dumps(contribution), parse_float=Decimal)
         
         # Add indexed fields for GSIs
         item.update(indexed_fields)
+        
+        # Add S3 key if provided
+        if s3_key:
+            item['s3_key'] = s3_key
+        
+        # Set null values for filing-specific fields (not applicable to contributions)
+        item['client'] = None
+        item['client_id'] = None
+        item['client_name'] = None
+        item['client_client_id'] = None
+        item['income'] = None
+        item['expenses'] = None
+        item['expenses_method'] = None
+        item['expenses_method_display'] = None
+        item['lobbying_activities'] = None
+        item['amount_reported'] = None
+        item['termination_date'] = None
         
         # Set primary key
         item['PK'] = f"CONTRIBUTION#{item['filing_uuid']}"
@@ -394,12 +428,20 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict):
             item['GSI4PK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
             item['GSI4SK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI5 (client_name) is not applicable to contributions - explicitly set to null
+        item['GSI5PK'] = None
+        item['GSI5SK'] = None
+        
         if indexed_fields.get('lobbyist_name'):
             item['GSI6PK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
             item['GSI6SK'] = indexed_fields.get('dt_posted', '')
         
-        # Save to DynamoDB
-        contributions_table.put_item(Item=item)
+        # GSI7 (amount_reported) is not applicable to contributions - explicitly set to null
+        item['GSI7PK'] = None
+        item['GSI7SK'] = None
+        
+        # Save to DynamoDB (same table as filings)
+        filings_table.put_item(Item=item)
         
     except Exception as e:
         log_print(f"❌ Error saving contribution to DynamoDB: {str(e)[:200]}")
@@ -455,18 +497,19 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                     # Extract indexed fields
                     indexed_fields = extract_indexed_fields_filing(full_filing)
                     
-                    # Save to DynamoDB
-                    save_filing_to_dynamodb(full_filing, indexed_fields)
-                    
-                    # Download document if available
+                    # Download document if available and get S3 key
+                    s3_key = None
                     doc_url = full_filing.get('filing_document_url')
                     if doc_url:
                         filing_type = full_filing.get('filing_type', 'unknown')
                         content_type = full_filing.get('filing_document_content_type', 'pdf')
                         ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
                         s3_key = f"filings/{filing_type}/{filing_uuid}.{ext}"
-                        download_document(session, doc_url, s3_key)
-                        log_print(f"   ✅ Downloaded document for {filing_uuid}")
+                        if download_document(session, doc_url, s3_key):
+                            log_print(f"   ✅ Downloaded document for {filing_uuid}")
+                    
+                    # Save to DynamoDB (with S3 key)
+                    save_filing_to_dynamodb(full_filing, indexed_fields, s3_key=s3_key)
                     
                     total_processed += 1
                     if total_processed % 100 == 0:
@@ -547,18 +590,19 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                     # Extract indexed fields
                     indexed_fields = extract_indexed_fields_contribution(full_contribution)
                     
-                    # Save to DynamoDB
-                    save_contribution_to_dynamodb(full_contribution, indexed_fields)
-                    
-                    # Download document if available
+                    # Download document if available and get S3 key
+                    s3_key = None
                     doc_url = full_contribution.get('filing_document_url')
                     if doc_url:
                         filing_type = full_contribution.get('filing_type', 'unknown')
                         content_type = full_contribution.get('filing_document_content_type', 'pdf')
                         ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
                         s3_key = f"contributions/{filing_type}/{filing_uuid}.{ext}"
-                        download_document(session, doc_url, s3_key)
-                        log_print(f"   ✅ Downloaded document for {filing_uuid}")
+                        if download_document(session, doc_url, s3_key):
+                            log_print(f"   ✅ Downloaded document for {filing_uuid}")
+                    
+                    # Save to DynamoDB (same table as filings, with S3 key)
+                    save_contribution_to_dynamodb(full_contribution, indexed_fields, s3_key=s3_key)
                     
                     total_processed += 1
                     if total_processed % 100 == 0:
