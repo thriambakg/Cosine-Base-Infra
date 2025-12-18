@@ -44,14 +44,17 @@ args = getResolvedOptions(sys.argv, [
     'RATE_LIMIT_DELAY'
 ])
 
-# Get optional date parameters
+# Get optional date parameters (required for API pagination)
 try:
     optional_args = getResolvedOptions(sys.argv, ['START_DATE', 'END_DATE'])
     args.update(optional_args)
-    print(f"✅ Successfully parsed optional arguments: START_DATE={optional_args.get('START_DATE')}, END_DATE={optional_args.get('END_DATE')}", flush=True)
+    print(f"✅ Successfully parsed date arguments: START_DATE={optional_args.get('START_DATE')}, END_DATE={optional_args.get('END_DATE')}", flush=True)
 except Exception as e:
-    print(f"ℹ️ Optional date arguments not provided: {str(e)[:200]}", flush=True)
-    pass
+    print(f"⚠️ Date arguments not provided: {str(e)[:200]}", flush=True)
+    print(f"⚠️ LDA API requires at least one filter parameter for pagination. START_DATE and END_DATE are required.", flush=True)
+    # Set to None - will be handled in main() to require dates
+    args['START_DATE'] = None
+    args['END_DATE'] = None
 
 # Initialize Glue context
 sc = SparkContext()
@@ -365,6 +368,10 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     log_print("📋 Processing Filings")
     log_print("="*80)
     
+    # LDA API requires at least one query parameter for pagination
+    if not start_date and not end_date:
+        raise ValueError("START_DATE and/or END_DATE must be provided. LDA API requires at least one filter parameter for pagination.")
+    
     params = {'page_size': 100}  # Max page size
     if start_date:
         params['filing_dt_posted_after'] = start_date
@@ -438,6 +445,10 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     log_print("\n" + "="*80)
     log_print("📋 Processing Contributions")
     log_print("="*80)
+    
+    # LDA API requires at least one query parameter for pagination
+    if not start_date and not end_date:
+        raise ValueError("START_DATE and/or END_DATE must be provided. LDA API requires at least one filter parameter for pagination.")
     
     params = {'page_size': 100}
     if start_date:
@@ -524,14 +535,22 @@ def main():
     # Create session
     session = create_session(api_key)
     
-    # Get date range (optional)
+    # Get date range (required - LDA API requires at least one filter parameter for pagination)
     start_date = args.get('START_DATE')
     end_date = args.get('END_DATE')
     
-    if start_date or end_date:
+    # Validate that at least one date is provided
+    if not start_date and not end_date:
+        error_msg = "ERROR: START_DATE and/or END_DATE must be provided. LDA API requires at least one query parameter for pagination."
+        log_print(f"❌ {error_msg}")
+        raise ValueError(error_msg)
+    
+    if start_date and end_date:
         log_print(f"📅 Date range: {start_date} to {end_date}")
-    else:
-        log_print("📅 No date range specified - processing all records")
+    elif start_date:
+        log_print(f"📅 Start date: {start_date} (no end date - will fetch all records from start date)")
+    elif end_date:
+        log_print(f"📅 End date: {end_date} (no start date - will fetch all records up to end date)")
     
     # Process filings
     process_all_filings(session, start_date, end_date)

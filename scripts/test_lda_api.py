@@ -19,6 +19,11 @@ API_KEY = "88f3f8febf11c8321d9c64d67b0b1367b740f435"
 REQUEST_TIMEOUT = 30
 RATE_LIMIT_DELAY = 0.5
 
+# Date range for filtering (optional - set to None to process all records)
+# Format: YYYY-MM-DD
+START_DATE = "2024-12-01"  # e.g., 
+END_DATE = "2024-12-31"   # e.g., "2024-12-31"
+
 # Script directory for downloads
 SCRIPT_DIR = Path(__file__).parent
 DOWNLOADS_DIR = SCRIPT_DIR / "lda_downloads"
@@ -273,6 +278,16 @@ def main():
     
     print(f"\n📁 Downloads Directory: {DOWNLOADS_DIR}")
     
+    # Display date range if set
+    if START_DATE or END_DATE:
+        print(f"\n📅 Date Range Filter:")
+        if START_DATE:
+            print(f"   Start Date: {START_DATE}")
+        if END_DATE:
+            print(f"   End Date: {END_DATE}")
+    else:
+        print(f"\n📅 No date range filter - processing all records")
+    
     # Create session with secure authentication
     session = create_session()
     
@@ -329,6 +344,11 @@ def main():
             'filing_amount_reported_max': '100000',
             'page_size': 5
         }
+        # Add date range if provided
+        if START_DATE:
+            params['filing_dt_posted_after'] = START_DATE
+        if END_DATE:
+            params['filing_dt_posted_before'] = END_DATE
         test_filings2 = call_api(session, '/filings/', params=params)
         test_results2 = test_filings2.get('results', [])
         print(f"   ✅ Found {len(test_results2)} filings with amount_reported between 10000-100000")
@@ -361,14 +381,26 @@ def main():
     except Exception as e:
         print(f"   ❌ Error testing range filter: {str(e)[:200]}")
     
-    # Fetch page 1 of filings (unfiltered)
+    # Fetch filings with date range filtering (if provided)
     print("\n" + "="*80)
-    print("📋 Fetching Filings List (Page 1 - Unfiltered)")
+    print("📋 Fetching Filings List")
     print("="*80)
+    
+    filings_params = {'page_size': 100}
+    if START_DATE:
+        filings_params['filing_dt_posted_after'] = START_DATE
+        print(f"   📅 Filtering filings posted on or after: {START_DATE}")
+    if END_DATE:
+        filings_params['filing_dt_posted_before'] = END_DATE
+        print(f"   📅 Filtering filings posted on or before: {END_DATE}")
+    if not START_DATE and not END_DATE:
+        print("   📅 No date filter - fetching all filings")
+    
     try:
-        filings_list = call_api(session, '/filings/', params=None)
+        filings_list = call_api(session, '/filings/', params=filings_params)
         filings_results = filings_list.get('results', [])
-        print(f"✅ Found {len(filings_results)} filings on page 1")
+        total_count = filings_list.get('count', 0)
+        print(f"✅ Found {len(filings_results)} filings on page 1 (total: {total_count})")
     except Exception as e:
         print(f"❌ Error fetching filings list: {str(e)[:200]}")
         return
@@ -430,14 +462,26 @@ def main():
         except Exception as e:
             print(f"   ❌ Error retrieving filing {filing_uuid}: {str(e)[:200]}")
     
-    # Fetch page 1 of contributions
+    # Fetch contributions with date range filtering (if provided)
     print("\n" + "="*80)
-    print("📋 Fetching Contributions List (Page 1)")
+    print("📋 Fetching Contributions List")
     print("="*80)
+    
+    contributions_params = {'page_size': 100}
+    if START_DATE:
+        contributions_params['filing_dt_posted_after'] = START_DATE
+        print(f"   📅 Filtering contributions posted on or after: {START_DATE}")
+    if END_DATE:
+        contributions_params['filing_dt_posted_before'] = END_DATE
+        print(f"   📅 Filtering contributions posted on or before: {END_DATE}")
+    if not START_DATE and not END_DATE:
+        print("   📅 No date filter - fetching all contributions")
+    
     try:
-        contributions_list = call_api(session, '/contributions/', params=None)
+        contributions_list = call_api(session, '/contributions/', params=contributions_params)
         contributions_results = contributions_list.get('results', [])
-        print(f"✅ Found {len(contributions_results)} contributions on page 1")
+        total_count = contributions_list.get('count', 0)
+        print(f"✅ Found {len(contributions_results)} contributions on page 1 (total: {total_count})")
     except Exception as e:
         print(f"❌ Error fetching contributions list: {str(e)[:200]}")
         return
