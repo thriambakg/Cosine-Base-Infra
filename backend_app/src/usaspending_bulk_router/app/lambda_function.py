@@ -47,22 +47,24 @@ def lambda_handler(event: Dict, context: Any) -> Dict:
     # Check if this is a scheduled execution
     is_scheduled = source in ["scheduler", "scheduler-daily"]
     
+    # Get current UTC date for calculations
+    now_utc = datetime.now(timezone.utc)
+    today_utc = now_utc.replace(hour=0, minute=0, second=0, microsecond=0)
+    yesterday_utc = today_utc - timedelta(days=1)
+    
     # If dates not provided, use scheduled mode defaults or fallback to yesterday
     if not start_date_str:
         if is_scheduled:
-            # Scheduled mode: start_date = previous day
-            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-            start_date_str = yesterday.strftime('%Y-%m-%d')
+            # Scheduled mode: start_date = previous day (yesterday)
+            start_date_str = yesterday_utc.strftime('%Y-%m-%d')
         else:
             # Manual/default mode: default to yesterday
-            yesterday = datetime.now(timezone.utc) - timedelta(days=1)
-            start_date_str = yesterday.strftime('%Y-%m-%d')
+            start_date_str = yesterday_utc.strftime('%Y-%m-%d')
     
     if not end_date_str:
         if is_scheduled:
-            # Scheduled mode: end_date = current day
-            today = datetime.now(timezone.utc)
-            end_date_str = today.strftime('%Y-%m-%d')
+            # Scheduled mode: end_date = current day (today)
+            end_date_str = today_utc.strftime('%Y-%m-%d')
         else:
             # Manual/default mode: default to start_date
             end_date_str = start_date_str
