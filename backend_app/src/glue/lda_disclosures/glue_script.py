@@ -65,16 +65,38 @@ except Exception as e:
     args['START_DATE'] = None
     args['END_DATE'] = None
 
-# Get optional testing parameter
-try:
-    testing_args = getResolvedOptions(sys.argv, ['TESTING'])
-    testing = testing_args.get('TESTING', '').lower() in ['true', '1', 'yes']
-    args['TESTING'] = testing
-    if testing:
-        print(f"🧪 Testing mode enabled - will limit to 10 records per type", flush=True)
-except Exception as e:
-    # Testing parameter is optional, default to False
-    args['TESTING'] = False
+# Get optional testing parameter (passed as string from Step Functions)
+# Check sys.argv directly since TESTING is optional and getResolvedOptions requires all args
+testing = False
+testing_value = None
+
+# Check if --TESTING is in sys.argv
+for i, arg in enumerate(sys.argv):
+    if arg == '--TESTING' and i + 1 < len(sys.argv):
+        testing_value = sys.argv[i + 1]
+        break
+
+if testing_value is not None:
+    print(f"🔍 DEBUG: Found TESTING in args: '{testing_value}' (type: {type(testing_value).__name__})", flush=True)
+    # Glue job arguments are always strings, parse as string
+    if isinstance(testing_value, str):
+        testing_str = testing_value.strip().lower()
+        testing = testing_str in ['true', '1', 'yes', 't']
+    elif isinstance(testing_value, bool):
+        testing = testing_value
+    else:
+        # Convert to string first, then parse
+        testing_str = str(testing_value).strip().lower()
+        testing = testing_str in ['true', '1', 'yes', 't']
+    print(f"🔍 DEBUG: Parsed TESTING value: '{testing_value}' -> {testing}", flush=True)
+else:
+    print(f"ℹ️ Testing parameter not provided (optional), defaulting to False", flush=True)
+
+args['TESTING'] = testing
+if testing:
+    print(f"🧪 Testing mode enabled - will limit to 10 records per type", flush=True)
+else:
+    print(f"ℹ️ Testing mode disabled", flush=True)
 
 # Initialize Glue context
 sc = SparkContext()

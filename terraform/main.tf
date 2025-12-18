@@ -3484,7 +3484,7 @@ module "lda_disclosures_state_machine" {
             "--RATE_LIMIT_DELAY"         = "0.5"
             "--START_DATE.$"             = "$.START_DATE"
             "--END_DATE.$"               = "$.END_DATE"
-            "--TESTING.$?"               = "$.TESTING"
+            "--TESTING.$"                = "$.TESTING"
           }
         }
         Catch = [
