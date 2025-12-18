@@ -3405,7 +3405,7 @@ module "lda_disclosures_glue_job" {
 # IAM Policy for Glue job to access contributions table
 resource "aws_iam_role_policy" "lda_disclosures_glue_contributions_table_access" {
   name = "${var.project_name}-lda-disclosures-contributions-table-access-${var.environment}"
-  role = module.lda_disclosures_glue_job.role_id
+  role = module.lda_disclosures_glue_job.role_name
 
   policy = jsonencode({
     Version = "2012-10-17"
