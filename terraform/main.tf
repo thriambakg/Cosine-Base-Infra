@@ -3313,7 +3313,8 @@ module "lda_disclosures_fetcher_lambda" {
   ]
 
   additional_policy_arns = [
-    module.lda_api_secrets_manager.secret_access_policy_arn
+    module.lda_api_secrets_manager.secret_access_policy_arn,
+    module.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
