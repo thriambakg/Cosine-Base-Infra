@@ -584,10 +584,11 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
             item['entity'] = unified_entity
         
         # Set null values for contribution-specific fields (not applicable to filings)
-        item['filer_type'] = None
-        item['filer_type_display'] = None
         item['contribution_items'] = None
         item['no_contributions'] = None
+        # filer_type - not applicable to filings, ensure it's removed (omit, don't set to None)
+        item.pop('filer_type', None)
+        item.pop('filer_type_display', None)
         # pac - not applicable to filings, ensure it's removed
         item.pop('pac', None)
         
