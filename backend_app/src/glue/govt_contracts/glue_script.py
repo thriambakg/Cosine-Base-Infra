@@ -886,6 +886,81 @@ def get_all_agencies() -> List[Dict[str, Any]]:
     log_print(f"✅ Found {len(agencies)} agencies")
     return agencies
 
+def check_agency_award_count(agency: Dict[str, Any], start_date: str, end_date: str) -> int:
+    """
+    Check the number of awards for an agency within a date range using the lightweight count API.
+    Returns 0 if no awards found, or the count if awards exist.
+    
+    Args:
+        agency: Agency dict with 'name' field
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+    
+    Returns:
+        Number of awards (0 if none found or error occurs)
+    """
+    agency_name = agency.get('name', 'Unknown')
+    
+    try:
+        log_print(f"🔍 Checking award count for {agency_name} ({start_date} to {end_date})...")
+        
+        # Use the lightweight count endpoint
+        response = call_usaspending_api(
+            "/api/v2/download/count/",
+            method='POST',
+            body={
+                "filters": {
+                    "agencies": [
+                        {
+                            "type": "awarding",
+                            "tier": "toptier",
+                            "name": agency_name
+                        },
+                        {
+                            "type": "funding",
+                            "tier": "toptier",
+                            "name": agency_name
+                        }
+                    ],
+                    "time_period": [
+                        {
+                            "start_date": start_date,
+                            "end_date": end_date
+                        }
+                    ]
+                },
+                "spending_level": "awards"
+            }
+        )
+        
+        if not response:
+            log_print(f"⚠️ No response from count API for {agency_name}, assuming 0 awards")
+            return 0
+        
+        # Extract the calculated count
+        calculated_count = response.get('calculated_count', 0)
+        
+        # Handle both int and string responses
+        if isinstance(calculated_count, str):
+            try:
+                calculated_count = int(calculated_count)
+            except (ValueError, TypeError):
+                calculated_count = 0
+        
+        if calculated_count > 0:
+            log_print(f"✅ {agency_name}: Found {calculated_count:,} award(s) - proceeding with bulk download")
+        else:
+            log_print(f"⏭️  {agency_name}: No awards found (count: {calculated_count}) - skipping")
+        
+        return calculated_count
+        
+    except Exception as e:
+        # On error, log and return 0 to skip (safer than proceeding with potentially large downloads)
+        error_msg = str(e)[:200]
+        log_print(f"⚠️ Error checking award count for {agency_name}: {error_msg}")
+        log_print(f"⏭️  {agency_name}: Skipping due to count check error")
+        return 0
+
 def initiate_bulk_download(start_date: str, end_date: str, agency: Optional[Dict[str, Any]] = None) -> Dict[str, Any]:
     """Initiate bulk download for all award types with sub-awards included"""
     if agency:
@@ -2761,6 +2836,14 @@ def main():
             log_print(f"📦 Processing Agency {i}/{len(agencies)}: {agency_name}")
             log_print(f"📅 Date Range: {start_date} to {end_date}")
             log_print(f"{'=' * 80}")
+            
+            # Pre-check: Verify agency has awards for this date range before proceeding
+            award_count = check_agency_award_count(agency, start_date, end_date)
+            
+            if award_count == 0:
+                log_print(f"⏭️  Skipping {agency_name} - no awards found for date range")
+                successful_agencies += 1
+                continue
             
             # Check if ZIP file already exists in S3
             log_print(f"\n🔍 Checking if ZIP file already exists in S3...")
