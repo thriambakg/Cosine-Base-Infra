@@ -90,18 +90,27 @@ def read_existing_csv(bucket: str, key: str, field_name: str) -> Set[str]:
         return set()
 
 def write_csv_to_s3(bucket: str, key: str, values: List[str], field_name: str):
-    """Write sorted values to S3 as CSV"""
+    """
+    Write sorted values to S3 as CSV without double quotes.
+    Manually writes CSV lines to avoid csv.writer's automatic quoting of values with commas.
+    """
     # Sort alphabetically
     sorted_values = sorted(values)
     
-    # Create CSV content
-    csv_buffer = StringIO()
-    writer = csv.writer(csv_buffer)
-    writer.writerow([field_name])  # Header
-    for value in sorted_values:
-        writer.writerow([value])
+    # Manually write CSV to avoid automatic quoting
+    # This ensures values like "CARFAX, INC." are written as CARFAX, INC. (no quotes)
+    csv_lines = [field_name]  # Header
     
-    csv_content = csv_buffer.getvalue()
+    for value in sorted_values:
+        # Ensure value is already cleaned (no quotes)
+        cleaned = clean_value(value) if value else ''
+        if cleaned:
+            # Manually write the line - values with commas will be written as-is (no quotes)
+            # This matches the format expected by the frontend (no quotes in CSV)
+            csv_lines.append(cleaned)
+    
+    # Join with newlines (simple CSV format - one value per line)
+    csv_content = '\n'.join(csv_lines) + '\n'
     
     # Upload to S3
     s3_client.put_object(
