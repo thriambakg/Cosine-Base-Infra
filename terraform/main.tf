@@ -3352,8 +3352,7 @@ module "lda_disclosures_indexer_lambda" {
     module.lda_api_secrets_manager.secret_access_policy_arn,
     module.lda_filings_table.table_policy_arn,
     module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
-    module.kms.main_key_policy_arn,
-    module.kms.dynamodb_key_policy_arn,
+    module.kms.kms_access_policy_arn,
     aws_iam_policy.lda_indexer_s3_policy.arn
   ]
 
