@@ -1069,7 +1069,7 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
         log_print(f"✅ Reached testing limit: {total_processed}/{testing_limit}")
         return
     
-    # Fetch remaining pages in parallel batches
+    # Fetch remaining pages in parallel batches and process each page as it's fetched
     while has_next and current_page < total_pages:
         # Determine how many pages to fetch in this batch
         pages_to_fetch = min(max_api_workers, total_pages - current_page)
@@ -1078,76 +1078,82 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
             break
         
         batch_number += 1
-        log_print(f"\n📄 Fetching pages {current_page + 1} to {current_page + pages_to_fetch} in parallel...")
+        batch_start_page = current_page + 1
+        batch_end_page = current_page + pages_to_fetch
+        log_print(f"\n📄 Batch {batch_number + 1}: Fetching pages {batch_start_page} to {batch_end_page} in parallel (fanning out to {max_processing_workers} workers per page)...")
         
-        # Fetch multiple pages in parallel
-        pages_to_process = list(range(current_page + 1, current_page + pages_to_fetch + 1))
-        with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
-            future_to_page = {
-                api_executor.submit(fetch_filings_page, session, base_params, page): page
-                for page in pages_to_process
-            }
+        # Fetch multiple pages in parallel, and process each page's results immediately as it's fetched
+        pages_to_process = list(range(batch_start_page, batch_end_page + 1))
+        
+        # Use a shared processing executor for all pages in this batch
+        # This allows up to 25 pages * 25 workers = 625 concurrent processing tasks
+        with ThreadPoolExecutor(max_workers=max_api_workers * max_processing_workers) as processing_executor:
+            # Track futures for both API calls and processing
+            page_processing_futures = []
+            batch_total_processed = 0
             
-            batch_results = []
-            for future in as_completed(future_to_page):
-                page_num = future_to_page[future]
-                try:
-                    response = future.result()
-                    if response:
-                        page_results = response.get('results', [])
-                        if page_results:
-                            batch_results.extend(page_results)
-                            # Individual page fetch logs removed - see batch summary instead
+            with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
+                # Submit all page fetch requests
+                future_to_page = {
+                    api_executor.submit(fetch_filings_page, session, base_params, page): page
+                    for page in pages_to_process
+                }
+                
+                # As each page is fetched, immediately start processing it with 25 workers
+                for future in as_completed(future_to_page):
+                    page_num = future_to_page[future]
+                    try:
+                        response = future.result()
+                        if response:
+                            page_results = response.get('results', [])
+                            if page_results:
+                                # Check testing limit before processing
+                                if testing_limit:
+                                    remaining = testing_limit - total_processed
+                                    if remaining <= 0:
+                                        has_next = False
+                                        break
+                                    page_results = page_results[:remaining]
+                                
+                                # Immediately start processing this page's results with 25 workers
+                                for filing in page_results:
+                                    processing_future = processing_executor.submit(process_single_filing, session, filing)
+                                    page_processing_futures.append((processing_future, filing, page_num))
+                                
+                                # Update total_processed count for testing limit check
+                                total_processed += len(page_results)
+                                if testing_limit and total_processed >= testing_limit:
+                                    has_next = False
+                                    break
+                            else:
+                                has_next = False
+                                break
                         else:
-                            has_next = False
-                            break
-                    else:
-                        log_print(f"   ⚠️ Page {page_num} returned None")
-                except Exception as e:
-                    log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
-        
-        # Check if we should continue fetching
-        if not batch_results:
-            has_next = False
-            break
-        
-        # Limit batch results if testing mode
-        if testing_limit:
-            remaining = testing_limit - total_processed
-            if remaining <= 0:
-                break
-            batch_results = batch_results[:remaining]
-        
-        # Process this batch immediately
-        log_print(f"\n📊 Processing batch {batch_number + 1} (pages {current_page + 1}-{current_page + pages_to_fetch}, {len(batch_results)} filings) with {max_processing_workers} workers...")
-        
-        with ThreadPoolExecutor(max_workers=max_processing_workers) as processing_executor:
-            future_to_filing = {
-                processing_executor.submit(process_single_filing, session, filing): filing
-                for filing in batch_results
-            }
+                            log_print(f"   ⚠️ Page {page_num} returned None")
+                    except Exception as e:
+                        log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
             
-            batch_processed = 0
-            for future in as_completed(future_to_filing):
-                filing = future_to_filing[future]
+            # Wait for all processing to complete for this batch
+            for processing_future, filing, page_num in page_processing_futures:
                 try:
-                    filing_type = future.result()
+                    filing_type = processing_future.result()
                     if filing_type:
-                        batch_processed += 1
-                        total_processed += 1
-                        if total_processed % 100 == 0:
-                            log_print(f"   📊 Processed {total_processed} filings total...")
+                        batch_total_processed += 1
                 except Exception as e:
                     filing_uuid = filing.get('filing_uuid', 'unknown')
-                    log_print(f"   ❌ Exception processing filing {filing_uuid}: {str(e)[:200]}")
+                    log_print(f"   ❌ Exception processing filing {filing_uuid} from page {page_num}: {str(e)[:200]}")
         
-        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_processed} filings from pages {current_page + 1}-{current_page + pages_to_fetch} (Total: {total_processed})")
+        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} filings from pages {batch_start_page}-{batch_end_page} (Total: {total_processed})")
         
-        current_page += pages_to_fetch
+        current_page = batch_end_page
         
         # Check if we've reached testing limit
         if testing_limit and total_processed >= testing_limit:
             log_print(f"✅ Reached testing limit: {total_processed}/{testing_limit}")
+            break
+        
+        # Check if we should continue
+        if not has_next:
             break
     
     log_print(f"\n✅ Finished processing all filings. Total processed and indexed: {total_processed}")
@@ -1283,7 +1289,7 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
         log_print(f"✅ Reached testing limit: {total_processed}/{testing_limit}")
         return
     
-    # Fetch remaining pages in parallel batches
+    # Fetch remaining pages in parallel batches and process each page as it's fetched
     while has_next and current_page < total_pages:
         # Determine how many pages to fetch in this batch
         pages_to_fetch = min(max_api_workers, total_pages - current_page)
@@ -1292,76 +1298,82 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
             break
         
         batch_number += 1
-        log_print(f"\n📄 Fetching pages {current_page + 1} to {current_page + pages_to_fetch} in parallel...")
+        batch_start_page = current_page + 1
+        batch_end_page = current_page + pages_to_fetch
+        log_print(f"\n📄 Batch {batch_number + 1}: Fetching pages {batch_start_page} to {batch_end_page} in parallel (fanning out to {max_processing_workers} workers per page)...")
         
-        # Fetch multiple pages in parallel
-        pages_to_process = list(range(current_page + 1, current_page + pages_to_fetch + 1))
-        with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
-            future_to_page = {
-                api_executor.submit(fetch_contributions_page, session, base_params, page): page
-                for page in pages_to_process
-            }
+        # Fetch multiple pages in parallel, and process each page's results immediately as it's fetched
+        pages_to_process = list(range(batch_start_page, batch_end_page + 1))
+        
+        # Use a shared processing executor for all pages in this batch
+        # This allows up to 25 pages * 25 workers = 625 concurrent processing tasks
+        with ThreadPoolExecutor(max_workers=max_api_workers * max_processing_workers) as processing_executor:
+            # Track futures for both API calls and processing
+            page_processing_futures = []
+            batch_total_processed = 0
             
-            batch_results = []
-            for future in as_completed(future_to_page):
-                page_num = future_to_page[future]
-                try:
-                    response = future.result()
-                    if response:
-                        page_results = response.get('results', [])
-                        if page_results:
-                            batch_results.extend(page_results)
-                            # Individual page fetch logs removed - see batch summary instead
+            with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
+                # Submit all page fetch requests
+                future_to_page = {
+                    api_executor.submit(fetch_contributions_page, session, base_params, page): page
+                    for page in pages_to_process
+                }
+                
+                # As each page is fetched, immediately start processing it with 25 workers
+                for future in as_completed(future_to_page):
+                    page_num = future_to_page[future]
+                    try:
+                        response = future.result()
+                        if response:
+                            page_results = response.get('results', [])
+                            if page_results:
+                                # Check testing limit before processing
+                                if testing_limit:
+                                    remaining = testing_limit - total_processed
+                                    if remaining <= 0:
+                                        has_next = False
+                                        break
+                                    page_results = page_results[:remaining]
+                                
+                                # Immediately start processing this page's results with 25 workers
+                                for contribution in page_results:
+                                    processing_future = processing_executor.submit(process_single_contribution, session, contribution)
+                                    page_processing_futures.append((processing_future, contribution, page_num))
+                                
+                                # Update total_processed count for testing limit check
+                                total_processed += len(page_results)
+                                if testing_limit and total_processed >= testing_limit:
+                                    has_next = False
+                                    break
+                            else:
+                                has_next = False
+                                break
                         else:
-                            has_next = False
-                            break
-                    else:
-                        log_print(f"   ⚠️ Page {page_num} returned None")
-                except Exception as e:
-                    log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
-        
-        # Check if we should continue fetching
-        if not batch_results:
-            has_next = False
-            break
-        
-        # Limit batch results if testing mode
-        if testing_limit:
-            remaining = testing_limit - total_processed
-            if remaining <= 0:
-                break
-            batch_results = batch_results[:remaining]
-        
-        # Process this batch immediately
-        log_print(f"\n📊 Processing batch {batch_number + 1} (pages {current_page + 1}-{current_page + pages_to_fetch}, {len(batch_results)} contributions) with {max_processing_workers} workers...")
-        
-        with ThreadPoolExecutor(max_workers=max_processing_workers) as processing_executor:
-            future_to_contribution = {
-                processing_executor.submit(process_single_contribution, session, contribution): contribution
-                for contribution in batch_results
-            }
+                            log_print(f"   ⚠️ Page {page_num} returned None")
+                    except Exception as e:
+                        log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
             
-            batch_processed = 0
-            for future in as_completed(future_to_contribution):
-                contribution = future_to_contribution[future]
+            # Wait for all processing to complete for this batch
+            for processing_future, contribution, page_num in page_processing_futures:
                 try:
-                    success = future.result()
+                    success = processing_future.result()
                     if success:
-                        batch_processed += 1
-                        total_processed += 1
-                        if total_processed % 100 == 0:
-                            log_print(f"   📊 Processed {total_processed} contributions total...")
+                        batch_total_processed += 1
                 except Exception as e:
                     contribution_uuid = contribution.get('filing_uuid', 'unknown')
-                    log_print(f"   ❌ Exception processing contribution {contribution_uuid}: {str(e)[:200]}")
+                    log_print(f"   ❌ Exception processing contribution {contribution_uuid} from page {page_num}: {str(e)[:200]}")
         
-        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_processed} contributions from pages {current_page + 1}-{current_page + pages_to_fetch} (Total: {total_processed})")
+        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} contributions from pages {batch_start_page}-{batch_end_page} (Total: {total_processed})")
         
-        current_page += pages_to_fetch
+        current_page = batch_end_page
         
         # Check if we've reached testing limit
         if testing_limit and total_processed >= testing_limit:
             log_print(f"✅ Reached testing limit: {total_processed}/{testing_limit}")
+            break
+        
+        # Check if we should continue
+        if not has_next:
             break
     
     log_print(f"\n✅ Finished processing all contributions. Total processed and indexed: {total_processed}")

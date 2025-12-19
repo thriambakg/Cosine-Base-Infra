@@ -1,0 +1,30 @@
+[
+  {
+    "value": "dr",
+    "name": "DR."
+  },
+  {
+    "value": "mr",
+    "name": "MR."
+  },
+  {
+    "value": "mrs",
+    "name": "MRS."
+  },
+  {
+    "value": "ms",
+    "name": "MS."
+  },
+  {
+    "value": "mx",
+    "name": "MX."
+  },
+  {
+    "value": "ptr",
+    "name": "PTR."
+  },
+  {
+    "value": "rev",
+    "name": "REV."
+  }
+]

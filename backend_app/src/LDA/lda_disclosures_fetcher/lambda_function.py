@@ -1,0 +1,216 @@
+"""
+LDA Disclosures Fetcher Lambda
+Determines total pages for filings and contributions endpoints and creates batches for processing.
+"""
+
+import json
+import os
+import time
+import requests
+import boto3
+from botocore.exceptions import ClientError
+from typing import Dict, List, Optional
+
+# Environment variables
+LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
+LDA_SECRET_NAME = os.environ.get('LDA_SECRET_NAME')
+REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))
+RATE_LIMIT_DELAY = float(os.environ.get('RATE_LIMIT_DELAY', '0.5'))
+
+# AWS clients
+secrets_client = boto3.client('secretsmanager')
+
+def get_api_key() -> str:
+    """Retrieve LDA API key from Secrets Manager"""
+    try:
+        response = secrets_client.get_secret_value(SecretId=LDA_SECRET_NAME)
+        secret_data = json.loads(response['SecretString'])
+        return secret_data.get('api_key') or secret_data.get('API_KEY') or secret_data.get('LDA_API_KEY') or secret_data.get('lda_api_key')
+    except ClientError as e:
+        print(f"❌ Error retrieving API key from Secrets Manager: {str(e)}")
+        raise
+
+def create_session(api_key: str) -> requests.Session:
+    """Create a requests session with Authorization header"""
+    session = requests.Session()
+    session.headers.update({
+        'Authorization': f'Token {api_key}',
+        'Accept': 'application/json',
+    })
+    return session
+
+def fetch_page_count(session: requests.Session, endpoint: str, start_date: Optional[str], end_date: Optional[str]) -> Dict:
+    """Fetch first page to get total count"""
+    base_params = {'page_size': 25}
+    
+    if not start_date and not end_date:
+        base_params['filing_dt_posted_after'] = '2000-01-01'
+    else:
+        if start_date:
+            base_params['filing_dt_posted_after'] = start_date
+        if end_date:
+            base_params['filing_dt_posted_before'] = end_date
+    
+    api_url = f"{LDA_API_BASE_URL}/{endpoint}/"
+    time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
+    
+    response = session.get(api_url, params={**base_params, 'page': 1}, timeout=REQUEST_TIMEOUT)
+    response.raise_for_status()
+    data = response.json()
+    
+    return data
+
+def create_batches(total_pages: int, batch_size: int = 25) -> List[Dict]:
+    """Create batches of pages"""
+    batches = []
+    for batch_id in range(1, (total_pages + batch_size - 1) // batch_size + 1):
+        start_page = (batch_id - 1) * batch_size + 1
+        end_page = min(batch_id * batch_size, total_pages)
+        pages = list(range(start_page, end_page + 1))
+        
+        batches.append({
+            'batch_id': batch_id,
+            'pages': pages,
+            'start_page': start_page,
+            'end_page': end_page,
+            'page_count': len(pages)
+        })
+    
+    return batches
+
+def lambda_handler(event, context):
+    """
+    Fetcher Lambda: Determines total pages and outputs batches for processing
+    
+    Input:
+    {
+        "START_DATE": "2025-01-01" (optional),
+        "END_DATE": "2025-01-31" (optional),
+        "TESTING": 10 (optional, number of records per endpoint)
+    }
+    
+    Output:
+    {
+        "filingbatches": {
+            "batches": [...],
+            "total_pages": 200,
+            "total_count": 5000,
+            "endpoint": "filings",
+            "start_date": "2025-01-01",
+            "end_date": "2025-01-31"
+        },
+        "contributionbatches": {
+            "batches": [...],
+            "total_pages": 150,
+            "total_count": 3750,
+            "endpoint": "contributions",
+            "start_date": "2025-01-01",
+            "end_date": "2025-01-31"
+        }
+    }
+    """
+    print("=" * 80)
+    print("🚀 LDA Disclosures Fetcher Lambda - Starting")
+    print("=" * 80)
+    
+    # Get input parameters
+    start_date = event.get('START_DATE')
+    end_date = event.get('END_DATE')
+    testing_limit = event.get('TESTING')  # Optional: number of records per endpoint
+    
+    print(f"📅 Date range: START_DATE={start_date}, END_DATE={end_date}")
+    if testing_limit:
+        print(f"🧪 Testing mode: {testing_limit} records per endpoint")
+    
+    # Get API key
+    api_key = get_api_key()
+    print("✅ Retrieved API key from Secrets Manager")
+    
+    # Create session
+    session = create_session(api_key)
+    
+    result = {}
+    batch_size = 25  # 25 pages per batch (for 25 parallel indexers)
+    
+    # Process filings endpoint
+    print("\n📋 Fetching filings endpoint count...")
+    try:
+        filings_data = fetch_page_count(session, 'filings', start_date, end_date)
+        filings_count = filings_data.get('count', 0)
+        filings_total_pages = (filings_count + 24) // 25 if filings_count > 0 else 1
+        
+        # Apply testing limit if provided
+        if testing_limit:
+            # Calculate how many pages we need for testing_limit records
+            pages_needed = (testing_limit + 24) // 25
+            filings_total_pages = min(filings_total_pages, pages_needed)
+            filings_count = min(filings_count, testing_limit)
+        
+        filings_batches = create_batches(filings_total_pages, batch_size)
+        
+        result['filingbatches'] = {
+            'batches': filings_batches,
+            'total_pages': filings_total_pages,
+            'total_count': filings_count,
+            'endpoint': 'filings',
+            'start_date': start_date,
+            'end_date': end_date
+        }
+        
+        print(f"✅ Filings: {filings_count} total records, {filings_total_pages} pages, {len(filings_batches)} batches")
+    except Exception as e:
+        print(f"❌ Error fetching filings count: {str(e)}")
+        result['filingbatches'] = {
+            'batches': [],
+            'total_pages': 0,
+            'total_count': 0,
+            'endpoint': 'filings',
+            'start_date': start_date,
+            'end_date': end_date,
+            'error': str(e)
+        }
+    
+    # Process contributions endpoint
+    print("\n📋 Fetching contributions endpoint count...")
+    try:
+        contributions_data = fetch_page_count(session, 'contributions', start_date, end_date)
+        contributions_count = contributions_data.get('count', 0)
+        contributions_total_pages = (contributions_count + 24) // 25 if contributions_count > 0 else 1
+        
+        # Apply testing limit if provided
+        if testing_limit:
+            # Calculate how many pages we need for testing_limit records
+            pages_needed = (testing_limit + 24) // 25
+            contributions_total_pages = min(contributions_total_pages, pages_needed)
+            contributions_count = min(contributions_count, testing_limit)
+        
+        contributions_batches = create_batches(contributions_total_pages, batch_size)
+        
+        result['contributionbatches'] = {
+            'batches': contributions_batches,
+            'total_pages': contributions_total_pages,
+            'total_count': contributions_count,
+            'endpoint': 'contributions',
+            'start_date': start_date,
+            'end_date': end_date
+        }
+        
+        print(f"✅ Contributions: {contributions_count} total records, {contributions_total_pages} pages, {len(contributions_batches)} batches")
+    except Exception as e:
+        print(f"❌ Error fetching contributions count: {str(e)}")
+        result['contributionbatches'] = {
+            'batches': [],
+            'total_pages': 0,
+            'total_count': 0,
+            'endpoint': 'contributions',
+            'start_date': start_date,
+            'end_date': end_date,
+            'error': str(e)
+        }
+    
+    print("\n" + "=" * 80)
+    print("✅ Fetcher Lambda Complete")
+    print("=" * 80)
+    
+    return result
+

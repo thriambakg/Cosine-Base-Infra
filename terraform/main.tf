@@ -906,7 +906,7 @@ module "news_fetcher" {
   timeout       = 300 # 5 minutes
   memory_size   = 512
 
-  source_dir = "${path.module}/../backend_app/src/news_fetcher/app"
+  source_dir = "${path.module}/../backend_app/src/NEWS/news_fetcher/app"
 
   # Environment variables
   environment_variables = {
@@ -941,7 +941,7 @@ module "news_processor" {
   timeout       = 60 # 1 minute
   memory_size   = 512
 
-  source_dir = "${path.module}/../backend_app/src/news_processor/app"
+  source_dir = "${path.module}/../backend_app/src/NEWS/news_processor/app"
 
   # Environment variables
   environment_variables = {
@@ -1111,7 +1111,7 @@ module "stock_data_historical_loader" {
   timeout       = 900  # 15 minutes (max)
   memory_size   = 3008 # Max memory for faster processing
 
-  source_dir = "${path.module}/../backend_app/src/stock_data_historical_loader/app"
+  source_dir = "${path.module}/../backend_app/src/STOCK/stock_data_historical_loader/app"
 
   # Environment variables
   environment_variables = {
@@ -1362,7 +1362,7 @@ module "eod_batch_generator" {
   timeout       = 60 # 1 minute
   memory_size   = 512
 
-  source_dir = "${path.module}/../backend_app/src/eod_batch_generator/app"
+  source_dir = "${path.module}/../backend_app/src/EODSTOCK/eod_batch_generator/app"
 
   # Environment variables
   environment_variables = {
@@ -1398,7 +1398,7 @@ module "eod_aggregator" {
   timeout       = 300 # 5 minutes per batch
   memory_size   = 1024
 
-  source_dir = "${path.module}/../backend_app/src/eod_aggregator/app"
+  source_dir = "${path.module}/../backend_app/src/EODSTOCK/eod_aggregator/app"
 
   # Environment variables
   environment_variables = {
@@ -1852,11 +1852,6 @@ module "glue_scripts_s3" {
       source_path  = "${path.module}/../backend_app/src/glue/congress_bills/backfill_bill_text.py"
       s3_key       = "congress_bills/backfill_bill_text.py"
       content_type = "text/x-python"
-    },
-    {
-      source_path  = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
-      s3_key       = "lda_disclosures/glue_script.py"
-      content_type = "text/x-python"
     }
   ]
 
@@ -1984,7 +1979,7 @@ module "usaspending_orphan_subaward_processor_lambda" {
   # Total worst case: ~400-500MB, so 1024MB provides comfortable headroom
   memory_size = 1024
 
-  source_dir = "${path.module}/../backend_app/src/usaspending_orphan_subaward_processor/app"
+  source_dir = "${path.module}/../backend_app/src/CONTRACTS/usaspending_orphan_subaward_processor/app"
 
   layers = [
     module.core_layer.layer_arn
@@ -2106,7 +2101,7 @@ module "usaspending_individual_award_processor_lambda" {
   timeout       = 900  # 15 minutes (enough for CSV parsing + processing + DynamoDB writes)
   memory_size   = 1024 # Enough for CSV parsing and processing
 
-  source_dir = "${path.module}/../backend_app/src/usaspending_individual_award_processor/app"
+  source_dir = "${path.module}/../backend_app/src/CONTRACTS/usaspending_individual_award_processor/app"
 
   layers = [
     module.core_layer.layer_arn
@@ -2192,7 +2187,7 @@ module "usaspending_bulk_router_lambda" {
   timeout       = 60 # 1 minute max
   memory_size   = 128
 
-  source_dir = "${path.module}/../backend_app/src/usaspending_bulk_router/app"
+  source_dir = "${path.module}/../backend_app/src/CONTRACTS/usaspending_bulk_router/app"
 
   environment_variables = {}
 
@@ -2210,7 +2205,7 @@ module "usaspending_bulk_fetcher_lambda" {
   timeout       = 900  # 15 minutes max
   memory_size   = 3008 # Max memory for processing very large CSV files (300k+ rows)
 
-  source_dir = "${path.module}/../backend_app/src/usaspending_bulk_fetcher/app"
+  source_dir = "${path.module}/../backend_app/src/CONTRACTS/usaspending_bulk_fetcher/app"
 
   environment_variables = {
     USASPENDING_BASE_URL   = "https://api.usaspending.gov"
@@ -3292,103 +3287,83 @@ module "lda_filings_table" {
 }
 
 
-# Upload LDA Glue script to S3
-resource "aws_s3_object" "lda_glue_script" {
-  bucket = module.glue_scripts_s3.bucket_id
-  key    = "lda_disclosures/glue_script.py"
-  source = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
-  etag   = filemd5("${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py")
 
-  content_type = "text/x-python"
+# Lambda Function for LDA Disclosures Fetcher
+module "lda_disclosures_fetcher_lambda" {
+  source = "./modules/lambda"
 
-  tags = var.common_tags
+  function_name = "${var.project_name}-lda-disclosures-fetcher-${var.environment}"
+  description   = "Fetches page counts and creates batches for LDA disclosures indexing"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 60 # 1 minute (just needs to make 2 API calls)
+  memory_size   = 256
 
-  depends_on = [module.glue_scripts_s3]
-}
+  source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_fetcher/app"
 
-# Glue Job for LDA Disclosures Indexing
-module "lda_disclosures_glue_job" {
-  source = "./modules/glue-job"
+  environment_variables = {
+    LDA_API_BASE_URL = "https://lda.senate.gov/api/v1"
+    LDA_SECRET_NAME  = module.lda_api_secrets_manager.secret_names["lda-api"]
+    REQUEST_TIMEOUT  = "30"
+    RATE_LIMIT_DELAY = "0.5"
+  }
 
-  job_name = "${var.project_name}-lda-disclosures-indexing-${var.environment}"
-
-  # Script location - uploaded to glue scripts bucket
-  script_location = "s3://${module.glue_scripts_s3.bucket_id}/lda_disclosures/glue_script.py"
-  python_version  = "3"
-  glue_version    = "4.0"
-
-  # Job configuration
-  max_retries           = 1
-  timeout               = 2880   # 48 hours (max is 10080 minutes = 7 days)
-  concurrent_executions = 1      # Only allow 1 concurrent run
-  worker_type           = "G.1X" # 16 GB memory per worker
-  number_of_workers     = 5      # 5 × 16 GB = 80 GB total (supports 30 parallel API calls + 25 processing workers)
-
-  # S3 buckets
-  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
-  additional_s3_bucket_arns = [
-    module.lda_disclosures_s3.bucket_arn,
-    module.static_hosting_bucket.bucket_arn
-  ]
-  spark_logs_bucket = module.static_hosting_bucket.bucket_id
-  temp_bucket       = module.static_hosting_bucket.bucket_id
-
-  # DynamoDB access
-  dynamodb_table_arn = module.lda_filings_table.table_arn
-
-  # KMS for encryption
-  kms_key_arn = module.kms.main_key_arn
-  additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+  layers = [
+    module.core_layer.layer_arn
   ]
 
-  # Additional IAM policies for Secrets Manager
   additional_policy_arns = [
     module.lda_api_secrets_manager.secret_access_policy_arn
   ]
 
-  # Job arguments
-  default_arguments = {
-    "--LDA_API_BASE_URL"   = "https://lda.senate.gov/api/v1"
-    "--LDA_SECRET_NAME"    = module.lda_api_secrets_manager.secret_names["lda-api"]
-    "--FILINGS_TABLE_NAME" = module.lda_filings_table.table_name
-    "--S3_BUCKET_NAME"     = module.lda_disclosures_s3.bucket_id
-    "--REQUEST_TIMEOUT"    = "30"
-    "--RATE_LIMIT_DELAY"   = "0.5"
-    "--PAC_QUEUE_URL"      = module.lda_pac_autocomplete_queue.queue_url
+  tags = var.common_tags
+
+  depends_on = [module.lda_api_secrets_manager]
+}
+
+# Lambda Function for LDA Disclosures Indexer
+module "lda_disclosures_indexer_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-lda-disclosures-indexer-${var.environment}"
+  description   = "Processes a single page of filings or contributions with 25 parallel workers"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 900  # 15 minutes (max Lambda timeout, should be enough for 25 items)
+  memory_size   = 2048 # Higher memory for parallel processing
+
+  source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_indexer/app"
+
+  environment_variables = {
+    LDA_API_BASE_URL   = "https://lda.senate.gov/api/v1"
+    LDA_SECRET_NAME    = module.lda_api_secrets_manager.secret_names["lda-api"]
+    FILINGS_TABLE_NAME = module.lda_filings_table.table_name
+    S3_BUCKET_NAME     = module.lda_disclosures_s3.bucket_id
+    REQUEST_TIMEOUT    = "30"
+    RATE_LIMIT_DELAY   = "0.5"
+    PAC_QUEUE_URL      = module.lda_pac_autocomplete_queue.queue_url
   }
 
-  job_bookmark_option = "job-bookmark-disable"
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  additional_policy_arns = [
+    module.lda_api_secrets_manager.secret_access_policy_arn,
+    module.lda_filings_table.table_policy_arn,
+    module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
+    module.kms.main_key_policy_arn,
+    module.kms.dynamodb_key_policy_arn,
+    aws_iam_policy.lda_indexer_s3_policy.arn
+  ]
 
   tags = var.common_tags
 
   depends_on = [
-    module.glue_scripts_s3,
-    module.lda_disclosures_s3,
-    module.static_hosting_bucket,
-    module.lda_filings_table,
-    module.kms,
     module.lda_api_secrets_manager,
-    aws_s3_object.lda_glue_script
-  ]
-}
-
-
-# Grant Glue job role access to DynamoDB KMS key
-resource "aws_kms_grant" "lda_disclosures_glue_dynamodb_key_access" {
-  name              = "${var.project_name}-lda-disclosures-${var.environment}-dynamodb-key-grant"
-  key_id            = module.kms.dynamodb_key_id
-  grantee_principal = module.lda_disclosures_glue_job.role_arn
-  operations = [
-    "Decrypt",
-    "Encrypt",
-    "GenerateDataKey",
-    "DescribeKey"
-  ]
-
-  depends_on = [
-    module.lda_disclosures_glue_job,
-    module.kms
+    module.lda_filings_table,
+    module.lda_disclosures_s3,
+    module.lda_pac_autocomplete_queue
   ]
 }
 
@@ -3399,30 +3374,30 @@ module "lda_disclosures_state_machine" {
   state_machine_name = "${var.project_name}-lda-disclosures-indexing-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition - directly invokes Glue job
+  # Step Functions definition - Fetcher + Parallel Indexers
   definition = jsonencode({
-    Comment = "LDA Senate Lobbying Disclosures Indexing - Uses Glue job"
-    StartAt = "StartGlueJob"
+    Comment = "LDA Senate Lobbying Disclosures Indexing - Fetcher + Parallel Indexers"
+    StartAt = "Fetcher"
     States = {
-      StartGlueJob = {
+      Fetcher = {
         Type     = "Task"
-        Resource = "arn:aws:states:::glue:startJobRun.sync"
-        Comment  = "Start Glue job for LDA disclosures indexing (48 hour timeout)"
+        Resource = module.lda_disclosures_fetcher_lambda.function_arn
+        Comment  = "Fetch page counts and create batches for filings and contributions"
         Parameters = {
-          "JobName" = module.lda_disclosures_glue_job.job_name
-          "Arguments" = {
-            "--LDA_API_BASE_URL"   = "https://lda.senate.gov/api/v1"
-            "--LDA_SECRET_NAME"    = module.lda_api_secrets_manager.secret_names["lda-api"]
-            "--FILINGS_TABLE_NAME" = module.lda_filings_table.table_name
-            "--S3_BUCKET_NAME"     = module.lda_disclosures_s3.bucket_id
-            "--REQUEST_TIMEOUT"    = "30"
-            "--RATE_LIMIT_DELAY"   = "0.5"
-            "--PAC_QUEUE_URL"      = module.lda_pac_autocomplete_queue.queue_url
-            "--START_DATE.$"       = "$.START_DATE"
-            "--END_DATE.$"         = "$.END_DATE"
-            "--TESTING.$?"         = "$.TESTING"
-          }
+          "START_DATE.$" = "$.START_DATE"
+          "END_DATE.$"   = "$.END_DATE"
+          "TESTING.$?"   = "$.TESTING"
         }
+        ResultPath = "$.fetcher_result"
+        Next       = "ProcessFilingsBatches"
+        Retry = [
+          {
+            ErrorEquals     = ["States.ALL"]
+            IntervalSeconds = 2
+            MaxAttempts     = 3
+            BackoffRate     = 2.0
+          }
+        ]
         Catch = [
           {
             ErrorEquals = ["States.ALL"]
@@ -3430,6 +3405,91 @@ module "lda_disclosures_state_machine" {
             Next        = "HandleError"
           }
         ]
+      }
+      ProcessFilingsBatches = {
+        Type           = "Map"
+        ItemsPath      = "$.fetcher_result.filingbatches.batches"
+        MaxConcurrency = 1
+        Comment        = "Process filings batches sequentially (wait for each batch to complete)"
+        Iterator = {
+          StartAt = "ProcessFilingsBatch"
+          States = {
+            ProcessFilingsBatch = {
+              Type           = "Map"
+              ItemsPath      = "$.pages"
+              MaxConcurrency = 25
+              Comment        = "Process 25 pages in parallel"
+              Iterator = {
+                StartAt = "IndexFilingsPage"
+                States = {
+                  IndexFilingsPage = {
+                    Type     = "Task"
+                    Resource = module.lda_disclosures_indexer_lambda.function_arn
+                    Parameters = {
+                      "page.$"       = "$"
+                      "start_date.$" = "$$.fetcher_result.filingbatches.start_date"
+                      "end_date.$"   = "$$.fetcher_result.filingbatches.end_date"
+                      "endpoint"     = "filings"
+                    }
+                    Retry = [
+                      {
+                        ErrorEquals     = ["States.ALL"]
+                        IntervalSeconds = 2
+                        MaxAttempts     = 3
+                        BackoffRate     = 2.0
+                      }
+                    ]
+                    End = true
+                  }
+                }
+              }
+              End = true
+            }
+          }
+        }
+        Next = "ProcessContributionsBatches"
+      }
+      ProcessContributionsBatches = {
+        Type           = "Map"
+        ItemsPath      = "$.fetcher_result.contributionbatches.batches"
+        MaxConcurrency = 1
+        Comment        = "Process contributions batches sequentially (wait for each batch to complete)"
+        Iterator = {
+          StartAt = "ProcessContributionsBatch"
+          States = {
+            ProcessContributionsBatch = {
+              Type           = "Map"
+              ItemsPath      = "$.pages"
+              MaxConcurrency = 25
+              Comment        = "Process 25 pages in parallel"
+              Iterator = {
+                StartAt = "IndexContributionsPage"
+                States = {
+                  IndexContributionsPage = {
+                    Type     = "Task"
+                    Resource = module.lda_disclosures_indexer_lambda.function_arn
+                    Parameters = {
+                      "page.$"       = "$"
+                      "start_date.$" = "$$.fetcher_result.contributionbatches.start_date"
+                      "end_date.$"   = "$$.fetcher_result.contributionbatches.end_date"
+                      "endpoint"     = "contributions"
+                    }
+                    Retry = [
+                      {
+                        ErrorEquals     = ["States.ALL"]
+                        IntervalSeconds = 2
+                        MaxAttempts     = 3
+                        BackoffRate     = 2.0
+                      }
+                    ]
+                    End = true
+                  }
+                }
+              }
+              End = true
+            }
+          }
+        }
         Next = "Success"
       }
       Success = {
@@ -3444,13 +3504,14 @@ module "lda_disclosures_state_machine" {
     }
   })
 
-  # No Lambda functions needed
-  lambda_function_arns = []
-
-  # Glue job name for IAM permissions
-  glue_job_names = [
-    module.lda_disclosures_glue_job.job_name
+  # Lambda function ARNs for IAM permissions
+  lambda_function_arns = [
+    module.lda_disclosures_fetcher_lambda.function_arn,
+    module.lda_disclosures_indexer_lambda.function_arn
   ]
+
+  # Glue job name for IAM permissions (kept for backward compatibility, but not used)
+  glue_job_names = []
 
   # Logging configuration
   log_level              = var.environment == "production" ? "ERROR" : "ALL"
@@ -3460,7 +3521,8 @@ module "lda_disclosures_state_machine" {
   tags = var.common_tags
 
   depends_on = [
-    module.lda_disclosures_glue_job
+    module.lda_disclosures_fetcher_lambda,
+    module.lda_disclosures_indexer_lambda
   ]
 }
 
@@ -3496,7 +3558,7 @@ module "lda_pac_autocomplete_processor" {
   timeout       = 60  # 1 minute
   memory_size   = 256 # Lightweight - just CSV operations
 
-  source_dir = "${path.module}/../backend_app/src/lda_pac_autocomplete_processor/app"
+  source_dir = "${path.module}/../backend_app/src/LDA/lda_pac_autocomplete_processor/app"
 
   # Environment variables
   environment_variables = {
@@ -3522,6 +3584,36 @@ module "lda_pac_autocomplete_processor" {
     module.lda_disclosures_s3,
     module.core_layer
   ]
+}
+
+# IAM Policy for Indexer Lambda to access S3 for document downloads
+resource "aws_iam_policy" "lda_indexer_s3_policy" {
+  name        = "${var.project_name}-lda-indexer-s3-${var.environment}"
+  description = "Allows LDA indexer Lambda to read/write documents in S3"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "${module.lda_disclosures_s3.bucket_arn}/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = module.lda_disclosures_s3.bucket_arn
+      }
+    ]
+  })
+
+  tags = var.common_tags
 }
 
 # IAM Policy for Lambda to access S3 for autocomplete CSVs
@@ -3572,35 +3664,6 @@ resource "aws_lambda_event_source_mapping" "lda_pac_autocomplete_sqs_trigger" {
 }
 
 # IAM Policy for Glue Job to send PAC names to SQS
-resource "aws_iam_policy" "lda_disclosures_glue_pac_sqs_policy" {
-  name        = "${var.project_name}-lda-disclosures-glue-pac-sqs-${var.environment}"
-  description = "Allows Glue job to send PAC names to SQS for autocomplete"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "sqs:SendMessage",
-          "sqs:GetQueueAttributes"
-        ]
-        Resource = module.lda_pac_autocomplete_queue.queue_arn
-      }
-    ]
-  })
-}
-
-# Attach PAC SQS policy to Glue job role
-resource "aws_iam_role_policy_attachment" "lda_disclosures_glue_pac_sqs" {
-  role       = module.lda_disclosures_glue_job.role_name
-  policy_arn = aws_iam_policy.lda_disclosures_glue_pac_sqs_policy.arn
-
-  depends_on = [
-    module.lda_disclosures_glue_job,
-    aws_iam_policy.lda_disclosures_glue_pac_sqs_policy
-  ]
-}
 
 # EventBridge Rule for Daily Bill Text Prefill
 resource "aws_cloudwatch_event_rule" "congress_bills_bill_text_prefill_scheduler" {
@@ -4201,7 +4264,7 @@ module "politician_trades_fetcher" {
   timeout       = 900 # 15 minutes (max)
   memory_size   = 1024
 
-  source_dir = "${path.module}/../backend_app/src/politician_trades_fetcher/app"
+  source_dir = "${path.module}/../backend_app/src/POLITRADES/politician_trades_fetcher/app"
 
   # Environment variables
   environment_variables = {
@@ -4236,7 +4299,7 @@ module "politician_trades_downloader" {
   timeout       = 60 # 1 minute per form
   memory_size   = 512
 
-  source_dir = "${path.module}/../backend_app/src/politician_trades_downloader/app"
+  source_dir = "${path.module}/../backend_app/src/POLITRADES/politician_trades_downloader/app"
 
   # Environment variables
   environment_variables = {
@@ -4271,7 +4334,7 @@ module "politician_trades_senate_matcher" {
   timeout       = 300  # 5 minutes per file (for PDF parsing and Textract)
   memory_size   = 2048 # Higher memory for PDF parsing, text processing, and Textract
 
-  source_dir = "${path.module}/../backend_app/src/politician_trades_senate_matcher/app"
+  source_dir = "${path.module}/../backend_app/src/POLITRADES/politician_trades_senate_matcher/app"
 
   # Environment variables
   environment_variables = {
@@ -4309,7 +4372,7 @@ module "politician_trades_house_matcher" {
   timeout       = 900  # 15 minutes (max)
   memory_size   = 2048 # Higher memory for PDF parsing and text processing
 
-  source_dir = "${path.module}/../backend_app/src/politician_trades_house_matcher/app"
+  source_dir = "${path.module}/../backend_app/src/POLITRADES/politician_trades_house_matcher/app"
 
   # Environment variables
   environment_variables = {
@@ -4347,7 +4410,7 @@ module "politician_trades_saver" {
   timeout       = 300 # 5 minutes
   memory_size   = 512
 
-  source_dir = "${path.module}/../backend_app/src/politician_trades_saver/app"
+  source_dir = "${path.module}/../backend_app/src/POLITRADES/politician_trades_saver/app"
 
   # Environment variables
   environment_variables = {
