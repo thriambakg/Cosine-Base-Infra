@@ -3490,7 +3490,7 @@ module "lda_pac_autocomplete_processor" {
   source = "./modules/lambda"
 
   function_name = "${var.project_name}-lda-pac-autocomplete-processor-${var.environment}"
-  description   = "Processes PAC names from SQS and maintains a sorted, deduplicated CSV in S3"
+  description   = "Processes autocomplete strings (PAC names, client names, lobbyist names, registrant names) from SQS and maintains sorted, deduplicated CSVs in S3"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
   timeout       = 60  # 1 minute
@@ -3501,7 +3501,6 @@ module "lda_pac_autocomplete_processor" {
   # Environment variables
   environment_variables = {
     S3_BUCKET_NAME = module.lda_disclosures_s3.bucket_id
-    S3_KEY         = "lists/pacs.csv"
   }
 
   # Lambda layers
@@ -3525,10 +3524,10 @@ module "lda_pac_autocomplete_processor" {
   ]
 }
 
-# IAM Policy for Lambda to access S3 for PAC CSV
+# IAM Policy for Lambda to access S3 for autocomplete CSVs
 resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
   name        = "${var.project_name}-lda-pac-autocomplete-s3-${var.environment}"
-  description = "Allows Lambda to read/write PAC autocomplete CSV in S3"
+  description = "Allows Lambda to read/write autocomplete CSVs (PACs, client names, lobbyist names, registrant names) in S3"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -3540,7 +3539,7 @@ resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
           "s3:PutObject",
           "s3:DeleteObject"
         ]
-        Resource = "${module.lda_disclosures_s3.bucket_arn}/lists/pacs.csv"
+        Resource = "${module.lda_disclosures_s3.bucket_arn}/lists/*"
       },
       {
         Effect = "Allow"

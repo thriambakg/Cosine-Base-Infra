@@ -69,7 +69,7 @@ except Exception as e:
 
 # Get optional testing parameter (passed as string from Step Functions)
 # Check sys.argv directly since TESTING is optional and getResolvedOptions requires all args
-# TESTING now accepts a number representing the limit per filing type (LD-1, LD-2, LD-203)
+# TESTING now accepts a number representing the limit per endpoint (filings endpoint and contributions endpoint)
 testing_limit = None
 testing_value = None
 
@@ -105,7 +105,7 @@ else:
 
 args['TESTING'] = testing_limit
 if testing_limit:
-    print(f"🧪 Testing mode enabled - will limit to {testing_limit} records per type (LD-1, LD-2, LD-203)", flush=True)
+    print(f"🧪 Testing mode enabled - will limit to {testing_limit} records per endpoint (filings and contributions)", flush=True)
 else:
     print(f"ℹ️ Testing mode disabled - processing all records", flush=True)
 
@@ -309,6 +309,28 @@ def create_unified_entity(client: Optional[Dict], lobbyist: Optional[Dict]) -> O
             'entity': lobbyist
         }
     return None
+
+def send_autocomplete_value(field_type: str, value: str):
+    """
+    Send an autocomplete value to SQS queue for CSV generation.
+    
+    Args:
+        field_type: One of 'pac_name', 'client_name', 'lobbyist_name', 'registrant_name'
+        value: The string value to add to autocomplete CSV
+    """
+    if not PAC_QUEUE_URL or not value or not value.strip():
+        return
+    
+    try:
+        sqs_client.send_message(
+            QueueUrl=PAC_QUEUE_URL,
+            MessageBody=json.dumps({
+                'field_type': field_type,
+                'value': value.strip()
+            })
+        )
+    except Exception as e:
+        log_print(f"⚠️ Failed to send {field_type} '{value}' to SQS: {str(e)[:200]}")
 
 def extract_indexed_fields_filing(filing: Dict) -> Dict:
     """Extract indexed fields for a filing (LD-1 or LD-2)"""
@@ -641,13 +663,23 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         # filing_period and dt_posted are already in indexed_fields
         # report_type and dt_posted are already in indexed_fields
         # registrant_name and dt_posted are already in indexed_fields
+        # Send registrant_name to autocomplete queue
+        if indexed_fields.get('registrant_name'):
+            send_autocomplete_value('registrant_name', indexed_fields['registrant_name'])
+        
         # client_name and dt_posted - only set if client_name exists (omit if missing)
         if not indexed_fields.get('client_name'):
             item.pop('client_name', None)
+        else:
+            # Send client_name to autocomplete queue
+            send_autocomplete_value('client_name', indexed_fields['client_name'])
         
         # lobbyist_name and dt_posted are already in indexed_fields
         if not indexed_fields.get('lobbyist_name'):
             item.pop('lobbyist_name', None)
+        else:
+            # Send lobbyist_name to autocomplete queue
+            send_autocomplete_value('lobbyist_name', indexed_fields['lobbyist_name'])
         
         # amount_bucket and amount_reported - only set if amount_reported exists
         if indexed_fields.get('amount_reported'):
@@ -751,14 +783,7 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                     pac_name = str(pac)
                 
                 if pac_name:
-                    try:
-                        sqs_client.send_message(
-                            QueueUrl=PAC_QUEUE_URL,
-                            MessageBody=json.dumps({'pac_name': pac_name})
-                        )
-                        log_print(f"✅ Sent PAC name to SQS: {pac_name}")
-                    except Exception as e:
-                        log_print(f"⚠️ Failed to send PAC name '{pac_name}' to SQS: {str(e)[:200]}")
+                    send_autocomplete_value('pac_name', pac_name)
                 else:
                     log_print(f"⚠️ PAC object missing 'name' field: {pac}")
         elif pacs and not PAC_QUEUE_URL:
@@ -798,13 +823,23 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         # filing_period and dt_posted are already in indexed_fields
         # report_type and dt_posted are already in indexed_fields
         # registrant_name and dt_posted are already in indexed_fields
+        # Send registrant_name to autocomplete queue
+        if indexed_fields.get('registrant_name'):
+            send_autocomplete_value('registrant_name', indexed_fields['registrant_name'])
+        
         # client_name and dt_posted - only set if client_name exists (omit if missing)
         if not indexed_fields.get('client_name'):
             item.pop('client_name', None)
+        else:
+            # Send client_name to autocomplete queue
+            send_autocomplete_value('client_name', indexed_fields['client_name'])
         
         # lobbyist_name and dt_posted are already in indexed_fields
         if not indexed_fields.get('lobbyist_name'):
             item.pop('lobbyist_name', None)
+        else:
+            # Send lobbyist_name to autocomplete queue
+            send_autocomplete_value('lobbyist_name', indexed_fields['lobbyist_name'])
         
         # amount_bucket and amount_reported - contributions can have amount_reported from contribution_items
         if indexed_fields.get('amount_reported'):
@@ -849,34 +884,33 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         raise
 
 def process_single_filing(session: requests.Session, filing: Dict) -> Optional[str]:
-    """Process a single filing (fetch details, download document, save to DynamoDB)
+    """Process a single filing (download document, save to DynamoDB)
+    Uses data directly from listing endpoint - no additional API call needed
     Returns the filing_type if successful, None otherwise"""
     filing_uuid = filing.get('filing_uuid')
     if not filing_uuid:
         return None
     
     try:
-        # Fetch full details (includes nested registrant, client, and lobbyist objects)
-        full_filing = call_api(session, f'/filings/{filing_uuid}/')
-        
         # Get filing type for tracking
-        filing_type = full_filing.get('filing_type', '')
+        filing_type = filing.get('filing_type', '')
         
-        # Extract indexed fields (uses data directly from main API response)
-        indexed_fields = extract_indexed_fields_filing(full_filing)
+        # Extract indexed fields (uses data directly from listing API response)
+        # The listing endpoint already includes all nested objects (registrant, client, lobbying_activities, etc.)
+        indexed_fields = extract_indexed_fields_filing(filing)
         
         # Download document if available and get S3 key
         s3_key = None
-        doc_url = full_filing.get('filing_document_url')
+        doc_url = filing.get('filing_document_url')
         if doc_url:
-            content_type = full_filing.get('filing_document_content_type', 'pdf')
+            content_type = filing.get('filing_document_content_type', 'pdf')
             ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
             s3_key = f"filings/{filing_type}/{filing_uuid}.{ext}"
             if download_document(session, doc_url, s3_key):
                 log_print(f"   ✅ Downloaded document for {filing_uuid}")
         
         # Save to DynamoDB (with S3 key)
-        save_filing_to_dynamodb(full_filing, indexed_fields, s3_key=s3_key)
+        save_filing_to_dynamodb(filing, indexed_fields, s3_key=s3_key)
         return filing_type
         
     except Exception as e:
@@ -890,13 +924,13 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     log_print("="*80)
     
     if testing_limit:
-        log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} filings per type (LD-1, LD-2)")
+        log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} filings total")
     
     # LDA API requires at least one query parameter for pagination
     if not start_date and not end_date:
         raise ValueError("START_DATE and/or END_DATE must be provided. LDA API requires at least one filter parameter for pagination.")
     
-    params = {'page_size': 100}  # Max page size
+    params = {'page_size': 25}  # LDA API appears to return max 25 items per page
     if start_date:
         params['filing_dt_posted_after'] = start_date
     if end_date:
@@ -904,9 +938,7 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     
     page = 1
     total_processed = 0
-    # Track counts per filing type for testing mode
-    type_counts = {'LD-1': 0, 'LD-2': 0}
-    max_workers = 5
+    max_workers = 25
     
     while True:
         params['page'] = page
@@ -924,23 +956,13 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
             log_print(f"   Found {len(results)} filings on page {page} (total: {count})")
             log_print(f"   Processing with {max_workers} workers...")
             
-            # Filter results if in testing mode and we've reached limits for all types
+            # Limit results if in testing mode
             if testing_limit:
-                filtered_results = []
-                for filing in results:
-                    filing_type = filing.get('filing_type', '')
-                    if filing_type in type_counts:
-                        if type_counts[filing_type] < testing_limit:
-                            filtered_results.append(filing)
-                    else:
-                        # Unknown type, include it
-                        filtered_results.append(filing)
-                
-                if not filtered_results:
-                    log_print(f"✅ Reached testing limit for all filing types. Stopping.")
+                remaining = testing_limit - total_processed
+                if remaining <= 0:
+                    log_print(f"✅ Reached testing limit for filings: {total_processed}/{testing_limit}")
                     break
-                
-                results = filtered_results
+                results = results[:remaining]
             
             # Process filings in parallel using ThreadPoolExecutor
             with ThreadPoolExecutor(max_workers=max_workers) as executor:
@@ -954,36 +976,25 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                     try:
                         filing_type = future.result()
                         if filing_type:
-                            # Track filing type for testing mode
-                            if testing_limit:
-                                if filing_type in type_counts:
-                                    type_counts[filing_type] += 1
-                                    if type_counts[filing_type] >= testing_limit:
-                                        log_print(f"   ✅ Reached limit for {filing_type}: {type_counts[filing_type]} filings")
-                            
                             total_processed += 1
                             if total_processed % 100 == 0:
                                 log_print(f"   📊 Processed {total_processed} filings...")
-                                if testing_limit:
-                                    log_print(f"      LD-1: {type_counts.get('LD-1', 0)}/{testing_limit}, LD-2: {type_counts.get('LD-2', 0)}/{testing_limit}")
+                            if testing_limit and total_processed >= testing_limit:
+                                log_print(f"   ✅ Reached limit for filings: {total_processed}/{testing_limit}")
                     except Exception as e:
                         filing_uuid = filing.get('filing_uuid', 'unknown')
                         log_print(f"   ❌ Exception processing filing {filing_uuid}: {str(e)[:200]}")
             
-            # Stop if testing mode and reached limits for all types
-            if testing_limit:
-                if all(count >= testing_limit for count in type_counts.values()):
-                    log_print(f"✅ Finished processing filings (testing mode limits reached)")
-                    log_print(f"   LD-1: {type_counts.get('LD-1', 0)}/{testing_limit}, LD-2: {type_counts.get('LD-2', 0)}/{testing_limit}")
-                    break
+            # Stop if testing mode and reached limit
+            if testing_limit and total_processed >= testing_limit:
+                log_print(f"✅ Finished processing filings (testing mode limit: {total_processed}/{testing_limit})")
+                break
             
             # Check if there's a next page
             if response.get('next'):
                 page += 1
             else:
                 log_print(f"✅ Finished processing all filings. Total: {total_processed}")
-                if testing_limit:
-                    log_print(f"   LD-1: {type_counts.get('LD-1', 0)}, LD-2: {type_counts.get('LD-2', 0)}")
                 break
                 
         except Exception as e:
@@ -991,31 +1002,30 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
             break
 
 def process_single_contribution(session: requests.Session, contribution: Dict) -> bool:
-    """Process a single contribution (fetch details, download document, save to DynamoDB)"""
+    """Process a single contribution (download document, save to DynamoDB)
+    Uses data directly from listing endpoint - no additional API call needed"""
     filing_uuid = contribution.get('filing_uuid')
     if not filing_uuid:
         return False
     
     try:
-        # Fetch full details (includes nested registrant, client, and lobbyist objects)
-        full_contribution = call_api(session, f'/contributions/{filing_uuid}/')
-        
-        # Extract indexed fields (uses data directly from main API response)
-        indexed_fields = extract_indexed_fields_contribution(full_contribution)
+        # Extract indexed fields (uses data directly from listing API response)
+        # The listing endpoint already includes all nested objects (registrant, client, lobbyist, contribution_items, etc.)
+        indexed_fields = extract_indexed_fields_contribution(contribution)
         
         # Download document if available and get S3 key
         s3_key = None
-        doc_url = full_contribution.get('filing_document_url')
+        doc_url = contribution.get('filing_document_url')
         if doc_url:
-            filing_type = full_contribution.get('filing_type', 'unknown')
-            content_type = full_contribution.get('filing_document_content_type', 'pdf')
+            filing_type = contribution.get('filing_type', 'unknown')
+            content_type = contribution.get('filing_document_content_type', 'pdf')
             ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
             s3_key = f"contributions/{filing_type}/{filing_uuid}.{ext}"
             if download_document(session, doc_url, s3_key):
                 log_print(f"   ✅ Downloaded document for {filing_uuid}")
         
         # Save to DynamoDB (same table as filings, with S3 key)
-        save_contribution_to_dynamodb(full_contribution, indexed_fields, s3_key=s3_key)
+        save_contribution_to_dynamodb(contribution, indexed_fields, s3_key=s3_key)
         return True
         
     except Exception as e:
@@ -1029,13 +1039,13 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     log_print("="*80)
     
     if testing_limit:
-        log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} contributions (LD-203)")
+        log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} contributions total")
     
     # LDA API requires at least one query parameter for pagination
     if not start_date and not end_date:
         raise ValueError("START_DATE and/or END_DATE must be provided. LDA API requires at least one filter parameter for pagination.")
     
-    params = {'page_size': 100}
+    params = {'page_size': 25}  # LDA API appears to return max 25 items per page
     if start_date:
         params['filing_dt_posted_after'] = start_date
     if end_date:
@@ -1043,7 +1053,7 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     
     page = 1
     total_processed = 0
-    max_workers = 5
+    max_workers = 25
     
     while True:
         params['page'] = page
@@ -1061,9 +1071,9 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
             log_print(f"   Found {len(results)} contributions on page {page} (total: {count})")
             log_print(f"   Processing with {max_workers} workers...")
             
-            # Filter results if in testing mode and we've reached the limit
+            # Check if we've reached the limit before processing
             if testing_limit and total_processed >= testing_limit:
-                log_print(f"✅ Reached testing limit for contributions (LD-203): {total_processed}/{testing_limit}")
+                log_print(f"✅ Reached testing limit for contributions: {total_processed}/{testing_limit}")
                 break
             
             # Limit results if testing mode
@@ -1089,7 +1099,7 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                             if total_processed % 100 == 0:
                                 log_print(f"   📊 Processed {total_processed} contributions...")
                             if testing_limit and total_processed >= testing_limit:
-                                log_print(f"   ✅ Reached limit for LD-203: {total_processed}/{testing_limit}")
+                                log_print(f"   ✅ Reached limit for contributions: {total_processed}/{testing_limit}")
                     except Exception as e:
                         filing_uuid = contribution.get('filing_uuid', 'unknown')
                         log_print(f"   ❌ Exception processing contribution {filing_uuid}: {str(e)[:200]}")
