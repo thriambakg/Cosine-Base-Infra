@@ -3260,6 +3260,14 @@ module "lda_filings_table" {
       projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "FilerTypePostedDateIndex"
+      hash_key        = "filer_type"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
     }
   ]
 
