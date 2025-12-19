@@ -125,7 +125,6 @@ S3_BUCKET_NAME = args.get('S3_BUCKET_NAME')
 REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 RATE_LIMIT_DELAY = float(args.get('RATE_LIMIT_DELAY', '0.5'))
 PAC_QUEUE_URL = args.get('PAC_QUEUE_URL')  # Optional - only send if queue URL is provided
-PAC_QUEUE_URL = args.get('PAC_QUEUE_URL')  # Optional - only send if queue URL is provided
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -137,6 +136,10 @@ sqs_client = boto3.client('sqs')
 filings_table = dynamodb.Table(FILINGS_TABLE_NAME)
 
 log_print(f"ℹ️ Configuration: Table={FILINGS_TABLE_NAME} (filings and contributions), S3 Bucket={S3_BUCKET_NAME}")
+if PAC_QUEUE_URL:
+    log_print(f"✅ PAC Queue URL configured: {PAC_QUEUE_URL}")
+else:
+    log_print(f"⚠️ PAC Queue URL not configured - PAC names will not be sent to SQS")
 
 # ============================================================================
 # Helper Functions
@@ -481,8 +484,9 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
     # Posted date
     indexed['dt_posted'] = contribution.get('dt_posted')
     
-    # Filer type
+    # Filer type (only for contributions - indicates who filed: registrant, lobbyist, etc.)
     indexed['filer_type'] = contribution.get('filer_type')
+    indexed['filer_type_display'] = contribution.get('filer_type_display')
     
     # Calculate total contribution amount from contribution_items
     # Also use this as amount_reported for contributions
@@ -698,6 +702,7 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         
         # Send PAC names to SQS for autocomplete (if queue URL is configured)
         if PAC_QUEUE_URL and pacs:
+            log_print(f"📤 Found {len(pacs)} PAC(s) in contribution, sending to SQS...")
             for pac in pacs:
                 pac_name = pac.get('name') if isinstance(pac, dict) else str(pac)
                 if pac_name:
@@ -706,8 +711,13 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                             QueueUrl=PAC_QUEUE_URL,
                             MessageBody=json.dumps({'pac_name': pac_name})
                         )
+                        log_print(f"✅ Sent PAC name to SQS: {pac_name}")
                     except Exception as e:
-                        log_print(f"⚠️ Failed to send PAC name to SQS: {str(e)[:200]}")
+                        log_print(f"⚠️ Failed to send PAC name '{pac_name}' to SQS: {str(e)[:200]}")
+                else:
+                    log_print(f"⚠️ PAC object missing 'name' field: {pac}")
+        elif pacs and not PAC_QUEUE_URL:
+            log_print(f"⚠️ Found {len(pacs)} PAC(s) but PAC_QUEUE_URL not configured, skipping SQS send")
         
         # Set null values for filing-specific fields (not applicable to contributions)
         # Note: client and lobbyist fields are preserved from the original contribution if they exist
@@ -765,6 +775,11 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         # state and dt_posted - only set if state exists (omit if missing)
         if not indexed_fields.get('state'):
             item.pop('state', None)
+        
+        # filer_type and dt_posted - only set if filer_type exists (omit if missing)
+        if not indexed_fields.get('filer_type'):
+            item.pop('filer_type', None)
+            item.pop('filer_type_display', None)
         
         # contribution_item_type and dt_posted - only set if contribution_item_type exists (omit if missing)
         if not indexed_fields.get('contribution_item_type'):

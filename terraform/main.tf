@@ -3152,7 +3152,8 @@ module "lda_filings_table" {
     { name = "government_entity_id", type = "N" },
     { name = "contribution_item_type", type = "S" },
     { name = "is_foreign", type = "N" },
-    { name = "pac", type = "N" }
+    { name = "pac", type = "N" },
+    { name = "filer_type", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -3491,7 +3492,7 @@ module "lda_pac_autocomplete_processor" {
   # Environment variables
   environment_variables = {
     S3_BUCKET_NAME = module.lda_disclosures_s3.bucket_id
-    S3_KEY         = "autocomplete/pacs.csv"
+    S3_KEY         = "lists/pacs.csv"
   }
 
   # Lambda layers
@@ -3530,7 +3531,7 @@ resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
           "s3:PutObject",
           "s3:DeleteObject"
         ]
-        Resource = "${module.lda_disclosures_s3.bucket_arn}/autocomplete/pacs.csv"
+        Resource = "${module.lda_disclosures_s3.bucket_arn}/lists/pacs.csv"
       },
       {
         Effect = "Allow"
@@ -3540,7 +3541,7 @@ resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
         Resource = module.lda_disclosures_s3.bucket_arn
         Condition = {
           StringLike = {
-            "s3:prefix" = "autocomplete/*"
+            "s3:prefix" = "lists/*"
           }
         }
       }
