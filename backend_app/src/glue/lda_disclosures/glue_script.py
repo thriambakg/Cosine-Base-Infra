@@ -969,8 +969,19 @@ def process_single_filing(session: requests.Session, filing: Dict) -> Optional[s
         log_print(f"   ❌ Error processing filing {filing_uuid}: {str(e)[:200]}")
         return None
 
+def fetch_filings_page(session: requests.Session, base_params: Dict, page: int) -> Optional[Dict]:
+    """Fetch a single page of filings - used for parallel page fetching"""
+    try:
+        page_params = base_params.copy()
+        page_params['page'] = page
+        response = call_api(session, '/filings/', params=page_params)
+        return response
+    except Exception as e:
+        log_print(f"   ❌ Error fetching filings page {page}: {str(e)[:200]}")
+        return None
+
 def process_all_filings(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing_limit: Optional[int] = None):
-    """Fetch and process all filings with pagination and multithreading"""
+    """Fetch and process all filings with parallel API calls and parallel processing"""
     log_print("\n" + "="*80)
     log_print("📋 Processing Filings")
     log_print("="*80)
@@ -978,20 +989,20 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     if testing_limit:
         log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} filings total")
     
-    # Build params - API requires at least one query parameter for pagination
+    # Build base params - API requires at least one query parameter for pagination
     # If both dates are null, use a very early default date to effectively fetch all records
-    params = {'page_size': 25}  # LDA API appears to return max 25 items per page
+    base_params = {'page_size': 25}  # LDA API appears to return max 25 items per page
     
     if not start_date and not end_date:
         # API requires at least one filter parameter, so use a very early date to fetch all records
         # LDA data goes back to around 2000, so use 2000-01-01 as default
-        params['filing_dt_posted_after'] = '2000-01-01'
+        base_params['filing_dt_posted_after'] = '2000-01-01'
         log_print(f"📅 No date filters provided - using default start date 2000-01-01 to fetch all records")
     else:
         if start_date:
-            params['filing_dt_posted_after'] = start_date
+            base_params['filing_dt_posted_after'] = start_date
         if end_date:
-            params['filing_dt_posted_before'] = end_date
+            base_params['filing_dt_posted_before'] = end_date
         
         # Log date range being used
         if start_date and end_date:
@@ -1001,70 +1012,126 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
         elif end_date:
             log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
     
-    page = 1
-    total_processed = 0
-    max_workers = 25
+    # Configuration for parallel fetching and processing
+    # Based on 3.9 pages/min and 15s processing time, we can handle ~30 parallel API calls
+    # Rate limit is 120 calls/min, so 120/4 = 30 parallel calls is safe
+    max_api_workers = 30  # Number of pages to fetch in parallel
+    max_processing_workers = 25  # Number of items to process in parallel
     
-    while True:
-        params['page'] = page
-        log_print(f"\n📄 Fetching filings page {page}...")
-        
-        try:
-            response = call_api(session, '/filings/', params=params)
-            results = response.get('results', [])
-            count = response.get('count', 0)
-            
-            if not results:
-                log_print(f"✅ No more filings to process. Total processed: {total_processed}")
-                break
-            
-            log_print(f"   Found {len(results)} filings on page {page} (total: {count})")
-            log_print(f"   Processing with {max_workers} workers...")
-            
-            # Limit results if in testing mode
-            if testing_limit:
-                remaining = testing_limit - total_processed
-                if remaining <= 0:
-                    log_print(f"✅ Reached testing limit for filings: {total_processed}/{testing_limit}")
-                    break
-                results = results[:remaining]
-            
-            # Process filings in parallel using ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_filing = {
-                    executor.submit(process_single_filing, session, filing): filing
-                    for filing in results
-                }
-                
-                for future in as_completed(future_to_filing):
-                    filing = future_to_filing[future]
-                    try:
-                        filing_type = future.result()
-                        if filing_type:
-                            total_processed += 1
-                            if total_processed % 100 == 0:
-                                log_print(f"   📊 Processed {total_processed} filings...")
-                            if testing_limit and total_processed >= testing_limit:
-                                log_print(f"   ✅ Reached limit for filings: {total_processed}/{testing_limit}")
-                    except Exception as e:
-                        filing_uuid = filing.get('filing_uuid', 'unknown')
-                        log_print(f"   ❌ Exception processing filing {filing_uuid}: {str(e)[:200]}")
-            
-            # Stop if testing mode and reached limit
-            if testing_limit and total_processed >= testing_limit:
-                log_print(f"✅ Finished processing filings (testing mode limit: {total_processed}/{testing_limit})")
-                break
-            
-            # Check if there's a next page
-            if response.get('next'):
-                page += 1
-            else:
-                log_print(f"✅ Finished processing all filings. Total: {total_processed}")
-                break
-                
-        except Exception as e:
-            log_print(f"❌ Error fetching filings page {page}: {str(e)[:200]}")
+    # First, fetch page 1 to get total count and determine pagination
+    log_print(f"\n📄 Fetching initial page to determine pagination...")
+    first_response = fetch_filings_page(session, base_params, 1)
+    if not first_response:
+        log_print(f"❌ Failed to fetch initial page")
+        return
+    
+    total_count = first_response.get('count', 0)
+    first_results = first_response.get('results', [])
+    has_next = first_response.get('next') is not None
+    
+    if not first_results:
+        log_print(f"✅ No filings to process")
+        return
+    
+    log_print(f"   Found {len(first_results)} filings on page 1 (total: {total_count})")
+    
+    # Calculate total pages (assuming 25 items per page)
+    page_size = 25
+    total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
+    log_print(f"   Estimated total pages: {total_pages}")
+    
+    total_processed = 0
+    current_page = 1
+    
+    # Process first page results
+    all_results = first_results.copy()
+    
+    # Fetch remaining pages in parallel batches
+    while has_next and current_page < total_pages:
+        # Determine how many pages to fetch in this batch
+        pages_to_fetch = min(max_api_workers, total_pages - current_page)
+        if testing_limit and total_processed + len(all_results) >= testing_limit:
+            # We have enough results already, don't fetch more
             break
+        
+        log_print(f"\n📄 Fetching pages {current_page + 1} to {current_page + pages_to_fetch} in parallel...")
+        
+        # Fetch multiple pages in parallel
+        pages_to_process = list(range(current_page + 1, current_page + pages_to_fetch + 1))
+        with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
+            future_to_page = {
+                api_executor.submit(fetch_filings_page, session, base_params, page): page
+                for page in pages_to_process
+            }
+            
+            batch_results = []
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                try:
+                    response = future.result()
+                    if response:
+                        page_results = response.get('results', [])
+                        if page_results:
+                            batch_results.extend(page_results)
+                            log_print(f"   ✅ Fetched page {page_num}: {len(page_results)} filings")
+                        else:
+                            has_next = False
+                            break
+                    else:
+                        log_print(f"   ⚠️ Page {page_num} returned None")
+                except Exception as e:
+                    log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
+        
+        all_results.extend(batch_results)
+        current_page += pages_to_fetch
+        
+        # Check if we should continue fetching
+        if not batch_results:
+            has_next = False
+            break
+        
+        # Check if we've reached testing limit
+        if testing_limit and len(all_results) >= testing_limit:
+            all_results = all_results[:testing_limit]
+            break
+    
+    # Limit results if in testing mode
+    if testing_limit:
+        all_results = all_results[:testing_limit]
+    
+    log_print(f"\n📊 Processing {len(all_results)} filings with {max_processing_workers} workers...")
+    
+    # Process all results in parallel
+    with ThreadPoolExecutor(max_workers=max_processing_workers) as processing_executor:
+        future_to_filing = {
+            processing_executor.submit(process_single_filing, session, filing): filing
+            for filing in all_results
+        }
+        
+        for future in as_completed(future_to_filing):
+            filing = future_to_filing[future]
+            try:
+                filing_type = future.result()
+                if filing_type:
+                    total_processed += 1
+                    if total_processed % 100 == 0:
+                        log_print(f"   📊 Processed {total_processed}/{len(all_results)} filings...")
+            except Exception as e:
+                filing_uuid = filing.get('filing_uuid', 'unknown')
+                log_print(f"   ❌ Exception processing filing {filing_uuid}: {str(e)[:200]}")
+    
+    log_print(f"✅ Finished processing filings. Total: {total_processed}")
+
+def fetch_contributions_page(session: requests.Session, base_params: Dict, page: int) -> Optional[Dict]:
+    """Fetch a single page of contributions - used for parallel page fetching"""
+    try:
+        page_params = base_params.copy()
+        page_params['page'] = page
+        response = call_api(session, '/contributions/', params=page_params)
+        return response
+    except Exception as e:
+        log_print(f"   ❌ Error fetching contributions page {page}: {str(e)[:200]}")
+        return None
 
 def process_single_contribution(session: requests.Session, contribution: Dict) -> bool:
     """Process a single contribution (download document, save to DynamoDB)
@@ -1098,7 +1165,7 @@ def process_single_contribution(session: requests.Session, contribution: Dict) -
         return False
 
 def process_all_contributions(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing_limit: Optional[int] = None):
-    """Fetch and process all contributions (LD-203) with pagination and multithreading"""
+    """Fetch and process all contributions with parallel API calls and parallel processing"""
     log_print("\n" + "="*80)
     log_print("📋 Processing Contributions (LD-203)")
     log_print("="*80)
@@ -1106,20 +1173,20 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     if testing_limit:
         log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} contributions total")
     
-    # Build params - API requires at least one query parameter for pagination
+    # Build base params - API requires at least one query parameter for pagination
     # If both dates are null, use a very early default date to effectively fetch all records
-    params = {'page_size': 25}  # LDA API appears to return max 25 items per page
+    base_params = {'page_size': 25}  # LDA API appears to return max 25 items per page
     
     if not start_date and not end_date:
         # API requires at least one filter parameter, so use a very early date to fetch all records
         # LDA data goes back to around 2000, so use 2000-01-01 as default
-        params['filing_dt_posted_after'] = '2000-01-01'
+        base_params['filing_dt_posted_after'] = '2000-01-01'
         log_print(f"📅 No date filters provided - using default start date 2000-01-01 to fetch all records")
     else:
         if start_date:
-            params['filing_dt_posted_after'] = start_date
+            base_params['filing_dt_posted_after'] = start_date
         if end_date:
-            params['filing_dt_posted_before'] = end_date
+            base_params['filing_dt_posted_before'] = end_date
         
         # Log date range being used
         if start_date and end_date:
@@ -1129,74 +1196,115 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
         elif end_date:
             log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
     
-    page = 1
-    total_processed = 0
-    max_workers = 25
+    # Configuration for parallel fetching and processing
+    # Based on 3.9 pages/min and 15s processing time, we can handle ~30 parallel API calls
+    # Rate limit is 120 calls/min, so 120/4 = 30 parallel calls is safe
+    max_api_workers = 30  # Number of pages to fetch in parallel
+    max_processing_workers = 25  # Number of items to process in parallel
     
-    while True:
-        params['page'] = page
-        log_print(f"\n📄 Fetching contributions page {page}...")
-        
-        try:
-            response = call_api(session, '/contributions/', params=params)
-            results = response.get('results', [])
-            count = response.get('count', 0)
-            
-            if not results:
-                log_print(f"✅ No more contributions to process. Total processed: {total_processed}")
-                break
-            
-            log_print(f"   Found {len(results)} contributions on page {page} (total: {count})")
-            log_print(f"   Processing with {max_workers} workers...")
-            
-            # Check if we've reached the limit before processing
-            if testing_limit and total_processed >= testing_limit:
-                log_print(f"✅ Reached testing limit for contributions: {total_processed}/{testing_limit}")
-                break
-            
-            # Limit results if testing mode
-            if testing_limit:
-                remaining = testing_limit - total_processed
-                if remaining <= 0:
-                    break
-                results = results[:remaining]
-            
-            # Process contributions in parallel using ThreadPoolExecutor
-            with ThreadPoolExecutor(max_workers=max_workers) as executor:
-                future_to_contribution = {
-                    executor.submit(process_single_contribution, session, contribution): contribution
-                    for contribution in results
-                }
-                
-                for future in as_completed(future_to_contribution):
-                    contribution = future_to_contribution[future]
-                    try:
-                        success = future.result()
-                        if success:
-                            total_processed += 1
-                            if total_processed % 100 == 0:
-                                log_print(f"   📊 Processed {total_processed} contributions...")
-                            if testing_limit and total_processed >= testing_limit:
-                                log_print(f"   ✅ Reached limit for contributions: {total_processed}/{testing_limit}")
-                    except Exception as e:
-                        filing_uuid = contribution.get('filing_uuid', 'unknown')
-                        log_print(f"   ❌ Exception processing contribution {filing_uuid}: {str(e)[:200]}")
-            
-            # Stop if testing mode and reached limit
-            if testing_limit and total_processed >= testing_limit:
-                log_print(f"✅ Finished processing contributions (testing mode limit: {total_processed}/{testing_limit})")
-                break
-            
-            # Check if there's a next page
-            if response.get('next'):
-                page += 1
-            else:
-                log_print(f"✅ Finished processing all contributions. Total: {total_processed}")
-                break
-                
-        except Exception as e:
-            log_print(f"❌ Error fetching contributions page {page}: {str(e)[:200]}")
+    # First, fetch page 1 to get total count and determine pagination
+    log_print(f"\n📄 Fetching initial page to determine pagination...")
+    first_response = fetch_contributions_page(session, base_params, 1)
+    if not first_response:
+        log_print(f"❌ Failed to fetch initial page")
+        return
+    
+    total_count = first_response.get('count', 0)
+    first_results = first_response.get('results', [])
+    has_next = first_response.get('next') is not None
+    
+    if not first_results:
+        log_print(f"✅ No contributions to process")
+        return
+    
+    log_print(f"   Found {len(first_results)} contributions on page 1 (total: {total_count})")
+    
+    # Calculate total pages (assuming 25 items per page)
+    page_size = 25
+    total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
+    log_print(f"   Estimated total pages: {total_pages}")
+    
+    total_processed = 0
+    current_page = 1
+    
+    # Process first page results
+    all_results = first_results.copy()
+    
+    # Fetch remaining pages in parallel batches
+    while has_next and current_page < total_pages:
+        # Determine how many pages to fetch in this batch
+        pages_to_fetch = min(max_api_workers, total_pages - current_page)
+        if testing_limit and total_processed + len(all_results) >= testing_limit:
+            # We have enough results already, don't fetch more
             break
+        
+        log_print(f"\n📄 Fetching pages {current_page + 1} to {current_page + pages_to_fetch} in parallel...")
+        
+        # Fetch multiple pages in parallel
+        pages_to_process = list(range(current_page + 1, current_page + pages_to_fetch + 1))
+        with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
+            future_to_page = {
+                api_executor.submit(fetch_contributions_page, session, base_params, page): page
+                for page in pages_to_process
+            }
+            
+            batch_results = []
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                try:
+                    response = future.result()
+                    if response:
+                        page_results = response.get('results', [])
+                        if page_results:
+                            batch_results.extend(page_results)
+                            log_print(f"   ✅ Fetched page {page_num}: {len(page_results)} contributions")
+                        else:
+                            has_next = False
+                            break
+                    else:
+                        log_print(f"   ⚠️ Page {page_num} returned None")
+                except Exception as e:
+                    log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
+        
+        all_results.extend(batch_results)
+        current_page += pages_to_fetch
+        
+        # Check if we should continue fetching
+        if not batch_results:
+            has_next = False
+            break
+        
+        # Check if we've reached testing limit
+        if testing_limit and len(all_results) >= testing_limit:
+            all_results = all_results[:testing_limit]
+            break
+    
+    # Limit results if in testing mode
+    if testing_limit:
+        all_results = all_results[:testing_limit]
+    
+    log_print(f"\n📊 Processing {len(all_results)} contributions with {max_processing_workers} workers...")
+    
+    # Process all results in parallel
+    with ThreadPoolExecutor(max_workers=max_processing_workers) as processing_executor:
+        future_to_contribution = {
+            processing_executor.submit(process_single_contribution, session, contribution): contribution
+            for contribution in all_results
+        }
+        
+        for future in as_completed(future_to_contribution):
+            contribution = future_to_contribution[future]
+            try:
+                success = future.result()
+                if success:
+                    total_processed += 1
+                    if total_processed % 100 == 0:
+                        log_print(f"   📊 Processed {total_processed}/{len(all_results)} contributions...")
+            except Exception as e:
+                contribution_uuid = contribution.get('filing_uuid', 'unknown')
+                log_print(f"   ❌ Exception processing contribution {contribution_uuid}: {str(e)[:200]}")
+    
+    log_print(f"✅ Finished processing contributions. Total: {total_processed}")
 
 # ============================================================================
 # Main Execution
