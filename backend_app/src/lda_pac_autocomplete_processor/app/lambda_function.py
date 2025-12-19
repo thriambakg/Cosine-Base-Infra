@@ -39,6 +39,33 @@ FIELD_TYPE_TO_S3_KEY = {
     'registrant_name': 'lists/registrant_names.csv'
 }
 
+def clean_value(value: str) -> str:
+    """
+    Clean autocomplete value by removing double quotes and extra whitespace.
+    Double quotes are not indexed, so they would cause search failures.
+    
+    Args:
+        value: Raw value string
+    
+    Returns:
+        Cleaned value with double quotes removed and stripped
+    """
+    if not value:
+        return ''
+    
+    # Strip whitespace first
+    cleaned = value.strip()
+    
+    # Remove surrounding double quotes if present
+    if cleaned.startswith('"') and cleaned.endswith('"'):
+        cleaned = cleaned[1:-1]
+    
+    # Remove any remaining double quotes (shouldn't happen, but be safe)
+    cleaned = cleaned.replace('"', '')
+    
+    # Strip again after quote removal
+    return cleaned.strip()
+
 def read_existing_csv(bucket: str, key: str, field_name: str) -> Set[str]:
     """Read existing values from S3 CSV, return as a set for deduplication"""
     try:
@@ -47,11 +74,13 @@ def read_existing_csv(bucket: str, key: str, field_name: str) -> Set[str]:
         reader = csv.reader(StringIO(csv_content))
         # Skip header if present
         next(reader, None)
-        # Collect all values
+        # Collect all values (clean double quotes)
         values = set()
         for row in reader:
-            if row and row[0].strip():  # First column is the value
-                values.add(row[0].strip())
+            if row and row[0]:
+                cleaned_value = clean_value(row[0])
+                if cleaned_value:
+                    values.add(cleaned_value)
         return values
     except s3_client.exceptions.NoSuchKey:
         # CSV doesn't exist yet, return empty set
@@ -107,13 +136,13 @@ def lambda_handler(event, context):
             if 'field_type' in body and 'value' in body:
                 # New format: {"field_type": "client_name", "value": "ACME Corp"}
                 field_type = body.get('field_type', '').strip()
-                value = body.get('value', '').strip()
+                value = clean_value(body.get('value', ''))
                 
                 if field_type and value and field_type in FIELD_TYPE_TO_S3_KEY:
                     new_values_by_type[field_type].add(value)
             else:
                 # Legacy format: {"pac_name": "BakePAC"} (backward compatibility)
-                pac_name = body.get('pac_name', '').strip()
+                pac_name = clean_value(body.get('pac_name', ''))
                 if pac_name:
                     new_values_by_type['pac_name'].add(pac_name)
         except Exception as e:

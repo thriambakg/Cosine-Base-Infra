@@ -313,12 +313,29 @@ def create_unified_entity(client: Optional[Dict], lobbyist: Optional[Dict]) -> O
 def send_autocomplete_value(field_type: str, value: str):
     """
     Send an autocomplete value to SQS queue for CSV generation.
+    Cleans double quotes from values before sending (double quotes are not indexed).
     
     Args:
         field_type: One of 'pac_name', 'client_name', 'lobbyist_name', 'registrant_name'
         value: The string value to add to autocomplete CSV
     """
-    if not PAC_QUEUE_URL or not value or not value.strip():
+    if not PAC_QUEUE_URL or not value:
+        return
+    
+    # Clean value: remove double quotes and strip whitespace
+    cleaned_value = value.strip()
+    
+    # Remove surrounding double quotes if present
+    if cleaned_value.startswith('"') and cleaned_value.endswith('"'):
+        cleaned_value = cleaned_value[1:-1]
+    
+    # Remove any remaining double quotes (shouldn't happen, but be safe)
+    cleaned_value = cleaned_value.replace('"', '')
+    
+    # Strip again after quote removal
+    cleaned_value = cleaned_value.strip()
+    
+    if not cleaned_value:
         return
     
     try:
@@ -326,11 +343,11 @@ def send_autocomplete_value(field_type: str, value: str):
             QueueUrl=PAC_QUEUE_URL,
             MessageBody=json.dumps({
                 'field_type': field_type,
-                'value': value.strip()
+                'value': cleaned_value
             })
         )
     except Exception as e:
-        log_print(f"⚠️ Failed to send {field_type} '{value}' to SQS: {str(e)[:200]}")
+        log_print(f"⚠️ Failed to send {field_type} '{cleaned_value}' to SQS: {str(e)[:200]}")
 
 def extract_indexed_fields_filing(filing: Dict) -> Dict:
     """Extract indexed fields for a filing (LD-1 or LD-2)"""
