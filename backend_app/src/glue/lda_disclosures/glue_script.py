@@ -489,8 +489,7 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
                 except (ValueError, TypeError):
                     pass  # Skip invalid amounts
     
-    indexed['total_contribution_amount'] = total_amount if total_amount > 0 else None
-    # For contributions, amount_reported comes from contribution_items
+    # For contributions, amount_reported comes from contribution_items (used for GSI)
     indexed['amount_reported'] = total_amount if total_amount > 0 else None
     
     # Store all contribution item types as list for autocomplete
@@ -633,13 +632,6 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         
         # Add indexed fields for GSIs (this includes total_contribution_amount as Decimal)
         item.update(indexed_fields)
-        
-        # Ensure total_contribution_amount is stored as Decimal if it exists
-        if 'total_contribution_amount' in indexed_fields:
-            if indexed_fields['total_contribution_amount'] is not None:
-                item['total_contribution_amount'] = indexed_fields['total_contribution_amount']
-            else:
-                item['total_contribution_amount'] = None
         
         # Add S3 key if provided
         if s3_key:
