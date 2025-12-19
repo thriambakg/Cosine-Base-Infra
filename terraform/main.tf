@@ -3426,10 +3426,10 @@ module "lda_disclosures_state_machine" {
                     Type     = "Task"
                     Resource = module.lda_disclosures_indexer_lambda.function_arn
                     Parameters = {
-                      "page.$"       = "$"
-                      "start_date.$" = "$$.fetcher_result.filingbatches.start_date"
-                      "end_date.$"   = "$$.fetcher_result.filingbatches.end_date"
-                      "endpoint"     = "filings"
+                      "page.$"        = "$"
+                      "start_date.$?" = "$$.fetcher_result.filingbatches.start_date"
+                      "end_date.$?"   = "$$.fetcher_result.filingbatches.end_date"
+                      "endpoint"      = "filings"
                     }
                     Retry = [
                       {
@@ -3469,10 +3469,10 @@ module "lda_disclosures_state_machine" {
                     Type     = "Task"
                     Resource = module.lda_disclosures_indexer_lambda.function_arn
                     Parameters = {
-                      "page.$"       = "$"
-                      "start_date.$" = "$$.fetcher_result.contributionbatches.start_date"
-                      "end_date.$"   = "$$.fetcher_result.contributionbatches.end_date"
-                      "endpoint"     = "contributions"
+                      "page.$"        = "$"
+                      "start_date.$?" = "$$.fetcher_result.contributionbatches.start_date"
+                      "end_date.$?"   = "$$.fetcher_result.contributionbatches.end_date"
+                      "endpoint"      = "contributions"
                     }
                     Retry = [
                       {

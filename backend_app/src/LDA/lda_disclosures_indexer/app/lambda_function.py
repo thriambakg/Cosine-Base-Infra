@@ -38,6 +38,12 @@ def lambda_handler(event, context):
     end_date = event.get('end_date')
     endpoint = event.get('endpoint')
     
+    # Normalize empty strings to None (Step Functions might pass "" for null)
+    if start_date == "" or start_date is None:
+        start_date = None
+    if end_date == "" or end_date is None:
+        end_date = None
+    
     if not page:
         return {
             'statusCode': 400,
