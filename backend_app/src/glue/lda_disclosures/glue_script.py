@@ -705,7 +705,14 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         if PAC_QUEUE_URL and pacs:
             log_print(f"📤 Found {len(pacs)} PAC(s) in contribution, sending to SQS...")
             for pac in pacs:
-                pac_name = pac.get('name') if isinstance(pac, dict) else str(pac)
+                # Handle both formats: object with 'name' field or string
+                if isinstance(pac, dict):
+                    pac_name = pac.get('name') or pac.get('S')  # Handle DynamoDB native format {"S": "name"}
+                elif isinstance(pac, str):
+                    pac_name = pac
+                else:
+                    pac_name = str(pac)
+                
                 if pac_name:
                     try:
                         sqs_client.send_message(
