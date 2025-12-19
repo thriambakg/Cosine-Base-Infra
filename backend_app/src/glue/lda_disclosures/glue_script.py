@@ -288,24 +288,74 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
         indexed['client_name'] = client.get('name')
         indexed['client_client_id'] = client.get('client_id')
     
-    # Lobbyists (get first lobbyist for GSI - can expand later)
+    # Lobbyists, General Issue Code, and Government Entity ID (get first activity for GSI - can expand later)
     lobbying_activities = filing.get('lobbying_activities', [])
+    all_general_issue_codes = []
+    all_government_entity_ids = []
+    
     if lobbying_activities:
         for activity in lobbying_activities:
+            # Extract general issue code from first activity (for GSI)
+            general_issue_code = activity.get('general_issue_code')
+            if general_issue_code:
+                if not indexed.get('general_issue_code'):  # Only set first one for GSI
+                    indexed['general_issue_code'] = general_issue_code
+                    indexed['general_issue_code_display'] = activity.get('general_issue_code_display')
+                # Collect all codes for autocomplete
+                if general_issue_code not in all_general_issue_codes:
+                    all_general_issue_codes.append(general_issue_code)
+            
+            # Extract first government entity ID from first activity (for GSI)
+            government_entities = activity.get('government_entities', [])
+            if government_entities:
+                first_entity = government_entities[0]
+                entity_id = first_entity.get('id')
+                if entity_id:
+                    if 'government_entity_id' not in indexed:  # Only set first one for GSI
+                        try:
+                            indexed['government_entity_id'] = int(entity_id)
+                        except (ValueError, TypeError):
+                            pass
+                    # Collect all entity IDs for autocomplete
+                    try:
+                        entity_id_int = int(entity_id)
+                        if entity_id_int not in all_government_entity_ids:
+                            all_government_entity_ids.append(entity_id_int)
+                    except (ValueError, TypeError):
+                        pass
+                # Collect all entity IDs from all entities in this activity
+                for entity in government_entities:
+                    entity_id = entity.get('id')
+                    if entity_id:
+                        try:
+                            entity_id_int = int(entity_id)
+                            if entity_id_int not in all_government_entity_ids:
+                                all_government_entity_ids.append(entity_id_int)
+                        except (ValueError, TypeError):
+                            pass
+            
+            # Extract first lobbyist
             lobbyists = activity.get('lobbyists', [])
             if lobbyists:
                 lobbyist = lobbyists[0].get('lobbyist', {})
                 if lobbyist:
-                    name_parts = [
-                        lobbyist.get('prefix_display', ''),
-                        lobbyist.get('first_name', ''),
-                        lobbyist.get('middle_name', ''),
-                        lobbyist.get('last_name', ''),
-                        lobbyist.get('suffix_display', '')
-                    ]
-                    indexed['lobbyist_name'] = ' '.join(filter(None, name_parts))
-                    indexed['lobbyist_id'] = lobbyist.get('id')
-                    break  # Use first lobbyist for GSI
+                    if 'lobbyist_name' not in indexed:  # Only set first one for GSI
+                        name_parts = [
+                            lobbyist.get('prefix_display', ''),
+                            lobbyist.get('first_name', ''),
+                            lobbyist.get('middle_name', ''),
+                            lobbyist.get('last_name', ''),
+                            lobbyist.get('suffix_display', '')
+                        ]
+                        indexed['lobbyist_name'] = ' '.join(filter(None, name_parts))
+                        indexed['lobbyist_id'] = lobbyist.get('id')
+                    break  # Use first lobbyist and first issue code for GSI
+    
+    # Store all codes as lists for autocomplete (preserves all activities)
+    if all_general_issue_codes:
+        indexed['all_general_issue_codes'] = all_general_issue_codes
+    if all_government_entity_ids:
+        indexed['all_government_entity_ids'] = all_government_entity_ids
     
     # Report type
     indexed['report_type'] = filing.get('filing_type')
@@ -415,19 +465,37 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
     
     # Calculate total contribution amount from contribution_items
     # Also use this as amount_reported for contributions
+    # Extract first contribution_item_type for GSI
     contribution_items = contribution.get('contribution_items', [])
     total_amount = Decimal('0')
+    all_contribution_item_types = []
+    
     if contribution_items:
         for item in contribution_items:
+            # Extract contribution type (for GSI and autocomplete)
+            contribution_type = item.get('contribution_type')
+            if contribution_type:
+                if 'contribution_item_type' not in indexed:  # Only set first one for GSI
+                    indexed['contribution_item_type'] = contribution_type
+                # Collect all types for autocomplete
+                if contribution_type not in all_contribution_item_types:
+                    all_contribution_item_types.append(contribution_type)
+            
+            # Calculate amount
             amount_str = item.get('amount')
             if amount_str:
                 try:
                     total_amount += Decimal(str(amount_str))
                 except (ValueError, TypeError):
                     pass  # Skip invalid amounts
+    
     indexed['total_contribution_amount'] = total_amount if total_amount > 0 else None
     # For contributions, amount_reported comes from contribution_items
     indexed['amount_reported'] = total_amount if total_amount > 0 else None
+    
+    # Store all contribution item types as list for autocomplete
+    if all_contribution_item_types:
+        indexed['all_contribution_item_types'] = all_contribution_item_types
     
     # Extract state from address or registrant
     state = None
@@ -533,6 +601,23 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         if not indexed_fields.get('state'):
             item.pop('state', None)
         
+        # general_issue_code and dt_posted - only set if general_issue_code exists (omit if missing)
+        # Note: Only filings have lobbying_activities, so this will be None for contributions
+        if not indexed_fields.get('general_issue_code'):
+            item.pop('general_issue_code', None)
+            item.pop('general_issue_code_display', None)
+        
+        # government_entity_id and dt_posted - only set if government_entity_id exists (omit if missing)
+        if not indexed_fields.get('government_entity_id'):
+            item.pop('government_entity_id', None)
+        else:
+            # Ensure it's stored as integer (N type)
+            item['government_entity_id'] = int(indexed_fields['government_entity_id'])
+        
+        # contribution_item_type - not applicable to filings, ensure it's removed
+        item.pop('contribution_item_type', None)
+        item.pop('all_contribution_item_types', None)
+        
         # Save to DynamoDB
         filings_table.put_item(Item=item)
         
@@ -605,6 +690,9 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         item['expenses_method_display'] = None
         item['lobbying_activities'] = None
         item['termination_date'] = None
+        # Contributions don't have general_issue_code (only filings have lobbying_activities)
+        item.pop('general_issue_code', None)
+        item.pop('general_issue_code_display', None)
         # amount_reported is now set from contribution_items in extract_indexed_fields_contribution
         
         # Set primary key
@@ -641,6 +729,17 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         # state and dt_posted - only set if state exists (omit if missing)
         if not indexed_fields.get('state'):
             item.pop('state', None)
+        
+        # contribution_item_type and dt_posted - only set if contribution_item_type exists (omit if missing)
+        if not indexed_fields.get('contribution_item_type'):
+            item.pop('contribution_item_type', None)
+        
+        # government_entity_id - not applicable to contributions, ensure it's removed
+        item.pop('government_entity_id', None)
+        item.pop('all_government_entity_ids', None)
+        item.pop('all_general_issue_codes', None)
+        item.pop('general_issue_code', None)
+        item.pop('general_issue_code_display', None)
         
         # Save to DynamoDB (same table as filings)
         filings_table.put_item(Item=item)

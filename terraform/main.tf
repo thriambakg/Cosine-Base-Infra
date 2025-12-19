@@ -3147,7 +3147,10 @@ module "lda_filings_table" {
     { name = "lobbyist_name", type = "S" },
     { name = "amount_reported", type = "N" },
     { name = "amount_bucket", type = "N" },
-    { name = "state", type = "S" }
+    { name = "state", type = "S" },
+    { name = "general_issue_code", type = "S" },
+    { name = "government_entity_id", type = "N" },
+    { name = "contribution_item_type", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -3210,6 +3213,30 @@ module "lda_filings_table" {
     {
       name            = "StatePostedDateIndex"
       hash_key        = "state"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "GeneralIssueCodePostedDateIndex"
+      hash_key        = "general_issue_code"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "GovernmentEntityPostedDateIndex"
+      hash_key        = "government_entity_id"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "ContributionItemTypePostedDateIndex"
+      hash_key        = "contribution_item_type"
       range_key       = "dt_posted"
       projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
