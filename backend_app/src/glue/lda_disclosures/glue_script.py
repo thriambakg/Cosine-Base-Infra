@@ -40,7 +40,8 @@ args = getResolvedOptions(sys.argv, [
     'FILINGS_TABLE_NAME',
     'S3_BUCKET_NAME',
     'REQUEST_TIMEOUT',
-    'RATE_LIMIT_DELAY'
+    'RATE_LIMIT_DELAY',
+    'PAC_QUEUE_URL'
 ])
 
 # Get date parameters (required for API pagination)
@@ -124,7 +125,7 @@ FILINGS_TABLE_NAME = args.get('FILINGS_TABLE_NAME')
 S3_BUCKET_NAME = args.get('S3_BUCKET_NAME')
 REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 RATE_LIMIT_DELAY = float(args.get('RATE_LIMIT_DELAY', '0.5'))
-PAC_QUEUE_URL = args.get('PAC_QUEUE_URL')  # Optional - only send if queue URL is provided
+PAC_QUEUE_URL = args.get('PAC_QUEUE_URL', '')  # Optional - only send if queue URL is provided
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
@@ -138,8 +139,6 @@ filings_table = dynamodb.Table(FILINGS_TABLE_NAME)
 log_print(f"ℹ️ Configuration: Table={FILINGS_TABLE_NAME} (filings and contributions), S3 Bucket={S3_BUCKET_NAME}")
 if PAC_QUEUE_URL:
     log_print(f"✅ PAC Queue URL configured: {PAC_QUEUE_URL}")
-else:
-    log_print(f"⚠️ PAC Queue URL not configured - PAC names will not be sent to SQS")
 
 # ============================================================================
 # Helper Functions
