@@ -1880,8 +1880,8 @@ module "usaspending_bulk_indexing_glue_job" {
   max_retries           = 1
   timeout               = 2880   # 48 hours (max is 10080 minutes = 7 days, bulk downloads can take time)
   concurrent_executions = 1      # Only allow 1 concurrent run to avoid conflicts
-  worker_type           = "G.2X" # Increased from G.1X (32 GB memory per worker vs 16 GB)
-  number_of_workers     = 5      # Increased from 2 (5 × 32 GB = 160 GB total memory for large CSV processing)
+  worker_type           = "G.1X" # 16 GB memory per worker (downgraded from G.2X for daily runs)
+  number_of_workers     = 5      # 5 × 16 GB = 80 GB total memory (sufficient for daily indexing)
 
   # S3 buckets
   s3_bucket_arn = module.glue_scripts_s3.bucket_arn
