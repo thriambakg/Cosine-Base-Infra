@@ -8,6 +8,7 @@ This includes:
 - Lobbyist Prefixes
 - Lobbyist Suffixes
 - Filing Types
+- Countries
 
 Usage:
     python fetch_general_issues_constants.py [--output-dir OUTPUT_DIR]
@@ -19,6 +20,7 @@ Each constant type will be saved to a separate file:
 - lobbyist_prefixes_constants.json
 - lobbyist_suffixes_constants.json
 - filing_types_constants.json
+- countries_constants.json
 """
 
 import json
@@ -38,7 +40,8 @@ ENDPOINTS = {
     "contribution_item_types": f"{LDA_API_BASE_URL}/constants/contribution/itemtypes/",
     "lobbyist_prefixes": f"{LDA_API_BASE_URL}/constants/lobbyist/prefixes/",
     "lobbyist_suffixes": f"{LDA_API_BASE_URL}/constants/lobbyist/suffixes/",
-    "filing_types": f"{LDA_API_BASE_URL}/constants/filing/filingtypes/"
+    "filing_types": f"{LDA_API_BASE_URL}/constants/filing/filingtypes/",
+    "countries": f"{LDA_API_BASE_URL}/constants/general/countries/"
 }
 
 # Output file names
@@ -48,7 +51,8 @@ OUTPUT_FILES = {
     "contribution_item_types": "contribution_item_types_constants.json",
     "lobbyist_prefixes": "lobbyist_prefixes_constants.json",
     "lobbyist_suffixes": "lobbyist_suffixes_constants.json",
-    "filing_types": "filing_types_constants.json"
+    "filing_types": "filing_types_constants.json",
+    "countries": "countries_constants.json"
 }
 
 def get_api_key() -> str:

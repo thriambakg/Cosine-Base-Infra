@@ -124,11 +124,14 @@ FILINGS_TABLE_NAME = args.get('FILINGS_TABLE_NAME')
 S3_BUCKET_NAME = args.get('S3_BUCKET_NAME')
 REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 RATE_LIMIT_DELAY = float(args.get('RATE_LIMIT_DELAY', '0.5'))
+PAC_QUEUE_URL = args.get('PAC_QUEUE_URL')  # Optional - only send if queue URL is provided
+PAC_QUEUE_URL = args.get('PAC_QUEUE_URL')  # Optional - only send if queue URL is provided
 
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
 s3_client = boto3.client('s3')
 secrets_client = boto3.client('secretsmanager')
+sqs_client = boto3.client('sqs')
 
 # DynamoDB table (both filings and contributions use the same table)
 filings_table = dynamodb.Table(FILINGS_TABLE_NAME)
@@ -357,6 +360,24 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
     if all_government_entity_ids:
         indexed['all_government_entity_ids'] = all_government_entity_ids
     
+    # Foreign Entities - extract country codes from foreign_entities list
+    foreign_entities = filing.get('foreign_entities', [])
+    foreign_countries = set()  # Use set for automatic deduplication
+    
+    if foreign_entities:
+        for entity in foreign_entities:
+            # Check both 'country' and 'ppb_country' fields
+            country_code = entity.get('country') or entity.get('ppb_country')
+            if country_code and country_code != 'US':  # Exclude US (domestic)
+                foreign_countries.add(country_code)
+    
+    # Set is_foreign as number for GSI (1 if any foreign countries found, 0 otherwise)
+    indexed['is_foreign'] = 1 if len(foreign_countries) > 0 else 0
+    
+    # Store all foreign countries as a list for autocomplete (deduplicated)
+    if foreign_countries:
+        indexed['foreign_countries'] = sorted(list(foreign_countries))
+    
     # Report type
     indexed['report_type'] = filing.get('filing_type')
     indexed['report_type_display'] = filing.get('filing_type_display')
@@ -563,7 +584,8 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         item['filer_type_display'] = None
         item['contribution_items'] = None
         item['no_contributions'] = None
-        item['pac'] = None
+        # pac - not applicable to filings, ensure it's removed
+        item.pop('pac', None)
         
         # Set primary key
         item['PK'] = f"FILING#{item['filing_uuid']}"
@@ -617,6 +639,13 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         item.pop('contribution_item_type', None)
         item.pop('all_contribution_item_types', None)
         
+        # is_foreign and dt_posted - only set if is_foreign is 1 (omit if 0)
+        if indexed_fields.get('is_foreign') != 1:
+            item.pop('is_foreign', None)
+        else:
+            # Ensure it's stored as integer (N type)
+            item['is_foreign'] = 1
+        
         # Save to DynamoDB
         filings_table.put_item(Item=item)
         
@@ -663,7 +692,22 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         
         # Check for PACs (Political Action Committees)
         pacs = contribution.get('pacs', [])
-        item['pac'] = bool(pacs and len(pacs) > 0)
+        # Store as number (1 if PACs exist, 0 otherwise) for GSI
+        indexed_fields['pac'] = 1 if (pacs and len(pacs) > 0) else 0
+        item['pac'] = indexed_fields['pac']
+        
+        # Send PAC names to SQS for autocomplete (if queue URL is configured)
+        if PAC_QUEUE_URL and pacs:
+            for pac in pacs:
+                pac_name = pac.get('name') if isinstance(pac, dict) else str(pac)
+                if pac_name:
+                    try:
+                        sqs_client.send_message(
+                            QueueUrl=PAC_QUEUE_URL,
+                            MessageBody=json.dumps({'pac_name': pac_name})
+                        )
+                    except Exception as e:
+                        log_print(f"⚠️ Failed to send PAC name to SQS: {str(e)[:200]}")
         
         # Set null values for filing-specific fields (not applicable to contributions)
         # Note: client and lobbyist fields are preserved from the original contribution if they exist
@@ -732,6 +776,10 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         item.pop('all_general_issue_codes', None)
         item.pop('general_issue_code', None)
         item.pop('general_issue_code_display', None)
+        
+        # is_foreign - not applicable to contributions, ensure it's removed
+        item.pop('is_foreign', None)
+        item.pop('foreign_countries', None)
         
         # Save to DynamoDB (same table as filings)
         filings_table.put_item(Item=item)

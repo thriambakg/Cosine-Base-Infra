@@ -43,6 +43,11 @@ CONSTANTS_FILES = {
         'json': 'filing_types_constants.json',
         'csv': 'filing_types.csv',
         'columns': ['value', 'name']
+    },
+    'countries': {
+        'json': 'countries_constants.json',
+        'csv': 'countries.csv',
+        'columns': ['value', 'name']
     }
 }
 

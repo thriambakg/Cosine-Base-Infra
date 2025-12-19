@@ -3150,7 +3150,9 @@ module "lda_filings_table" {
     { name = "state", type = "S" },
     { name = "general_issue_code", type = "S" },
     { name = "government_entity_id", type = "N" },
-    { name = "contribution_item_type", type = "S" }
+    { name = "contribution_item_type", type = "S" },
+    { name = "is_foreign", type = "N" },
+    { name = "pac", type = "N" }
   ]
 
   global_secondary_indexes = [
@@ -3237,6 +3239,22 @@ module "lda_filings_table" {
     {
       name            = "ContributionItemTypePostedDateIndex"
       hash_key        = "contribution_item_type"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "ForeignEntityPostedDateIndex"
+      hash_key        = "is_foreign"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "PACPostedDateIndex"
+      hash_key        = "pac"
       range_key       = "dt_posted"
       projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
@@ -3328,6 +3346,7 @@ module "lda_disclosures_glue_job" {
     "--S3_BUCKET_NAME"     = module.lda_disclosures_s3.bucket_id
     "--REQUEST_TIMEOUT"    = "30"
     "--RATE_LIMIT_DELAY"   = "0.5"
+    "--PAC_QUEUE_URL"      = module.lda_pac_autocomplete_queue.queue_url
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -3432,6 +3451,145 @@ module "lda_disclosures_state_machine" {
 
   depends_on = [
     module.lda_disclosures_glue_job
+  ]
+}
+
+# SQS Queue for LDA PAC Autocomplete Processing
+module "lda_pac_autocomplete_queue" {
+  source = "./modules/sqs"
+
+  project_name = var.project_name
+  environment  = var.environment
+  queue_name   = "lda-pac-autocomplete"
+  purpose      = "LDA PAC Autocomplete Processing"
+
+  # Queue configuration
+  message_retention_seconds  = 1209600 # 14 days
+  visibility_timeout_seconds = 60      # 1 minute
+  max_receive_count          = 3
+  enable_dlq                 = true
+
+  # Encryption
+  kms_key_id = module.kms.main_key_id
+
+  tags = var.common_tags
+}
+
+# Lambda Function for LDA PAC Autocomplete Processor
+module "lda_pac_autocomplete_processor" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-lda-pac-autocomplete-processor-${var.environment}"
+  description   = "Processes PAC names from SQS and maintains a sorted, deduplicated CSV in S3"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 60  # 1 minute
+  memory_size   = 256 # Lightweight - just CSV operations
+
+  source_dir = "${path.module}/../backend_app/src/lda_pac_autocomplete_processor/app"
+
+  # Environment variables
+  environment_variables = {
+    S3_BUCKET_NAME = module.lda_disclosures_s3.bucket_id
+    S3_KEY         = "autocomplete/pacs.csv"
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
+    module.kms.kms_access_policy_arn,
+    aws_iam_policy.lda_pac_autocomplete_s3_policy.arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.lda_pac_autocomplete_queue,
+    module.lda_disclosures_s3,
+    module.core_layer
+  ]
+}
+
+# IAM Policy for Lambda to access S3 for PAC CSV
+resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
+  name        = "${var.project_name}-lda-pac-autocomplete-s3-${var.environment}"
+  description = "Allows Lambda to read/write PAC autocomplete CSV in S3"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:DeleteObject"
+        ]
+        Resource = "${module.lda_disclosures_s3.bucket_arn}/autocomplete/pacs.csv"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = module.lda_disclosures_s3.bucket_arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "autocomplete/*"
+          }
+        }
+      }
+    ]
+  })
+}
+
+# SQS Event Source Mapping for PAC Autocomplete Processor
+resource "aws_lambda_event_source_mapping" "lda_pac_autocomplete_sqs_trigger" {
+  event_source_arn                   = module.lda_pac_autocomplete_queue.queue_arn
+  function_name                      = module.lda_pac_autocomplete_processor.function_arn
+  batch_size                         = 10
+  maximum_batching_window_in_seconds = 5
+  enabled                            = true
+
+  depends_on = [
+    module.lda_pac_autocomplete_queue,
+    module.lda_pac_autocomplete_processor
+  ]
+}
+
+# IAM Policy for Glue Job to send PAC names to SQS
+resource "aws_iam_policy" "lda_disclosures_glue_pac_sqs_policy" {
+  name        = "${var.project_name}-lda-disclosures-glue-pac-sqs-${var.environment}"
+  description = "Allows Glue job to send PAC names to SQS for autocomplete"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage",
+          "sqs:GetQueueAttributes"
+        ]
+        Resource = module.lda_pac_autocomplete_queue.queue_arn
+      }
+    ]
+  })
+}
+
+# Attach PAC SQS policy to Glue job role
+resource "aws_iam_role_policy_attachment" "lda_disclosures_glue_pac_sqs" {
+  role       = module.lda_disclosures_glue_job.role_name
+  policy_arn = aws_iam_policy.lda_disclosures_glue_pac_sqs_policy.arn
+
+  depends_on = [
+    module.lda_disclosures_glue_job,
+    aws_iam_policy.lda_disclosures_glue_pac_sqs_policy
   ]
 }
 
