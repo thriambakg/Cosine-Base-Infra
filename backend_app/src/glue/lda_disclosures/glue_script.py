@@ -47,25 +47,51 @@ args = getResolvedOptions(sys.argv, [
 ])
 
 # Get date parameters (optional - can be null to fetch all records)
-# Check sys.argv directly since START_DATE and END_DATE are optional
+# Parse each argument individually since they're optional
 start_date = None
 end_date = None
+
+# Print sys.argv for debugging
+print(f"🔍 DEBUG: sys.argv = {sys.argv}", flush=True)
 
 # Check if --START_DATE is in sys.argv
 for i, arg in enumerate(sys.argv):
     if arg == '--START_DATE' and i + 1 < len(sys.argv):
         start_date_value = sys.argv[i + 1]
-        if start_date_value and start_date_value.strip():
+        if start_date_value and start_date_value.strip() and start_date_value.strip().lower() != 'null':
             start_date = start_date_value.strip()
+        print(f"🔍 DEBUG: Found --START_DATE in sys.argv at index {i}, raw_value='{start_date_value}', parsed='{start_date}'", flush=True)
         break
 
 # Check if --END_DATE is in sys.argv
 for i, arg in enumerate(sys.argv):
     if arg == '--END_DATE' and i + 1 < len(sys.argv):
         end_date_value = sys.argv[i + 1]
-        if end_date_value and end_date_value.strip():
+        if end_date_value and end_date_value.strip() and end_date_value.strip().lower() != 'null':
             end_date = end_date_value.strip()
+        print(f"🔍 DEBUG: Found --END_DATE in sys.argv at index {i}, raw_value='{end_date_value}', parsed='{end_date}'", flush=True)
         break
+
+# Also try getResolvedOptions as a fallback for each individually
+if start_date is None:
+    try:
+        date_args = getResolvedOptions(sys.argv, ['START_DATE'])
+        start_date = date_args.get('START_DATE')
+        if start_date == '':
+            start_date = None
+        print(f"🔍 DEBUG: getResolvedOptions found START_DATE={start_date}", flush=True)
+    except Exception:
+        pass  # START_DATE not provided, which is fine
+
+if end_date is None:
+    try:
+        date_args = getResolvedOptions(sys.argv, ['END_DATE'])
+        end_date = date_args.get('END_DATE')
+        if end_date == '':
+            end_date = None
+        print(f"🔍 DEBUG: getResolvedOptions found END_DATE={end_date}", flush=True)
+    except Exception:
+        pass  # END_DATE not provided, which is fine
 
 args['START_DATE'] = start_date
 args['END_DATE'] = end_date
@@ -952,22 +978,28 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     if testing_limit:
         log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} filings total")
     
-    # Build params - only include date filters if provided
+    # Build params - API requires at least one query parameter for pagination
+    # If both dates are null, use a very early default date to effectively fetch all records
     params = {'page_size': 25}  # LDA API appears to return max 25 items per page
-    if start_date:
-        params['filing_dt_posted_after'] = start_date
-    if end_date:
-        params['filing_dt_posted_before'] = end_date
     
-    # Log date range being used
-    if start_date and end_date:
-        log_print(f"📅 Date range: {start_date} to {end_date}")
-    elif start_date:
-        log_print(f"📅 Start date: {start_date} (no end date - fetching all records from start date forward)")
-    elif end_date:
-        log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
+    if not start_date and not end_date:
+        # API requires at least one filter parameter, so use a very early date to fetch all records
+        # LDA data goes back to around 2000, so use 2000-01-01 as default
+        params['filing_dt_posted_after'] = '2000-01-01'
+        log_print(f"📅 No date filters provided - using default start date 2000-01-01 to fetch all records")
     else:
-        log_print(f"📅 No date filters - fetching all records across all time")
+        if start_date:
+            params['filing_dt_posted_after'] = start_date
+        if end_date:
+            params['filing_dt_posted_before'] = end_date
+        
+        # Log date range being used
+        if start_date and end_date:
+            log_print(f"📅 Date range: {start_date} to {end_date}")
+        elif start_date:
+            log_print(f"📅 Start date: {start_date} (no end date - fetching all records from start date forward)")
+        elif end_date:
+            log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
     
     page = 1
     total_processed = 0
@@ -1074,22 +1106,28 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     if testing_limit:
         log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} contributions total")
     
-    # Build params - only include date filters if provided
+    # Build params - API requires at least one query parameter for pagination
+    # If both dates are null, use a very early default date to effectively fetch all records
     params = {'page_size': 25}  # LDA API appears to return max 25 items per page
-    if start_date:
-        params['filing_dt_posted_after'] = start_date
-    if end_date:
-        params['filing_dt_posted_before'] = end_date
     
-    # Log date range being used
-    if start_date and end_date:
-        log_print(f"📅 Date range: {start_date} to {end_date}")
-    elif start_date:
-        log_print(f"📅 Start date: {start_date} (no end date - fetching all records from start date forward)")
-    elif end_date:
-        log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
+    if not start_date and not end_date:
+        # API requires at least one filter parameter, so use a very early date to fetch all records
+        # LDA data goes back to around 2000, so use 2000-01-01 as default
+        params['filing_dt_posted_after'] = '2000-01-01'
+        log_print(f"📅 No date filters provided - using default start date 2000-01-01 to fetch all records")
     else:
-        log_print(f"📅 No date filters - fetching all records across all time")
+        if start_date:
+            params['filing_dt_posted_after'] = start_date
+        if end_date:
+            params['filing_dt_posted_before'] = end_date
+        
+        # Log date range being used
+        if start_date and end_date:
+            log_print(f"📅 Date range: {start_date} to {end_date}")
+        elif start_date:
+            log_print(f"📅 Start date: {start_date} (no end date - fetching all records from start date forward)")
+        elif end_date:
+            log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
     
     page = 1
     total_processed = 0
@@ -1189,7 +1227,7 @@ def main():
     elif end_date:
         log_print(f"📅 End date: {end_date} (no start date - will fetch all records up to end date)")
     else:
-        log_print(f"📅 No date filters provided - will fetch all records across all time")
+        log_print(f"📅 No date filters provided - will use default start date 2000-01-01 to fetch all records (API requires at least one filter parameter)")
     
     # Get testing limit (number of records per type, or None for all records)
     testing_limit = args.get('TESTING')
