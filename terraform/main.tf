@@ -3418,9 +3418,9 @@ module "lda_disclosures_state_machine" {
             "--REQUEST_TIMEOUT"    = "30"
             "--RATE_LIMIT_DELAY"   = "0.5"
             "--PAC_QUEUE_URL"      = module.lda_pac_autocomplete_queue.queue_url
-            "--START_DATE.$"       = "$.START_DATE"
-            "--END_DATE.$"         = "$.END_DATE"
-            "--TESTING.$"          = "$.TESTING"
+            "--START_DATE.$?"      = "$.START_DATE"
+            "--END_DATE.$?"        = "$.END_DATE"
+            "--TESTING.$?"         = "$.TESTING"
           }
         }
         Catch = [

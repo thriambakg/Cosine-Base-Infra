@@ -46,26 +46,30 @@ args = getResolvedOptions(sys.argv, [
     'PAC_QUEUE_URL'
 ])
 
-# Get date parameters (required for API pagination)
-# Try to get them - they should be provided by Step Function
-try:
-    date_args = getResolvedOptions(sys.argv, ['START_DATE', 'END_DATE'])
-    # Convert empty strings to None
-    start_date = date_args.get('START_DATE')
-    end_date = date_args.get('END_DATE')
-    if start_date == '':
-        start_date = None
-    if end_date == '':
-        end_date = None
-    args['START_DATE'] = start_date
-    args['END_DATE'] = end_date
-    print(f"✅ Successfully parsed date arguments: START_DATE={start_date}, END_DATE={end_date}", flush=True)
-except Exception as e:
-    print(f"⚠️ Date arguments not provided or failed to parse: {str(e)[:200]}", flush=True)
-    print(f"⚠️ LDA API requires at least one filter parameter for pagination. START_DATE and/or END_DATE are required.", flush=True)
-    # Set to None - will be handled in main() to require dates
-    args['START_DATE'] = None
-    args['END_DATE'] = None
+# Get date parameters (optional - can be null to fetch all records)
+# Check sys.argv directly since START_DATE and END_DATE are optional
+start_date = None
+end_date = None
+
+# Check if --START_DATE is in sys.argv
+for i, arg in enumerate(sys.argv):
+    if arg == '--START_DATE' and i + 1 < len(sys.argv):
+        start_date_value = sys.argv[i + 1]
+        if start_date_value and start_date_value.strip():
+            start_date = start_date_value.strip()
+        break
+
+# Check if --END_DATE is in sys.argv
+for i, arg in enumerate(sys.argv):
+    if arg == '--END_DATE' and i + 1 < len(sys.argv):
+        end_date_value = sys.argv[i + 1]
+        if end_date_value and end_date_value.strip():
+            end_date = end_date_value.strip()
+        break
+
+args['START_DATE'] = start_date
+args['END_DATE'] = end_date
+print(f"✅ Parsed date arguments: START_DATE={start_date}, END_DATE={end_date}", flush=True)
 
 # Get optional testing parameter (passed as string from Step Functions)
 # Check sys.argv directly since TESTING is optional and getResolvedOptions requires all args
@@ -948,15 +952,22 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     if testing_limit:
         log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} filings total")
     
-    # LDA API requires at least one query parameter for pagination
-    if not start_date and not end_date:
-        raise ValueError("START_DATE and/or END_DATE must be provided. LDA API requires at least one filter parameter for pagination.")
-    
+    # Build params - only include date filters if provided
     params = {'page_size': 25}  # LDA API appears to return max 25 items per page
     if start_date:
         params['filing_dt_posted_after'] = start_date
     if end_date:
         params['filing_dt_posted_before'] = end_date
+    
+    # Log date range being used
+    if start_date and end_date:
+        log_print(f"📅 Date range: {start_date} to {end_date}")
+    elif start_date:
+        log_print(f"📅 Start date: {start_date} (no end date - fetching all records from start date forward)")
+    elif end_date:
+        log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
+    else:
+        log_print(f"📅 No date filters - fetching all records across all time")
     
     page = 1
     total_processed = 0
@@ -1063,15 +1074,22 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     if testing_limit:
         log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} contributions total")
     
-    # LDA API requires at least one query parameter for pagination
-    if not start_date and not end_date:
-        raise ValueError("START_DATE and/or END_DATE must be provided. LDA API requires at least one filter parameter for pagination.")
-    
+    # Build params - only include date filters if provided
     params = {'page_size': 25}  # LDA API appears to return max 25 items per page
     if start_date:
         params['filing_dt_posted_after'] = start_date
     if end_date:
         params['filing_dt_posted_before'] = end_date
+    
+    # Log date range being used
+    if start_date and end_date:
+        log_print(f"📅 Date range: {start_date} to {end_date}")
+    elif start_date:
+        log_print(f"📅 Start date: {start_date} (no end date - fetching all records from start date forward)")
+    elif end_date:
+        log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
+    else:
+        log_print(f"📅 No date filters - fetching all records across all time")
     
     page = 1
     total_processed = 0
@@ -1159,22 +1177,19 @@ def main():
     # Create session
     session = create_session(api_key)
     
-    # Get date range (required - LDA API requires at least one filter parameter for pagination)
+    # Get date range (optional - can be null to fetch all records)
     start_date = args.get('START_DATE')
     end_date = args.get('END_DATE')
     
-    # Validate that at least one date is provided
-    if not start_date and not end_date:
-        error_msg = "ERROR: START_DATE and/or END_DATE must be provided. LDA API requires at least one query parameter for pagination."
-        log_print(f"❌ {error_msg}")
-        raise ValueError(error_msg)
-    
+    # Log date range configuration
     if start_date and end_date:
         log_print(f"📅 Date range: {start_date} to {end_date}")
     elif start_date:
-        log_print(f"📅 Start date: {start_date} (no end date - will fetch all records from start date)")
+        log_print(f"📅 Start date: {start_date} (no end date - will fetch all records from start date forward)")
     elif end_date:
         log_print(f"📅 End date: {end_date} (no start date - will fetch all records up to end date)")
+    else:
+        log_print(f"📅 No date filters provided - will fetch all records across all time")
     
     # Get testing limit (number of records per type, or None for all records)
     testing_limit = args.get('TESTING')
