@@ -958,8 +958,7 @@ def process_single_filing(session: requests.Session, filing: Dict) -> Optional[s
             content_type = filing.get('filing_document_content_type', 'pdf')
             ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
             s3_key = f"filings/{filing_type}/{filing_uuid}.{ext}"
-            if download_document(session, doc_url, s3_key):
-                log_print(f"   ✅ Downloaded document for {filing_uuid}")
+            download_document(session, doc_url, s3_key)  # Download silently, errors will be logged
         
         # Save to DynamoDB (with S3 key)
         save_filing_to_dynamodb(filing, indexed_fields, s3_key=s3_key)
@@ -1098,7 +1097,7 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                         page_results = response.get('results', [])
                         if page_results:
                             batch_results.extend(page_results)
-                            log_print(f"   ✅ Fetched page {page_num}: {len(page_results)} filings")
+                            # Individual page fetch logs removed - see batch summary instead
                         else:
                             has_next = False
                             break
@@ -1184,8 +1183,7 @@ def process_single_contribution(session: requests.Session, contribution: Dict) -
             content_type = contribution.get('filing_document_content_type', 'pdf')
             ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
             s3_key = f"contributions/{filing_type}/{filing_uuid}.{ext}"
-            if download_document(session, doc_url, s3_key):
-                log_print(f"   ✅ Downloaded document for {filing_uuid}")
+            download_document(session, doc_url, s3_key)  # Download silently, errors will be logged
         
         # Save to DynamoDB (same table as filings, with S3 key)
         save_contribution_to_dynamodb(contribution, indexed_fields, s3_key=s3_key)
@@ -1313,7 +1311,7 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                         page_results = response.get('results', [])
                         if page_results:
                             batch_results.extend(page_results)
-                            log_print(f"   ✅ Fetched page {page_num}: {len(page_results)} contributions")
+                            # Individual page fetch logs removed - see batch summary instead
                         else:
                             has_next = False
                             break
