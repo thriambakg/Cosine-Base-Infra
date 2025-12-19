@@ -3138,86 +3138,80 @@ module "lda_filings_table" {
   attributes = [
     { name = "PK", type = "S" },
     { name = "SK", type = "S" },
-    { name = "YearPostedDateIndexPK", type = "S" },
-    { name = "YearPostedDateIndexSK", type = "S" },
-    { name = "PeriodPostedDateIndexPK", type = "S" },
-    { name = "PeriodPostedDateIndexSK", type = "S" },
-    { name = "ReportTypePostedDateIndexPK", type = "S" },
-    { name = "ReportTypePostedDateIndexSK", type = "S" },
-    { name = "RegistrantPostedDateIndexPK", type = "S" },
-    { name = "RegistrantPostedDateIndexSK", type = "S" },
-    { name = "ClientPostedDateIndexPK", type = "S" },
-    { name = "ClientPostedDateIndexSK", type = "S" },
-    { name = "LobbyistPostedDateIndexPK", type = "S" },
-    { name = "LobbyistPostedDateIndexSK", type = "S" },
-    { name = "AmountReportedIndexPK", type = "S" },
-    { name = "AmountReportedIndexSK", type = "N" },
-    { name = "StatePostedDateIndexPK", type = "S" },
-    { name = "StatePostedDateIndexSK", type = "S" }
+    { name = "filing_year", type = "N" },
+    { name = "dt_posted", type = "S" },
+    { name = "filing_period", type = "S" },
+    { name = "report_type", type = "S" },
+    { name = "registrant_name", type = "S" },
+    { name = "client_name", type = "S" },
+    { name = "lobbyist_name", type = "S" },
+    { name = "amount_reported", type = "N" },
+    { name = "amount_bucket", type = "N" },
+    { name = "state", type = "S" }
   ]
 
   global_secondary_indexes = [
     {
       name            = "YearPostedDateIndex"
-      hash_key        = "YearPostedDateIndexPK"
-      range_key       = "YearPostedDateIndexSK"
-      projection_type = "ALL"
+      hash_key        = "filing_year"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
       name            = "PeriodPostedDateIndex"
-      hash_key        = "PeriodPostedDateIndexPK"
-      range_key       = "PeriodPostedDateIndexSK"
-      projection_type = "ALL"
+      hash_key        = "filing_period"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
       name            = "ReportTypePostedDateIndex"
-      hash_key        = "ReportTypePostedDateIndexPK"
-      range_key       = "ReportTypePostedDateIndexSK"
-      projection_type = "ALL"
+      hash_key        = "report_type"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
       name            = "RegistrantPostedDateIndex"
-      hash_key        = "RegistrantPostedDateIndexPK"
-      range_key       = "RegistrantPostedDateIndexSK"
-      projection_type = "ALL"
+      hash_key        = "registrant_name"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
       name            = "ClientPostedDateIndex"
-      hash_key        = "ClientPostedDateIndexPK"
-      range_key       = "ClientPostedDateIndexSK"
-      projection_type = "ALL"
+      hash_key        = "client_name"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
       name            = "LobbyistPostedDateIndex"
-      hash_key        = "LobbyistPostedDateIndexPK"
-      range_key       = "LobbyistPostedDateIndexSK"
-      projection_type = "ALL"
+      hash_key        = "lobbyist_name"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
       name            = "AmountReportedIndex"
-      hash_key        = "AmountReportedIndexPK"
-      range_key       = "AmountReportedIndexSK"
-      projection_type = "ALL"
+      hash_key        = "amount_bucket"
+      range_key       = "amount_reported"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
       name            = "StatePostedDateIndex"
-      hash_key        = "StatePostedDateIndexPK"
-      range_key       = "StatePostedDateIndexSK"
-      projection_type = "ALL"
+      hash_key        = "state"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     }

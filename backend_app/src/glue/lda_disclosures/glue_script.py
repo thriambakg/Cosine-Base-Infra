@@ -198,36 +198,6 @@ def download_document(session: requests.Session, url: str, s3_key: str) -> bool:
         log_print(f"   ❌ Failed to download {url}: {str(e)[:200]}")
         return False
 
-def enrich_registrant(session: requests.Session, registrant_id: Optional[int]) -> Optional[Dict]:
-    """Fetch full registrant details from API to ensure uniform data structure"""
-    if not registrant_id:
-        return None
-    try:
-        return call_api(session, f'/registrants/{registrant_id}/')
-    except Exception as e:
-        log_print(f"   ⚠️  Could not enrich registrant {registrant_id}: {str(e)[:200]}")
-        return None
-
-def enrich_client(session: requests.Session, client_id: Optional[int]) -> Optional[Dict]:
-    """Fetch full client details from API to ensure uniform data structure"""
-    if not client_id:
-        return None
-    try:
-        return call_api(session, f'/clients/{client_id}/')
-    except Exception as e:
-        log_print(f"   ⚠️  Could not enrich client {client_id}: {str(e)[:200]}")
-        return None
-
-def enrich_lobbyist(session: requests.Session, lobbyist_id: Optional[int]) -> Optional[Dict]:
-    """Fetch full lobbyist details from API to ensure uniform data structure"""
-    if not lobbyist_id:
-        return None
-    try:
-        return call_api(session, f'/lobbyists/{lobbyist_id}/')
-    except Exception as e:
-        log_print(f"   ⚠️  Could not enrich lobbyist {lobbyist_id}: {str(e)[:200]}")
-        return None
-
 def merge_address_fields(item: Dict, registrant: Optional[Dict] = None) -> Dict:
     """
     Merge address fields from top-level and registrant into unified address structure.
@@ -344,7 +314,13 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
     # Filing period and year
     indexed['filing_period'] = filing.get('filing_period')
     indexed['filing_period_display'] = filing.get('filing_period_display')
-    indexed['filing_year'] = filing.get('filing_year')
+    # filing_year must be a number (N type) for GSI
+    filing_year = filing.get('filing_year')
+    if filing_year:
+        try:
+            indexed['filing_year'] = int(filing_year)
+        except (ValueError, TypeError):
+            indexed['filing_year'] = filing_year
     
     # Posted date
     indexed['dt_posted'] = filing.get('dt_posted')
@@ -423,7 +399,13 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
     # Filing period and year
     indexed['filing_period'] = contribution.get('filing_period')
     indexed['filing_period_display'] = contribution.get('filing_period_display')
-    indexed['filing_year'] = contribution.get('filing_year')
+    # filing_year must be a number (N type) for GSI
+    filing_year = contribution.get('filing_year')
+    if filing_year:
+        try:
+            indexed['filing_year'] = int(filing_year)
+        except (ValueError, TypeError):
+            indexed['filing_year'] = filing_year
     
     # Posted date
     indexed['dt_posted'] = contribution.get('dt_posted')
@@ -520,51 +502,36 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         item['PK'] = f"FILING#{item['filing_uuid']}"
         item['SK'] = f"FILING#{item['filing_uuid']}"
         
-        # Set GSI keys based on indexed fields (renamed for clarity)
-        # GSI1: YearPostedDateIndex
-        if indexed_fields.get('filing_year'):
-            item['YearPostedDateIndexPK'] = f"YEAR#{indexed_fields['filing_year']}"
-            item['YearPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
+        # Set GSI fields using existing fields (matching government contracts pattern)
+        # GSI fields are set directly from indexed_fields - no special GSI field names
+        # DynamoDB will automatically index these fields based on the GSI definitions
         
-        # GSI2: PeriodPostedDateIndex
-        if indexed_fields.get('filing_period'):
-            item['PeriodPostedDateIndexPK'] = f"PERIOD#{indexed_fields['filing_period']}"
-            item['PeriodPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
+        # filing_year and dt_posted are already in indexed_fields and will be in item
+        # filing_period and dt_posted are already in indexed_fields
+        # report_type and dt_posted are already in indexed_fields
+        # registrant_name and dt_posted are already in indexed_fields
+        # client_name and dt_posted - only set if client_name exists (omit if missing)
+        if not indexed_fields.get('client_name'):
+            item.pop('client_name', None)
         
-        # GSI3: ReportTypePostedDateIndex
-        if indexed_fields.get('report_type'):
-            item['ReportTypePostedDateIndexPK'] = f"TYPE#{indexed_fields['report_type']}"
-            item['ReportTypePostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
+        # lobbyist_name and dt_posted are already in indexed_fields
+        if not indexed_fields.get('lobbyist_name'):
+            item.pop('lobbyist_name', None)
         
-        # GSI4: RegistrantPostedDateIndex
-        if indexed_fields.get('registrant_name'):
-            item['RegistrantPostedDateIndexPK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
-            item['RegistrantPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
-        
-        # GSI5: ClientPostedDateIndex - only set if client_name exists (omit if missing)
-        if indexed_fields.get('client_name'):
-            item['ClientPostedDateIndexPK'] = f"CLIENT#{indexed_fields['client_name']}"
-            item['ClientPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
-        
-        # GSI6: LobbyistPostedDateIndex
-        if indexed_fields.get('lobbyist_name'):
-            item['LobbyistPostedDateIndexPK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
-            item['LobbyistPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
-        
-        # GSI7: AmountReportedIndex - only set if amount_reported exists (omit if missing)
+        # amount_bucket and amount_reported - only set if amount_reported exists
         if indexed_fields.get('amount_reported'):
-            # For numeric range queries, use a partition key format
             amount = indexed_fields['amount_reported']
-            # Round to nearest 10k for partition key
+            # Round to nearest 10k for partition key (amount_bucket)
             amount_bucket = int(float(amount) / 10000) * 10000
-            item['AmountReportedIndexPK'] = f"AMOUNT#{amount_bucket}"
-            # Keep as Decimal (Number type) for DynamoDB - don't convert to string
-            item['AmountReportedIndexSK'] = Decimal(str(amount)) if not isinstance(amount, Decimal) else amount
+            item['amount_bucket'] = Decimal(str(amount_bucket))
+            # amount_reported is already in indexed_fields
+        else:
+            item.pop('amount_reported', None)
+            item.pop('amount_bucket', None)
         
-        # GSI8: StatePostedDateIndex - only set if state exists (omit if missing)
-        if indexed_fields.get('state'):
-            item['StatePostedDateIndexPK'] = f"STATE#{indexed_fields['state']}"
-            item['StatePostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
+        # state and dt_posted - only set if state exists (omit if missing)
+        if not indexed_fields.get('state'):
+            item.pop('state', None)
         
         # Save to DynamoDB
         filings_table.put_item(Item=item)
@@ -644,49 +611,36 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         item['PK'] = f"CONTRIBUTION#{item['filing_uuid']}"
         item['SK'] = f"CONTRIBUTION#{item['filing_uuid']}"
         
-        # Set GSI keys (shared with filings, renamed for clarity)
-        # GSI1: YearPostedDateIndex
-        if indexed_fields.get('filing_year'):
-            item['YearPostedDateIndexPK'] = f"YEAR#{indexed_fields['filing_year']}"
-            item['YearPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
+        # Set GSI fields using existing fields (matching government contracts pattern)
+        # GSI fields are set directly from indexed_fields - no special GSI field names
+        # DynamoDB will automatically index these fields based on the GSI definitions
         
-        # GSI2: PeriodPostedDateIndex
-        if indexed_fields.get('filing_period'):
-            item['PeriodPostedDateIndexPK'] = f"PERIOD#{indexed_fields['filing_period']}"
-            item['PeriodPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
+        # filing_year and dt_posted are already in indexed_fields and will be in item
+        # filing_period and dt_posted are already in indexed_fields
+        # report_type and dt_posted are already in indexed_fields
+        # registrant_name and dt_posted are already in indexed_fields
+        # client_name and dt_posted - only set if client_name exists (omit if missing)
+        if not indexed_fields.get('client_name'):
+            item.pop('client_name', None)
         
-        # GSI3: ReportTypePostedDateIndex
-        if indexed_fields.get('report_type'):
-            item['ReportTypePostedDateIndexPK'] = f"TYPE#{indexed_fields['report_type']}"
-            item['ReportTypePostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
+        # lobbyist_name and dt_posted are already in indexed_fields
+        if not indexed_fields.get('lobbyist_name'):
+            item.pop('lobbyist_name', None)
         
-        # GSI4: RegistrantPostedDateIndex
-        if indexed_fields.get('registrant_name'):
-            item['RegistrantPostedDateIndexPK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
-            item['RegistrantPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
-        
-        # GSI5: ClientPostedDateIndex - check if contribution has a client field
-        client_name = indexed_fields.get('client_name')
-        if client_name:
-            item['ClientPostedDateIndexPK'] = f"CLIENT#{client_name}"
-            item['ClientPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
-        
-        # GSI6: LobbyistPostedDateIndex
-        if indexed_fields.get('lobbyist_name'):
-            item['LobbyistPostedDateIndexPK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
-            item['LobbyistPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
-        
-        # GSI7: AmountReportedIndex - contributions can have amount_reported from contribution_items
+        # amount_bucket and amount_reported - contributions can have amount_reported from contribution_items
         if indexed_fields.get('amount_reported'):
             amount = indexed_fields['amount_reported']
+            # Round to nearest 10k for partition key (amount_bucket)
             amount_bucket = int(float(amount) / 10000) * 10000
-            item['AmountReportedIndexPK'] = f"AMOUNT#{amount_bucket}"
-            item['AmountReportedIndexSK'] = Decimal(str(amount)) if not isinstance(amount, Decimal) else amount
+            item['amount_bucket'] = Decimal(str(amount_bucket))
+            # amount_reported is already in indexed_fields
+        else:
+            item.pop('amount_reported', None)
+            item.pop('amount_bucket', None)
         
-        # GSI8: StatePostedDateIndex - only set if state exists (omit if missing)
-        if indexed_fields.get('state'):
-            item['StatePostedDateIndexPK'] = f"STATE#{indexed_fields['state']}"
-            item['StatePostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
+        # state and dt_posted - only set if state exists (omit if missing)
+        if not indexed_fields.get('state'):
+            item.pop('state', None)
         
         # Save to DynamoDB (same table as filings)
         filings_table.put_item(Item=item)
@@ -739,37 +693,10 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                     continue
                 
                 try:
-                    # Fetch full details
+                    # Fetch full details (includes nested registrant, client, and lobbyist objects)
                     full_filing = call_api(session, f'/filings/{filing_uuid}/')
                     
-                    # Enrich entities with full details from dedicated endpoints for uniform data
-                    registrant = full_filing.get('registrant', {})
-                    if registrant and registrant.get('id'):
-                        enriched_registrant = enrich_registrant(session, registrant.get('id'))
-                        if enriched_registrant:
-                            full_filing['registrant'] = enriched_registrant
-                    
-                    client = full_filing.get('client', {})
-                    if client and client.get('id'):
-                        enriched_client = enrich_client(session, client.get('id'))
-                        if enriched_client:
-                            full_filing['client'] = enriched_client
-                    
-                    # For lobbyist, extract from lobbying_activities and enrich
-                    lobbying_activities = full_filing.get('lobbying_activities', [])
-                    if lobbying_activities:
-                        for activity in lobbying_activities:
-                            lobbyists = activity.get('lobbyists', [])
-                            if lobbyists:
-                                lobbyist_info = lobbyists[0]
-                                lobbyist_obj = lobbyist_info.get('lobbyist', {})
-                                if lobbyist_obj and lobbyist_obj.get('id'):
-                                    enriched_lobbyist = enrich_lobbyist(session, lobbyist_obj.get('id'))
-                                    if enriched_lobbyist:
-                                        lobbyist_info['lobbyist'] = enriched_lobbyist
-                                break  # Only enrich first lobbyist
-                    
-                    # Extract indexed fields
+                    # Extract indexed fields (uses data directly from main API response)
                     indexed_fields = extract_indexed_fields_filing(full_filing)
                     
                     # Download document if available and get S3 key
@@ -859,30 +786,10 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                     continue
                 
                 try:
-                    # Fetch full details
+                    # Fetch full details (includes nested registrant, client, and lobbyist objects)
                     full_contribution = call_api(session, f'/contributions/{filing_uuid}/')
                     
-                    # Enrich entities with full details from dedicated endpoints for uniform data
-                    registrant = full_contribution.get('registrant', {})
-                    if registrant and registrant.get('id'):
-                        enriched_registrant = enrich_registrant(session, registrant.get('id'))
-                        if enriched_registrant:
-                            full_contribution['registrant'] = enriched_registrant
-                    
-                    client = full_contribution.get('client', {})
-                    if client and client.get('id'):
-                        enriched_client = enrich_client(session, client.get('id'))
-                        if enriched_client:
-                            full_contribution['client'] = enriched_client
-                    
-                    # Enrich lobbyist (direct object in contributions)
-                    lobbyist = full_contribution.get('lobbyist', {})
-                    if lobbyist and lobbyist.get('id'):
-                        enriched_lobbyist = enrich_lobbyist(session, lobbyist.get('id'))
-                        if enriched_lobbyist:
-                            full_contribution['lobbyist'] = enriched_lobbyist
-                    
-                    # Extract indexed fields
+                    # Extract indexed fields (uses data directly from main API response)
                     indexed_fields = extract_indexed_fields_contribution(full_contribution)
                     
                     # Download document if available and get S3 key
