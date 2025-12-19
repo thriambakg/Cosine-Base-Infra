@@ -3319,10 +3319,10 @@ module "lda_disclosures_glue_job" {
 
   # Job configuration
   max_retries           = 1
-  timeout               = 2880 # 48 hours (max is 10080 minutes = 7 days)
-  concurrent_executions = 1    # Only allow 1 concurrent run
-  worker_type           = "G.1X"
-  number_of_workers     = 2
+  timeout               = 2880   # 48 hours (max is 10080 minutes = 7 days)
+  concurrent_executions = 1      # Only allow 1 concurrent run
+  worker_type           = "G.1X" # 16 GB memory per worker
+  number_of_workers     = 5      # 5 × 16 GB = 80 GB total (supports 30 parallel API calls + 25 processing workers)
 
   # S3 buckets
   s3_bucket_arn = module.glue_scripts_s3.bucket_arn
