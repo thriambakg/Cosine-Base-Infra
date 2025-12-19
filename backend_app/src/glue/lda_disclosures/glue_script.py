@@ -144,7 +144,7 @@ def get_api_key() -> str:
     try:
         response = secrets_client.get_secret_value(SecretId=LDA_SECRET_NAME)
         secret_data = json.loads(response['SecretString'])
-        return secret_data.get('api_key') or secret_data.get('API_KEY') or secret_data.get('lda_api_key')
+        return secret_data.get('api_key') or secret_data.get('API_KEY') or secret_data.get('LDA_API_KEY') or secret_data.get('lda_api_key')
     except ClientError as e:
         log_print(f"❌ Error retrieving API key from Secrets Manager: {str(e)}")
         raise
@@ -197,6 +197,36 @@ def download_document(session: requests.Session, url: str, s3_key: str) -> bool:
     except Exception as e:
         log_print(f"   ❌ Failed to download {url}: {str(e)[:200]}")
         return False
+
+def enrich_registrant(session: requests.Session, registrant_id: Optional[int]) -> Optional[Dict]:
+    """Fetch full registrant details from API to ensure uniform data structure"""
+    if not registrant_id:
+        return None
+    try:
+        return call_api(session, f'/registrants/{registrant_id}/')
+    except Exception as e:
+        log_print(f"   ⚠️  Could not enrich registrant {registrant_id}: {str(e)[:200]}")
+        return None
+
+def enrich_client(session: requests.Session, client_id: Optional[int]) -> Optional[Dict]:
+    """Fetch full client details from API to ensure uniform data structure"""
+    if not client_id:
+        return None
+    try:
+        return call_api(session, f'/clients/{client_id}/')
+    except Exception as e:
+        log_print(f"   ⚠️  Could not enrich client {client_id}: {str(e)[:200]}")
+        return None
+
+def enrich_lobbyist(session: requests.Session, lobbyist_id: Optional[int]) -> Optional[Dict]:
+    """Fetch full lobbyist details from API to ensure uniform data structure"""
+    if not lobbyist_id:
+        return None
+    try:
+        return call_api(session, f'/lobbyists/{lobbyist_id}/')
+    except Exception as e:
+        log_print(f"   ⚠️  Could not enrich lobbyist {lobbyist_id}: {str(e)[:200]}")
+        return None
 
 def extract_indexed_fields_filing(filing: Dict) -> Dict:
     """Extract indexed fields for a filing (LD-1 or LD-2)"""
@@ -258,7 +288,16 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
         except (ValueError, TypeError):
             pass
     
-    indexed['expenses'] = filing.get('expenses')
+    # Convert expenses to Decimal if present
+    expenses = filing.get('expenses')
+    if expenses is not None:
+        try:
+            indexed['expenses'] = Decimal(str(expenses))
+        except (ValueError, TypeError):
+            indexed['expenses'] = expenses  # Keep original if conversion fails
+    else:
+        indexed['expenses'] = None
+    
     indexed['expenses_method'] = filing.get('expenses_method')
     
     return indexed
@@ -276,6 +315,13 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
         indexed['registrant_id'] = registrant.get('id')
         indexed['registrant_name'] = registrant.get('name')
         indexed['registrant_house_registrant_id'] = registrant.get('house_registrant_id')
+    
+    # Client (contributions may have a client field - check for it)
+    client = contribution.get('client', {})
+    if client:
+        indexed['client_id'] = client.get('id')
+        indexed['client_name'] = client.get('name')
+        indexed['client_client_id'] = client.get('client_id')
     
     # Lobbyist
     lobbyist = contribution.get('lobbyist', {})
@@ -305,6 +351,19 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
     # Filer type
     indexed['filer_type'] = contribution.get('filer_type')
     
+    # Calculate total contribution amount from contribution_items
+    contribution_items = contribution.get('contribution_items', [])
+    total_amount = Decimal('0')
+    if contribution_items:
+        for item in contribution_items:
+            amount_str = item.get('amount')
+            if amount_str:
+                try:
+                    total_amount += Decimal(str(amount_str))
+                except (ValueError, TypeError):
+                    pass  # Skip invalid amounts
+    indexed['total_contribution_amount'] = total_amount if total_amount > 0 else None
+    
     return indexed
 
 def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional[str] = None):
@@ -313,8 +372,12 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         # Prepare item with all filing data
         item = json.loads(json.dumps(filing), parse_float=Decimal)  # Convert floats to Decimal
         
-        # Add indexed fields for GSIs
+        # Add indexed fields for GSIs (this includes amount_reported and expenses as Decimal)
         item.update(indexed_fields)
+        
+        # Ensure expenses is stored as Decimal if it exists in indexed_fields
+        if 'expenses' in indexed_fields and indexed_fields['expenses'] is not None:
+            item['expenses'] = indexed_fields['expenses']
         
         # Add S3 key if provided
         if s3_key:
@@ -347,20 +410,17 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
             item['GSI4PK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
             item['GSI4SK'] = indexed_fields.get('dt_posted', '')
         
-        # GSI5 (client_name) - only for filings
+        # GSI5 (client_name) - only set if client_name exists (omit if missing)
         if indexed_fields.get('client_name'):
             item['GSI5PK'] = f"CLIENT#{indexed_fields['client_name']}"
             item['GSI5SK'] = indexed_fields.get('dt_posted', '')
-        else:
-            # Explicitly set to null if client_name is missing
-            item['GSI5PK'] = None
-            item['GSI5SK'] = None
+        # Note: Don't set GSI5PK/GSI5SK if client_name is missing - DynamoDB doesn't allow NULL for GSI keys
         
         if indexed_fields.get('lobbyist_name'):
             item['GSI6PK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
             item['GSI6SK'] = indexed_fields.get('dt_posted', '')
         
-        # GSI7 (amount_reported) - only for filings
+        # GSI7 (amount_reported) - only set if amount_reported exists (omit if missing)
         if indexed_fields.get('amount_reported'):
             # For numeric range queries, use a partition key format
             amount = indexed_fields['amount_reported']
@@ -369,10 +429,7 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
             item['GSI7PK'] = f"AMOUNT#{amount_bucket}"
             # Keep as Decimal (Number type) for DynamoDB - don't convert to string
             item['GSI7SK'] = Decimal(str(amount)) if not isinstance(amount, Decimal) else amount
-        else:
-            # Explicitly set to null if amount_reported is missing
-            item['GSI7PK'] = None
-            item['GSI7SK'] = None
+        # Note: Don't set GSI7PK/GSI7SK if amount_reported is missing - DynamoDB doesn't allow NULL for GSI keys
         
         # Save to DynamoDB
         filings_table.put_item(Item=item)
@@ -387,18 +444,32 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         # Prepare item with all contribution data
         item = json.loads(json.dumps(contribution), parse_float=Decimal)
         
-        # Add indexed fields for GSIs
+        # Add indexed fields for GSIs (this includes total_contribution_amount as Decimal)
         item.update(indexed_fields)
+        
+        # Ensure total_contribution_amount is stored as Decimal if it exists
+        if 'total_contribution_amount' in indexed_fields:
+            if indexed_fields['total_contribution_amount'] is not None:
+                item['total_contribution_amount'] = indexed_fields['total_contribution_amount']
+            else:
+                item['total_contribution_amount'] = None
         
         # Add S3 key if provided
         if s3_key:
             item['s3_key'] = s3_key
         
         # Set null values for filing-specific fields (not applicable to contributions)
-        item['client'] = None
-        item['client_id'] = None
-        item['client_name'] = None
-        item['client_client_id'] = None
+        # Note: client fields are preserved from the original contribution if they exist
+        # The original contribution may have a full client object with more fields than just id/name
+        # Only set client fields to None if the original contribution doesn't have a client
+        original_client = contribution.get('client')
+        if not original_client:
+            # No client in original contribution, set to None
+            item['client'] = None
+            item['client_id'] = None
+            item['client_name'] = None
+            item['client_client_id'] = None
+        # If original_client exists, it's already in item from json.loads, so keep it
         item['income'] = None
         item['expenses'] = None
         item['expenses_method'] = None
@@ -428,17 +499,20 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
             item['GSI4PK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
             item['GSI4SK'] = indexed_fields.get('dt_posted', '')
         
-        # GSI5 (client_name) is not applicable to contributions - explicitly set to null
-        item['GSI5PK'] = None
-        item['GSI5SK'] = None
+        # GSI5 (client_name) - check if contribution has a client field
+        # Contributions may have a client field, so check for it
+        client_name = indexed_fields.get('client_name')
+        if client_name:
+            item['GSI5PK'] = f"CLIENT#{client_name}"
+            item['GSI5SK'] = indexed_fields.get('dt_posted', '')
+        # Note: Don't set GSI5PK/GSI5SK if client_name is missing - DynamoDB doesn't allow NULL for GSI keys
         
         if indexed_fields.get('lobbyist_name'):
             item['GSI6PK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
             item['GSI6SK'] = indexed_fields.get('dt_posted', '')
         
-        # GSI7 (amount_reported) is not applicable to contributions - explicitly set to null
-        item['GSI7PK'] = None
-        item['GSI7SK'] = None
+        # GSI7 (amount_reported) is not applicable to contributions - omit entirely
+        # Note: Don't set GSI7PK/GSI7SK for contributions - DynamoDB doesn't allow NULL for GSI keys
         
         # Save to DynamoDB (same table as filings)
         filings_table.put_item(Item=item)
@@ -493,6 +567,33 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                 try:
                     # Fetch full details
                     full_filing = call_api(session, f'/filings/{filing_uuid}/')
+                    
+                    # Enrich entities with full details from dedicated endpoints for uniform data
+                    registrant = full_filing.get('registrant', {})
+                    if registrant and registrant.get('id'):
+                        enriched_registrant = enrich_registrant(session, registrant.get('id'))
+                        if enriched_registrant:
+                            full_filing['registrant'] = enriched_registrant
+                    
+                    client = full_filing.get('client', {})
+                    if client and client.get('id'):
+                        enriched_client = enrich_client(session, client.get('id'))
+                        if enriched_client:
+                            full_filing['client'] = enriched_client
+                    
+                    # For lobbyist, extract from lobbying_activities and enrich
+                    lobbying_activities = full_filing.get('lobbying_activities', [])
+                    if lobbying_activities:
+                        for activity in lobbying_activities:
+                            lobbyists = activity.get('lobbyists', [])
+                            if lobbyists:
+                                lobbyist_info = lobbyists[0]
+                                lobbyist_obj = lobbyist_info.get('lobbyist', {})
+                                if lobbyist_obj and lobbyist_obj.get('id'):
+                                    enriched_lobbyist = enrich_lobbyist(session, lobbyist_obj.get('id'))
+                                    if enriched_lobbyist:
+                                        lobbyist_info['lobbyist'] = enriched_lobbyist
+                                break  # Only enrich first lobbyist
                     
                     # Extract indexed fields
                     indexed_fields = extract_indexed_fields_filing(full_filing)
@@ -586,6 +687,26 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                 try:
                     # Fetch full details
                     full_contribution = call_api(session, f'/contributions/{filing_uuid}/')
+                    
+                    # Enrich entities with full details from dedicated endpoints for uniform data
+                    registrant = full_contribution.get('registrant', {})
+                    if registrant and registrant.get('id'):
+                        enriched_registrant = enrich_registrant(session, registrant.get('id'))
+                        if enriched_registrant:
+                            full_contribution['registrant'] = enriched_registrant
+                    
+                    client = full_contribution.get('client', {})
+                    if client and client.get('id'):
+                        enriched_client = enrich_client(session, client.get('id'))
+                        if enriched_client:
+                            full_contribution['client'] = enriched_client
+                    
+                    # Enrich lobbyist (direct object in contributions)
+                    lobbyist = full_contribution.get('lobbyist', {})
+                    if lobbyist and lobbyist.get('id'):
+                        enriched_lobbyist = enrich_lobbyist(session, lobbyist.get('id'))
+                        if enriched_lobbyist:
+                            full_contribution['lobbyist'] = enriched_lobbyist
                     
                     # Extract indexed fields
                     indexed_fields = extract_indexed_fields_contribution(full_contribution)
