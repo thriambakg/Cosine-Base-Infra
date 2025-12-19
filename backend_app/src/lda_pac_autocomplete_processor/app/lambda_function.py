@@ -41,14 +41,14 @@ FIELD_TYPE_TO_S3_KEY = {
 
 def clean_value(value: str) -> str:
     """
-    Clean autocomplete value by removing double quotes and extra whitespace.
-    Double quotes are not indexed, so they would cause search failures.
+    Clean autocomplete value by removing double quotes, commas, and extra whitespace.
+    Double quotes and commas are not indexed and would confuse CSV structure/parsing.
     
     Args:
         value: Raw value string
     
     Returns:
-        Cleaned value with double quotes removed and stripped
+        Cleaned value with double quotes and commas removed, and stripped
     """
     if not value:
         return ''
@@ -63,7 +63,12 @@ def clean_value(value: str) -> str:
     # Remove any remaining double quotes (shouldn't happen, but be safe)
     cleaned = cleaned.replace('"', '')
     
-    # Strip again after quote removal
+    # Remove commas (would confuse CSV structure and search)
+    cleaned = cleaned.replace(',', '')
+    
+    # Normalize whitespace (multiple spaces to single space)
+    cleaned = ' '.join(cleaned.split())
+    
     return cleaned.strip()
 
 def read_existing_csv(bucket: str, key: str, field_name: str) -> Set[str]:

@@ -313,7 +313,7 @@ def create_unified_entity(client: Optional[Dict], lobbyist: Optional[Dict]) -> O
 def send_autocomplete_value(field_type: str, value: str):
     """
     Send an autocomplete value to SQS queue for CSV generation.
-    Cleans double quotes from values before sending (double quotes are not indexed).
+    Cleans double quotes and commas from values before sending (would confuse CSV structure).
     
     Args:
         field_type: One of 'pac_name', 'client_name', 'lobbyist_name', 'registrant_name'
@@ -322,7 +322,7 @@ def send_autocomplete_value(field_type: str, value: str):
     if not PAC_QUEUE_URL or not value:
         return
     
-    # Clean value: remove double quotes and strip whitespace
+    # Clean value: remove double quotes, commas, and strip whitespace
     cleaned_value = value.strip()
     
     # Remove surrounding double quotes if present
@@ -332,8 +332,11 @@ def send_autocomplete_value(field_type: str, value: str):
     # Remove any remaining double quotes (shouldn't happen, but be safe)
     cleaned_value = cleaned_value.replace('"', '')
     
-    # Strip again after quote removal
-    cleaned_value = cleaned_value.strip()
+    # Remove commas (would confuse CSV structure and search)
+    cleaned_value = cleaned_value.replace(',', '')
+    
+    # Normalize whitespace (multiple spaces to single space)
+    cleaned_value = ' '.join(cleaned_value.split())
     
     if not cleaned_value:
         return
