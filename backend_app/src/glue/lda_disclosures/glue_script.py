@@ -19,6 +19,8 @@ from typing import Dict, List, Any, Optional
 from decimal import Decimal
 from pathlib import Path
 from urllib.parse import urlparse
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -67,7 +69,8 @@ except Exception as e:
 
 # Get optional testing parameter (passed as string from Step Functions)
 # Check sys.argv directly since TESTING is optional and getResolvedOptions requires all args
-testing = False
+# TESTING now accepts a number representing the limit per filing type (LD-1, LD-2, LD-203)
+testing_limit = None
 testing_value = None
 
 # Check if --TESTING is in sys.argv
@@ -78,25 +81,33 @@ for i, arg in enumerate(sys.argv):
 
 if testing_value is not None:
     print(f"🔍 DEBUG: Found TESTING in args: '{testing_value}' (type: {type(testing_value).__name__})", flush=True)
-    # Glue job arguments are always strings, parse as string
-    if isinstance(testing_value, str):
-        testing_str = testing_value.strip().lower()
-        testing = testing_str in ['true', '1', 'yes', 't']
-    elif isinstance(testing_value, bool):
-        testing = testing_value
-    else:
-        # Convert to string first, then parse
-        testing_str = str(testing_value).strip().lower()
-        testing = testing_str in ['true', '1', 'yes', 't']
-    print(f"🔍 DEBUG: Parsed TESTING value: '{testing_value}' -> {testing}", flush=True)
+    try:
+        # Try to parse as integer (number of records per type)
+        testing_limit = int(testing_value)
+        if testing_limit < 1:
+            print(f"⚠️ TESTING value must be >= 1, ignoring: {testing_value}", flush=True)
+            testing_limit = None
+        else:
+            print(f"🔍 DEBUG: Parsed TESTING value: '{testing_value}' -> {testing_limit} records per type", flush=True)
+    except (ValueError, TypeError):
+        # If not a number, check if it's a boolean for backward compatibility
+        if isinstance(testing_value, str):
+            testing_str = testing_value.strip().lower()
+            if testing_str in ['true', '1', 'yes', 't']:
+                testing_limit = 10  # Default to 10 for backward compatibility
+                print(f"🔍 DEBUG: Parsed TESTING as boolean 'true', defaulting to {testing_limit} records per type", flush=True)
+            else:
+                print(f"⚠️ TESTING value must be a number or boolean, ignoring: {testing_value}", flush=True)
+        else:
+            print(f"⚠️ TESTING value must be a number, ignoring: {testing_value}", flush=True)
 else:
-    print(f"ℹ️ Testing parameter not provided (optional), defaulting to False", flush=True)
+    print(f"ℹ️ Testing parameter not provided (optional), processing all records", flush=True)
 
-args['TESTING'] = testing
-if testing:
-    print(f"🧪 Testing mode enabled - will limit to 10 records per type", flush=True)
+args['TESTING'] = testing_limit
+if testing_limit:
+    print(f"🧪 Testing mode enabled - will limit to {testing_limit} records per type (LD-1, LD-2, LD-203)", flush=True)
 else:
-    print(f"ℹ️ Testing mode disabled", flush=True)
+    print(f"ℹ️ Testing mode disabled - processing all records", flush=True)
 
 # Initialize Glue context
 sc = SparkContext()
@@ -141,6 +152,33 @@ if PAC_QUEUE_URL:
     log_print(f"✅ PAC Queue URL configured: {PAC_QUEUE_URL}")
 
 # ============================================================================
+# Rate Limiting
+# ============================================================================
+
+class RateLimiter:
+    """Thread-safe rate limiter for API calls"""
+    def __init__(self, calls_per_minute: int = 120):
+        self.calls_per_minute = calls_per_minute
+        self.min_interval = 60.0 / calls_per_minute  # Minimum seconds between calls
+        self.last_call_time = 0.0
+        self.lock = Lock()
+    
+    def wait(self):
+        """Wait if necessary to respect rate limit"""
+        with self.lock:
+            current_time = time.time()
+            time_since_last_call = current_time - self.last_call_time
+            
+            if time_since_last_call < self.min_interval:
+                sleep_time = self.min_interval - time_since_last_call
+                time.sleep(sleep_time)
+            
+            self.last_call_time = time.time()
+
+# Global rate limiter (120 calls per minute = 0.5 seconds between calls)
+rate_limiter = RateLimiter(calls_per_minute=120)
+
+# ============================================================================
 # Helper Functions
 # ============================================================================
 
@@ -164,10 +202,10 @@ def create_session(api_key: str) -> requests.Session:
     return session
 
 def call_api(session: requests.Session, endpoint: str, params: Optional[Dict] = None) -> Dict:
-    """Call LDA API endpoint with rate limiting"""
+    """Call LDA API endpoint with thread-safe rate limiting"""
     url = f"{LDA_API_BASE_URL}{endpoint}"
     
-    time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
+    rate_limiter.wait()  # Thread-safe rate limiting
     response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
     
     if response.status_code >= 400:
@@ -186,7 +224,7 @@ def call_api(session: requests.Session, endpoint: str, params: Optional[Dict] = 
 def download_document(session: requests.Session, url: str, s3_key: str) -> bool:
     """Download a document from URL and upload to S3"""
     try:
-        time.sleep(RATE_LIMIT_DELAY)
+        rate_limiter.wait()  # Thread-safe rate limiting
         response = session.get(url, timeout=REQUEST_TIMEOUT, stream=True)
         response.raise_for_status()
         
@@ -810,14 +848,49 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         log_print(f"❌ Error saving contribution to DynamoDB: {str(e)[:200]}")
         raise
 
-def process_all_filings(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing: bool = False):
-    """Fetch and process all filings with pagination"""
+def process_single_filing(session: requests.Session, filing: Dict) -> Optional[str]:
+    """Process a single filing (fetch details, download document, save to DynamoDB)
+    Returns the filing_type if successful, None otherwise"""
+    filing_uuid = filing.get('filing_uuid')
+    if not filing_uuid:
+        return None
+    
+    try:
+        # Fetch full details (includes nested registrant, client, and lobbyist objects)
+        full_filing = call_api(session, f'/filings/{filing_uuid}/')
+        
+        # Get filing type for tracking
+        filing_type = full_filing.get('filing_type', '')
+        
+        # Extract indexed fields (uses data directly from main API response)
+        indexed_fields = extract_indexed_fields_filing(full_filing)
+        
+        # Download document if available and get S3 key
+        s3_key = None
+        doc_url = full_filing.get('filing_document_url')
+        if doc_url:
+            content_type = full_filing.get('filing_document_content_type', 'pdf')
+            ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
+            s3_key = f"filings/{filing_type}/{filing_uuid}.{ext}"
+            if download_document(session, doc_url, s3_key):
+                log_print(f"   ✅ Downloaded document for {filing_uuid}")
+        
+        # Save to DynamoDB (with S3 key)
+        save_filing_to_dynamodb(full_filing, indexed_fields, s3_key=s3_key)
+        return filing_type
+        
+    except Exception as e:
+        log_print(f"   ❌ Error processing filing {filing_uuid}: {str(e)[:200]}")
+        return None
+
+def process_all_filings(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing_limit: Optional[int] = None):
+    """Fetch and process all filings with pagination and multithreading"""
     log_print("\n" + "="*80)
     log_print("📋 Processing Filings")
     log_print("="*80)
     
-    if testing:
-        log_print("🧪 TESTING MODE: Limiting to 10 filings")
+    if testing_limit:
+        log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} filings per type (LD-1, LD-2)")
     
     # LDA API requires at least one query parameter for pagination
     if not start_date and not end_date:
@@ -831,7 +904,9 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     
     page = 1
     total_processed = 0
-    max_records = 10 if testing else None
+    # Track counts per filing type for testing mode
+    type_counts = {'LD-1': 0, 'LD-2': 0}
+    max_workers = 5
     
     while True:
         params['page'] = page
@@ -847,70 +922,114 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                 break
             
             log_print(f"   Found {len(results)} filings on page {page} (total: {count})")
+            log_print(f"   Processing with {max_workers} workers...")
             
-            for filing in results:
-                filing_uuid = filing.get('filing_uuid')
-                if not filing_uuid:
-                    continue
+            # Filter results if in testing mode and we've reached limits for all types
+            if testing_limit:
+                filtered_results = []
+                for filing in results:
+                    filing_type = filing.get('filing_type', '')
+                    if filing_type in type_counts:
+                        if type_counts[filing_type] < testing_limit:
+                            filtered_results.append(filing)
+                    else:
+                        # Unknown type, include it
+                        filtered_results.append(filing)
                 
-                try:
-                    # Fetch full details (includes nested registrant, client, and lobbyist objects)
-                    full_filing = call_api(session, f'/filings/{filing_uuid}/')
-                    
-                    # Extract indexed fields (uses data directly from main API response)
-                    indexed_fields = extract_indexed_fields_filing(full_filing)
-                    
-                    # Download document if available and get S3 key
-                    s3_key = None
-                    doc_url = full_filing.get('filing_document_url')
-                    if doc_url:
-                        filing_type = full_filing.get('filing_type', 'unknown')
-                        content_type = full_filing.get('filing_document_content_type', 'pdf')
-                        ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
-                        s3_key = f"filings/{filing_type}/{filing_uuid}.{ext}"
-                        if download_document(session, doc_url, s3_key):
-                            log_print(f"   ✅ Downloaded document for {filing_uuid}")
-                    
-                    # Save to DynamoDB (with S3 key)
-                    save_filing_to_dynamodb(full_filing, indexed_fields, s3_key=s3_key)
-                    
-                    total_processed += 1
-                    if total_processed % 100 == 0:
-                        log_print(f"   📊 Processed {total_processed} filings...")
-                    
-                    # Stop if testing mode and reached limit
-                    if testing and total_processed >= max_records:
-                        log_print(f"🧪 Testing mode: Reached limit of {max_records} filings. Stopping.")
-                        break
-                    
-                except Exception as e:
-                    log_print(f"   ❌ Error processing filing {filing_uuid}: {str(e)[:200]}")
-                    continue
+                if not filtered_results:
+                    log_print(f"✅ Reached testing limit for all filing types. Stopping.")
+                    break
+                
+                results = filtered_results
             
-            # Stop if testing mode and reached limit
-            if testing and total_processed >= max_records:
-                log_print(f"✅ Finished processing filings (testing mode limit: {total_processed})")
-                break
+            # Process filings in parallel using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_filing = {
+                    executor.submit(process_single_filing, session, filing): filing
+                    for filing in results
+                }
+                
+                for future in as_completed(future_to_filing):
+                    filing = future_to_filing[future]
+                    try:
+                        filing_type = future.result()
+                        if filing_type:
+                            # Track filing type for testing mode
+                            if testing_limit:
+                                if filing_type in type_counts:
+                                    type_counts[filing_type] += 1
+                                    if type_counts[filing_type] >= testing_limit:
+                                        log_print(f"   ✅ Reached limit for {filing_type}: {type_counts[filing_type]} filings")
+                            
+                            total_processed += 1
+                            if total_processed % 100 == 0:
+                                log_print(f"   📊 Processed {total_processed} filings...")
+                                if testing_limit:
+                                    log_print(f"      LD-1: {type_counts.get('LD-1', 0)}/{testing_limit}, LD-2: {type_counts.get('LD-2', 0)}/{testing_limit}")
+                    except Exception as e:
+                        filing_uuid = filing.get('filing_uuid', 'unknown')
+                        log_print(f"   ❌ Exception processing filing {filing_uuid}: {str(e)[:200]}")
+            
+            # Stop if testing mode and reached limits for all types
+            if testing_limit:
+                if all(count >= testing_limit for count in type_counts.values()):
+                    log_print(f"✅ Finished processing filings (testing mode limits reached)")
+                    log_print(f"   LD-1: {type_counts.get('LD-1', 0)}/{testing_limit}, LD-2: {type_counts.get('LD-2', 0)}/{testing_limit}")
+                    break
             
             # Check if there's a next page
             if response.get('next'):
                 page += 1
             else:
                 log_print(f"✅ Finished processing all filings. Total: {total_processed}")
+                if testing_limit:
+                    log_print(f"   LD-1: {type_counts.get('LD-1', 0)}, LD-2: {type_counts.get('LD-2', 0)}")
                 break
                 
         except Exception as e:
             log_print(f"❌ Error fetching filings page {page}: {str(e)[:200]}")
             break
 
-def process_all_contributions(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing: bool = False):
-    """Fetch and process all contributions with pagination"""
+def process_single_contribution(session: requests.Session, contribution: Dict) -> bool:
+    """Process a single contribution (fetch details, download document, save to DynamoDB)"""
+    filing_uuid = contribution.get('filing_uuid')
+    if not filing_uuid:
+        return False
+    
+    try:
+        # Fetch full details (includes nested registrant, client, and lobbyist objects)
+        full_contribution = call_api(session, f'/contributions/{filing_uuid}/')
+        
+        # Extract indexed fields (uses data directly from main API response)
+        indexed_fields = extract_indexed_fields_contribution(full_contribution)
+        
+        # Download document if available and get S3 key
+        s3_key = None
+        doc_url = full_contribution.get('filing_document_url')
+        if doc_url:
+            filing_type = full_contribution.get('filing_type', 'unknown')
+            content_type = full_contribution.get('filing_document_content_type', 'pdf')
+            ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
+            s3_key = f"contributions/{filing_type}/{filing_uuid}.{ext}"
+            if download_document(session, doc_url, s3_key):
+                log_print(f"   ✅ Downloaded document for {filing_uuid}")
+        
+        # Save to DynamoDB (same table as filings, with S3 key)
+        save_contribution_to_dynamodb(full_contribution, indexed_fields, s3_key=s3_key)
+        return True
+        
+    except Exception as e:
+        log_print(f"   ❌ Error processing contribution {filing_uuid}: {str(e)[:200]}")
+        return False
+
+def process_all_contributions(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing_limit: Optional[int] = None):
+    """Fetch and process all contributions (LD-203) with pagination and multithreading"""
     log_print("\n" + "="*80)
-    log_print("📋 Processing Contributions")
+    log_print("📋 Processing Contributions (LD-203)")
     log_print("="*80)
     
-    if testing:
-        log_print("🧪 TESTING MODE: Limiting to 10 contributions")
+    if testing_limit:
+        log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} contributions (LD-203)")
     
     # LDA API requires at least one query parameter for pagination
     if not start_date and not end_date:
@@ -924,7 +1043,7 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     
     page = 1
     total_processed = 0
-    max_records = 10 if testing else None
+    max_workers = 5
     
     while True:
         params['page'] = page
@@ -940,49 +1059,44 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                 break
             
             log_print(f"   Found {len(results)} contributions on page {page} (total: {count})")
+            log_print(f"   Processing with {max_workers} workers...")
             
-            for contribution in results:
-                filing_uuid = contribution.get('filing_uuid')
-                if not filing_uuid:
-                    continue
+            # Filter results if in testing mode and we've reached the limit
+            if testing_limit and total_processed >= testing_limit:
+                log_print(f"✅ Reached testing limit for contributions (LD-203): {total_processed}/{testing_limit}")
+                break
+            
+            # Limit results if testing mode
+            if testing_limit:
+                remaining = testing_limit - total_processed
+                if remaining <= 0:
+                    break
+                results = results[:remaining]
+            
+            # Process contributions in parallel using ThreadPoolExecutor
+            with ThreadPoolExecutor(max_workers=max_workers) as executor:
+                future_to_contribution = {
+                    executor.submit(process_single_contribution, session, contribution): contribution
+                    for contribution in results
+                }
                 
-                try:
-                    # Fetch full details (includes nested registrant, client, and lobbyist objects)
-                    full_contribution = call_api(session, f'/contributions/{filing_uuid}/')
-                    
-                    # Extract indexed fields (uses data directly from main API response)
-                    indexed_fields = extract_indexed_fields_contribution(full_contribution)
-                    
-                    # Download document if available and get S3 key
-                    s3_key = None
-                    doc_url = full_contribution.get('filing_document_url')
-                    if doc_url:
-                        filing_type = full_contribution.get('filing_type', 'unknown')
-                        content_type = full_contribution.get('filing_document_content_type', 'pdf')
-                        ext = 'pdf' if 'pdf' in content_type.lower() else 'html'
-                        s3_key = f"contributions/{filing_type}/{filing_uuid}.{ext}"
-                        if download_document(session, doc_url, s3_key):
-                            log_print(f"   ✅ Downloaded document for {filing_uuid}")
-                    
-                    # Save to DynamoDB (same table as filings, with S3 key)
-                    save_contribution_to_dynamodb(full_contribution, indexed_fields, s3_key=s3_key)
-                    
-                    total_processed += 1
-                    if total_processed % 100 == 0:
-                        log_print(f"   📊 Processed {total_processed} contributions...")
-                    
-                    # Stop if testing mode and reached limit
-                    if testing and total_processed >= max_records:
-                        log_print(f"🧪 Testing mode: Reached limit of {max_records} contributions. Stopping.")
-                        break
-                    
-                except Exception as e:
-                    log_print(f"   ❌ Error processing contribution {filing_uuid}: {str(e)[:200]}")
-                    continue
+                for future in as_completed(future_to_contribution):
+                    contribution = future_to_contribution[future]
+                    try:
+                        success = future.result()
+                        if success:
+                            total_processed += 1
+                            if total_processed % 100 == 0:
+                                log_print(f"   📊 Processed {total_processed} contributions...")
+                            if testing_limit and total_processed >= testing_limit:
+                                log_print(f"   ✅ Reached limit for LD-203: {total_processed}/{testing_limit}")
+                    except Exception as e:
+                        filing_uuid = contribution.get('filing_uuid', 'unknown')
+                        log_print(f"   ❌ Exception processing contribution {filing_uuid}: {str(e)[:200]}")
             
             # Stop if testing mode and reached limit
-            if testing and total_processed >= max_records:
-                log_print(f"✅ Finished processing contributions (testing mode limit: {total_processed})")
+            if testing_limit and total_processed >= testing_limit:
+                log_print(f"✅ Finished processing contributions (testing mode limit: {total_processed}/{testing_limit})")
                 break
             
             # Check if there's a next page
@@ -1030,14 +1144,14 @@ def main():
     elif end_date:
         log_print(f"📅 End date: {end_date} (no start date - will fetch all records up to end date)")
     
-    # Get testing mode
-    testing = args.get('TESTING', False)
+    # Get testing limit (number of records per type, or None for all records)
+    testing_limit = args.get('TESTING')
     
-    # Process filings
-    process_all_filings(session, start_date, end_date, testing=testing)
+    # Process filings (LD-1 and LD-2)
+    process_all_filings(session, start_date, end_date, testing_limit=testing_limit)
     
-    # Process contributions
-    process_all_contributions(session, start_date, end_date, testing=testing)
+    # Process contributions (LD-203)
+    process_all_contributions(session, start_date, end_date, testing_limit=testing_limit)
     
     log_print("\n" + "="*80)
     log_print("✅ LDA Disclosures Indexing Job Completed Successfully")
