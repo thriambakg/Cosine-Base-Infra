@@ -788,6 +788,7 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         item['pac'] = indexed_fields['pac']
         
         # Send PAC names to SQS for autocomplete (if queue URL is configured)
+        # Note: send_autocomplete_value() will clean double quotes from PAC names
         if PAC_QUEUE_URL and pacs:
             log_print(f"📤 Found {len(pacs)} PAC(s) in contribution, sending to SQS...")
             for pac in pacs:
@@ -800,6 +801,7 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                     pac_name = str(pac)
                 
                 if pac_name:
+                    # send_autocomplete_value() will clean double quotes before sending to SQS
                     send_autocomplete_value('pac_name', pac_name)
                 else:
                     log_print(f"⚠️ PAC object missing 'name' field: {pac}")
