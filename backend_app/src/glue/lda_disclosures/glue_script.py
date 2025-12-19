@@ -228,6 +228,75 @@ def enrich_lobbyist(session: requests.Session, lobbyist_id: Optional[int]) -> Op
         log_print(f"   ⚠️  Could not enrich lobbyist {lobbyist_id}: {str(e)[:200]}")
         return None
 
+def merge_address_fields(item: Dict, registrant: Optional[Dict] = None) -> Dict:
+    """
+    Merge address fields from top-level and registrant into unified address structure.
+    Priority: top-level address fields > registrant address fields > registrant object address fields
+    """
+    unified_address = {}
+    
+    # Check top-level address fields first
+    if item.get('address_1'):
+        unified_address['address_1'] = item.get('address_1')
+    if item.get('address_2'):
+        unified_address['address_2'] = item.get('address_2')
+    if item.get('city'):
+        unified_address['city'] = item.get('city')
+    if item.get('state'):
+        unified_address['state'] = item.get('state')
+    if item.get('zip'):
+        unified_address['zip'] = item.get('zip')
+    if item.get('country'):
+        unified_address['country'] = item.get('country')
+    
+    # Fall back to registrant-specific address fields if top-level is missing
+    if not unified_address.get('address_1') and item.get('registrant_address_1'):
+        unified_address['address_1'] = item.get('registrant_address_1')
+    if not unified_address.get('address_2') and item.get('registrant_address_2'):
+        unified_address['address_2'] = item.get('registrant_address_2')
+    if not unified_address.get('city') and item.get('registrant_city'):
+        unified_address['city'] = item.get('registrant_city')
+    if not unified_address.get('state') and item.get('registrant_state'):
+        unified_address['state'] = item.get('registrant_state')
+    if not unified_address.get('zip') and item.get('registrant_zip'):
+        unified_address['zip'] = item.get('registrant_zip')
+    if not unified_address.get('country') and item.get('registrant_country'):
+        unified_address['country'] = item.get('registrant_country')
+    
+    # Finally, fall back to registrant object address fields if still missing
+    if registrant:
+        if not unified_address.get('address_1') and registrant.get('address_1'):
+            unified_address['address_1'] = registrant.get('address_1')
+        if not unified_address.get('address_2') and registrant.get('address_2'):
+            unified_address['address_2'] = registrant.get('address_2')
+        if not unified_address.get('city') and registrant.get('city'):
+            unified_address['city'] = registrant.get('city')
+        if not unified_address.get('state') and registrant.get('state'):
+            unified_address['state'] = registrant.get('state')
+        if not unified_address.get('zip') and registrant.get('zip'):
+            unified_address['zip'] = registrant.get('zip')
+        if not unified_address.get('country') and registrant.get('country'):
+            unified_address['country'] = registrant.get('country')
+    
+    return unified_address if unified_address else None
+
+def create_unified_entity(client: Optional[Dict], lobbyist: Optional[Dict]) -> Optional[Dict]:
+    """
+    Create a unified entity field from either client or lobbyist (mutually exclusive).
+    Returns a dict with 'entity_type' ('client' or 'lobbyist') and 'entity' (the object).
+    """
+    if client:
+        return {
+            'entity_type': 'client',
+            'entity': client
+        }
+    elif lobbyist:
+        return {
+            'entity_type': 'lobbyist',
+            'entity': lobbyist
+        }
+    return None
+
 def extract_indexed_fields_filing(filing: Dict) -> Dict:
     """Extract indexed fields for a filing (LD-1 or LD-2)"""
     indexed = {}
@@ -300,6 +369,17 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
     
     indexed['expenses_method'] = filing.get('expenses_method')
     
+    # Extract state from address or registrant
+    state = None
+    if filing.get('address'):
+        state = filing['address'].get('state')
+    if not state and registrant:
+        if registrant.get('address'):
+            state = registrant['address'].get('state')
+        if not state:
+            state = registrant.get('state')
+    indexed['state'] = state
+    
     return indexed
 
 def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
@@ -352,6 +432,7 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
     indexed['filer_type'] = contribution.get('filer_type')
     
     # Calculate total contribution amount from contribution_items
+    # Also use this as amount_reported for contributions
     contribution_items = contribution.get('contribution_items', [])
     total_amount = Decimal('0')
     if contribution_items:
@@ -363,6 +444,19 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
                 except (ValueError, TypeError):
                     pass  # Skip invalid amounts
     indexed['total_contribution_amount'] = total_amount if total_amount > 0 else None
+    # For contributions, amount_reported comes from contribution_items
+    indexed['amount_reported'] = total_amount if total_amount > 0 else None
+    
+    # Extract state from address or registrant
+    state = None
+    if contribution.get('address'):
+        state = contribution['address'].get('state')
+    if not state and registrant:
+        if registrant.get('address'):
+            state = registrant['address'].get('state')
+        if not state:
+            state = registrant.get('state')
+    indexed['state'] = state
     
     return indexed
 
@@ -383,53 +477,94 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         if s3_key:
             item['s3_key'] = s3_key
         
+        # Merge address fields into unified structure
+        registrant = item.get('registrant')
+        unified_address = merge_address_fields(item, registrant)
+        if unified_address:
+            item['address'] = unified_address
+        
+        # Remove redundant address fields - clean up top-level address fields
+        item.pop('address_1', None)
+        item.pop('address_2', None)
+        item.pop('zip', None)
+        item.pop('registrant_address_1', None)
+        item.pop('registrant_address_2', None)
+        item.pop('registrant_city', None)
+        item.pop('registrant_state', None)
+        item.pop('registrant_zip', None)
+        item.pop('registrant_country', None)
+        
+        # Create unified entity field (client takes priority over lobbyist for filings)
+        client = item.get('client')
+        # Extract first lobbyist from lobbying_activities if present
+        lobbyist = None
+        lobbying_activities = item.get('lobbying_activities', [])
+        if lobbying_activities:
+            for activity in lobbying_activities:
+                lobbyists = activity.get('lobbyists', [])
+                if lobbyists:
+                    lobbyist = lobbyists[0].get('lobbyist', {})
+                    break
+        unified_entity = create_unified_entity(client, lobbyist)
+        if unified_entity:
+            item['entity'] = unified_entity
+        
         # Set null values for contribution-specific fields (not applicable to filings)
         item['filer_type'] = None
         item['filer_type_display'] = None
         item['contribution_items'] = None
         item['no_contributions'] = None
+        item['pac'] = None
         
         # Set primary key
         item['PK'] = f"FILING#{item['filing_uuid']}"
         item['SK'] = f"FILING#{item['filing_uuid']}"
         
-        # Set GSI keys based on indexed fields
+        # Set GSI keys based on indexed fields (renamed for clarity)
+        # GSI1: YearPostedDateIndex
         if indexed_fields.get('filing_year'):
-            item['GSI1PK'] = f"YEAR#{indexed_fields['filing_year']}"
-            item['GSI1SK'] = indexed_fields.get('dt_posted', '')
+            item['YearPostedDateIndexPK'] = f"YEAR#{indexed_fields['filing_year']}"
+            item['YearPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI2: PeriodPostedDateIndex
         if indexed_fields.get('filing_period'):
-            item['GSI2PK'] = f"PERIOD#{indexed_fields['filing_period']}"
-            item['GSI2SK'] = indexed_fields.get('dt_posted', '')
+            item['PeriodPostedDateIndexPK'] = f"PERIOD#{indexed_fields['filing_period']}"
+            item['PeriodPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI3: ReportTypePostedDateIndex
         if indexed_fields.get('report_type'):
-            item['GSI3PK'] = f"TYPE#{indexed_fields['report_type']}"
-            item['GSI3SK'] = indexed_fields.get('dt_posted', '')
+            item['ReportTypePostedDateIndexPK'] = f"TYPE#{indexed_fields['report_type']}"
+            item['ReportTypePostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI4: RegistrantPostedDateIndex
         if indexed_fields.get('registrant_name'):
-            item['GSI4PK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
-            item['GSI4SK'] = indexed_fields.get('dt_posted', '')
+            item['RegistrantPostedDateIndexPK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
+            item['RegistrantPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
-        # GSI5 (client_name) - only set if client_name exists (omit if missing)
+        # GSI5: ClientPostedDateIndex - only set if client_name exists (omit if missing)
         if indexed_fields.get('client_name'):
-            item['GSI5PK'] = f"CLIENT#{indexed_fields['client_name']}"
-            item['GSI5SK'] = indexed_fields.get('dt_posted', '')
-        # Note: Don't set GSI5PK/GSI5SK if client_name is missing - DynamoDB doesn't allow NULL for GSI keys
+            item['ClientPostedDateIndexPK'] = f"CLIENT#{indexed_fields['client_name']}"
+            item['ClientPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI6: LobbyistPostedDateIndex
         if indexed_fields.get('lobbyist_name'):
-            item['GSI6PK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
-            item['GSI6SK'] = indexed_fields.get('dt_posted', '')
+            item['LobbyistPostedDateIndexPK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
+            item['LobbyistPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
-        # GSI7 (amount_reported) - only set if amount_reported exists (omit if missing)
+        # GSI7: AmountReportedIndex - only set if amount_reported exists (omit if missing)
         if indexed_fields.get('amount_reported'):
             # For numeric range queries, use a partition key format
             amount = indexed_fields['amount_reported']
             # Round to nearest 10k for partition key
             amount_bucket = int(float(amount) / 10000) * 10000
-            item['GSI7PK'] = f"AMOUNT#{amount_bucket}"
+            item['AmountReportedIndexPK'] = f"AMOUNT#{amount_bucket}"
             # Keep as Decimal (Number type) for DynamoDB - don't convert to string
-            item['GSI7SK'] = Decimal(str(amount)) if not isinstance(amount, Decimal) else amount
-        # Note: Don't set GSI7PK/GSI7SK if amount_reported is missing - DynamoDB doesn't allow NULL for GSI keys
+            item['AmountReportedIndexSK'] = Decimal(str(amount)) if not isinstance(amount, Decimal) else amount
+        
+        # GSI8: StatePostedDateIndex - only set if state exists (omit if missing)
+        if indexed_fields.get('state'):
+            item['StatePostedDateIndexPK'] = f"STATE#{indexed_fields['state']}"
+            item['StatePostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
         # Save to DynamoDB
         filings_table.put_item(Item=item)
@@ -458,10 +593,37 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         if s3_key:
             item['s3_key'] = s3_key
         
+        # Merge address fields into unified structure
+        registrant = item.get('registrant')
+        unified_address = merge_address_fields(item, registrant)
+        if unified_address:
+            item['address'] = unified_address
+        
+        # Remove redundant address fields - clean up top-level address fields
+        item.pop('address_1', None)
+        item.pop('address_2', None)
+        item.pop('zip', None)
+        item.pop('registrant_address_1', None)
+        item.pop('registrant_address_2', None)
+        item.pop('registrant_city', None)
+        item.pop('registrant_state', None)
+        item.pop('registrant_zip', None)
+        item.pop('registrant_country', None)
+        
+        # Create unified entity field (client or lobbyist - mutually exclusive for contributions)
+        client = item.get('client')
+        lobbyist = item.get('lobbyist')
+        unified_entity = create_unified_entity(client, lobbyist)
+        if unified_entity:
+            item['entity'] = unified_entity
+        
+        # Check for PACs (Political Action Committees)
+        pacs = contribution.get('pacs', [])
+        item['pac'] = bool(pacs and len(pacs) > 0)
+        
         # Set null values for filing-specific fields (not applicable to contributions)
-        # Note: client fields are preserved from the original contribution if they exist
-        # The original contribution may have a full client object with more fields than just id/name
-        # Only set client fields to None if the original contribution doesn't have a client
+        # Note: client and lobbyist fields are preserved from the original contribution if they exist
+        # The unified 'entity' field is the primary way to access this data
         original_client = contribution.get('client')
         if not original_client:
             # No client in original contribution, set to None
@@ -475,44 +637,56 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         item['expenses_method'] = None
         item['expenses_method_display'] = None
         item['lobbying_activities'] = None
-        item['amount_reported'] = None
         item['termination_date'] = None
+        # amount_reported is now set from contribution_items in extract_indexed_fields_contribution
         
         # Set primary key
         item['PK'] = f"CONTRIBUTION#{item['filing_uuid']}"
         item['SK'] = f"CONTRIBUTION#{item['filing_uuid']}"
         
-        # Set GSI keys (shared with filings)
+        # Set GSI keys (shared with filings, renamed for clarity)
+        # GSI1: YearPostedDateIndex
         if indexed_fields.get('filing_year'):
-            item['GSI1PK'] = f"YEAR#{indexed_fields['filing_year']}"
-            item['GSI1SK'] = indexed_fields.get('dt_posted', '')
+            item['YearPostedDateIndexPK'] = f"YEAR#{indexed_fields['filing_year']}"
+            item['YearPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI2: PeriodPostedDateIndex
         if indexed_fields.get('filing_period'):
-            item['GSI2PK'] = f"PERIOD#{indexed_fields['filing_period']}"
-            item['GSI2SK'] = indexed_fields.get('dt_posted', '')
+            item['PeriodPostedDateIndexPK'] = f"PERIOD#{indexed_fields['filing_period']}"
+            item['PeriodPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI3: ReportTypePostedDateIndex
         if indexed_fields.get('report_type'):
-            item['GSI3PK'] = f"TYPE#{indexed_fields['report_type']}"
-            item['GSI3SK'] = indexed_fields.get('dt_posted', '')
+            item['ReportTypePostedDateIndexPK'] = f"TYPE#{indexed_fields['report_type']}"
+            item['ReportTypePostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI4: RegistrantPostedDateIndex
         if indexed_fields.get('registrant_name'):
-            item['GSI4PK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
-            item['GSI4SK'] = indexed_fields.get('dt_posted', '')
+            item['RegistrantPostedDateIndexPK'] = f"REGISTRANT#{indexed_fields['registrant_name']}"
+            item['RegistrantPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
-        # GSI5 (client_name) - check if contribution has a client field
-        # Contributions may have a client field, so check for it
+        # GSI5: ClientPostedDateIndex - check if contribution has a client field
         client_name = indexed_fields.get('client_name')
         if client_name:
-            item['GSI5PK'] = f"CLIENT#{client_name}"
-            item['GSI5SK'] = indexed_fields.get('dt_posted', '')
-        # Note: Don't set GSI5PK/GSI5SK if client_name is missing - DynamoDB doesn't allow NULL for GSI keys
+            item['ClientPostedDateIndexPK'] = f"CLIENT#{client_name}"
+            item['ClientPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
+        # GSI6: LobbyistPostedDateIndex
         if indexed_fields.get('lobbyist_name'):
-            item['GSI6PK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
-            item['GSI6SK'] = indexed_fields.get('dt_posted', '')
+            item['LobbyistPostedDateIndexPK'] = f"LOBBYIST#{indexed_fields['lobbyist_name']}"
+            item['LobbyistPostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
-        # GSI7 (amount_reported) is not applicable to contributions - omit entirely
-        # Note: Don't set GSI7PK/GSI7SK for contributions - DynamoDB doesn't allow NULL for GSI keys
+        # GSI7: AmountReportedIndex - contributions can have amount_reported from contribution_items
+        if indexed_fields.get('amount_reported'):
+            amount = indexed_fields['amount_reported']
+            amount_bucket = int(float(amount) / 10000) * 10000
+            item['AmountReportedIndexPK'] = f"AMOUNT#{amount_bucket}"
+            item['AmountReportedIndexSK'] = Decimal(str(amount)) if not isinstance(amount, Decimal) else amount
+        
+        # GSI8: StatePostedDateIndex - only set if state exists (omit if missing)
+        if indexed_fields.get('state'):
+            item['StatePostedDateIndexPK'] = f"STATE#{indexed_fields['state']}"
+            item['StatePostedDateIndexSK'] = indexed_fields.get('dt_posted', '')
         
         # Save to DynamoDB (same table as filings)
         filings_table.put_item(Item=item)
