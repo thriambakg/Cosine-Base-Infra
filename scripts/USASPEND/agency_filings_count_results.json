@@ -1,0 +1,55 @@
+{
+  "date_range": {
+    "start_date": "2024-12-20",
+    "end_date": "2025-12-20",
+    "days": 365
+  },
+  "agencies": [
+    "Department of Defense",
+    "Department of War"
+  ],
+  "results": [
+    {
+      "agency": "Department of Defense",
+      "awards": {
+        "agency_name": "Department of Defense",
+        "total_count": 3128048,
+        "date_range": {
+          "start_date": "2024-12-20",
+          "end_date": "2025-12-20"
+        }
+      },
+      "transactions": {
+        "agency_name": "Department of Defense",
+        "total_count": 3408916,
+        "date_range": {
+          "start_date": "2024-12-20",
+          "end_date": "2025-12-20"
+        }
+      }
+    },
+    {
+      "agency": "Department of War",
+      "awards": {
+        "agency_name": "Department of War",
+        "total_count": 0,
+        "date_range": {
+          "start_date": "2024-12-20",
+          "end_date": "2025-12-20"
+        }
+      },
+      "transactions": {
+        "agency_name": "Department of War",
+        "total_count": 0,
+        "date_range": {
+          "start_date": "2024-12-20",
+          "end_date": "2025-12-20"
+        }
+      }
+    }
+  ],
+  "totals": {
+    "total_awards": 3128048,
+    "total_transactions": 3408916
+  }
+}
