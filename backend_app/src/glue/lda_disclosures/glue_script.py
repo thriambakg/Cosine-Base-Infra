@@ -194,27 +194,47 @@ if PAC_QUEUE_URL:
 # ============================================================================
 
 class RateLimiter:
-    """Thread-safe rate limiter for API calls"""
-    def __init__(self, calls_per_minute: int = 120):
+    """
+    Thread-safe rate limiter for API calls with token bucket algorithm.
+    Allows bursts for parallel calls while maintaining overall rate limit.
+    """
+    def __init__(self, calls_per_minute: int = 120, burst_size: int = 25):
         self.calls_per_minute = calls_per_minute
         self.min_interval = 60.0 / calls_per_minute  # Minimum seconds between calls
-        self.last_call_time = 0.0
+        self.burst_size = burst_size  # Allow bursts up to this many calls
+        self.tokens = burst_size  # Start with full bucket
+        self.last_refill_time = time.time()
         self.lock = Lock()
+        # Refill rate: tokens per second
+        self.refill_rate = calls_per_minute / 60.0
     
     def wait(self):
-        """Wait if necessary to respect rate limit"""
+        """Wait if necessary to respect rate limit, allowing bursts for parallel calls"""
         with self.lock:
             current_time = time.time()
-            time_since_last_call = current_time - self.last_call_time
             
-            if time_since_last_call < self.min_interval:
-                sleep_time = self.min_interval - time_since_last_call
-                time.sleep(sleep_time)
+            # Refill tokens based on time elapsed
+            time_elapsed = current_time - self.last_refill_time
+            tokens_to_add = time_elapsed * self.refill_rate
+            self.tokens = min(self.burst_size, self.tokens + tokens_to_add)
+            self.last_refill_time = current_time
             
-            self.last_call_time = time.time()
+            # If we have tokens, use one immediately (allows parallel bursts)
+            # This allows all 25 parallel API calls to proceed without waiting
+            if self.tokens >= 1.0:
+                self.tokens -= 1.0
+                return  # No wait needed - proceed immediately
+            
+            # No tokens available, wait for next token
+            # This should rarely happen with burst_size=25 and only 25 parallel workers
+            wait_time = (1.0 - self.tokens) / self.refill_rate
+            if wait_time > 0:
+                time.sleep(wait_time)
+                self.tokens = 0.0
+                self.last_refill_time = time.time()
 
-# Global rate limiter (120 calls per minute = 0.5 seconds between calls)
-rate_limiter = RateLimiter(calls_per_minute=120)
+# Global rate limiter (120 calls per minute, allows bursts of 25 for parallel page fetching)
+rate_limiter = RateLimiter(calls_per_minute=120, burst_size=25)
 
 # ============================================================================
 # Helper Functions
@@ -1038,6 +1058,7 @@ def fetch_filings_page(session: requests.Session, base_params: Dict, page: int) 
     try:
         page_params = base_params.copy()
         page_params['page'] = page
+        # Use call_api which includes rate limiting
         response = call_api(session, '/filings/', params=page_params)
         return response
     except Exception as e:
@@ -1152,27 +1173,34 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
         
         # Process this batch: 25 pages fetched in parallel, each page processed with 25 workers
         # Total concurrent processing: 25 pages × 25 workers = 625 workers
+        batch_start_time = time.time()
         with ThreadPoolExecutor(max_workers=max_api_workers * max_processing_workers) as processing_executor:
             # Track futures for both API calls and processing
             page_processing_futures = []
             batch_total_processed = 0
             
             # Step 1: Fetch 25 pages in parallel
+            log_print(f"   🚀 Submitting {len(pages_to_process)} page fetch requests in parallel...")
+            api_start_time = time.time()
             with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
-                # Submit all page fetch requests
+                # Submit all page fetch requests immediately (all 25 at once)
                 future_to_page = {
                     api_executor.submit(fetch_filings_page, session, base_params, page): page
                     for page in pages_to_process
                 }
+                log_print(f"   ✅ All {len(future_to_page)} API requests submitted, waiting for responses...")
                 
                 # Step 2: As each page is fetched, immediately start processing it with 25 workers
+                pages_received = 0
                 for future in as_completed(future_to_page):
                     page_num = future_to_page[future]
+                    pages_received += 1
                     try:
                         response = future.result()
                         if response:
                             page_results = response.get('results', [])
                             if page_results:
+                                log_print(f"   📥 Received page {page_num} ({pages_received}/{len(pages_to_process)} pages) with {len(page_results)} items, submitting to processing pool...")
                                 # Check testing limit before processing
                                 if testing_limit:
                                     remaining = testing_limit - total_processed
@@ -1210,8 +1238,13 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                 except Exception as e:
                     filing_uuid = filing.get('filing_uuid', 'unknown')
                     log_print(f"   ❌ Exception processing filing {filing_uuid} from page {page_num}: {str(e)[:200]}")
+            
+            processing_end_time = time.time()
+            processing_duration = processing_end_time - processing_start_time
+            batch_duration = processing_end_time - batch_start_time
+            log_print(f"   ✅ All {len(page_processing_futures)} items processed in {processing_duration:.2f}s")
         
-        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} filings from pages {batch_start_page}-{batch_end_page} (Total: {total_processed})")
+        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} filings from pages {batch_start_page}-{batch_end_page} in {batch_duration:.2f}s (Total: {total_processed})")
         
         # Clear memory after each batch to free up resources
         # This helps prevent memory accumulation across batches
@@ -1380,27 +1413,34 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
         
         # Process this batch: 25 pages fetched in parallel, each page processed with 25 workers
         # Total concurrent processing: 25 pages × 25 workers = 625 workers
+        batch_start_time = time.time()
         with ThreadPoolExecutor(max_workers=max_api_workers * max_processing_workers) as processing_executor:
             # Track futures for both API calls and processing
             page_processing_futures = []
             batch_total_processed = 0
             
             # Step 1: Fetch 25 pages in parallel
+            log_print(f"   🚀 Submitting {len(pages_to_process)} page fetch requests in parallel...")
+            api_start_time = time.time()
             with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
-                # Submit all page fetch requests
+                # Submit all page fetch requests immediately (all 25 at once)
                 future_to_page = {
                     api_executor.submit(fetch_contributions_page, session, base_params, page): page
                     for page in pages_to_process
                 }
+                log_print(f"   ✅ All {len(future_to_page)} API requests submitted, waiting for responses...")
                 
                 # Step 2: As each page is fetched, immediately start processing it with 25 workers
+                pages_received = 0
                 for future in as_completed(future_to_page):
                     page_num = future_to_page[future]
+                    pages_received += 1
                     try:
                         response = future.result()
                         if response:
                             page_results = response.get('results', [])
                             if page_results:
+                                log_print(f"   📥 Received page {page_num} ({pages_received}/{len(pages_to_process)} pages) with {len(page_results)} items, submitting to processing pool...")
                                 # Check testing limit before processing
                                 if testing_limit:
                                     remaining = testing_limit - total_processed
@@ -1429,7 +1469,13 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                     except Exception as e:
                         log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
             
+            api_end_time = time.time()
+            api_duration = api_end_time - api_start_time
+            log_print(f"   ✅ All {len(pages_to_process)} pages fetched in {api_duration:.2f}s (avg {api_duration/len(pages_to_process):.2f}s per page)")
+            log_print(f"   🔄 Processing {len(page_processing_futures)} items with {max_api_workers * max_processing_workers} workers...")
+            
             # Step 3: Wait for all processing to complete for this batch (all 25 pages × 25 items)
+            processing_start_time = time.time()
             for processing_future, contribution, page_num in page_processing_futures:
                 try:
                     success = processing_future.result()
@@ -1438,8 +1484,13 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                 except Exception as e:
                     contribution_uuid = contribution.get('filing_uuid', 'unknown')
                     log_print(f"   ❌ Exception processing contribution {contribution_uuid} from page {page_num}: {str(e)[:200]}")
+            
+            processing_end_time = time.time()
+            processing_duration = processing_end_time - processing_start_time
+            batch_duration = processing_end_time - batch_start_time
+            log_print(f"   ✅ All {len(page_processing_futures)} items processed in {processing_duration:.2f}s")
         
-        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} contributions from pages {batch_start_page}-{batch_end_page} (Total: {total_processed})")
+        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} contributions from pages {batch_start_page}-{batch_end_page} in {batch_duration:.2f}s (Total: {total_processed})")
         
         # Clear memory after each batch to free up resources
         # This helps prevent memory accumulation across batches
