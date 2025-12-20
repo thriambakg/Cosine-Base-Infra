@@ -19,7 +19,14 @@ BATCH_QUEUE_URL = os.environ.get('BATCH_QUEUE_URL')  # SQS standard queue for ba
 
 # AWS clients
 secrets_client = boto3.client('secretsmanager')
-sqs_client = boto3.client('sqs')
+
+# Configure SQS client with larger connection pool to avoid warnings
+# Default pool size is 10, increase to 25 to match our parallelism
+from botocore.config import Config
+sqs_config = Config(
+    max_pool_connections=25  # Match our max_workers to avoid connection pool warnings
+)
+sqs_client = boto3.client('sqs', config=sqs_config)
 
 def get_api_key() -> str:
     """Retrieve LDA API key from Secrets Manager"""
