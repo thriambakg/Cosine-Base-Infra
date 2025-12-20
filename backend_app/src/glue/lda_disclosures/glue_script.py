@@ -60,8 +60,11 @@ print(f"🔍 DEBUG: sys.argv = {sys.argv}", flush=True)
 for i, arg in enumerate(sys.argv):
     if arg == '--START_DATE' and i + 1 < len(sys.argv):
         start_date_value = sys.argv[i + 1]
-        if start_date_value and start_date_value.strip() and start_date_value.strip().lower() != 'null':
-            start_date = start_date_value.strip()
+        # Handle null values from Step Functions (can be string "null" or JSONPath if not resolved)
+        if start_date_value and start_date_value.strip() and start_date_value.strip().lower() not in ['null', '$.start_date', 'none', '']:
+            # Also check if it's a JSONPath that wasn't resolved (starts with $.)
+            if not start_date_value.strip().startswith('$.'):
+                start_date = start_date_value.strip()
         print(f"🔍 DEBUG: Found --START_DATE in sys.argv at index {i}, raw_value='{start_date_value}', parsed='{start_date}'", flush=True)
         break
 
@@ -69,8 +72,11 @@ for i, arg in enumerate(sys.argv):
 for i, arg in enumerate(sys.argv):
     if arg == '--END_DATE' and i + 1 < len(sys.argv):
         end_date_value = sys.argv[i + 1]
-        if end_date_value and end_date_value.strip() and end_date_value.strip().lower() != 'null':
-            end_date = end_date_value.strip()
+        # Handle null values from Step Functions (can be string "null" or JSONPath if not resolved)
+        if end_date_value and end_date_value.strip() and end_date_value.strip().lower() not in ['null', '$.end_date', 'none', '']:
+            # Also check if it's a JSONPath that wasn't resolved (starts with $.)
+            if not end_date_value.strip().startswith('$.'):
+                end_date = end_date_value.strip()
         print(f"🔍 DEBUG: Found --END_DATE in sys.argv at index {i}, raw_value='{end_date_value}', parsed='{end_date}'", flush=True)
         break
 
