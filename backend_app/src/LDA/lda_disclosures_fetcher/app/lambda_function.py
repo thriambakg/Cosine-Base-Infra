@@ -105,8 +105,8 @@ def send_page_to_queue(page: int, endpoint: str, start_date: Optional[str], end_
         print(f"   ❌ Error sending page {page} to queue: {str(e)}")
         return False
 
-def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int], max_workers: int = 25):
-    """Send multiple pages to SQS queue in parallel"""
+def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int], max_workers: int = 10):
+    """Send multiple pages to SQS queue in parallel (reduced to 10 to avoid connection pool issues)"""
     if not pages:
         return 0
     
