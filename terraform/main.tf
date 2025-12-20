@@ -2365,14 +2365,13 @@ resource "aws_iam_role_policy" "usaspending_bulk_indexing_scheduler_policy" {
   })
 }
 
-# EventBridge Scheduler for Daily USAspending Bulk Indexing (4:00 AM EST)
-# Runs daily 2 hours after USAspending nightly update completes (assumed ~2 AM EST)
-# Processes previous day's contract updates
-# Note: EST is UTC-5, EDT is UTC-4. Using 9:00 UTC covers both (9 AM UTC = 4 AM EST / 5 AM EDT)
+# EventBridge Scheduler for Daily USAspending Bulk Indexing (9:00 AM EST)
+# Runs daily at 9:00 AM EST to process previous day's contract updates
+# Note: EST is UTC-5, EDT is UTC-4. Using 14:00 UTC = 9:00 AM EST (standard time) or 10:00 AM EDT (daylight time)
 resource "aws_cloudwatch_event_rule" "usaspending_bulk_indexing_scheduler" {
   name                = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
-  description         = "Trigger daily bulk indexing of USAspending contracts at 4:00 AM EST (9:00 UTC) - 2 hours after nightly update, processes previous day's contract updates"
-  schedule_expression = "cron(0 9 * * ? *)" # 9:00 AM UTC = 4:00 AM EST (standard time) or 5:00 AM EDT (daylight time)
+  description         = "Trigger daily bulk indexing of USAspending contracts at 9:00 AM EST (14:00 UTC) - processes previous day's contract updates"
+  schedule_expression = "cron(0 14 * * ? *)" # 14:00 UTC = 9:00 AM EST (standard time) or 10:00 AM EDT (daylight time)
   state               = "ENABLED"
 
   tags = merge(var.common_tags, {
