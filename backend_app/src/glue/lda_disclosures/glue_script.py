@@ -13,6 +13,7 @@ import sys
 import json
 import logging
 import time
+import gc  # Garbage collection for memory cleanup
 import requests
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional
@@ -1085,13 +1086,14 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
         # Fetch multiple pages in parallel, and process each page's results immediately as it's fetched
         pages_to_process = list(range(batch_start_page, batch_end_page + 1))
         
-        # Use a shared processing executor for all pages in this batch
-        # This allows up to 25 pages * 25 workers = 625 concurrent processing tasks
+        # Process this batch: 25 pages fetched in parallel, each page processed with 25 workers
+        # Total concurrent processing: 25 pages × 25 workers = 625 workers
         with ThreadPoolExecutor(max_workers=max_api_workers * max_processing_workers) as processing_executor:
             # Track futures for both API calls and processing
             page_processing_futures = []
             batch_total_processed = 0
             
+            # Step 1: Fetch 25 pages in parallel
             with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
                 # Submit all page fetch requests
                 future_to_page = {
@@ -1099,7 +1101,7 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                     for page in pages_to_process
                 }
                 
-                # As each page is fetched, immediately start processing it with 25 workers
+                # Step 2: As each page is fetched, immediately start processing it with 25 workers
                 for future in as_completed(future_to_page):
                     page_num = future_to_page[future]
                     try:
@@ -1115,7 +1117,9 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                                         break
                                     page_results = page_results[:remaining]
                                 
-                                # Immediately start processing this page's results with 25 workers
+                                # Process this page's items with up to 25 workers (fan-out)
+                                # All items from this page are submitted to the shared executor
+                                # which has capacity for 25 pages × 25 workers = 625 total
                                 for filing in page_results:
                                     processing_future = processing_executor.submit(process_single_filing, session, filing)
                                     page_processing_futures.append((processing_future, filing, page_num))
@@ -1133,7 +1137,7 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                     except Exception as e:
                         log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
             
-            # Wait for all processing to complete for this batch
+            # Step 3: Wait for all processing to complete for this batch (all 25 pages × 25 items)
             for processing_future, filing, page_num in page_processing_futures:
                 try:
                     filing_type = processing_future.result()
@@ -1144,6 +1148,11 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
                     log_print(f"   ❌ Exception processing filing {filing_uuid} from page {page_num}: {str(e)[:200]}")
         
         log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} filings from pages {batch_start_page}-{batch_end_page} (Total: {total_processed})")
+        
+        # Clear memory after each batch to free up resources
+        # This helps prevent memory accumulation across batches
+        del page_processing_futures
+        gc.collect()
         
         current_page = batch_end_page
         
@@ -1232,9 +1241,9 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
             log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
     
     # Configuration for parallel fetching and processing
-    # Reduced to 25 to avoid connection errors and stay within API limits
-    max_api_workers = 25  # Number of pages to fetch in parallel
-    max_processing_workers = 25  # Number of items to process in parallel
+    # Batches of 25 pages, each page processed with 25 workers
+    max_api_workers = 25  # Number of pages to fetch in parallel (batch size)
+    max_processing_workers = 25  # Number of items to process in parallel per page
     
     # First, fetch page 1 to get total count and determine pagination
     log_print(f"\n📄 Fetching initial page to determine pagination...")
@@ -1305,13 +1314,14 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
         # Fetch multiple pages in parallel, and process each page's results immediately as it's fetched
         pages_to_process = list(range(batch_start_page, batch_end_page + 1))
         
-        # Use a shared processing executor for all pages in this batch
-        # This allows up to 25 pages * 25 workers = 625 concurrent processing tasks
+        # Process this batch: 25 pages fetched in parallel, each page processed with 25 workers
+        # Total concurrent processing: 25 pages × 25 workers = 625 workers
         with ThreadPoolExecutor(max_workers=max_api_workers * max_processing_workers) as processing_executor:
             # Track futures for both API calls and processing
             page_processing_futures = []
             batch_total_processed = 0
             
+            # Step 1: Fetch 25 pages in parallel
             with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
                 # Submit all page fetch requests
                 future_to_page = {
@@ -1319,7 +1329,7 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                     for page in pages_to_process
                 }
                 
-                # As each page is fetched, immediately start processing it with 25 workers
+                # Step 2: As each page is fetched, immediately start processing it with 25 workers
                 for future in as_completed(future_to_page):
                     page_num = future_to_page[future]
                     try:
@@ -1335,7 +1345,9 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                                         break
                                     page_results = page_results[:remaining]
                                 
-                                # Immediately start processing this page's results with 25 workers
+                                # Process this page's items with up to 25 workers (fan-out)
+                                # All items from this page are submitted to the shared executor
+                                # which has capacity for 25 pages × 25 workers = 625 total
                                 for contribution in page_results:
                                     processing_future = processing_executor.submit(process_single_contribution, session, contribution)
                                     page_processing_futures.append((processing_future, contribution, page_num))
@@ -1353,7 +1365,7 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                     except Exception as e:
                         log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
             
-            # Wait for all processing to complete for this batch
+            # Step 3: Wait for all processing to complete for this batch (all 25 pages × 25 items)
             for processing_future, contribution, page_num in page_processing_futures:
                 try:
                     success = processing_future.result()
@@ -1364,6 +1376,11 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
                     log_print(f"   ❌ Exception processing contribution {contribution_uuid} from page {page_num}: {str(e)[:200]}")
         
         log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} contributions from pages {batch_start_page}-{batch_end_page} (Total: {total_processed})")
+        
+        # Clear memory after each batch to free up resources
+        # This helps prevent memory accumulation across batches
+        del page_processing_futures
+        gc.collect()
         
         current_page = batch_end_page
         

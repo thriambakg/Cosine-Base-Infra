@@ -3306,8 +3306,12 @@ module "lda_disclosures_glue_job" {
   max_retries           = 1
   timeout               = 2880   # 48 hours (max is 10080 minutes = 7 days)
   concurrent_executions = 1      # Only allow 1 concurrent run
-  worker_type           = "G.1X" # 16 GB memory per worker
-  number_of_workers     = 25     # 25 × 16 GB = 400 GB total memory (for parallel processing)
+  worker_type           = "G.1X" # 16 GB memory, 4 vCPUs per worker
+  # 25 workers = 100 vCPUs, 400 GB total memory
+  # Processing: 25 pages × 25 items = 625 concurrent threads (I/O-bound)
+  # ~25 threads per worker on average - sufficient for I/O-bound operations
+  # Memory cleanup after each batch prevents accumulation
+  number_of_workers = 25
 
   # S3 buckets
   s3_bucket_arn = module.glue_scripts_s3.bucket_arn
