@@ -16,12 +16,11 @@ LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/ap
 LDA_SECRET_NAME = os.environ.get('LDA_SECRET_NAME')
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))
 RATE_LIMIT_DELAY = float(os.environ.get('RATE_LIMIT_DELAY', '0.5'))
-# Limit pages per execution to stay under Step Functions 25k event limit
-# ~4,000 pages = ~24,000 events (6 events/page + overhead)
-MAX_PAGES_PER_EXECUTION = int(os.environ.get('MAX_PAGES_PER_EXECUTION', '4000'))
+BATCH_QUEUE_URL = os.environ.get('BATCH_QUEUE_URL')  # SQS FIFO queue for batches
 
 # AWS clients
 secrets_client = boto3.client('secretsmanager')
+sqs_client = boto3.client('sqs')
 
 def get_api_key() -> str:
     """Retrieve LDA API key from Secrets Manager"""
@@ -81,6 +80,38 @@ def create_batches(total_pages: int, batch_size: int = 25) -> List[Dict]:
     
     return batches
 
+def send_page_to_queue(page: int, endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int]):
+    """Send a single page to SQS FIFO queue"""
+    if not BATCH_QUEUE_URL:
+        print(f"⚠️  BATCH_QUEUE_URL not configured, skipping SQS send")
+        return False
+    
+    message_body = {
+        'page': page,
+        'endpoint': endpoint,
+        'start_date': start_date,
+        'end_date': end_date,
+        'testing_limit': testing_limit
+    }
+    
+    # For FIFO queues, use MessageGroupId and MessageDeduplicationId
+    # Use endpoint as group ID to ensure pages for same endpoint are processed in order
+    # Use page + endpoint as deduplication ID
+    message_group_id = endpoint
+    message_deduplication_id = f"{endpoint}-{page}"
+    
+    try:
+        sqs_client.send_message(
+            QueueUrl=BATCH_QUEUE_URL,
+            MessageBody=json.dumps(message_body),
+            MessageGroupId=message_group_id,
+            MessageDeduplicationId=message_deduplication_id
+        )
+        return True
+    except Exception as e:
+        print(f"   ❌ Error sending page {page} to queue: {str(e)}")
+        return False
+
 def lambda_handler(event, context):
     """
     Fetcher Lambda: Determines total pages and outputs batches for processing
@@ -132,8 +163,7 @@ def lambda_handler(event, context):
     # Create session
     session = create_session(api_key)
     
-    result = {}
-    batch_size = 10  # 10 pages per batch (for 10 parallel indexers - reduced to avoid 25k event limit)
+    total_pages_sent = 0
     
     # Process filings endpoint
     print("\n📋 Fetching filings endpoint count...")
@@ -144,42 +174,23 @@ def lambda_handler(event, context):
         
         # Apply testing limit if provided
         if testing_limit:
-            # Calculate how many pages we need for testing_limit records
             pages_needed = (testing_limit + 24) // 25
             filings_total_pages = min(filings_total_pages, pages_needed)
             filings_count = min(filings_count, testing_limit)
         
-        # Cap pages per execution to avoid 25k event limit
-        original_filings_pages = filings_total_pages
-        if filings_total_pages > MAX_PAGES_PER_EXECUTION:
-            print(f"⚠️  Filings pages ({filings_total_pages:,}) exceeds MAX_PAGES_PER_EXECUTION ({MAX_PAGES_PER_EXECUTION:,})")
-            print(f"   Capping to {MAX_PAGES_PER_EXECUTION:,} pages to stay under 25k event limit")
-            filings_total_pages = MAX_PAGES_PER_EXECUTION
-            filings_count = min(filings_count, MAX_PAGES_PER_EXECUTION * 25)
+        print(f"✅ Filings: {filings_count} total records, {filings_total_pages} pages")
+        print(f"📤 Sending {filings_total_pages} pages to SQS queue...")
         
-        filings_batches = create_batches(filings_total_pages, batch_size)
+        # Send each page to SQS
+        for page in range(1, filings_total_pages + 1):
+            if send_page_to_queue(page, 'filings', start_date, end_date, testing_limit):
+                total_pages_sent += 1
+                if page % 100 == 0:
+                    print(f"   📤 Sent {page}/{filings_total_pages} filings pages...")
         
-        result['filingbatches'] = {
-            'batches': filings_batches,
-            'total_pages': filings_total_pages,
-            'total_count': filings_count,
-            'endpoint': 'filings',
-            'start_date': start_date,
-            'end_date': end_date
-        }
-        
-        print(f"✅ Filings: {filings_count} total records, {filings_total_pages} pages, {len(filings_batches)} batches")
+        print(f"✅ Sent {filings_total_pages} filings pages to queue")
     except Exception as e:
         print(f"❌ Error fetching filings count: {str(e)}")
-        result['filingbatches'] = {
-            'batches': [],
-            'total_pages': 0,
-            'total_count': 0,
-            'endpoint': 'filings',
-            'start_date': start_date,
-            'end_date': end_date,
-            'error': str(e)
-        }
     
     # Process contributions endpoint
     print("\n📋 Fetching contributions endpoint count...")
@@ -190,69 +201,33 @@ def lambda_handler(event, context):
         
         # Apply testing limit if provided
         if testing_limit:
-            # Calculate how many pages we need for testing_limit records
             pages_needed = (testing_limit + 24) // 25
             contributions_total_pages = min(contributions_total_pages, pages_needed)
             contributions_count = min(contributions_count, testing_limit)
         
-        # Cap pages per execution to avoid 25k event limit
-        original_contributions_pages = contributions_total_pages
-        if contributions_total_pages > MAX_PAGES_PER_EXECUTION:
-            print(f"⚠️  Contributions pages ({contributions_total_pages:,}) exceeds MAX_PAGES_PER_EXECUTION ({MAX_PAGES_PER_EXECUTION:,})")
-            print(f"   Capping to {MAX_PAGES_PER_EXECUTION:,} pages to stay under 25k event limit")
-            contributions_total_pages = MAX_PAGES_PER_EXECUTION
-            contributions_count = min(contributions_count, MAX_PAGES_PER_EXECUTION * 25)
+        print(f"✅ Contributions: {contributions_count} total records, {contributions_total_pages} pages")
+        print(f"📤 Sending {contributions_total_pages} pages to SQS queue...")
         
-        contributions_batches = create_batches(contributions_total_pages, batch_size)
+        # Send each page to SQS
+        for page in range(1, contributions_total_pages + 1):
+            if send_page_to_queue(page, 'contributions', start_date, end_date, testing_limit):
+                total_pages_sent += 1
+                if page % 100 == 0:
+                    print(f"   📤 Sent {page}/{contributions_total_pages} contributions pages...")
         
-        result['contributionbatches'] = {
-            'batches': contributions_batches,
-            'total_pages': contributions_total_pages,
-            'total_count': contributions_count,
-            'endpoint': 'contributions',
-            'start_date': start_date,
-            'end_date': end_date
-        }
-        
-        print(f"✅ Contributions: {contributions_count} total records, {contributions_total_pages} pages, {len(contributions_batches)} batches")
+        print(f"✅ Sent {contributions_total_pages} contributions pages to queue")
     except Exception as e:
         print(f"❌ Error fetching contributions count: {str(e)}")
-        result['contributionbatches'] = {
-            'batches': [],
-            'total_pages': 0,
-            'total_count': 0,
-            'endpoint': 'contributions',
-            'start_date': start_date,
-            'end_date': end_date,
-            'error': str(e)
-        }
-    
-    # Add warnings if pages were capped
-    result['warnings'] = []
-    if 'original_filings_pages' in locals() and original_filings_pages > MAX_PAGES_PER_EXECUTION:
-        result['warnings'].append({
-            'endpoint': 'filings',
-            'original_pages': original_filings_pages,
-            'capped_pages': filings_total_pages,
-            'message': f'Filings pages capped from {original_filings_pages:,} to {filings_total_pages:,} to avoid 25k event limit. Run multiple executions with smaller date ranges.'
-        })
-    
-    if 'original_contributions_pages' in locals() and original_contributions_pages > MAX_PAGES_PER_EXECUTION:
-        result['warnings'].append({
-            'endpoint': 'contributions',
-            'original_pages': original_contributions_pages,
-            'capped_pages': contributions_total_pages,
-            'message': f'Contributions pages capped from {original_contributions_pages:,} to {contributions_total_pages:,} to avoid 25k event limit. Run multiple executions with smaller date ranges.'
-        })
-    
-    if result['warnings']:
-        print("\n⚠️  WARNINGS:")
-        for warning in result['warnings']:
-            print(f"   {warning['message']}")
     
     print("\n" + "=" * 80)
-    print("✅ Fetcher Lambda Complete")
+    print(f"✅ Fetcher Lambda Complete - Sent {total_pages_sent} pages to queue")
     print("=" * 80)
     
-    return result
+    return {
+        'statusCode': 200,
+        'total_pages_sent': total_pages_sent,
+        'start_date': start_date,
+        'end_date': end_date,
+        'testing_limit': testing_limit
+    }
 

@@ -79,5 +79,8 @@ resource "aws_lambda_function" "function" {
 
   layers = var.layers
 
+  # Only set reserved_concurrent_executions if provided (not null)
+  reserved_concurrent_executions = var.reserved_concurrent_executions != null ? var.reserved_concurrent_executions : null
+
   tags = var.tags
 }

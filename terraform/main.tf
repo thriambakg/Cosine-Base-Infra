@@ -3555,6 +3555,143 @@ resource "aws_iam_policy" "lda_indexer_s3_policy" {
   tags = var.common_tags
 }
 
+# SQS FIFO Queue for LDA Batch Processing
+module "lda_batch_queue" {
+  source = "./modules/sqs"
+
+  project_name = var.project_name
+  environment  = var.environment
+  queue_name   = "lda-batch-processing" # Module will add .fifo suffix
+  purpose      = "LDA Batch Processing Queue"
+
+  # FIFO queue configuration
+  fifo_queue                  = true
+  content_based_deduplication = true
+
+  # Queue configuration
+  message_retention_seconds  = 1209600 # 14 days
+  visibility_timeout_seconds = 900     # 15 minutes (enough for batch processing)
+  max_receive_count          = 3
+  enable_dlq                 = true
+
+  # Encryption
+  kms_key_id = module.kms.main_key_id
+
+  tags = var.common_tags
+}
+
+# LDA Disclosures Fetcher Lambda
+module "lda_disclosures_fetcher" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-lda-disclosures-fetcher-${var.environment}"
+  description   = "Fetches LDA API counts, creates batches, and sends to SQS queue"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 300 # 5 minutes
+  memory_size   = 512
+
+  source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_fetcher/app"
+
+  # Environment variables
+  environment_variables = {
+    LDA_API_BASE_URL = "https://lda.senate.gov/api/v1"
+    LDA_SECRET_NAME  = module.lda_api_secrets_manager.secret_names["lda-api"]
+    REQUEST_TIMEOUT  = "30"
+    RATE_LIMIT_DELAY = "0.5"
+    BATCH_QUEUE_URL  = module.lda_batch_queue.queue_url
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # IAM policies
+  additional_policy_arns = [
+    module.lda_api_secrets_manager.secret_access_policy_arn,
+    module.lda_batch_queue.sqs_access_policy_arn,
+    module.kms.kms_access_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.lda_batch_queue,
+    module.lda_api_secrets_manager,
+    module.core_layer
+  ]
+}
+
+# LDA Disclosures Indexer Lambda
+module "lda_disclosures_indexer" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-lda-disclosures-indexer-${var.environment}"
+  description   = "Processes individual LDA pages from SQS queue sequentially. Concurrency limit: 25 (25 pages processed in parallel)"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 900  # 15 minutes (enough for batch processing)
+  memory_size   = 1024 # Enough for parallel processing
+
+  source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_indexer/app"
+
+  # Environment variables
+  environment_variables = {
+    LDA_API_BASE_URL   = "https://lda.senate.gov/api/v1"
+    LDA_SECRET_NAME    = module.lda_api_secrets_manager.secret_names["lda-api"]
+    FILINGS_TABLE_NAME = module.lda_filings_table.table_name
+    S3_BUCKET_NAME     = module.lda_disclosures_s3.bucket_id
+    REQUEST_TIMEOUT    = "30"
+    RATE_LIMIT_DELAY   = "0.5"
+    PAC_QUEUE_URL      = module.lda_pac_autocomplete_queue.queue_url
+  }
+
+  # Lambda layers
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  # Reserved concurrency limit of 25
+  reserved_concurrent_executions = 25
+
+  # IAM policies
+  additional_policy_arns = [
+    module.lda_api_secrets_manager.secret_access_policy_arn,
+    module.lda_filings_table.table_policy_arn,
+    module.lda_batch_queue.sqs_access_policy_arn,
+    module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
+    module.kms.kms_access_policy_arn,
+    aws_iam_policy.lda_indexer_s3_policy.arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.lda_batch_queue,
+    module.lda_filings_table,
+    module.lda_disclosures_s3,
+    module.lda_api_secrets_manager,
+    module.lda_pac_autocomplete_queue,
+    module.core_layer
+  ]
+}
+
+
+# SQS Event Source Mapping for Indexer Lambda
+resource "aws_lambda_event_source_mapping" "lda_batch_sqs_trigger" {
+  event_source_arn                   = module.lda_batch_queue.queue_arn
+  function_name                      = module.lda_disclosures_indexer.function_arn
+  batch_size                         = 1 # Process 1 page at a time
+  maximum_batching_window_in_seconds = 0 # Process immediately
+  enabled                            = true
+
+  depends_on = [
+    module.lda_disclosures_indexer,
+    module.lda_batch_queue
+  ]
+}
+
 # IAM Policy for Lambda to access S3 for autocomplete CSVs
 resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
   name        = "${var.project_name}-lda-pac-autocomplete-s3-${var.environment}"

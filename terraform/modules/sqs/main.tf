@@ -5,9 +5,11 @@
 resource "aws_sqs_queue" "dlq" {
   count = var.enable_dlq ? 1 : 0
 
-  name                       = "${var.project_name}-${var.queue_name}-dlq-${var.environment}"
-  message_retention_seconds  = var.dlq_message_retention_seconds
-  visibility_timeout_seconds = var.dlq_visibility_timeout_seconds
+  name                        = var.fifo_queue ? "${var.project_name}-${var.queue_name}-dlq-${var.environment}.fifo" : "${var.project_name}-${var.queue_name}-dlq-${var.environment}"
+  fifo_queue                  = var.fifo_queue
+  content_based_deduplication = var.fifo_queue ? var.content_based_deduplication : false
+  message_retention_seconds   = var.dlq_message_retention_seconds
+  visibility_timeout_seconds  = var.dlq_visibility_timeout_seconds
 
   # Server-side encryption
   kms_master_key_id                 = var.kms_key_id
@@ -22,7 +24,7 @@ resource "aws_sqs_queue" "dlq" {
 
 # Main SQS Queue
 resource "aws_sqs_queue" "main" {
-  name                       = "${var.project_name}-${var.queue_name}-${var.environment}"
+  name                       = var.fifo_queue ? "${var.project_name}-${var.queue_name}-${var.environment}.fifo" : "${var.project_name}-${var.queue_name}-${var.environment}"
   message_retention_seconds  = var.message_retention_seconds
   visibility_timeout_seconds = var.visibility_timeout_seconds
   delay_seconds              = var.delay_seconds

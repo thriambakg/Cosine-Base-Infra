@@ -1,12 +1,11 @@
 """
 Contributions processing module for LDA indexer Lambda
-Processes a single page of contributions with 25 parallel workers
+Processes a single page of contributions sequentially (parallelism handled at Lambda level)
 """
 
 import json
 from typing import Dict, Optional
 from decimal import Decimal
-from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
@@ -288,24 +287,16 @@ def process_contributions_page(page: int, start_date: Optional[str], end_date: O
     
     print(f"   Found {len(results)} contributions on page {page}")
     
-    # Process with 25 parallel workers
-    max_workers = 25
+    # Process items sequentially (we're already parallelizing at Lambda level with 25 concurrent executions)
     processed_count = 0
     
-    with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        futures = {
-            executor.submit(process_single_contribution, session, contribution): contribution
-            for contribution in results
-        }
-        
-        for future in as_completed(futures):
-            contribution = futures[future]
-            try:
-                if future.result():
-                    processed_count += 1
-            except Exception as e:
-                contribution_uuid = contribution.get('filing_uuid', 'unknown')
-                print(f"   ❌ Exception processing contribution {contribution_uuid}: {str(e)[:200]}")
+    for contribution in results:
+        try:
+            if process_single_contribution(session, contribution):
+                processed_count += 1
+        except Exception as e:
+            contribution_uuid = contribution.get('filing_uuid', 'unknown')
+            print(f"   ❌ Exception processing contribution {contribution_uuid}: {str(e)[:200]}")
     
     print(f"✅ Page {page} complete: Processed {processed_count}/{len(results)} contributions")
     

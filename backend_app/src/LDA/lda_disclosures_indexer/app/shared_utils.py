@@ -80,6 +80,18 @@ def call_api(session: requests.Session, endpoint: str, params: Optional[Dict] = 
     rate_limiter.wait()
     response = session.get(url, params=params, timeout=REQUEST_TIMEOUT)
     
+    # Check for rate limiting (429)
+    if response.status_code == 429:
+        error_msg = f"Rate limited (429) for {endpoint}"
+        print(f"   ⚠️  {error_msg}")
+        try:
+            error_data = response.json()
+            print(f"      Error response: {json.dumps(error_data, indent=2)}")
+        except:
+            print(f"      Error text: {response.text[:500]}")
+        # Raise a custom exception that can be caught for retry
+        raise requests.exceptions.HTTPError(error_msg, response=response)
+    
     if response.status_code >= 400:
         print(f"   🔍 Error Details:")
         print(f"      Status: {response.status_code}")
