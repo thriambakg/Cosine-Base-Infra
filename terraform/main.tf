@@ -3405,8 +3405,26 @@ module "lda_disclosures_state_machine" {
   # Step Functions definition - Invokes Glue job
   definition = jsonencode({
     Comment = "LDA Senate Lobbying Disclosures Indexing - Glue Job"
-    StartAt = "StartGlueJob"
+    StartAt = "PrepareArguments"
     States = {
+      PrepareArguments = {
+        Type    = "Pass"
+        Comment = "Normalize input - merge with defaults to ensure optional fields always exist"
+        Parameters = {
+          "defaults" = {
+            "START_DATE" = null
+            "END_DATE"   = null
+            "TESTING"    = null
+          }
+          "input.$" = "$"
+        }
+        # Merge input with defaults - input values take precedence, defaults fill in missing fields
+        Result = {
+          "normalized.$" = "States.JsonMerge($.defaults, $.input, false)"
+        }
+        ResultPath = "$"
+        Next       = "StartGlueJob"
+      }
       StartGlueJob = {
         Type     = "Task"
         Resource = "arn:aws:states:::glue:startJobRun.sync"
@@ -3421,9 +3439,9 @@ module "lda_disclosures_state_machine" {
             "--REQUEST_TIMEOUT"    = "30"
             "--RATE_LIMIT_DELAY"   = "0.5"
             "--PAC_QUEUE_URL"      = module.lda_pac_autocomplete_queue.queue_url
-            "--START_DATE.$"       = "$.START_DATE"
-            "--END_DATE.$"         = "$.END_DATE"
-            "--TESTING.$"          = "$.TESTING"
+            "--START_DATE.$"       = "$.normalized.START_DATE"
+            "--END_DATE.$"         = "$.normalized.END_DATE"
+            "--TESTING.$"          = "$.normalized.TESTING"
           }
         }
         Catch = [
