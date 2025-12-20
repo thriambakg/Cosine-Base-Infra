@@ -141,3 +141,4 @@ For **< 100K strings**: Use CSV + Binary Search (Option 1)
 For **100K - 1M strings**: Use CSV + Trie (Option 2) or S3 + CloudFront (Option 3)
 For **> 1M strings**: Use DynamoDB GSI (Option 4) or OpenSearch (Option 5)
 
+

@@ -119,3 +119,4 @@ If the field is missing:
 3. Check if table has the GSI defined
 4. Re-run Glue job to reindex
 
+

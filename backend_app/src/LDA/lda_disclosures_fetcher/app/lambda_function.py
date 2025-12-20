@@ -16,7 +16,7 @@ LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/ap
 LDA_SECRET_NAME = os.environ.get('LDA_SECRET_NAME')
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))
 RATE_LIMIT_DELAY = float(os.environ.get('RATE_LIMIT_DELAY', '0.5'))
-BATCH_QUEUE_URL = os.environ.get('BATCH_QUEUE_URL')  # SQS FIFO queue for batches
+BATCH_QUEUE_URL = os.environ.get('BATCH_QUEUE_URL')  # SQS standard queue for batches
 
 # AWS clients
 secrets_client = boto3.client('secretsmanager')
@@ -94,18 +94,13 @@ def send_page_to_queue(page: int, endpoint: str, start_date: Optional[str], end_
         'testing_limit': testing_limit
     }
     
-    # For FIFO queues, use MessageGroupId and MessageDeduplicationId
-    # Use endpoint as group ID to ensure pages for same endpoint are processed in order
-    # Use page + endpoint as deduplication ID
-    message_group_id = endpoint
-    message_deduplication_id = f"{endpoint}-{page}"
+    # Standard queue - no MessageGroupId or MessageDeduplicationId needed
+    # Standard queues allow full concurrency up to the Lambda's reserved_concurrent_executions limit (25)
     
     try:
         sqs_client.send_message(
             QueueUrl=BATCH_QUEUE_URL,
-            MessageBody=json.dumps(message_body),
-            MessageGroupId=message_group_id,
-            MessageDeduplicationId=message_deduplication_id
+            MessageBody=json.dumps(message_body)
         )
         return True
     except Exception as e:

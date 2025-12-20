@@ -3555,18 +3555,18 @@ resource "aws_iam_policy" "lda_indexer_s3_policy" {
   tags = var.common_tags
 }
 
-# SQS FIFO Queue for LDA Batch Processing
+# SQS Standard Queue for LDA Batch Processing
+# Using standard queue (not FIFO) to enable full concurrency - order doesn't matter
 module "lda_batch_queue" {
   source = "./modules/sqs"
 
   project_name = var.project_name
   environment  = var.environment
-  queue_name   = "lda-batch-processing" # Module will add .fifo suffix
+  queue_name   = "lda-batch-processing"
   purpose      = "LDA Batch Processing Queue"
 
-  # FIFO queue configuration
-  fifo_queue                  = true
-  content_based_deduplication = true
+  # Standard queue configuration (not FIFO - order doesn't matter)
+  fifo_queue = false
 
   # Queue configuration
   message_retention_seconds  = 1209600 # 14 days
@@ -3685,6 +3685,9 @@ resource "aws_lambda_event_source_mapping" "lda_batch_sqs_trigger" {
   batch_size                         = 1 # Process 1 page at a time
   maximum_batching_window_in_seconds = 0 # Process immediately
   enabled                            = true
+
+  # Standard queues scale naturally - reserved_concurrent_executions (25) on Lambda will limit concurrency
+  # No scaling_config needed for standard queues
 
   depends_on = [
     module.lda_disclosures_indexer,

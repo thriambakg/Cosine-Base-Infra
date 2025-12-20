@@ -192,3 +192,4 @@ Based on `selected (9).csv`, here's what can be mapped:
 | `lobbying_activities[].government_entities[].id` | `government_entities_constants.json` | ❌ Not indexed | Add `government_entity_id` field + GSI |
 | `contribution_items[].contribution_type` | `contribution_item_types_constants.json` | ❌ Not indexed | Add `contribution_item_type` field + GSI |
 
+
