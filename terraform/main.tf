@@ -3598,7 +3598,6 @@ module "lda_disclosures_fetcher" {
     LDA_API_BASE_URL = "https://lda.senate.gov/api/v1"
     LDA_SECRET_NAME  = module.lda_api_secrets_manager.secret_names["lda-api"]
     REQUEST_TIMEOUT  = "30"
-    RATE_LIMIT_DELAY = "0.5"
     BATCH_QUEUE_URL  = module.lda_batch_queue.queue_url
   }
 

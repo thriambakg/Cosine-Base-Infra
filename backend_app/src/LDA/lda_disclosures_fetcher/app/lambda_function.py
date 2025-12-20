@@ -5,7 +5,6 @@ Determines total pages for filings and contributions endpoints and creates batch
 
 import json
 import os
-import time
 import requests
 import boto3
 from botocore.exceptions import ClientError
@@ -15,7 +14,6 @@ from typing import Dict, List, Optional
 LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
 LDA_SECRET_NAME = os.environ.get('LDA_SECRET_NAME')
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))
-RATE_LIMIT_DELAY = float(os.environ.get('RATE_LIMIT_DELAY', '0.5'))
 BATCH_QUEUE_URL = os.environ.get('BATCH_QUEUE_URL')  # SQS standard queue for batches
 
 # AWS clients
@@ -54,7 +52,6 @@ def fetch_page_count(session: requests.Session, endpoint: str, start_date: Optio
             base_params['filing_dt_posted_before'] = end_date
     
     api_url = f"{LDA_API_BASE_URL}/{endpoint}/"
-    time.sleep(RATE_LIMIT_DELAY)  # Rate limiting
     
     response = session.get(api_url, params={**base_params, 'page': 1}, timeout=REQUEST_TIMEOUT)
     response.raise_for_status()
