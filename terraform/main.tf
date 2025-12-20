@@ -1852,6 +1852,11 @@ module "glue_scripts_s3" {
       source_path  = "${path.module}/../backend_app/src/glue/congress_bills/backfill_bill_text.py"
       s3_key       = "congress_bills/backfill_bill_text.py"
       content_type = "text/x-python"
+    },
+    {
+      source_path  = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
+      s3_key       = "lda_disclosures/glue_script.py"
+      content_type = "text/x-python"
     }
   ]
 
@@ -3286,84 +3291,103 @@ module "lda_filings_table" {
   depends_on = [module.kms]
 }
 
+# Glue Job for LDA Disclosures Indexing
+module "lda_disclosures_glue_job" {
+  source = "./modules/glue-job"
 
+  job_name = "${var.project_name}-lda-disclosures-indexing-${var.environment}"
 
-# Lambda Function for LDA Disclosures Fetcher
-module "lda_disclosures_fetcher_lambda" {
-  source = "./modules/lambda"
+  # Script location - uploaded to glue scripts bucket
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/lda_disclosures/glue_script.py"
+  python_version  = "3"
+  glue_version    = "4.0"
 
-  function_name = "${var.project_name}-lda-disclosures-fetcher-${var.environment}"
-  description   = "Fetches page counts and creates batches for LDA disclosures indexing"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.11"
-  timeout       = 60 # 1 minute (just needs to make 2 API calls)
-  memory_size   = 256
+  # Job configuration
+  max_retries           = 1
+  timeout               = 2880   # 48 hours (max is 10080 minutes = 7 days)
+  concurrent_executions = 1      # Only allow 1 concurrent run
+  worker_type           = "G.1X" # 16 GB memory per worker
+  number_of_workers     = 25     # 25 × 16 GB = 400 GB total memory (for parallel processing)
 
-  source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_fetcher/app"
+  # S3 buckets
+  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
+  additional_s3_bucket_arns = [
+    module.lda_disclosures_s3.bucket_arn,
+    module.static_hosting_bucket.bucket_arn
+  ]
+  spark_logs_bucket = module.static_hosting_bucket.bucket_id
+  temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  environment_variables = {
-    LDA_API_BASE_URL = "https://lda.senate.gov/api/v1"
-    LDA_SECRET_NAME  = module.lda_api_secrets_manager.secret_names["lda-api"]
-    REQUEST_TIMEOUT  = "30"
-    RATE_LIMIT_DELAY = "0.5"
-  }
+  # DynamoDB access
+  dynamodb_table_arn = module.lda_filings_table.table_arn
 
-  layers = [
-    module.core_layer.layer_arn
+  # KMS for encryption
+  kms_key_arn = module.kms.main_key_arn
+  # Also include DynamoDB KMS key since the table is encrypted with it
+  additional_kms_key_arns = [
+    module.kms.dynamodb_key_arn
   ]
 
+  # Additional IAM policies for Secrets Manager and SQS access
   additional_policy_arns = [
     module.lda_api_secrets_manager.secret_access_policy_arn,
-    module.kms.kms_access_policy_arn
+    aws_iam_policy.lda_glue_pac_sqs_policy.arn
   ]
 
-  tags = var.common_tags
-
-  depends_on = [module.lda_api_secrets_manager]
-}
-
-# Lambda Function for LDA Disclosures Indexer
-module "lda_disclosures_indexer_lambda" {
-  source = "./modules/lambda"
-
-  function_name = "${var.project_name}-lda-disclosures-indexer-${var.environment}"
-  description   = "Processes a single page of filings or contributions with 25 parallel workers"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.11"
-  timeout       = 900  # 15 minutes (max Lambda timeout, should be enough for 25 items)
-  memory_size   = 2048 # Higher memory for parallel processing
-
-  source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_indexer/app"
-
-  environment_variables = {
-    LDA_API_BASE_URL   = "https://lda.senate.gov/api/v1"
-    LDA_SECRET_NAME    = module.lda_api_secrets_manager.secret_names["lda-api"]
-    FILINGS_TABLE_NAME = module.lda_filings_table.table_name
-    S3_BUCKET_NAME     = module.lda_disclosures_s3.bucket_id
-    REQUEST_TIMEOUT    = "30"
-    RATE_LIMIT_DELAY   = "0.5"
-    PAC_QUEUE_URL      = module.lda_pac_autocomplete_queue.queue_url
+  # Job arguments
+  default_arguments = {
+    "--LDA_API_BASE_URL"   = "https://lda.senate.gov/api/v1"
+    "--LDA_SECRET_NAME"    = module.lda_api_secrets_manager.secret_names["lda-api"]
+    "--FILINGS_TABLE_NAME" = module.lda_filings_table.table_name
+    "--S3_BUCKET_NAME"     = module.lda_disclosures_s3.bucket_id
+    "--REQUEST_TIMEOUT"    = "30"
+    "--RATE_LIMIT_DELAY"   = "0.5"
+    "--PAC_QUEUE_URL"      = module.lda_pac_autocomplete_queue.queue_url
   }
 
-  layers = [
-    module.core_layer.layer_arn
-  ]
-
-  additional_policy_arns = [
-    module.lda_api_secrets_manager.secret_access_policy_arn,
-    module.lda_filings_table.table_policy_arn,
-    module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
-    module.kms.kms_access_policy_arn,
-    aws_iam_policy.lda_indexer_s3_policy.arn
-  ]
+  job_bookmark_option = "job-bookmark-disable"
 
   tags = var.common_tags
 
   depends_on = [
-    module.lda_api_secrets_manager,
     module.lda_filings_table,
     module.lda_disclosures_s3,
+    module.kms,
+    module.glue_scripts_s3,
+    module.lda_api_secrets_manager,
     module.lda_pac_autocomplete_queue
+  ]
+}
+
+# IAM Policy for Glue Job to send messages to PAC autocomplete queue
+resource "aws_iam_policy" "lda_glue_pac_sqs_policy" {
+  name        = "${var.project_name}-lda-glue-pac-sqs-${var.environment}"
+  description = "Allows Glue job to send PAC names to autocomplete queue"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:SendMessage"
+        ]
+        Resource = module.lda_pac_autocomplete_queue.queue_arn
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# Attach PAC SQS policy to Glue job role
+resource "aws_iam_role_policy_attachment" "lda_glue_pac_sqs" {
+  role       = module.lda_disclosures_glue_job.role_name
+  policy_arn = aws_iam_policy.lda_glue_pac_sqs_policy.arn
+
+  depends_on = [
+    module.lda_disclosures_glue_job,
+    aws_iam_policy.lda_glue_pac_sqs_policy
   ]
 }
 
@@ -3374,30 +3398,30 @@ module "lda_disclosures_state_machine" {
   state_machine_name = "${var.project_name}-lda-disclosures-indexing-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition - Fetcher + Parallel Indexers
+  # Step Functions definition - Invokes Glue job
   definition = jsonencode({
-    Comment = "LDA Senate Lobbying Disclosures Indexing - Fetcher + Parallel Indexers"
-    StartAt = "Fetcher"
+    Comment = "LDA Senate Lobbying Disclosures Indexing - Glue Job"
+    StartAt = "StartGlueJob"
     States = {
-      Fetcher = {
+      StartGlueJob = {
         Type     = "Task"
-        Resource = module.lda_disclosures_fetcher_lambda.function_arn
-        Comment  = "Fetch page counts and create batches for filings and contributions"
+        Resource = "arn:aws:states:::glue:startJobRun.sync"
+        Comment  = "Start Glue job for LDA disclosures indexing"
         Parameters = {
-          "START_DATE.$" = "$.START_DATE"
-          "END_DATE.$"   = "$.END_DATE"
-          "TESTING.$?"   = "$.TESTING"
-        }
-        ResultPath = "$.fetcher_result"
-        Next       = "ProcessFilingsBatches"
-        Retry = [
-          {
-            ErrorEquals     = ["States.ALL"]
-            IntervalSeconds = 2
-            MaxAttempts     = 3
-            BackoffRate     = 2.0
+          "JobName" = module.lda_disclosures_glue_job.job_name
+          "Arguments" = {
+            "--LDA_API_BASE_URL"   = "https://lda.senate.gov/api/v1"
+            "--LDA_SECRET_NAME"    = module.lda_api_secrets_manager.secret_names["lda-api"]
+            "--FILINGS_TABLE_NAME" = module.lda_filings_table.table_name
+            "--S3_BUCKET_NAME"     = module.lda_disclosures_s3.bucket_id
+            "--REQUEST_TIMEOUT"    = "30"
+            "--RATE_LIMIT_DELAY"   = "0.5"
+            "--PAC_QUEUE_URL"      = module.lda_pac_autocomplete_queue.queue_url
+            "--START_DATE.$?"      = "$.START_DATE"
+            "--END_DATE.$?"        = "$.END_DATE"
+            "--TESTING.$?"         = "$.TESTING"
           }
-        ]
+        }
         Catch = [
           {
             ErrorEquals = ["States.ALL"]
@@ -3405,91 +3429,6 @@ module "lda_disclosures_state_machine" {
             Next        = "HandleError"
           }
         ]
-      }
-      ProcessFilingsBatches = {
-        Type           = "Map"
-        ItemsPath      = "$.fetcher_result.filingbatches.batches"
-        MaxConcurrency = 1
-        Comment        = "Process filings batches sequentially (wait for each batch to complete)"
-        Iterator = {
-          StartAt = "ProcessFilingsBatch"
-          States = {
-            ProcessFilingsBatch = {
-              Type           = "Map"
-              ItemsPath      = "$.pages"
-              MaxConcurrency = 10
-              Comment        = "Process 10 pages in parallel (reduced to avoid 25k event limit)"
-              Iterator = {
-                StartAt = "IndexFilingsPage"
-                States = {
-                  IndexFilingsPage = {
-                    Type     = "Task"
-                    Resource = module.lda_disclosures_indexer_lambda.function_arn
-                    Parameters = {
-                      "page.$"        = "$"
-                      "start_date.$?" = "$$.fetcher_result.filingbatches.start_date"
-                      "end_date.$?"   = "$$.fetcher_result.filingbatches.end_date"
-                      "endpoint"      = "filings"
-                    }
-                    Retry = [
-                      {
-                        ErrorEquals     = ["States.ALL"]
-                        IntervalSeconds = 2
-                        MaxAttempts     = 3
-                        BackoffRate     = 2.0
-                      }
-                    ]
-                    End = true
-                  }
-                }
-              }
-              End = true
-            }
-          }
-        }
-        Next = "ProcessContributionsBatches"
-      }
-      ProcessContributionsBatches = {
-        Type           = "Map"
-        ItemsPath      = "$.fetcher_result.contributionbatches.batches"
-        MaxConcurrency = 1
-        Comment        = "Process contributions batches sequentially (wait for each batch to complete)"
-        Iterator = {
-          StartAt = "ProcessContributionsBatch"
-          States = {
-            ProcessContributionsBatch = {
-              Type           = "Map"
-              ItemsPath      = "$.pages"
-              MaxConcurrency = 10
-              Comment        = "Process 10 pages in parallel (reduced to avoid 25k event limit)"
-              Iterator = {
-                StartAt = "IndexContributionsPage"
-                States = {
-                  IndexContributionsPage = {
-                    Type     = "Task"
-                    Resource = module.lda_disclosures_indexer_lambda.function_arn
-                    Parameters = {
-                      "page.$"        = "$"
-                      "start_date.$?" = "$$.fetcher_result.contributionbatches.start_date"
-                      "end_date.$?"   = "$$.fetcher_result.contributionbatches.end_date"
-                      "endpoint"      = "contributions"
-                    }
-                    Retry = [
-                      {
-                        ErrorEquals     = ["States.ALL"]
-                        IntervalSeconds = 2
-                        MaxAttempts     = 3
-                        BackoffRate     = 2.0
-                      }
-                    ]
-                    End = true
-                  }
-                }
-              }
-              End = true
-            }
-          }
-        }
         Next = "Success"
       }
       Success = {
@@ -3504,165 +3443,23 @@ module "lda_disclosures_state_machine" {
     }
   })
 
-  # Lambda function ARNs for IAM permissions
-  lambda_function_arns = [
-    module.lda_disclosures_fetcher_lambda.function_arn,
-    module.lda_disclosures_indexer_lambda.function_arn
+  # Glue job name for IAM permissions
+  glue_job_names = [
+    module.lda_disclosures_glue_job.job_name
   ]
-
-  # Glue job name for IAM permissions (kept for backward compatibility, but not used)
-  glue_job_names = []
 
   # Logging configuration
-  # Disable execution data to reduce event count (avoids 25k event limit with high parallelism)
-  # With 25 parallel indexers per batch, we can easily exceed 25k events
-  log_level              = "ERROR" # Reduced to ERROR to minimize events
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
   log_retention_days     = 7
-  include_execution_data = false # Disabled to avoid 25k event limit
+  include_execution_data = true
 
   tags = var.common_tags
 
   depends_on = [
-    module.lda_disclosures_fetcher_lambda,
-    module.lda_disclosures_indexer_lambda
+    module.lda_disclosures_glue_job
   ]
 }
 
-# Lambda Function for LDA Execution History Exporter
-module "lda_execution_history_exporter_lambda" {
-  source = "./modules/lambda"
-
-  function_name = "${var.project_name}-lda-execution-history-exporter-${var.environment}"
-  description   = "Exports Step Functions execution history to S3 to avoid 25k event limit"
-  handler       = "lambda_function.lambda_handler"
-  runtime       = "python3.11"
-  timeout       = 900 # 15 minutes (max) - may need time to fetch large execution histories
-  memory_size   = 1024
-
-  source_dir = "${path.module}/../backend_app/src/LDA/lda_execution_history_exporter/app"
-
-  environment_variables = {
-    S3_BUCKET_NAME    = module.lda_disclosures_s3.bucket_id
-    STATE_MACHINE_ARN = module.lda_disclosures_state_machine.state_machine_arn
-  }
-
-  layers = [
-    module.core_layer.layer_arn
-  ]
-
-  additional_policy_arns = [
-    module.kms.kms_access_policy_arn,
-    aws_iam_policy.lda_execution_history_exporter_s3_policy.arn,
-    aws_iam_policy.lda_execution_history_exporter_sfn_policy.arn
-  ]
-
-  tags = var.common_tags
-
-  depends_on = [
-    module.lda_disclosures_s3,
-    module.lda_disclosures_state_machine
-  ]
-}
-
-# IAM Policy for Execution History Exporter to access S3
-resource "aws_iam_policy" "lda_execution_history_exporter_s3_policy" {
-  name        = "${var.project_name}-lda-execution-history-exporter-s3-${var.environment}"
-  description = "Allows Lambda to write execution history to S3"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject",
-          "s3:GetObject"
-        ]
-        Resource = "${module.lda_disclosures_s3.bucket_arn}/executionhistory/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:ListBucket"
-        ]
-        Resource = module.lda_disclosures_s3.bucket_arn
-        Condition = {
-          StringLike = {
-            "s3:prefix" = "executionhistory/*"
-          }
-        }
-      }
-    ]
-  })
-
-  tags = var.common_tags
-}
-
-# IAM Policy for Execution History Exporter to read Step Functions execution history
-resource "aws_iam_policy" "lda_execution_history_exporter_sfn_policy" {
-  name        = "${var.project_name}-lda-execution-history-exporter-sfn-${var.environment}"
-  description = "Allows Lambda to read Step Functions execution history"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "states:GetExecutionHistory",
-          "states:DescribeExecution",
-          "states:ListExecutions"
-        ]
-        # Allow access to all executions under this state machine
-        # Execution ARN format: arn:aws:states:region:account:execution:stateMachineName:executionId
-        Resource = [
-          module.lda_disclosures_state_machine.state_machine_arn,
-          "${replace(module.lda_disclosures_state_machine.state_machine_arn, ":stateMachine:", ":execution:")}:*"
-        ]
-      }
-    ]
-  })
-
-  tags = var.common_tags
-}
-
-# EventBridge Rule to trigger execution history exporter when Step Function completes
-resource "aws_cloudwatch_event_rule" "lda_execution_history_exporter" {
-  name        = "${var.project_name}-lda-execution-history-exporter-${var.environment}"
-  description = "Trigger execution history exporter when LDA Step Function completes"
-
-  event_pattern = jsonencode({
-    source      = ["aws.states"]
-    detail-type = ["Step Functions Execution Status Change"]
-    detail = {
-      stateMachineArn = [module.lda_disclosures_state_machine.state_machine_arn]
-      status          = ["SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"]
-    }
-  })
-
-  tags = var.common_tags
-}
-
-# EventBridge Target to invoke Lambda
-resource "aws_cloudwatch_event_target" "lda_execution_history_exporter" {
-  rule      = aws_cloudwatch_event_rule.lda_execution_history_exporter.name
-  target_id = "LDAExecutionHistoryExporter"
-  arn       = module.lda_execution_history_exporter_lambda.function_arn
-}
-
-# Lambda permission for EventBridge to invoke
-resource "aws_lambda_permission" "lda_execution_history_exporter_eventbridge" {
-  statement_id  = "AllowEventBridgeInvoke"
-  action        = "lambda:InvokeFunction"
-  function_name = module.lda_execution_history_exporter_lambda.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.lda_execution_history_exporter.arn
-
-  depends_on = [
-    module.lda_execution_history_exporter_lambda,
-    aws_cloudwatch_event_rule.lda_execution_history_exporter
-  ]
-}
 
 # SQS Queue for LDA PAC Autocomplete Processing
 module "lda_pac_autocomplete_queue" {

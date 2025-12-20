@@ -16,6 +16,9 @@ LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/ap
 LDA_SECRET_NAME = os.environ.get('LDA_SECRET_NAME')
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))
 RATE_LIMIT_DELAY = float(os.environ.get('RATE_LIMIT_DELAY', '0.5'))
+# Limit pages per execution to stay under Step Functions 25k event limit
+# ~4,000 pages = ~24,000 events (6 events/page + overhead)
+MAX_PAGES_PER_EXECUTION = int(os.environ.get('MAX_PAGES_PER_EXECUTION', '4000'))
 
 # AWS clients
 secrets_client = boto3.client('secretsmanager')
@@ -146,6 +149,14 @@ def lambda_handler(event, context):
             filings_total_pages = min(filings_total_pages, pages_needed)
             filings_count = min(filings_count, testing_limit)
         
+        # Cap pages per execution to avoid 25k event limit
+        original_filings_pages = filings_total_pages
+        if filings_total_pages > MAX_PAGES_PER_EXECUTION:
+            print(f"⚠️  Filings pages ({filings_total_pages:,}) exceeds MAX_PAGES_PER_EXECUTION ({MAX_PAGES_PER_EXECUTION:,})")
+            print(f"   Capping to {MAX_PAGES_PER_EXECUTION:,} pages to stay under 25k event limit")
+            filings_total_pages = MAX_PAGES_PER_EXECUTION
+            filings_count = min(filings_count, MAX_PAGES_PER_EXECUTION * 25)
+        
         filings_batches = create_batches(filings_total_pages, batch_size)
         
         result['filingbatches'] = {
@@ -184,6 +195,14 @@ def lambda_handler(event, context):
             contributions_total_pages = min(contributions_total_pages, pages_needed)
             contributions_count = min(contributions_count, testing_limit)
         
+        # Cap pages per execution to avoid 25k event limit
+        original_contributions_pages = contributions_total_pages
+        if contributions_total_pages > MAX_PAGES_PER_EXECUTION:
+            print(f"⚠️  Contributions pages ({contributions_total_pages:,}) exceeds MAX_PAGES_PER_EXECUTION ({MAX_PAGES_PER_EXECUTION:,})")
+            print(f"   Capping to {MAX_PAGES_PER_EXECUTION:,} pages to stay under 25k event limit")
+            contributions_total_pages = MAX_PAGES_PER_EXECUTION
+            contributions_count = min(contributions_count, MAX_PAGES_PER_EXECUTION * 25)
+        
         contributions_batches = create_batches(contributions_total_pages, batch_size)
         
         result['contributionbatches'] = {
@@ -207,6 +226,29 @@ def lambda_handler(event, context):
             'end_date': end_date,
             'error': str(e)
         }
+    
+    # Add warnings if pages were capped
+    result['warnings'] = []
+    if 'original_filings_pages' in locals() and original_filings_pages > MAX_PAGES_PER_EXECUTION:
+        result['warnings'].append({
+            'endpoint': 'filings',
+            'original_pages': original_filings_pages,
+            'capped_pages': filings_total_pages,
+            'message': f'Filings pages capped from {original_filings_pages:,} to {filings_total_pages:,} to avoid 25k event limit. Run multiple executions with smaller date ranges.'
+        })
+    
+    if 'original_contributions_pages' in locals() and original_contributions_pages > MAX_PAGES_PER_EXECUTION:
+        result['warnings'].append({
+            'endpoint': 'contributions',
+            'original_pages': original_contributions_pages,
+            'capped_pages': contributions_total_pages,
+            'message': f'Contributions pages capped from {original_contributions_pages:,} to {contributions_total_pages:,} to avoid 25k event limit. Run multiple executions with smaller date ranges.'
+        })
+    
+    if result['warnings']:
+        print("\n⚠️  WARNINGS:")
+        for warning in result['warnings']:
+            print(f"   {warning['message']}")
     
     print("\n" + "=" * 80)
     print("✅ Fetcher Lambda Complete")
