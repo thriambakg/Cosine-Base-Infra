@@ -9,6 +9,7 @@ import requests
 import boto3
 from botocore.exceptions import ClientError
 from typing import Dict, List, Optional
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # Environment variables
 LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
@@ -78,7 +79,7 @@ def create_batches(total_pages: int, batch_size: int = 25) -> List[Dict]:
     return batches
 
 def send_page_to_queue(page: int, endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int]):
-    """Send a single page to SQS FIFO queue"""
+    """Send a single page to SQS standard queue"""
     if not BATCH_QUEUE_URL:
         print(f"⚠️  BATCH_QUEUE_URL not configured, skipping SQS send")
         return False
@@ -103,6 +104,35 @@ def send_page_to_queue(page: int, endpoint: str, start_date: Optional[str], end_
     except Exception as e:
         print(f"   ❌ Error sending page {page} to queue: {str(e)}")
         return False
+
+def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int], max_workers: int = 25):
+    """Send multiple pages to SQS queue in parallel"""
+    if not pages:
+        return 0
+    
+    successful = 0
+    failed = 0
+    
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all send tasks
+        future_to_page = {
+            executor.submit(send_page_to_queue, page, endpoint, start_date, end_date, testing_limit): page
+            for page in pages
+        }
+        
+        # Process completed tasks
+        for future in as_completed(future_to_page):
+            page = future_to_page[future]
+            try:
+                if future.result():
+                    successful += 1
+                else:
+                    failed += 1
+            except Exception as e:
+                print(f"   ❌ Exception sending page {page}: {str(e)}")
+                failed += 1
+    
+    return successful
 
 def lambda_handler(event, context):
     """
@@ -171,16 +201,14 @@ def lambda_handler(event, context):
             filings_count = min(filings_count, testing_limit)
         
         print(f"✅ Filings: {filings_count} total records, {filings_total_pages} pages")
-        print(f"📤 Sending {filings_total_pages} pages to SQS queue...")
+        print(f"📤 Sending {filings_total_pages} pages to SQS queue in parallel...")
         
-        # Send each page to SQS
-        for page in range(1, filings_total_pages + 1):
-            if send_page_to_queue(page, 'filings', start_date, end_date, testing_limit):
-                total_pages_sent += 1
-                if page % 100 == 0:
-                    print(f"   📤 Sent {page}/{filings_total_pages} filings pages...")
+        # Send all pages to SQS in parallel
+        filings_pages = list(range(1, filings_total_pages + 1))
+        successful = send_pages_parallel(filings_pages, 'filings', start_date, end_date, testing_limit)
+        total_pages_sent += successful
         
-        print(f"✅ Sent {filings_total_pages} filings pages to queue")
+        print(f"✅ Sent {successful}/{filings_total_pages} filings pages to queue")
     except Exception as e:
         print(f"❌ Error fetching filings count: {str(e)}")
     
@@ -198,16 +226,14 @@ def lambda_handler(event, context):
             contributions_count = min(contributions_count, testing_limit)
         
         print(f"✅ Contributions: {contributions_count} total records, {contributions_total_pages} pages")
-        print(f"📤 Sending {contributions_total_pages} pages to SQS queue...")
+        print(f"📤 Sending {contributions_total_pages} pages to SQS queue in parallel...")
         
-        # Send each page to SQS
-        for page in range(1, contributions_total_pages + 1):
-            if send_page_to_queue(page, 'contributions', start_date, end_date, testing_limit):
-                total_pages_sent += 1
-                if page % 100 == 0:
-                    print(f"   📤 Sent {page}/{contributions_total_pages} contributions pages...")
+        # Send all pages to SQS in parallel
+        contributions_pages = list(range(1, contributions_total_pages + 1))
+        successful = send_pages_parallel(contributions_pages, 'contributions', start_date, end_date, testing_limit)
+        total_pages_sent += successful
         
-        print(f"✅ Sent {contributions_total_pages} contributions pages to queue")
+        print(f"✅ Sent {successful}/{contributions_total_pages} contributions pages to queue")
     except Exception as e:
         print(f"❌ Error fetching contributions count: {str(e)}")
     

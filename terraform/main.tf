@@ -3588,7 +3588,7 @@ module "lda_disclosures_fetcher" {
   description   = "Fetches LDA API counts, creates batches, and sends to SQS queue"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
-  timeout       = 300 # 5 minutes
+  timeout       = 900 # 15 minutes (enough for parallel SQS sends)
   memory_size   = 512
 
   source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_fetcher/app"
