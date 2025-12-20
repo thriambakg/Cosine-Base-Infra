@@ -3630,8 +3630,8 @@ module "lda_disclosures_indexer" {
   description   = "Processes individual LDA pages from SQS queue sequentially. Concurrency limit: 25 (25 pages processed in parallel)"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
-  timeout       = 900  # 15 minutes (enough for batch processing)
-  memory_size   = 1024 # Enough for parallel processing
+  timeout       = 900 # 15 minutes (enough for batch processing)
+  memory_size   = 512 # Reduced from 1024 - sequential processing within each invocation
 
   source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_indexer/app"
 
