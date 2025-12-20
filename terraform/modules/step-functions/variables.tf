@@ -55,3 +55,15 @@ variable "tags" {
   default     = {}
 }
 
+variable "enable_s3_history" {
+  description = "Enable S3 execution history logging to avoid 25k event limit"
+  type        = bool
+  default     = false
+}
+
+variable "s3_bucket_id" {
+  description = "S3 bucket ID for execution history (required if enable_s3_history is true)"
+  type        = string
+  default     = ""
+}
+

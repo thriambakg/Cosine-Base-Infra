@@ -17,6 +17,13 @@ resource "aws_sfn_state_machine" "this" {
     level                  = var.log_level
   }
 
+  dynamic "tracing_configuration" {
+    for_each = var.enable_s3_history ? [1] : []
+    content {
+      enabled = true
+    }
+  }
+
   tags = merge(
     var.tags,
     {
@@ -139,6 +146,40 @@ resource "aws_iam_role_policy" "step_functions_logging" {
           "logs:DescribeLogGroups"
         ]
         Resource = "*"
+      }
+    ]
+  })
+}
+
+# IAM Policy for Step Functions to write execution history to S3
+resource "aws_iam_role_policy" "step_functions_s3_history" {
+  count = var.enable_s3_history && var.s3_bucket_id != "" ? 1 : 0
+
+  name = "${var.state_machine_name}-s3-history-policy"
+  role = aws_iam_role.step_functions.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject"
+        ]
+        Resource = "arn:aws:s3:::${var.s3_bucket_id}/executionhistory/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = "arn:aws:s3:::${var.s3_bucket_id}"
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "executionhistory/*"
+          }
+        }
       }
     ]
   })

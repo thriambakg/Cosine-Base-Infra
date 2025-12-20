@@ -3514,9 +3514,11 @@ module "lda_disclosures_state_machine" {
   glue_job_names = []
 
   # Logging configuration
-  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  # Disable execution data to reduce event count (avoids 25k event limit with high parallelism)
+  # With 25 parallel indexers per batch, we can easily exceed 25k events
+  log_level              = "ERROR" # Reduced to ERROR to minimize events
   log_retention_days     = 7
-  include_execution_data = true
+  include_execution_data = false # Disabled to avoid 25k event limit
 
   tags = var.common_tags
 
