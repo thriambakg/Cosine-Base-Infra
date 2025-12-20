@@ -30,6 +30,7 @@ from pyspark.context import SparkContext
 
 import boto3
 from botocore.exceptions import ClientError
+from botocore.exceptions import ClientError as BotoClientError
 
 # ============================================================================
 # Configuration
@@ -340,6 +341,55 @@ def create_unified_entity(client: Optional[Dict], lobbyist: Optional[Dict]) -> O
             'entity': lobbyist
         }
     return None
+
+def retry_dynamodb_operation(operation_func, max_retries: int = 5, initial_delay: float = 0.5):
+    """
+    Retry a DynamoDB operation with exponential backoff on throttling errors.
+    
+    Args:
+        operation_func: A callable that performs the DynamoDB operation (no arguments)
+        max_retries: Maximum number of retry attempts (default: 5)
+        initial_delay: Initial delay in seconds before first retry (default: 0.5)
+    
+    Returns:
+        The result of the operation_func
+    
+    Raises:
+        The last exception if all retries are exhausted
+    """
+    delay = initial_delay
+    last_exception = None
+    
+    for attempt in range(max_retries + 1):  # +1 for initial attempt
+        try:
+            return operation_func()
+        except ClientError as e:
+            error_code = e.response.get('Error', {}).get('Code', '')
+            
+            # Check if it's a throttling error
+            is_throttling = (
+                error_code == 'ProvisionedThroughputExceededException' or
+                error_code == 'ThrottlingException' or
+                error_code == 'TooManyRequestsException' or
+                (error_code == 'ValidationException' and 'throttl' in str(e).lower())
+            )
+            
+            if is_throttling and attempt < max_retries:
+                last_exception = e
+                log_print(f"   ⚠️ DynamoDB throttling detected (attempt {attempt + 1}/{max_retries + 1}), retrying in {delay:.2f}s...")
+                time.sleep(delay)
+                delay = min(delay * 2, 60)  # Exponential backoff, max 60 seconds
+            else:
+                # Not a throttling error, or retries exhausted - re-raise
+                raise
+        except Exception as e:
+            # Non-ClientError exceptions - re-raise immediately
+            raise
+    
+    # If we exhausted retries, raise the last exception
+    if last_exception:
+        log_print(f"   ❌ DynamoDB operation failed after {max_retries + 1} attempts due to throttling")
+        raise last_exception
 
 def send_autocomplete_value(field_type: str, value: str):
     """
@@ -771,8 +821,12 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
             # Ensure it's stored as integer (N type)
             item['is_foreign'] = 1
         
-        # Save to DynamoDB
-        filings_table.put_item(Item=item)
+        # Save to DynamoDB with retry logic for throttling
+        retry_dynamodb_operation(
+            lambda: filings_table.put_item(Item=item),
+            max_retries=5,
+            initial_delay=0.5
+        )
         
     except Exception as e:
         log_print(f"❌ Error saving filing to DynamoDB: {str(e)[:200]}")
@@ -929,8 +983,12 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         item.pop('is_foreign', None)
         item.pop('foreign_countries', None)
         
-        # Save to DynamoDB (same table as filings)
-        filings_table.put_item(Item=item)
+        # Save to DynamoDB (same table as filings) with retry logic for throttling
+        retry_dynamodb_operation(
+            lambda: filings_table.put_item(Item=item),
+            max_retries=5,
+            initial_delay=0.5
+        )
         
     except Exception as e:
         log_print(f"❌ Error saving contribution to DynamoDB: {str(e)[:200]}")
