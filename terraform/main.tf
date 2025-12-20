@@ -3417,8 +3417,8 @@ module "lda_disclosures_state_machine" {
             ProcessFilingsBatch = {
               Type           = "Map"
               ItemsPath      = "$.pages"
-              MaxConcurrency = 25
-              Comment        = "Process 25 pages in parallel"
+              MaxConcurrency = 10
+              Comment        = "Process 10 pages in parallel (reduced to avoid 25k event limit)"
               Iterator = {
                 StartAt = "IndexFilingsPage"
                 States = {
@@ -3460,8 +3460,8 @@ module "lda_disclosures_state_machine" {
             ProcessContributionsBatch = {
               Type           = "Map"
               ItemsPath      = "$.pages"
-              MaxConcurrency = 25
-              Comment        = "Process 25 pages in parallel"
+              MaxConcurrency = 10
+              Comment        = "Process 10 pages in parallel (reduced to avoid 25k event limit)"
               Iterator = {
                 StartAt = "IndexContributionsPage"
                 States = {
@@ -3525,6 +3525,142 @@ module "lda_disclosures_state_machine" {
   depends_on = [
     module.lda_disclosures_fetcher_lambda,
     module.lda_disclosures_indexer_lambda
+  ]
+}
+
+# Lambda Function for LDA Execution History Exporter
+module "lda_execution_history_exporter_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-lda-execution-history-exporter-${var.environment}"
+  description   = "Exports Step Functions execution history to S3 to avoid 25k event limit"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 900 # 15 minutes (max) - may need time to fetch large execution histories
+  memory_size   = 1024
+
+  source_dir = "${path.module}/../backend_app/src/LDA/lda_execution_history_exporter/app"
+
+  environment_variables = {
+    S3_BUCKET_NAME    = module.lda_disclosures_s3.bucket_id
+    STATE_MACHINE_ARN = module.lda_disclosures_state_machine.state_machine_arn
+  }
+
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  additional_policy_arns = [
+    module.kms.kms_access_policy_arn,
+    aws_iam_policy.lda_execution_history_exporter_s3_policy.arn,
+    aws_iam_policy.lda_execution_history_exporter_sfn_policy.arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.lda_disclosures_s3,
+    module.lda_disclosures_state_machine
+  ]
+}
+
+# IAM Policy for Execution History Exporter to access S3
+resource "aws_iam_policy" "lda_execution_history_exporter_s3_policy" {
+  name        = "${var.project_name}-lda-execution-history-exporter-s3-${var.environment}"
+  description = "Allows Lambda to write execution history to S3"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject"
+        ]
+        Resource = "${module.lda_disclosures_s3.bucket_arn}/executionhistory/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = module.lda_disclosures_s3.bucket_arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "executionhistory/*"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for Execution History Exporter to read Step Functions execution history
+resource "aws_iam_policy" "lda_execution_history_exporter_sfn_policy" {
+  name        = "${var.project_name}-lda-execution-history-exporter-sfn-${var.environment}"
+  description = "Allows Lambda to read Step Functions execution history"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:GetExecutionHistory",
+          "states:DescribeExecution",
+          "states:ListExecutions"
+        ]
+        # Allow access to all executions under this state machine
+        # Execution ARN format: arn:aws:states:region:account:execution:stateMachineName:executionId
+        Resource = [
+          module.lda_disclosures_state_machine.state_machine_arn,
+          "${replace(module.lda_disclosures_state_machine.state_machine_arn, ":stateMachine:", ":execution:")}:*"
+        ]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# EventBridge Rule to trigger execution history exporter when Step Function completes
+resource "aws_cloudwatch_event_rule" "lda_execution_history_exporter" {
+  name        = "${var.project_name}-lda-execution-history-exporter-${var.environment}"
+  description = "Trigger execution history exporter when LDA Step Function completes"
+
+  event_pattern = jsonencode({
+    source      = ["aws.states"]
+    detail-type = ["Step Functions Execution Status Change"]
+    detail = {
+      stateMachineArn = [module.lda_disclosures_state_machine.state_machine_arn]
+      status          = ["SUCCEEDED", "FAILED", "TIMED_OUT", "ABORTED"]
+    }
+  })
+
+  tags = var.common_tags
+}
+
+# EventBridge Target to invoke Lambda
+resource "aws_cloudwatch_event_target" "lda_execution_history_exporter" {
+  rule      = aws_cloudwatch_event_rule.lda_execution_history_exporter.name
+  target_id = "LDAExecutionHistoryExporter"
+  arn       = module.lda_execution_history_exporter_lambda.function_arn
+}
+
+# Lambda permission for EventBridge to invoke
+resource "aws_lambda_permission" "lda_execution_history_exporter_eventbridge" {
+  statement_id  = "AllowEventBridgeInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = module.lda_execution_history_exporter_lambda.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.lda_execution_history_exporter.arn
+
+  depends_on = [
+    module.lda_execution_history_exporter_lambda,
+    aws_cloudwatch_event_rule.lda_execution_history_exporter
   ]
 }
 

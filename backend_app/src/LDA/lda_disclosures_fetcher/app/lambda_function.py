@@ -130,7 +130,7 @@ def lambda_handler(event, context):
     session = create_session(api_key)
     
     result = {}
-    batch_size = 25  # 25 pages per batch (for 25 parallel indexers)
+    batch_size = 10  # 10 pages per batch (for 10 parallel indexers - reduced to avoid 25k event limit)
     
     # Process filings endpoint
     print("\n📋 Fetching filings endpoint count...")
