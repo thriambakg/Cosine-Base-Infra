@@ -1053,6 +1053,24 @@ def process_single_filing(session: requests.Session, filing: Dict) -> Optional[s
         log_print(f"   ❌ Error processing filing {filing_uuid}: {str(e)[:200]}")
         return None
 
+def create_batches(total_pages: int, batch_size: int = 25) -> List[Dict]:
+    """Create batches of pages (matching Lambda fetcher architecture)"""
+    batches = []
+    for batch_id in range(1, (total_pages + batch_size - 1) // batch_size + 1):
+        start_page = (batch_id - 1) * batch_size + 1
+        end_page = min(batch_id * batch_size, total_pages)
+        pages = list(range(start_page, end_page + 1))
+        
+        batches.append({
+            'batch_id': batch_id,
+            'pages': pages,
+            'start_page': start_page,
+            'end_page': end_page,
+            'page_count': len(pages)
+        })
+    
+    return batches
+
 def fetch_filings_page(session: requests.Session, base_params: Dict, page: int) -> Optional[Dict]:
     """Fetch a single page of filings - used for parallel page fetching"""
     try:
@@ -1066,7 +1084,13 @@ def fetch_filings_page(session: requests.Session, base_params: Dict, page: int) 
         return None
 
 def process_all_filings(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing_limit: Optional[int] = None):
-    """Fetch and process all filings with parallel API calls and parallel processing"""
+    """
+    Process all filings matching Lambda architecture:
+    1. ONE fetch to get count (matching Lambda fetcher)
+    2. Build batches of 25 pages (matching Lambda fetcher)
+    3. Process batches sequentially (matching Lambda Step Function)
+    4. Within each batch: fetch all 25 pages in parallel, then process all items with 25 workers (matching Lambda indexer)
+    """
     log_print("\n" + "="*80)
     log_print("📋 Processing Filings")
     log_print("="*80)
@@ -1074,13 +1098,10 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     if testing_limit:
         log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} filings total")
     
-    # Build base params - API requires at least one query parameter for pagination
-    # If both dates are null, use a very early default date to effectively fetch all records
-    base_params = {'page_size': 25}  # LDA API appears to return max 25 items per page
+    # Build base params
+    base_params = {'page_size': 25}
     
     if not start_date and not end_date:
-        # API requires at least one filter parameter, so use a very early date to fetch all records
-        # LDA data goes back to around 2000, so use 2000-01-01 as default
         base_params['filing_dt_posted_after'] = '2000-01-01'
         log_print(f"📅 No date filters provided - using default start date 2000-01-01 to fetch all records")
     else:
@@ -1089,7 +1110,6 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
         if end_date:
             base_params['filing_dt_posted_before'] = end_date
         
-        # Log date range being used
         if start_date and end_date:
             log_print(f"📅 Date range: {start_date} to {end_date}")
         elif start_date:
@@ -1097,13 +1117,12 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
         elif end_date:
             log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
     
-    # Configuration for parallel fetching and processing
-    # Reduced to 25 to avoid connection errors and stay within API limits
-    max_api_workers = 25  # Number of pages to fetch in parallel
-    max_processing_workers = 25  # Number of items to process in parallel
+    # Configuration matching Lambda architecture
+    batch_size = 25  # Pages per batch (matching Lambda fetcher)
+    max_processing_workers = 25  # Workers per page (matching Lambda indexer)
     
-    # First, fetch page 1 to get total count and determine pagination
-    log_print(f"\n📄 Fetching initial page to determine pagination...")
+    # Step 1: ONE fetch to get count (matching Lambda fetcher)
+    log_print(f"\n📄 Fetching initial page to get count...")
     first_response = fetch_filings_page(session, base_params, 1)
     if not first_response:
         log_print(f"❌ Failed to fetch initial page")
@@ -1111,7 +1130,6 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     
     total_count = first_response.get('count', 0)
     first_results = first_response.get('results', [])
-    has_next = first_response.get('next') is not None
     
     if not first_results:
         log_print(f"✅ No filings to process")
@@ -1119,148 +1137,109 @@ def process_all_filings(session: requests.Session, start_date: Optional[str] = N
     
     log_print(f"   Found {len(first_results)} filings on page 1 (total: {total_count})")
     
-    # Calculate total pages (assuming 25 items per page)
+    # Calculate total pages
     page_size = 25
     total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
-    log_print(f"   Estimated total pages: {total_pages}")
+    log_print(f"   Total pages: {total_pages}")
+    
+    # Apply testing limit if provided
+    if testing_limit:
+        pages_needed = (testing_limit + page_size - 1) // page_size
+        total_pages = min(total_pages, pages_needed)
+        total_count = min(total_count, testing_limit)
+        log_print(f"   🧪 Testing limit applied: {total_pages} pages, {total_count} records")
+    
+    # Step 2: Build batches (matching Lambda fetcher)
+    batches = create_batches(total_pages, batch_size)
+    log_print(f"\n📦 Created {len(batches)} batches of {batch_size} pages each")
     
     total_processed = 0
-    current_page = 1
-    batch_number = 0
     
-    # Process first page results
-    log_print(f"\n📊 Processing batch 1 (page 1) with {max_processing_workers} workers...")
-    with ThreadPoolExecutor(max_workers=max_processing_workers) as processing_executor:
-        future_to_filing = {
-            processing_executor.submit(process_single_filing, session, filing): filing
-            for filing in first_results
-        }
-        
-        batch_processed = 0
-        for future in as_completed(future_to_filing):
-            filing = future_to_filing[future]
-            try:
-                filing_type = future.result()
-                if filing_type:
-                    batch_processed += 1
-                    total_processed += 1
-            except Exception as e:
-                filing_uuid = filing.get('filing_uuid', 'unknown')
-                log_print(f"   ❌ Exception processing filing {filing_uuid}: {str(e)[:200]}")
-    
-    log_print(f"✅ Batch 1 complete: Processed and indexed {batch_processed} filings from page 1 (Total: {total_processed})")
-    
-    # Check if we've reached testing limit after first page
-    if testing_limit and total_processed >= testing_limit:
-        log_print(f"✅ Reached testing limit: {total_processed}/{testing_limit}")
-        return
-    
-    # Fetch remaining pages in parallel batches and process each page as it's fetched
-    while has_next and current_page < total_pages:
-        # Determine how many pages to fetch in this batch
-        pages_to_fetch = min(max_api_workers, total_pages - current_page)
-        if testing_limit and total_processed >= testing_limit:
-            # We have enough results already, don't fetch more
-            break
-        
-        batch_number += 1
-        batch_start_page = current_page + 1
-        batch_end_page = current_page + pages_to_fetch
-        log_print(f"\n📄 Batch {batch_number + 1}: Fetching pages {batch_start_page} to {batch_end_page} in parallel (fanning out to {max_processing_workers} workers per page)...")
-        
-        # Fetch multiple pages in parallel, and process each page's results immediately as it's fetched
-        pages_to_process = list(range(batch_start_page, batch_end_page + 1))
-        
-        # Process this batch: 25 pages fetched in parallel, each page processed with 25 workers
-        # Total concurrent processing: 25 pages × 25 workers = 625 workers
-        batch_start_time = time.time()
-        with ThreadPoolExecutor(max_workers=max_api_workers * max_processing_workers) as processing_executor:
-            # Track futures for both API calls and processing
-            page_processing_futures = []
-            batch_total_processed = 0
-            
-            # Step 1: Fetch 25 pages in parallel
-            log_print(f"   🚀 Submitting {len(pages_to_process)} page fetch requests in parallel...")
-            api_start_time = time.time()
-            with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
-                # Submit all page fetch requests immediately (all 25 at once)
-                future_to_page = {
-                    api_executor.submit(fetch_filings_page, session, base_params, page): page
-                    for page in pages_to_process
-                }
-                log_print(f"   ✅ All {len(future_to_page)} API requests submitted, waiting for responses...")
-                
-                # Step 2: As each page is fetched, immediately start processing it with 25 workers
-                pages_received = 0
-                for future in as_completed(future_to_page):
-                    page_num = future_to_page[future]
-                    pages_received += 1
-                    try:
-                        response = future.result()
-                        if response:
-                            page_results = response.get('results', [])
-                            if page_results:
-                                log_print(f"   📥 Received page {page_num} ({pages_received}/{len(pages_to_process)} pages) with {len(page_results)} items, submitting to processing pool...")
-                                # Check testing limit before processing
-                                if testing_limit:
-                                    remaining = testing_limit - total_processed
-                                    if remaining <= 0:
-                                        has_next = False
-                                        break
-                                    page_results = page_results[:remaining]
-                                
-                                # Process this page's items with up to 25 workers (fan-out)
-                                # All items from this page are submitted to the shared executor
-                                # which has capacity for 25 pages × 25 workers = 625 total
-                                for filing in page_results:
-                                    processing_future = processing_executor.submit(process_single_filing, session, filing)
-                                    page_processing_futures.append((processing_future, filing, page_num))
-                                
-                                # Update total_processed count for testing limit check
-                                total_processed += len(page_results)
-                                if testing_limit and total_processed >= testing_limit:
-                                    has_next = False
-                                    break
-                            else:
-                                has_next = False
-                                break
-                        else:
-                            log_print(f"   ⚠️ Page {page_num} returned None")
-                    except Exception as e:
-                        log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
-            
-            # Step 3: Wait for all processing to complete for this batch (all 25 pages × 25 items)
-            for processing_future, filing, page_num in page_processing_futures:
-                try:
-                    filing_type = processing_future.result()
-                    if filing_type:
-                        batch_total_processed += 1
-                except Exception as e:
-                    filing_uuid = filing.get('filing_uuid', 'unknown')
-                    log_print(f"   ❌ Exception processing filing {filing_uuid} from page {page_num}: {str(e)[:200]}")
-            
-            processing_end_time = time.time()
-            processing_duration = processing_end_time - processing_start_time
-            batch_duration = processing_end_time - batch_start_time
-            log_print(f"   ✅ All {len(page_processing_futures)} items processed in {processing_duration:.2f}s")
-        
-        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} filings from pages {batch_start_page}-{batch_end_page} in {batch_duration:.2f}s (Total: {total_processed})")
-        
-        # Clear memory after each batch to free up resources
-        # This helps prevent memory accumulation across batches
-        del page_processing_futures
-        gc.collect()
-        
-        current_page = batch_end_page
-        
-        # Check if we've reached testing limit
+    # Step 3: Process batches sequentially (matching Lambda Step Function)
+    for batch_idx, batch in enumerate(batches, 1):
         if testing_limit and total_processed >= testing_limit:
             log_print(f"✅ Reached testing limit: {total_processed}/{testing_limit}")
             break
         
-        # Check if we should continue
-        if not has_next:
-            break
+        batch_pages = batch['pages']
+        log_print(f"\n📄 Batch {batch_idx}/{len(batches)}: Processing pages {batch['start_page']}-{batch['end_page']} ({len(batch_pages)} pages)")
+        
+        batch_start_time = time.time()
+        
+        # Step 3a: Fetch all pages in this batch in parallel (matching Lambda indexer parallel page fetching)
+        log_print(f"   🚀 Fetching {len(batch_pages)} pages in parallel...")
+        api_start_time = time.time()
+        
+        with ThreadPoolExecutor(max_workers=batch_size) as api_executor:
+            # Submit all page fetch requests
+            future_to_page = {
+                api_executor.submit(fetch_filings_page, session, base_params, page): page
+                for page in batch_pages
+            }
+            
+            # Collect all page responses
+            page_responses = {}
+            pages_received = 0
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                pages_received += 1
+                try:
+                    response = future.result()
+                    if response:
+                        page_responses[page_num] = response.get('results', [])
+                        log_print(f"   📥 Received page {page_num} ({pages_received}/{len(batch_pages)} pages, {len(page_responses[page_num])} items)")
+                except Exception as e:
+                    log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
+        
+        api_end_time = time.time()
+        api_duration = api_end_time - api_start_time
+        log_print(f"   ✅ All {len(batch_pages)} pages fetched in {api_duration:.2f}s (avg {api_duration/len(batch_pages):.2f}s per page)")
+        
+        # Step 3b: Process all items from all pages with 25 workers (matching Lambda indexer)
+        all_items = []
+        for page_num in sorted(page_responses.keys()):
+            page_items = page_responses[page_num]
+            if testing_limit:
+                remaining = testing_limit - total_processed
+                if remaining <= 0:
+                    break
+                page_items = page_items[:remaining]
+            all_items.extend([(item, page_num) for item in page_items])
+        
+        if not all_items:
+            log_print(f"   ⚠️ No items to process in this batch")
+            continue
+        
+        log_print(f"   🔄 Processing {len(all_items)} items with {max_processing_workers} workers...")
+        processing_start_time = time.time()
+        
+        batch_processed = 0
+        with ThreadPoolExecutor(max_workers=max_processing_workers) as processing_executor:
+            future_to_item = {
+                processing_executor.submit(process_single_filing, session, item): (item, page_num)
+                for item, page_num in all_items
+            }
+            
+            for future in as_completed(future_to_item):
+                item, page_num = future_to_item[future]
+                try:
+                    filing_type = future.result()
+                    if filing_type:
+                        batch_processed += 1
+                        total_processed += 1
+                except Exception as e:
+                    filing_uuid = item.get('filing_uuid', 'unknown')
+                    log_print(f"   ❌ Exception processing filing {filing_uuid} from page {page_num}: {str(e)[:200]}")
+        
+        processing_end_time = time.time()
+        processing_duration = processing_end_time - processing_start_time
+        batch_duration = processing_end_time - batch_start_time
+        
+        log_print(f"   ✅ Processed {batch_processed}/{len(all_items)} items in {processing_duration:.2f}s")
+        log_print(f"✅ Batch {batch_idx} complete: {batch_processed} filings from pages {batch['start_page']}-{batch['end_page']} in {batch_duration:.2f}s (Total: {total_processed})")
+        
+        # Memory cleanup after each batch
+        gc.collect()
     
     log_print(f"\n✅ Finished processing all filings. Total processed and indexed: {total_processed}")
 
@@ -1306,7 +1285,13 @@ def process_single_contribution(session: requests.Session, contribution: Dict) -
         return False
 
 def process_all_contributions(session: requests.Session, start_date: Optional[str] = None, end_date: Optional[str] = None, testing_limit: Optional[int] = None):
-    """Fetch and process all contributions with parallel API calls and parallel processing"""
+    """
+    Process all contributions matching Lambda architecture:
+    1. ONE fetch to get count (matching Lambda fetcher)
+    2. Build batches of 25 pages (matching Lambda fetcher)
+    3. Process batches sequentially (matching Lambda Step Function)
+    4. Within each batch: fetch all 25 pages in parallel, then process all items with 25 workers (matching Lambda indexer)
+    """
     log_print("\n" + "="*80)
     log_print("📋 Processing Contributions (LD-203)")
     log_print("="*80)
@@ -1314,13 +1299,10 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     if testing_limit:
         log_print(f"🧪 TESTING MODE: Limiting to {testing_limit} contributions total")
     
-    # Build base params - API requires at least one query parameter for pagination
-    # If both dates are null, use a very early default date to effectively fetch all records
-    base_params = {'page_size': 25}  # LDA API appears to return max 25 items per page
+    # Build base params
+    base_params = {'page_size': 25}
     
     if not start_date and not end_date:
-        # API requires at least one filter parameter, so use a very early date to fetch all records
-        # LDA data goes back to around 2000, so use 2000-01-01 as default
         base_params['filing_dt_posted_after'] = '2000-01-01'
         log_print(f"📅 No date filters provided - using default start date 2000-01-01 to fetch all records")
     else:
@@ -1329,7 +1311,6 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
         if end_date:
             base_params['filing_dt_posted_before'] = end_date
         
-        # Log date range being used
         if start_date and end_date:
             log_print(f"📅 Date range: {start_date} to {end_date}")
         elif start_date:
@@ -1337,13 +1318,12 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
         elif end_date:
             log_print(f"📅 End date: {end_date} (no start date - fetching all records up to end date)")
     
-    # Configuration for parallel fetching and processing
-    # Batches of 25 pages, each page processed with 25 workers
-    max_api_workers = 25  # Number of pages to fetch in parallel (batch size)
-    max_processing_workers = 25  # Number of items to process in parallel per page
+    # Configuration matching Lambda architecture
+    batch_size = 25  # Pages per batch (matching Lambda fetcher)
+    max_processing_workers = 25  # Workers per page (matching Lambda indexer)
     
-    # First, fetch page 1 to get total count and determine pagination
-    log_print(f"\n📄 Fetching initial page to determine pagination...")
+    # Step 1: ONE fetch to get count (matching Lambda fetcher)
+    log_print(f"\n📄 Fetching initial page to get count...")
     first_response = fetch_contributions_page(session, base_params, 1)
     if not first_response:
         log_print(f"❌ Failed to fetch initial page")
@@ -1351,7 +1331,6 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     
     total_count = first_response.get('count', 0)
     first_results = first_response.get('results', [])
-    has_next = first_response.get('next') is not None
     
     if not first_results:
         log_print(f"✅ No contributions to process")
@@ -1359,154 +1338,109 @@ def process_all_contributions(session: requests.Session, start_date: Optional[st
     
     log_print(f"   Found {len(first_results)} contributions on page 1 (total: {total_count})")
     
-    # Calculate total pages (assuming 25 items per page)
+    # Calculate total pages
     page_size = 25
     total_pages = (total_count + page_size - 1) // page_size if total_count > 0 else 1
-    log_print(f"   Estimated total pages: {total_pages}")
+    log_print(f"   Total pages: {total_pages}")
+    
+    # Apply testing limit if provided
+    if testing_limit:
+        pages_needed = (testing_limit + page_size - 1) // page_size
+        total_pages = min(total_pages, pages_needed)
+        total_count = min(total_count, testing_limit)
+        log_print(f"   🧪 Testing limit applied: {total_pages} pages, {total_count} records")
+    
+    # Step 2: Build batches (matching Lambda fetcher)
+    batches = create_batches(total_pages, batch_size)
+    log_print(f"\n📦 Created {len(batches)} batches of {batch_size} pages each")
     
     total_processed = 0
-    current_page = 1
-    batch_number = 0
     
-    # Process first page results
-    log_print(f"\n📊 Processing batch 1 (page 1) with {max_processing_workers} workers...")
-    with ThreadPoolExecutor(max_workers=max_processing_workers) as processing_executor:
-        future_to_contribution = {
-            processing_executor.submit(process_single_contribution, session, contribution): contribution
-            for contribution in first_results
-        }
-        
-        batch_processed = 0
-        for future in as_completed(future_to_contribution):
-            contribution = future_to_contribution[future]
-            try:
-                success = future.result()
-                if success:
-                    batch_processed += 1
-                    total_processed += 1
-            except Exception as e:
-                contribution_uuid = contribution.get('filing_uuid', 'unknown')
-                log_print(f"   ❌ Exception processing contribution {contribution_uuid}: {str(e)[:200]}")
-    
-    log_print(f"✅ Batch 1 complete: Processed and indexed {batch_processed} contributions from page 1 (Total: {total_processed})")
-    
-    # Check if we've reached testing limit after first page
-    if testing_limit and total_processed >= testing_limit:
-        log_print(f"✅ Reached testing limit: {total_processed}/{testing_limit}")
-        return
-    
-    # Fetch remaining pages in parallel batches and process each page as it's fetched
-    while has_next and current_page < total_pages:
-        # Determine how many pages to fetch in this batch
-        pages_to_fetch = min(max_api_workers, total_pages - current_page)
-        if testing_limit and total_processed >= testing_limit:
-            # We have enough results already, don't fetch more
-            break
-        
-        batch_number += 1
-        batch_start_page = current_page + 1
-        batch_end_page = current_page + pages_to_fetch
-        log_print(f"\n📄 Batch {batch_number + 1}: Fetching pages {batch_start_page} to {batch_end_page} in parallel (fanning out to {max_processing_workers} workers per page)...")
-        
-        # Fetch multiple pages in parallel, and process each page's results immediately as it's fetched
-        pages_to_process = list(range(batch_start_page, batch_end_page + 1))
-        
-        # Process this batch: 25 pages fetched in parallel, each page processed with 25 workers
-        # Total concurrent processing: 25 pages × 25 workers = 625 workers
-        batch_start_time = time.time()
-        with ThreadPoolExecutor(max_workers=max_api_workers * max_processing_workers) as processing_executor:
-            # Track futures for both API calls and processing
-            page_processing_futures = []
-            batch_total_processed = 0
-            
-            # Step 1: Fetch 25 pages in parallel
-            log_print(f"   🚀 Submitting {len(pages_to_process)} page fetch requests in parallel...")
-            api_start_time = time.time()
-            with ThreadPoolExecutor(max_workers=max_api_workers) as api_executor:
-                # Submit all page fetch requests immediately (all 25 at once)
-                future_to_page = {
-                    api_executor.submit(fetch_contributions_page, session, base_params, page): page
-                    for page in pages_to_process
-                }
-                log_print(f"   ✅ All {len(future_to_page)} API requests submitted, waiting for responses...")
-                
-                # Step 2: As each page is fetched, immediately start processing it with 25 workers
-                pages_received = 0
-                for future in as_completed(future_to_page):
-                    page_num = future_to_page[future]
-                    pages_received += 1
-                    try:
-                        response = future.result()
-                        if response:
-                            page_results = response.get('results', [])
-                            if page_results:
-                                log_print(f"   📥 Received page {page_num} ({pages_received}/{len(pages_to_process)} pages) with {len(page_results)} items, submitting to processing pool...")
-                                # Check testing limit before processing
-                                if testing_limit:
-                                    remaining = testing_limit - total_processed
-                                    if remaining <= 0:
-                                        has_next = False
-                                        break
-                                    page_results = page_results[:remaining]
-                                
-                                # Process this page's items with up to 25 workers (fan-out)
-                                # All items from this page are submitted to the shared executor
-                                # which has capacity for 25 pages × 25 workers = 625 total
-                                for contribution in page_results:
-                                    processing_future = processing_executor.submit(process_single_contribution, session, contribution)
-                                    page_processing_futures.append((processing_future, contribution, page_num))
-                                
-                                # Update total_processed count for testing limit check
-                                total_processed += len(page_results)
-                                if testing_limit and total_processed >= testing_limit:
-                                    has_next = False
-                                    break
-                            else:
-                                has_next = False
-                                break
-                        else:
-                            log_print(f"   ⚠️ Page {page_num} returned None")
-                    except Exception as e:
-                        log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
-            
-            api_end_time = time.time()
-            api_duration = api_end_time - api_start_time
-            log_print(f"   ✅ All {len(pages_to_process)} pages fetched in {api_duration:.2f}s (avg {api_duration/len(pages_to_process):.2f}s per page)")
-            log_print(f"   🔄 Processing {len(page_processing_futures)} items with {max_api_workers * max_processing_workers} workers...")
-            
-            # Step 3: Wait for all processing to complete for this batch (all 25 pages × 25 items)
-            processing_start_time = time.time()
-            for processing_future, contribution, page_num in page_processing_futures:
-                try:
-                    success = processing_future.result()
-                    if success:
-                        batch_total_processed += 1
-                except Exception as e:
-                    contribution_uuid = contribution.get('filing_uuid', 'unknown')
-                    log_print(f"   ❌ Exception processing contribution {contribution_uuid} from page {page_num}: {str(e)[:200]}")
-            
-            processing_end_time = time.time()
-            processing_duration = processing_end_time - processing_start_time
-            batch_duration = processing_end_time - batch_start_time
-            log_print(f"   ✅ All {len(page_processing_futures)} items processed in {processing_duration:.2f}s")
-        
-        log_print(f"✅ Batch {batch_number + 1} complete: Processed and indexed {batch_total_processed} contributions from pages {batch_start_page}-{batch_end_page} in {batch_duration:.2f}s (Total: {total_processed})")
-        
-        # Clear memory after each batch to free up resources
-        # This helps prevent memory accumulation across batches
-        del page_processing_futures
-        gc.collect()
-        
-        current_page = batch_end_page
-        
-        # Check if we've reached testing limit
+    # Step 3: Process batches sequentially (matching Lambda Step Function)
+    for batch_idx, batch in enumerate(batches, 1):
         if testing_limit and total_processed >= testing_limit:
             log_print(f"✅ Reached testing limit: {total_processed}/{testing_limit}")
             break
         
-        # Check if we should continue
-        if not has_next:
-            break
+        batch_pages = batch['pages']
+        log_print(f"\n📄 Batch {batch_idx}/{len(batches)}: Processing pages {batch['start_page']}-{batch['end_page']} ({len(batch_pages)} pages)")
+        
+        batch_start_time = time.time()
+        
+        # Step 3a: Fetch all pages in this batch in parallel (matching Lambda indexer parallel page fetching)
+        log_print(f"   🚀 Fetching {len(batch_pages)} pages in parallel...")
+        api_start_time = time.time()
+        
+        with ThreadPoolExecutor(max_workers=batch_size) as api_executor:
+            # Submit all page fetch requests
+            future_to_page = {
+                api_executor.submit(fetch_contributions_page, session, base_params, page): page
+                for page in batch_pages
+            }
+            
+            # Collect all page responses
+            page_responses = {}
+            pages_received = 0
+            for future in as_completed(future_to_page):
+                page_num = future_to_page[future]
+                pages_received += 1
+                try:
+                    response = future.result()
+                    if response:
+                        page_responses[page_num] = response.get('results', [])
+                        log_print(f"   📥 Received page {page_num} ({pages_received}/{len(batch_pages)} pages, {len(page_responses[page_num])} items)")
+                except Exception as e:
+                    log_print(f"   ❌ Exception fetching page {page_num}: {str(e)[:200]}")
+        
+        api_end_time = time.time()
+        api_duration = api_end_time - api_start_time
+        log_print(f"   ✅ All {len(batch_pages)} pages fetched in {api_duration:.2f}s (avg {api_duration/len(batch_pages):.2f}s per page)")
+        
+        # Step 3b: Process all items from all pages with 25 workers (matching Lambda indexer)
+        all_items = []
+        for page_num in sorted(page_responses.keys()):
+            page_items = page_responses[page_num]
+            if testing_limit:
+                remaining = testing_limit - total_processed
+                if remaining <= 0:
+                    break
+                page_items = page_items[:remaining]
+            all_items.extend([(item, page_num) for item in page_items])
+        
+        if not all_items:
+            log_print(f"   ⚠️ No items to process in this batch")
+            continue
+        
+        log_print(f"   🔄 Processing {len(all_items)} items with {max_processing_workers} workers...")
+        processing_start_time = time.time()
+        
+        batch_processed = 0
+        with ThreadPoolExecutor(max_workers=max_processing_workers) as processing_executor:
+            future_to_item = {
+                processing_executor.submit(process_single_contribution, session, item): (item, page_num)
+                for item, page_num in all_items
+            }
+            
+            for future in as_completed(future_to_item):
+                item, page_num = future_to_item[future]
+                try:
+                    success = future.result()
+                    if success:
+                        batch_processed += 1
+                        total_processed += 1
+                except Exception as e:
+                    contribution_uuid = item.get('filing_uuid', 'unknown')
+                    log_print(f"   ❌ Exception processing contribution {contribution_uuid} from page {page_num}: {str(e)[:200]}")
+        
+        processing_end_time = time.time()
+        processing_duration = processing_end_time - processing_start_time
+        batch_duration = processing_end_time - batch_start_time
+        
+        log_print(f"   ✅ Processed {batch_processed}/{len(all_items)} items in {processing_duration:.2f}s")
+        log_print(f"✅ Batch {batch_idx} complete: {batch_processed} contributions from pages {batch['start_page']}-{batch['end_page']} in {batch_duration:.2f}s (Total: {total_processed})")
+        
+        # Memory cleanup after each batch
+        gc.collect()
     
     log_print(f"\n✅ Finished processing all contributions. Total processed and indexed: {total_processed}")
 
