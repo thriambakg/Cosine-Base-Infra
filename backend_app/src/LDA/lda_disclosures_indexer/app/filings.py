@@ -1,11 +1,12 @@
 """
 Filings processing module for LDA indexer Lambda
-Processes a single page of filings sequentially (parallelism handled at Lambda level)
+Processes a single page of filings in parallel (25 workers per page)
 """
 
 import json
 from typing import Dict, Optional
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
@@ -324,18 +325,33 @@ def process_filings_page(page: int, start_date: Optional[str], end_date: Optiona
     
     print(f"   Found {len(results)} filings on page {page}")
     
-    # Process items sequentially (we're already parallelizing at Lambda level with 25 concurrent executions)
+    # Process items in parallel (25 workers per page)
+    # Each item: API call, document download, DynamoDB write
     processed_count = 0
+    failed_count = 0
+    max_workers = 25  # Process all items on page in parallel
     
-    for filing in results:
-        try:
-            if process_single_filing(session, filing):
-                processed_count += 1
-        except Exception as e:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all filing processing tasks
+        future_to_filing = {
+            executor.submit(process_single_filing, session, filing): filing
+            for filing in results
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_filing):
+            filing = future_to_filing[future]
             filing_uuid = filing.get('filing_uuid', 'unknown')
-            print(f"   ❌ Exception processing filing {filing_uuid}: {str(e)[:200]}")
+            try:
+                if future.result():
+                    processed_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                failed_count += 1
+                print(f"   ❌ Exception processing filing {filing_uuid}: {str(e)[:200]}")
     
-    print(f"✅ Page {page} complete: Processed {processed_count}/{len(results)} filings")
+    print(f"✅ Page {page} complete: Processed {processed_count}/{len(results)} filings ({failed_count} failed)")
     
     return {
         'processed_count': processed_count,

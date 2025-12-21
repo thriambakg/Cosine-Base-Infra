@@ -1,11 +1,12 @@
 """
 Contributions processing module for LDA indexer Lambda
-Processes a single page of contributions sequentially (parallelism handled at Lambda level)
+Processes a single page of contributions in parallel (25 workers per page)
 """
 
 import json
 from typing import Dict, Optional
 from decimal import Decimal
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
@@ -287,18 +288,33 @@ def process_contributions_page(page: int, start_date: Optional[str], end_date: O
     
     print(f"   Found {len(results)} contributions on page {page}")
     
-    # Process items sequentially (we're already parallelizing at Lambda level with 25 concurrent executions)
+    # Process items in parallel (25 workers per page)
+    # Each item: API call, document download, DynamoDB write
     processed_count = 0
+    failed_count = 0
+    max_workers = 25  # Process all items on page in parallel
     
-    for contribution in results:
-        try:
-            if process_single_contribution(session, contribution):
-                processed_count += 1
-        except Exception as e:
+    with ThreadPoolExecutor(max_workers=max_workers) as executor:
+        # Submit all contribution processing tasks
+        future_to_contribution = {
+            executor.submit(process_single_contribution, session, contribution): contribution
+            for contribution in results
+        }
+        
+        # Collect results as they complete
+        for future in as_completed(future_to_contribution):
+            contribution = future_to_contribution[future]
             contribution_uuid = contribution.get('filing_uuid', 'unknown')
-            print(f"   ❌ Exception processing contribution {contribution_uuid}: {str(e)[:200]}")
+            try:
+                if future.result():
+                    processed_count += 1
+                else:
+                    failed_count += 1
+            except Exception as e:
+                failed_count += 1
+                print(f"   ❌ Exception processing contribution {contribution_uuid}: {str(e)[:200]}")
     
-    print(f"✅ Page {page} complete: Processed {processed_count}/{len(results)} contributions")
+    print(f"✅ Page {page} complete: Processed {processed_count}/{len(results)} contributions ({failed_count} failed)")
     
     return {
         'processed_count': processed_count,

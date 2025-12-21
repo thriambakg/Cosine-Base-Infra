@@ -3626,11 +3626,11 @@ module "lda_disclosures_indexer" {
   source = "./modules/lambda"
 
   function_name = "${var.project_name}-lda-disclosures-indexer-${var.environment}"
-  description   = "Processes individual LDA pages from SQS queue sequentially. Concurrency limit: 25 (25 pages processed in parallel)"
+  description   = "Processes individual LDA pages from SQS queue with parallel item processing. Concurrency limit: 25 (25 pages processed in parallel, 25 items per page processed in parallel)"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
-  timeout       = 900 # 15 minutes (enough for batch processing)
-  memory_size   = 512 # Reduced from 1024 - sequential processing within each invocation
+  timeout       = 900  # 15 minutes (enough for parallel batch processing)
+  memory_size   = 1024 # Increased from 512 - parallel processing of 25 items per page (API calls, document downloads, DynamoDB writes)
 
   source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_indexer/app"
 
@@ -3651,7 +3651,7 @@ module "lda_disclosures_indexer" {
   ]
 
   # Reserved concurrency limit of 25
-  reserved_concurrent_executions = 30
+  reserved_concurrent_executions = 25
 
   # IAM policies
   additional_policy_arns = [
