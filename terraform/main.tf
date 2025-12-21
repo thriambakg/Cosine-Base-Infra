@@ -3629,8 +3629,8 @@ module "lda_disclosures_indexer" {
   description   = "Processes individual LDA pages from SQS queue with parallel item processing. Concurrency limit: 25 (25 pages processed in parallel, 25 items per page processed in parallel)"
   runtime       = "python3.11"
   handler       = "lambda_function.lambda_handler"
-  timeout       = 900  # 15 minutes (enough for parallel batch processing)
-  memory_size   = 1024 # Increased from 512 - parallel processing of 25 items per page (API calls, document downloads, DynamoDB writes)
+  timeout       = 900 # 15 minutes (enough for parallel batch processing)
+  memory_size   = 512 # Increased from 512 - parallel processing of 25 items per page (API calls, document downloads, DynamoDB writes)
 
   source_dir = "${path.module}/../backend_app/src/LDA/lda_disclosures_indexer/app"
 

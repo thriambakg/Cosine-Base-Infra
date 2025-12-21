@@ -167,3 +167,4 @@ attributes:
 4. **Skip SQS/CSV approach** - use direct GSI queries instead
 
 
+
