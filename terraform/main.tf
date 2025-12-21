@@ -3651,7 +3651,7 @@ module "lda_disclosures_indexer" {
   ]
 
   # Reserved concurrency limit of 25
-  reserved_concurrent_executions = 30
+  reserved_concurrent_executions = 25
 
   # IAM policies
   additional_policy_arns = [
