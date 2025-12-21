@@ -592,6 +592,38 @@ output "congress_bills_data_s3_bucket_arn" {
   value       = module.congress_bills_data_s3.bucket_arn
 }
 
+# LDA Filings Table Outputs
+output "lda_filings_table_name" {
+  description = "Name of the LDA filings DynamoDB table"
+  value       = module.lda_filings_table.table_name
+}
+
+output "lda_filings_table_arn" {
+  description = "ARN of the LDA filings DynamoDB table"
+  value       = module.lda_filings_table.table_arn
+}
+
+output "lda_filings_table_id" {
+  description = "ID of the LDA filings DynamoDB table"
+  value       = module.lda_filings_table.table_id
+}
+
+output "lda_filings_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing the LDA filings table"
+  value       = module.lda_filings_table.table_policy_arn
+}
+
+# LDA Disclosures S3 Bucket Outputs
+output "lda_disclosures_s3_bucket_name" {
+  description = "Name of the LDA disclosures S3 bucket"
+  value       = module.lda_disclosures_s3.bucket_id
+}
+
+output "lda_disclosures_s3_bucket_arn" {
+  description = "ARN of the LDA disclosures S3 bucket"
+  value       = module.lda_disclosures_s3.bucket_arn
+}
+
 # OpenSearch Domain Outputs
 # DISABLED FOR MVP - OpenSearch is not being used
 # output "opensearch_domain_endpoint" {
