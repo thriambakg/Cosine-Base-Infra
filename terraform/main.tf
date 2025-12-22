@@ -1946,65 +1946,6 @@ resource "aws_kms_grant" "glue_dynamodb_key_access" {
   ]
 }
 
-# IAM Policy for Glue Job to access LDA Parameter Filings Table
-resource "aws_iam_policy" "lda_glue_parameter_filings_table_policy" {
-  name        = "${var.project_name}-lda-glue-parameter-filings-table-${var.environment}"
-  description = "Allows Glue job to read/write to LDA parameter-filings table"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "dynamodb:GetItem",
-          "dynamodb:PutItem",
-          "dynamodb:UpdateItem",
-          "dynamodb:DeleteItem",
-          "dynamodb:Query",
-          "dynamodb:Scan",
-          "dynamodb:BatchGetItem",
-          "dynamodb:BatchWriteItem"
-        ]
-        Resource = [
-          module.lda_parameter_filings_table.table_arn,
-          "${module.lda_parameter_filings_table.table_arn}/index/*"
-        ]
-      }
-    ]
-  })
-
-  tags = var.common_tags
-}
-
-# Attach parameter-filings table policy to Glue job role
-resource "aws_iam_role_policy_attachment" "lda_glue_parameter_filings_table" {
-  role       = module.lda_disclosures_glue_job.role_name
-  policy_arn = aws_iam_policy.lda_glue_parameter_filings_table_policy.arn
-
-  depends_on = [
-    module.lda_disclosures_glue_job,
-    aws_iam_policy.lda_glue_parameter_filings_table_policy
-  ]
-}
-
-# Grant Glue job role access to DynamoDB KMS key for parameter-filings table
-resource "aws_kms_grant" "lda_glue_parameter_filings_dynamodb_key_access" {
-  name              = "${var.project_name}-lda-disclosures-${var.environment}-parameter-filings-dynamodb-key-grant"
-  key_id            = module.kms.dynamodb_key_id
-  grantee_principal = module.lda_disclosures_glue_job.role_arn
-  operations = [
-    "Decrypt",
-    "Encrypt",
-    "GenerateDataKey",
-    "DescribeKey"
-  ]
-
-  depends_on = [
-    module.lda_disclosures_glue_job,
-    module.kms
-  ]
-}
 
 # SQS Queue for Orphan Subaward Processing
 module "usaspending_orphan_subaward_queue" {
@@ -3323,87 +3264,9 @@ module "lda_filings_table" {
   depends_on = [module.kms]
 }
 
-# DynamoDB Table for LDA Parameter-Filing Mappings
-# Stores many-to-many relationships for parameters that require scan operations
-# Examples: PAC names, all general issue codes, all government entity IDs, foreign countries, all lobbyists
-# Primary Key: parameter_type#parameter_value (e.g., "PAC#Dave Kamp 2008", "GENERAL_ISSUE#TAX")
-# Range Key: filing_uuid (allows multiple filings per parameter)
-module "lda_parameter_filings_table" {
-  source = "./modules/dynamodb-table"
-
-  project_name = var.project_name
-  environment  = var.environment
-  table_name   = "lda-parameter-filings"
-
-  hash_key  = "parameter_key"
-  range_key = "filing_uuid"
-
-  attributes = [
-    { name = "parameter_key", type = "S" },   # Format: "PARAMETER_TYPE#VALUE" (e.g., "PAC#Dave Kamp 2008")
-    { name = "filing_uuid", type = "S" },     # Filing or contribution UUID
-    { name = "parameter_type", type = "S" },  # Type: "PAC", "GENERAL_ISSUE", "GOVERNMENT_ENTITY", "FOREIGN_COUNTRY", "LOBBYIST"
-    { name = "parameter_value", type = "S" }, # The actual value (PAC name, issue code, etc.)
-    { name = "filing_type", type = "S" },     # "FILING" or "CONTRIBUTION"
-    { name = "dt_posted", type = "S" },       # Posted date for sorting
-    { name = "filing_year", type = "N" }      # Filing year for filtering
-  ]
-
-  global_secondary_indexes = [
-    {
-      name            = "ParameterTypeValueIndex"
-      hash_key        = "parameter_type"
-      range_key       = "parameter_value"
-      projection_type = "KEYS_ONLY"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "ParameterValuePostedDateIndex"
-      hash_key        = "parameter_value"
-      range_key       = "dt_posted"
-      projection_type = "KEYS_ONLY"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "FilingTypePostedDateIndex"
-      hash_key        = "filing_type"
-      range_key       = "dt_posted"
-      projection_type = "KEYS_ONLY"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "ParameterTypePostedDateIndex"
-      hash_key        = "parameter_type"
-      range_key       = "dt_posted"
-      projection_type = "KEYS_ONLY"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    }
-  ]
-
-  billing_mode                   = var.dynamodb_billing_mode
-  read_capacity                  = var.dynamodb_read_capacity
-  write_capacity                 = var.dynamodb_write_capacity
-  stream_enabled                 = var.dynamodb_stream_enabled
-  stream_view_type               = var.dynamodb_stream_view_type
-  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
-  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
-
-  kms_key_arn = module.kms.dynamodb_key_arn
-
-  table_type    = "LobbyingData"
-  table_purpose = "LDAParameterFilings"
-
-  tags = var.common_tags
-
-  depends_on = [module.kms]
-}
-
 # Glue Job for LDA Disclosures Indexing
+# Note: Parameter-filing mappings are stored in the same lda-filings table
+# using PK = "PARAMETER_TYPE#VALUE" and SK = "FILING#{uuid}" or "CONTRIBUTION#{uuid}"
 module "lda_disclosures_glue_job" {
   source = "./modules/glue-job"
 
@@ -3436,6 +3299,7 @@ module "lda_disclosures_glue_job" {
 
   # DynamoDB access
   dynamodb_table_arn = module.lda_filings_table.table_arn
+  # Note: Parameter-filing mappings are stored in the same table using different PK/SK patterns
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
@@ -3452,14 +3316,13 @@ module "lda_disclosures_glue_job" {
 
   # Job arguments
   default_arguments = {
-    "--LDA_API_BASE_URL"             = "https://lda.senate.gov/api/v1"
-    "--LDA_SECRET_NAME"              = module.lda_api_secrets_manager.secret_names["lda-api"]
-    "--FILINGS_TABLE_NAME"           = module.lda_filings_table.table_name
-    "--PARAMETER_FILINGS_TABLE_NAME" = module.lda_parameter_filings_table.table_name
-    "--S3_BUCKET_NAME"               = module.lda_disclosures_s3.bucket_id
-    "--REQUEST_TIMEOUT"              = "30"
-    "--RATE_LIMIT_DELAY"             = "0.5"
-    "--PAC_QUEUE_URL"                = module.lda_pac_autocomplete_queue.queue_url
+    "--LDA_API_BASE_URL"   = "https://lda.senate.gov/api/v1"
+    "--LDA_SECRET_NAME"    = module.lda_api_secrets_manager.secret_names["lda-api"]
+    "--FILINGS_TABLE_NAME" = module.lda_filings_table.table_name
+    "--S3_BUCKET_NAME"     = module.lda_disclosures_s3.bucket_id
+    "--REQUEST_TIMEOUT"    = "30"
+    "--RATE_LIMIT_DELAY"   = "0.5"
+    "--PAC_QUEUE_URL"      = module.lda_pac_autocomplete_queue.queue_url
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -3468,7 +3331,6 @@ module "lda_disclosures_glue_job" {
 
   depends_on = [
     module.lda_filings_table,
-    module.lda_parameter_filings_table,
     module.lda_disclosures_s3,
     module.kms,
     module.glue_scripts_s3,
@@ -3751,14 +3613,13 @@ module "lda_disclosures_indexer" {
 
   # Environment variables
   environment_variables = {
-    LDA_API_BASE_URL             = "https://lda.senate.gov/api/v1"
-    LDA_SECRET_NAME              = module.lda_api_secrets_manager.secret_names["lda-api"]
-    FILINGS_TABLE_NAME           = module.lda_filings_table.table_name
-    PARAMETER_FILINGS_TABLE_NAME = module.lda_parameter_filings_table.table_name
-    S3_BUCKET_NAME               = module.lda_disclosures_s3.bucket_id
-    REQUEST_TIMEOUT              = "30"
-    RATE_LIMIT_DELAY             = "0.5"
-    PAC_QUEUE_URL                = module.lda_pac_autocomplete_queue.queue_url
+    LDA_API_BASE_URL   = "https://lda.senate.gov/api/v1"
+    LDA_SECRET_NAME    = module.lda_api_secrets_manager.secret_names["lda-api"]
+    FILINGS_TABLE_NAME = module.lda_filings_table.table_name
+    S3_BUCKET_NAME     = module.lda_disclosures_s3.bucket_id
+    REQUEST_TIMEOUT    = "30"
+    RATE_LIMIT_DELAY   = "0.5"
+    PAC_QUEUE_URL      = module.lda_pac_autocomplete_queue.queue_url
   }
 
   # Lambda layers
@@ -3773,7 +3634,6 @@ module "lda_disclosures_indexer" {
   additional_policy_arns = [
     module.lda_api_secrets_manager.secret_access_policy_arn,
     module.lda_filings_table.table_policy_arn,
-    module.lda_parameter_filings_table.table_policy_arn,
     module.lda_batch_queue.sqs_access_policy_arn,
     module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
     module.kms.kms_access_policy_arn,

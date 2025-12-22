@@ -157,8 +157,7 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                         parameter_value=pac_name,
                         filing_uuid=item['filing_uuid'],
                         filing_type='CONTRIBUTION',
-                        dt_posted=indexed_fields.get('dt_posted'),
-                        filing_year=indexed_fields.get('filing_year')
+                        dt_posted=indexed_fields.get('dt_posted')
                     )
         
         # Set null values for filing-specific fields

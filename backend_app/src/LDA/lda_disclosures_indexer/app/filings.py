@@ -246,7 +246,6 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         # Save parameter-filing mappings for all array values
         filing_uuid = item['filing_uuid']
         dt_posted = indexed_fields.get('dt_posted')
-        filing_year = indexed_fields.get('filing_year')
         
         # Save all general issue codes
         all_general_issue_codes = indexed_fields.get('all_general_issue_codes', [])
@@ -258,8 +257,7 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                         parameter_value=issue_code,
                         filing_uuid=filing_uuid,
                         filing_type='FILING',
-                        dt_posted=dt_posted,
-                        filing_year=filing_year
+                        dt_posted=dt_posted
                     )
         
         # Save all government entity IDs
@@ -272,8 +270,7 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                         parameter_value=str(entity_id),
                         filing_uuid=filing_uuid,
                         filing_type='FILING',
-                        dt_posted=dt_posted,
-                        filing_year=filing_year
+                        dt_posted=dt_posted
                     )
         
         # Save all foreign countries
@@ -286,8 +283,7 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                         parameter_value=country_code,
                         filing_uuid=filing_uuid,
                         filing_type='FILING',
-                        dt_posted=dt_posted,
-                        filing_year=filing_year
+                        dt_posted=dt_posted
                     )
         
         # Save all lobbyist names
@@ -300,8 +296,7 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                         parameter_value=lobbyist_name,
                         filing_uuid=filing_uuid,
                         filing_type='FILING',
-                        dt_posted=dt_posted,
-                        filing_year=filing_year
+                        dt_posted=dt_posted
                     )
         
     except Exception as e:
