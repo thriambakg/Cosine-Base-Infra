@@ -84,14 +84,18 @@ def lambda_handler(event, context):
                 # Log error and send to DLQ immediately (internal retries already exhausted)
                 error_msg = str(e)[:500]
                 print(f"❌ Error processing SQS record: {error_msg}")
+                print(f"📋 Full error details: {type(e).__name__}: {str(e)}")
                 try:
                     message_body = json.loads(record['body'])
+                    print(f"📦 Message body: page={message_body.get('page')}, endpoint={message_body.get('endpoint')}")
                     send_to_dlq(message_body, error_msg)
-                except:
+                except Exception as parse_error:
                     # If we can't parse the message, send the raw body
+                    print(f"⚠️  Could not parse message body: {str(parse_error)}")
                     send_to_dlq({'raw_body': record.get('body', '')}, error_msg)
                 # Return success so message is deleted from main queue (already sent to DLQ)
                 # This prevents SQS from retrying since we've already done internal retries
+                # NOTE: This is why errors don't show in CloudWatch metrics - Lambda returns 200
                 total_processed += 0
         
         return {
