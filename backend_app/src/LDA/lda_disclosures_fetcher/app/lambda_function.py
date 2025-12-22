@@ -29,7 +29,7 @@ s3_client = boto3.client('s3') if S3_BUCKET_NAME else None
 # Configure SQS client with larger connection pool for high parallelism
 from botocore.config import Config
 sqs_config = Config(
-    max_pool_connections=100  # Increased for high parallelism with batch sends
+    max_pool_connections=150  # Increased to support 100 parallel workers with batch sends
 )
 sqs_client = boto3.client('sqs', config=sqs_config)
 
@@ -129,11 +129,13 @@ def send_message_batch_to_queue(pages_batch: List[int], endpoint: str, start_dat
         print(f"   ❌ Error sending batch to queue: {str(e)}")
         return 0
 
-def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int], max_workers: int = 50, batch_size: int = 10):
+def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int], max_workers: int = 100, batch_size: int = 10):
     """Send multiple pages to SQS queue in parallel using batch sends
     
     Uses send_message_batch to send up to 10 messages per API call, significantly reducing
     the number of API calls and improving throughput.
+    
+    Increased max_workers to 100 for maximum parallelism within Lambda timeout limits.
     """
     if not pages:
         return 0
@@ -147,6 +149,7 @@ def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[st
     failed = 0
     
     # Use ThreadPoolExecutor to send batches in parallel
+    # Increased to 100 workers for maximum throughput
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
         # Submit all batch send tasks
         future_to_batch = {
