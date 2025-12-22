@@ -67,3 +67,12 @@ variable "reserved_concurrent_executions" {
   type        = number
   default     = null
 }
+
+variable "file_system_configs" {
+  description = "EFS file system configurations for the Lambda function"
+  type = list(object({
+    arn              = string
+    local_mount_path = string
+  }))
+  default = []
+}

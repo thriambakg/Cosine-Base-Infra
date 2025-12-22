@@ -82,5 +82,14 @@ resource "aws_lambda_function" "function" {
   # Only set reserved_concurrent_executions if provided (not null)
   reserved_concurrent_executions = var.reserved_concurrent_executions != null ? var.reserved_concurrent_executions : null
 
+  # EFS file system configurations
+  dynamic "file_system_config" {
+    for_each = var.file_system_configs
+    content {
+      arn              = file_system_config.value.arn
+      local_mount_path = file_system_config.value.local_mount_path
+    }
+  }
+
   tags = var.tags
 }

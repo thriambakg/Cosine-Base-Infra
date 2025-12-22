@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
-    save_parameter_filing_mapping, get_government_entity_name,
+    save_parameter_filing_mapping, get_government_entity_name, get_general_issue_name,
     filings_table, PAC_QUEUE_URL
 )
 
@@ -290,20 +290,22 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         
         # Save parameter-filing mappings for: General Issue Codes, Government Entities, PACs, Foreign Entities, and Lobbyists
         
-        # Save all general issue codes
+        # Save all general issue codes (mapped to names)
         all_general_issue_codes = indexed_fields.get('all_general_issue_codes', [])
         if all_general_issue_codes:
             for issue_code in all_general_issue_codes:
                 if issue_code:
-                    # Save parameter-filing mapping
-                    # Note: General issue codes use static CSV in frontend, no autocomplete queue needed
-                    save_parameter_filing_mapping(
-                        parameter_type='GENERAL_ISSUE',
-                        parameter_value=issue_code,
-                        filing_uuid=filing_uuid,
-                        filing_type='FILING',
-                        dt_posted=dt_posted
-                    )
+                    # Map issue code to name using constants file
+                    issue_name = get_general_issue_name(issue_code)
+                    if issue_name:
+                        # Save parameter-filing mapping with full name, not abbreviation
+                        save_parameter_filing_mapping(
+                            parameter_type='GENERAL_ISSUE',
+                            parameter_value=issue_name,  # Store name, not code
+                            filing_uuid=filing_uuid,
+                            filing_type='FILING',
+                            dt_posted=dt_posted
+                        )
         
         # Save all government entity IDs (mapped to names)
         all_government_entity_ids = indexed_fields.get('all_government_entity_ids', [])

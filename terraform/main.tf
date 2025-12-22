@@ -2443,6 +2443,185 @@ module "lda_disclosures_s3" {
   tags        = var.common_tags
 }
 
+# EFS File System for LDA Constants (shared between fetcher and indexer)
+resource "aws_efs_file_system" "lda_constants_efs" {
+  creation_token = "${var.project_name}-lda-constants-${var.environment}"
+
+  performance_mode                = "generalPurpose"
+  throughput_mode                 = "provisioned"
+  provisioned_throughput_in_mibps = 100
+
+  encrypted  = true
+  kms_key_id = module.kms.main_key_arn
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name    = "${var.project_name}-lda-constants-${var.environment}"
+      Purpose = "LDA Constants Storage"
+    }
+  )
+}
+
+# EFS Access Point for Fetcher (write access)
+resource "aws_efs_access_point" "lda_fetcher_efs_access" {
+  file_system_id = aws_efs_file_system.lda_constants_efs.id
+
+  posix_user {
+    gid = 1000
+    uid = 1000
+  }
+
+  root_directory {
+    path = "/lists"
+    creation_info {
+      owner_gid   = 1000
+      owner_uid   = 1000
+      permissions = "755"
+    }
+  }
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name    = "${var.project_name}-lda-fetcher-efs-access-${var.environment}"
+      Purpose = "LDA Fetcher EFS Access"
+    }
+  )
+}
+
+# EFS Access Point for Indexer (read access)
+resource "aws_efs_access_point" "lda_indexer_efs_access" {
+  file_system_id = aws_efs_file_system.lda_constants_efs.id
+
+  posix_user {
+    gid = 1000
+    uid = 1000
+  }
+
+  root_directory {
+    path = "/lists"
+    creation_info {
+      owner_gid   = 1000
+      owner_uid   = 1000
+      permissions = "755"
+    }
+  }
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name    = "${var.project_name}-lda-indexer-efs-access-${var.environment}"
+      Purpose = "LDA Indexer EFS Access"
+    }
+  )
+}
+
+# EFS Mount Target (one per subnet in the VPC)
+# Get VPC and subnets from data sources
+data "aws_vpc" "main" {
+  default = true
+}
+
+data "aws_subnets" "private" {
+  filter {
+    name   = "vpc-id"
+    values = [data.aws_vpc.main.id]
+  }
+}
+
+resource "aws_efs_mount_target" "lda_constants_efs_mount" {
+  count           = length(data.aws_subnets.private.ids)
+  file_system_id  = aws_efs_file_system.lda_constants_efs.id
+  subnet_id       = data.aws_subnets.private.ids[count.index]
+  security_groups = [aws_security_group.lda_efs_sg.id]
+}
+
+# Security Group for EFS
+resource "aws_security_group" "lda_efs_sg" {
+  name        = "${var.project_name}-lda-efs-${var.environment}"
+  description = "Security group for LDA constants EFS"
+  vpc_id      = data.aws_vpc.main.id
+
+  ingress {
+    from_port   = 2049
+    to_port     = 2049
+    protocol    = "tcp"
+    cidr_blocks = [data.aws_vpc.main.cidr_block]
+    description = "NFS access from VPC"
+  }
+
+  egress {
+    from_port   = 0
+    to_port     = 0
+    protocol    = "-1"
+    cidr_blocks = ["0.0.0.0/0"]
+    description = "Allow all outbound"
+  }
+
+  tags = merge(
+    var.common_tags,
+    {
+      Name = "${var.project_name}-lda-efs-sg-${var.environment}"
+    }
+  )
+}
+
+# IAM Policy for Fetcher Lambda to write to EFS
+resource "aws_iam_policy" "lda_fetcher_efs_policy" {
+  name        = "${var.project_name}-lda-fetcher-efs-${var.environment}"
+  description = "Allows Fetcher Lambda to write to EFS for constants storage"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticfilesystem:ClientMount",
+          "elasticfilesystem:ClientWrite",
+          "elasticfilesystem:ClientRootAccess"
+        ]
+        Resource = aws_efs_file_system.lda_constants_efs.arn
+        Condition = {
+          StringEquals = {
+            "elasticfilesystem:AccessPointArn" = aws_efs_access_point.lda_fetcher_efs_access.arn
+          }
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for Indexer Lambda to read from EFS
+resource "aws_iam_policy" "lda_indexer_efs_policy" {
+  name        = "${var.project_name}-lda-indexer-efs-${var.environment}"
+  description = "Allows Indexer Lambda to read from EFS for constants access"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "elasticfilesystem:ClientMount",
+          "elasticfilesystem:ClientRead"
+        ]
+        Resource = aws_efs_file_system.lda_constants_efs.arn
+        Condition = {
+          StringEquals = {
+            "elasticfilesystem:AccessPointArn" = aws_efs_access_point.lda_indexer_efs_access.arn
+          }
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
 # ==============================================================================
 # CONGRESS.GOV BILL DATA INGESTION SYSTEM
 # ==============================================================================
@@ -3587,7 +3766,17 @@ module "lda_disclosures_fetcher" {
   additional_policy_arns = [
     module.lda_api_secrets_manager.secret_access_policy_arn,
     module.lda_batch_queue.sqs_access_policy_arn,
-    module.kms.kms_access_policy_arn
+    module.kms.kms_access_policy_arn,
+    aws_iam_policy.lda_fetcher_s3_policy.arn,
+    aws_iam_policy.lda_fetcher_efs_policy.arn
+  ]
+
+  # EFS configuration for constants storage
+  file_system_configs = [
+    {
+      arn              = aws_efs_access_point.lda_fetcher_efs_access.arn
+      local_mount_path = "/mnt/efs"
+    }
   ]
 
   tags = var.common_tags
@@ -3596,7 +3785,10 @@ module "lda_disclosures_fetcher" {
     module.lda_batch_queue,
     module.lda_api_secrets_manager,
     module.lda_disclosures_s3,
-    module.core_layer
+    module.core_layer,
+    aws_efs_file_system.lda_constants_efs,
+    aws_efs_access_point.lda_fetcher_efs_access,
+    aws_efs_mount_target.lda_constants_efs_mount
   ]
 }
 
@@ -3640,7 +3832,16 @@ module "lda_disclosures_indexer" {
     module.lda_batch_queue.sqs_access_policy_arn,
     module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
     module.kms.kms_access_policy_arn,
-    aws_iam_policy.lda_indexer_s3_policy.arn
+    aws_iam_policy.lda_indexer_s3_policy.arn,
+    aws_iam_policy.lda_indexer_efs_policy.arn
+  ]
+
+  # EFS configuration for constants access
+  file_system_configs = [
+    {
+      arn              = aws_efs_access_point.lda_indexer_efs_access.arn
+      local_mount_path = "/mnt/efs"
+    }
   ]
 
   tags = var.common_tags

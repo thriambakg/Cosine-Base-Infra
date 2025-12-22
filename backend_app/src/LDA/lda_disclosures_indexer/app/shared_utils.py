@@ -5,6 +5,7 @@ Contains common helper functions used by both filings.py and contributions.py
 
 import json
 import os
+import csv
 import time
 import requests
 import boto3
@@ -12,6 +13,7 @@ from typing import Dict, Optional
 from decimal import Decimal
 from threading import Lock
 from botocore.exceptions import ClientError
+from io import StringIO
 
 # Environment variables
 LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
@@ -35,8 +37,42 @@ filings_table = dynamodb.Table(FILINGS_TABLE_NAME) if FILINGS_TABLE_NAME else No
 _government_entities_map = None
 _government_entities_map_lock = Lock()
 
+def sync_file_from_s3_to_efs(s3_key: str, efs_path: str) -> bool:
+    """Sync a file from S3 to EFS if EFS is available and file doesn't exist in EFS"""
+    try:
+        # Check if EFS is available
+        efs_base = '/mnt/efs'
+        if not os.path.exists(efs_base):
+            return False
+        
+        # Check if file already exists in EFS
+        if os.path.exists(efs_path):
+            return True  # Already synced
+        
+        # Create directory if needed
+        efs_dir = os.path.dirname(efs_path)
+        os.makedirs(efs_dir, exist_ok=True)
+        
+        # Download from S3
+        if not S3_BUCKET_NAME:
+            return False
+        
+        response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+        content = response['Body'].read().decode('utf-8')
+        
+        # Write to EFS
+        with open(efs_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        print(f"✅ Synced {s3_key} from S3 to EFS: {efs_path}")
+        return True
+        
+    except Exception as e:
+        print(f"⚠️  Could not sync {s3_key} to EFS: {str(e)[:200]}")
+        return False
+
 def load_government_entities_map() -> Dict[int, str]:
-    """Load government entities mapping from local file or S3"""
+    """Load government entities mapping from local CSV file, EFS, or S3"""
     global _government_entities_map
     
     if _government_entities_map is not None:
@@ -48,26 +84,47 @@ def load_government_entities_map() -> Dict[int, str]:
         
         try:
             # Try to load from local file first (in Lambda package)
-            local_path = os.path.join(os.path.dirname(__file__), 'government_entities_constants.json')
+            local_path = os.path.join(os.path.dirname(__file__), 'government_entities.csv')
             if os.path.exists(local_path):
                 with open(local_path, 'r', encoding='utf-8') as f:
-                    entities_list = json.load(f)
-                    _government_entities_map = {entity['id']: entity['name'] for entity in entities_list}
+                    reader = csv.DictReader(f)
+                    _government_entities_map = {int(row['id']): row['name'] for row in reader if row.get('id') and row.get('name')}
                     print(f"✅ Loaded {len(_government_entities_map)} government entities from local file")
                     return _government_entities_map
             
-            # Fallback: try to load from S3
+            # Try EFS mount point (if available)
+            efs_path = '/mnt/efs/lists/government_entities.csv'
+            if os.path.exists(efs_path):
+                with open(efs_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    _government_entities_map = {int(row['id']): row['name'] for row in reader if row.get('id') and row.get('name')}
+                    print(f"✅ Loaded {len(_government_entities_map)} government entities from EFS")
+                    return _government_entities_map
+            
+            # Try to sync from S3 to EFS (lazy loading)
+            if os.path.exists('/mnt/efs'):
+                sync_file_from_s3_to_efs('lists/government_entities.csv', efs_path)
+                # Try loading from EFS again after sync
+                if os.path.exists(efs_path):
+                    with open(efs_path, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        _government_entities_map = {int(row['id']): row['name'] for row in reader if row.get('id') and row.get('name')}
+                        print(f"✅ Loaded {len(_government_entities_map)} government entities from EFS (synced from S3)")
+                        return _government_entities_map
+            
+            # Fallback: try to load directly from S3
             if S3_BUCKET_NAME:
                 try:
-                    response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key='lists/government_entities_constants.json')
-                    entities_list = json.loads(response['Body'].read().decode('utf-8'))
-                    _government_entities_map = {entity['id']: entity['name'] for entity in entities_list}
+                    response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key='lists/government_entities.csv')
+                    csv_content = response['Body'].read().decode('utf-8')
+                    reader = csv.DictReader(StringIO(csv_content))
+                    _government_entities_map = {int(row['id']): row['name'] for row in reader if row.get('id') and row.get('name')}
                     print(f"✅ Loaded {len(_government_entities_map)} government entities from S3")
                     return _government_entities_map
                 except Exception as e:
                     print(f"⚠️  Could not load government entities from S3: {str(e)[:200]}")
             
-            # If both fail, return empty map
+            # If all fail, return empty map
             print("⚠️  Could not load government entities mapping, using empty map")
             _government_entities_map = {}
             return _government_entities_map
@@ -81,6 +138,78 @@ def get_government_entity_name(entity_id: int) -> Optional[str]:
     """Get government entity name by ID"""
     entities_map = load_government_entities_map()
     return entities_map.get(entity_id)
+
+# General issue codes mapping (code -> name)
+_general_issues_map = None
+_general_issues_map_lock = Lock()
+
+def load_general_issues_map() -> Dict[str, str]:
+    """Load general issue codes mapping from local CSV file, EFS, or S3"""
+    global _general_issues_map
+    
+    if _general_issues_map is not None:
+        return _general_issues_map
+    
+    with _general_issues_map_lock:
+        if _general_issues_map is not None:
+            return _general_issues_map
+        
+        try:
+            # Try to load from local file first (in Lambda package)
+            local_path = os.path.join(os.path.dirname(__file__), 'general_issues.csv')
+            if os.path.exists(local_path):
+                with open(local_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    _general_issues_map = {row['value']: row['name'] for row in reader if row.get('value') and row.get('name')}
+                    print(f"✅ Loaded {len(_general_issues_map)} general issue codes from local file")
+                    return _general_issues_map
+            
+            # Try EFS mount point (if available)
+            efs_path = '/mnt/efs/lists/general_issues.csv'
+            if os.path.exists(efs_path):
+                with open(efs_path, 'r', encoding='utf-8') as f:
+                    reader = csv.DictReader(f)
+                    _general_issues_map = {row['value']: row['name'] for row in reader if row.get('value') and row.get('name')}
+                    print(f"✅ Loaded {len(_general_issues_map)} general issue codes from EFS")
+                    return _general_issues_map
+            
+            # Try to sync from S3 to EFS (lazy loading)
+            if os.path.exists('/mnt/efs'):
+                sync_file_from_s3_to_efs('lists/general_issues.csv', efs_path)
+                # Try loading from EFS again after sync
+                if os.path.exists(efs_path):
+                    with open(efs_path, 'r', encoding='utf-8') as f:
+                        reader = csv.DictReader(f)
+                        _general_issues_map = {row['value']: row['name'] for row in reader if row.get('value') and row.get('name')}
+                        print(f"✅ Loaded {len(_general_issues_map)} general issue codes from EFS (synced from S3)")
+                        return _general_issues_map
+            
+            # Fallback: try to load directly from S3
+            if S3_BUCKET_NAME:
+                try:
+                    response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key='lists/general_issues.csv')
+                    csv_content = response['Body'].read().decode('utf-8')
+                    reader = csv.DictReader(StringIO(csv_content))
+                    _general_issues_map = {row['value']: row['name'] for row in reader if row.get('value') and row.get('name')}
+                    print(f"✅ Loaded {len(_general_issues_map)} general issue codes from S3")
+                    return _general_issues_map
+                except Exception as e:
+                    print(f"⚠️  Could not load general issue codes from S3: {str(e)[:200]}")
+            
+            # If all fail, return empty map
+            print("⚠️  Could not load general issue codes mapping, using empty map")
+            _general_issues_map = {}
+            return _general_issues_map
+            
+        except Exception as e:
+            print(f"❌ Error loading general issue codes mapping: {str(e)[:200]}")
+            _general_issues_map = {}
+            return _general_issues_map
+
+def get_general_issue_name(issue_code: str) -> Optional[str]:
+    """Get general issue name by code"""
+    issues_map = load_general_issues_map()
+    return issues_map.get(issue_code)
 
 # Rate Limiter
 class RateLimiter:

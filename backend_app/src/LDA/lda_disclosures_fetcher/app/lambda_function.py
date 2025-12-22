@@ -5,11 +5,13 @@ Determines total pages for filings and contributions endpoints and creates batch
 
 import json
 import os
+import csv
 import requests
 import boto3
 from botocore.exceptions import ClientError
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from io import StringIO
 
 # Environment variables
 LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
@@ -145,38 +147,100 @@ def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[st
     
     return successful
 
+def json_to_csv(data: List[Dict], code_column: str, name_column: str) -> str:
+    """Convert JSON data to CSV string with code and name columns"""
+    if not data:
+        return ''
+    
+    csv_buffer = StringIO()
+    writer = csv.DictWriter(csv_buffer, fieldnames=[code_column, name_column])
+    writer.writeheader()
+    
+    for item in data:
+        code = item.get(code_column, '')
+        name = item.get(name_column, '')
+        writer.writerow({code_column: code, name_column: name})
+    
+    return csv_buffer.getvalue()
+
+def write_to_efs(file_path: str, content: str) -> bool:
+    """Write content to EFS if EFS is mounted"""
+    try:
+        # Check if EFS mount point exists
+        efs_base = '/mnt/efs'
+        if not os.path.exists(efs_base):
+            return False
+        
+        # Create directory if it doesn't exist
+        efs_dir = os.path.join(efs_base, 'lists')
+        os.makedirs(efs_dir, exist_ok=True)
+        
+        # Write file to EFS
+        efs_path = os.path.join(efs_dir, os.path.basename(file_path))
+        with open(efs_path, 'w', encoding='utf-8') as f:
+            f.write(content)
+        
+        print(f"   ✅ Also stored to EFS: {efs_path}")
+        return True
+    except Exception as e:
+        print(f"   ⚠️  Could not write to EFS: {str(e)[:200]}")
+        return False
+
 def fetch_and_store_constants(session: requests.Session):
-    """Fetch constants from LDA API and store in S3"""
+    """Fetch constants from LDA API, convert to CSV, and store in S3 and EFS"""
     if not S3_BUCKET_NAME or not s3_client:
         print("⚠️  S3_BUCKET_NAME not configured, skipping constants storage")
         return
     
-    # Constants to fetch and store
-    constants_endpoints = {
-        "general_issues": f"{LDA_API_BASE_URL}/constants/filing/lobbyingactivityissues/",
-        "government_entities": f"{LDA_API_BASE_URL}/constants/filing/governmententities/",
-        "countries": f"{LDA_API_BASE_URL}/constants/general/countries/"
+    # Constants to fetch and store (with CSV column mappings)
+    constants_config = {
+        "general_issues": {
+            "endpoint": f"{LDA_API_BASE_URL}/constants/filing/lobbyingactivityissues/",
+            "code_column": "value",
+            "name_column": "name"
+        },
+        "government_entities": {
+            "endpoint": f"{LDA_API_BASE_URL}/constants/filing/governmententities/",
+            "code_column": "id",
+            "name_column": "name"
+        },
+        "countries": {
+            "endpoint": f"{LDA_API_BASE_URL}/constants/general/countries/",
+            "code_column": "value",
+            "name_column": "name"
+        }
     }
     
-    print("\n📋 Fetching and storing constants to S3...")
+    print("\n📋 Fetching and storing constants as CSVs to S3 (and EFS if available)...")
     
-    for constant_type, endpoint in constants_endpoints.items():
+    for constant_type, config in constants_config.items():
         try:
             print(f"   📡 Fetching {constant_type}...")
-            response = session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            response = session.get(config["endpoint"], timeout=REQUEST_TIMEOUT)
             response.raise_for_status()
             constants = response.json()
             
-            # Store in S3
-            s3_key = f"lists/{constant_type}_constants.json"
+            # Convert to CSV
+            csv_content = json_to_csv(
+                constants,
+                config["code_column"],
+                config["name_column"]
+            )
+            
+            # Store CSV in S3
+            s3_key = f"lists/{constant_type}.csv"
             s3_client.put_object(
                 Bucket=S3_BUCKET_NAME,
                 Key=s3_key,
-                Body=json.dumps(constants, indent=2, ensure_ascii=False).encode('utf-8'),
-                ContentType='application/json'
+                Body=csv_content.encode('utf-8'),
+                ContentType='text/csv'
             )
             
             print(f"   ✅ Stored {len(constants)} {constant_type} to s3://{S3_BUCKET_NAME}/{s3_key}")
+            
+            # Also write to EFS if available
+            write_to_efs(f"{constant_type}.csv", csv_content)
+            
         except Exception as e:
             print(f"   ⚠️  Error fetching/storing {constant_type}: {str(e)[:200]}")
 
