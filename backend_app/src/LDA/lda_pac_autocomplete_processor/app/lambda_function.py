@@ -15,6 +15,7 @@ Supports multiple field types:
 - client_name -> lists/client_names.csv
 - lobbyist_name -> lists/lobbyist_names.csv
 - registrant_name -> lists/registrant_names.csv
+- general_issue_code -> lists/general_issue_codes.csv
 """
 
 import json
@@ -36,7 +37,8 @@ FIELD_TYPE_TO_S3_KEY = {
     'pac_name': 'lists/pacs.csv',
     'client_name': 'lists/client_names.csv',
     'lobbyist_name': 'lists/lobbyist_names.csv',
-    'registrant_name': 'lists/registrant_names.csv'
+    'registrant_name': 'lists/registrant_names.csv',
+    'general_issue_code': 'lists/general_issue_codes.csv'
 }
 
 def clean_value(value: str) -> str:

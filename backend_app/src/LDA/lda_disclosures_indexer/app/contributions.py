@@ -105,6 +105,34 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
             state = registrant.get('state')
     indexed['state'] = state
     
+    # General Issue Codes (from lobbying_activities if present)
+    lobbying_activities = contribution.get('lobbying_activities', [])
+    all_general_issue_codes = []
+    
+    if lobbying_activities:
+        for activity in lobbying_activities:
+            general_issue_code = activity.get('general_issue_code')
+            if general_issue_code:
+                if general_issue_code not in all_general_issue_codes:
+                    all_general_issue_codes.append(general_issue_code)
+    
+    if all_general_issue_codes:
+        indexed['all_general_issue_codes'] = all_general_issue_codes
+    
+    # Foreign Entities
+    foreign_entities = contribution.get('foreign_entities', [])
+    foreign_countries = set()
+    
+    if foreign_entities:
+        for entity in foreign_entities:
+            country_code = entity.get('country') or entity.get('ppb_country')
+            if country_code and country_code != 'US':
+                foreign_countries.add(country_code)
+    
+    indexed['is_foreign'] = 1 if len(foreign_countries) > 0 else 0
+    if foreign_countries:
+        indexed['foreign_countries'] = sorted(list(foreign_countries))
+    
     return indexed
 
 def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_key: Optional[str] = None):
@@ -158,6 +186,39 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                         filing_uuid=item['filing_uuid'],
                         filing_type='CONTRIBUTION',
                         dt_posted=indexed_fields.get('dt_posted')
+                    )
+        
+        # Save parameter-filing mappings for General Issue Codes and Foreign Countries
+        filing_uuid = item['filing_uuid']
+        dt_posted = indexed_fields.get('dt_posted')
+        
+        # Save all general issue codes
+        all_general_issue_codes = indexed_fields.get('all_general_issue_codes', [])
+        if all_general_issue_codes:
+            for issue_code in all_general_issue_codes:
+                if issue_code:
+                    # Send to autocomplete queue for CSV generation
+                    send_autocomplete_value('general_issue_code', issue_code)
+                    # Save parameter-filing mapping
+                    save_parameter_filing_mapping(
+                        parameter_type='GENERAL_ISSUE',
+                        parameter_value=issue_code,
+                        filing_uuid=filing_uuid,
+                        filing_type='CONTRIBUTION',
+                        dt_posted=dt_posted
+                    )
+        
+        # Save all foreign countries
+        foreign_countries = indexed_fields.get('foreign_countries', [])
+        if foreign_countries:
+            for country_code in foreign_countries:
+                if country_code:
+                    save_parameter_filing_mapping(
+                        parameter_type='FOREIGN_COUNTRY',
+                        parameter_value=country_code,
+                        filing_uuid=filing_uuid,
+                        filing_type='CONTRIBUTION',
+                        dt_posted=dt_posted
                     )
         
         # Set null values for filing-specific fields
@@ -218,9 +279,16 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         item.pop('all_contribution_item_types', None)
         item.pop('government_entity_id', None)
         item.pop('all_government_entity_ids', None)
+        
+        # Remove arrays that are now only in parameter-filing mappings
         item.pop('all_general_issue_codes', None)
-        item.pop('is_foreign', None)
         item.pop('foreign_countries', None)
+        
+        # Keep is_foreign and pac as boolean flags for GSI queries
+        if indexed_fields.get('is_foreign') != 1:
+            item.pop('is_foreign', None)
+        else:
+            item['is_foreign'] = 1
         
         if indexed_fields.get('pac') != 1:
             item.pop('pac', None)

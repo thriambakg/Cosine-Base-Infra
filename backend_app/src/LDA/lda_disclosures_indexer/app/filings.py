@@ -247,27 +247,20 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         filing_uuid = item['filing_uuid']
         dt_posted = indexed_fields.get('dt_posted')
         
+        # Save parameter-filing mappings only for: General Issue Codes, PACs, and Foreign Entities
+        # (Other fields like government entities and lobbyists have GSIs and are fast queries)
+        
         # Save all general issue codes
         all_general_issue_codes = indexed_fields.get('all_general_issue_codes', [])
         if all_general_issue_codes:
             for issue_code in all_general_issue_codes:
                 if issue_code:
+                    # Send to autocomplete queue for CSV generation
+                    send_autocomplete_value('general_issue_code', issue_code)
+                    # Save parameter-filing mapping
                     save_parameter_filing_mapping(
                         parameter_type='GENERAL_ISSUE',
                         parameter_value=issue_code,
-                        filing_uuid=filing_uuid,
-                        filing_type='FILING',
-                        dt_posted=dt_posted
-                    )
-        
-        # Save all government entity IDs
-        all_government_entity_ids = indexed_fields.get('all_government_entity_ids', [])
-        if all_government_entity_ids:
-            for entity_id in all_government_entity_ids:
-                if entity_id is not None:
-                    save_parameter_filing_mapping(
-                        parameter_type='GOVERNMENT_ENTITY',
-                        parameter_value=str(entity_id),
                         filing_uuid=filing_uuid,
                         filing_type='FILING',
                         dt_posted=dt_posted
@@ -281,19 +274,6 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                     save_parameter_filing_mapping(
                         parameter_type='FOREIGN_COUNTRY',
                         parameter_value=country_code,
-                        filing_uuid=filing_uuid,
-                        filing_type='FILING',
-                        dt_posted=dt_posted
-                    )
-        
-        # Save all lobbyist names
-        all_lobbyist_names = indexed_fields.get('all_lobbyist_names', [])
-        if all_lobbyist_names:
-            for lobbyist_name in all_lobbyist_names:
-                if lobbyist_name:
-                    save_parameter_filing_mapping(
-                        parameter_type='LOBBYIST',
-                        parameter_value=lobbyist_name,
                         filing_uuid=filing_uuid,
                         filing_type='FILING',
                         dt_posted=dt_posted
