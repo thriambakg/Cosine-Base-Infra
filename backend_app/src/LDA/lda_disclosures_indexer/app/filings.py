@@ -236,6 +236,9 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         item['PK'] = f"FILING#{item['filing_uuid']}"
         item['SK'] = f"FILING#{item['filing_uuid']}"
         
+        # Set item_type for GSI
+        item['item_type'] = 'FILING'
+        
         # Handle GSI fields - only set if values exist
         if indexed_fields.get('registrant_name'):
             send_autocomplete_value('registrant_name', indexed_fields['registrant_name'])

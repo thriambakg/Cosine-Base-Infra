@@ -3,14 +3,13 @@ LDA Disclosures Indexer Lambda Handler
 Processes individual pages from SQS queue.
 Each page is processed with 25 parallel workers.
 Implements rate limiting with exponential backoff.
-Failed transactions are sent to DLQ for future redriving.
+Failed messages are automatically sent to DLQ by SQS after max_receive_count (3) failed attempts.
 """
 
 import json
 import os
 import time
 import re
-import boto3
 from typing import Dict, Optional
 from botocore.exceptions import ClientError
 import requests
@@ -18,12 +17,6 @@ import requests
 # Import processing modules
 from filings import process_filings_page
 from contributions import process_contributions_page
-
-# Environment variables
-DLQ_QUEUE_URL = os.environ.get('DLQ_QUEUE_URL')
-
-# AWS clients
-sqs_client = boto3.client('sqs') if DLQ_QUEUE_URL else None
 
 def lambda_handler(event, context):
     """
@@ -57,18 +50,12 @@ def lambda_handler(event, context):
                 result = process_single_page_with_retry(message_body)
                 total_processed += result.get('processed_count', 0)
             except Exception as e:
-                # Log error and send to DLQ
+                # Log error - SQS will automatically retry and move to DLQ after max_receive_count (3) failures
                 error_msg = str(e)[:500]
                 print(f"❌ Error processing SQS record: {error_msg}")
-                try:
-                    message_body = json.loads(record['body'])
-                    send_to_dlq(message_body, error_msg)
-                except:
-                    # If we can't parse the message, send the raw body
-                    send_to_dlq({'raw_body': record.get('body', '')}, error_msg)
-                # Return success so message is deleted from main queue (already sent to DLQ)
-                # This prevents unnecessary retries on messages we know will fail
-                total_processed += 0
+                # Re-raise exception so SQS can track the failure and retry
+                # After max_receive_count failures, SQS will automatically move message to DLQ
+                raise
         
         return {
             'statusCode': 200,
@@ -77,30 +64,6 @@ def lambda_handler(event, context):
     else:
         # Direct invocation (for testing)
         return process_single_page_with_retry(event)
-
-def send_to_dlq(message_body: Dict, error: str):
-    """Send failed message to Dead Letter Queue for future redriving"""
-    if not DLQ_QUEUE_URL or not sqs_client:
-        print(f"⚠️  DLQ not configured, cannot send failed message: {error}")
-        return False
-    
-    try:
-        # Create DLQ message with original message body and error details
-        dlq_message = {
-            **message_body,
-            'error': error,
-            'failed_at': time.time(),
-            'dlq_source': 'lda_disclosures_indexer'
-        }
-        sqs_client.send_message(
-            QueueUrl=DLQ_QUEUE_URL,
-            MessageBody=json.dumps(dlq_message)
-        )
-        print(f"📤 Sent failed message to DLQ: {error}")
-        return True
-    except Exception as e:
-        print(f"❌ Failed to send message to DLQ: {str(e)[:200]}")
-        return False
 
 def process_single_page_with_retry(message_body: Dict, max_retries: int = 6) -> Dict:
     """Process a single page with exponential backoff retry on rate limiting
@@ -174,13 +137,12 @@ def process_single_page_with_retry(message_body: Dict, max_retries: int = 6) -> 
                 else:
                     error_msg = f'Rate limited on page {page} after {max_retries} retries'
                     print(f"❌ {error_msg}")
-                    send_to_dlq(message_body, error_msg)
+                    # SQS will automatically move to DLQ after max_receive_count failures
                     raise Exception(error_msg)
             else:
-                # Not a rate limit error - send to DLQ
+                # Not a rate limit error - SQS will automatically move to DLQ after max_receive_count failures
                 error_msg = f'HTTP {e.response.status_code if e.response else "unknown"} on page {page}: {str(e)[:200]}'
                 print(f"❌ {error_msg}")
-                send_to_dlq(message_body, error_msg)
                 raise Exception(error_msg)
                 
         except ClientError as e:
@@ -197,13 +159,12 @@ def process_single_page_with_retry(message_body: Dict, max_retries: int = 6) -> 
                 else:
                     error_msg = f'AWS throttling on page {page} after {max_retries} retries'
                     print(f"❌ {error_msg}")
-                    send_to_dlq(message_body, error_msg)
+                    # SQS will automatically move to DLQ after max_receive_count failures
                     raise Exception(error_msg)
             else:
-                # Not a rate limit error - send to DLQ
+                # Not a rate limit error - SQS will automatically move to DLQ after max_receive_count failures
                 error_msg = f'AWS error {error_code} on page {page}: {str(e)[:200]}'
                 print(f"❌ {error_msg}")
-                send_to_dlq(message_body, error_msg)
                 raise Exception(error_msg)
                 
         except Exception as e:
@@ -219,24 +180,21 @@ def process_single_page_with_retry(message_body: Dict, max_retries: int = 6) -> 
                 else:
                     error_msg = f'Rate limited on page {page} after {max_retries} retries'
                     print(f"❌ {error_msg}")
-                    send_to_dlq(message_body, error_msg)
+                    # SQS will automatically move to DLQ after max_receive_count failures
                     raise Exception(error_msg)
             else:
-                # Other errors - send to DLQ
+                # Other errors - SQS will automatically move to DLQ after max_receive_count failures
                 error_msg = f'Error processing page {page}: {str(e)[:200]}'
                 print(f"❌ {error_msg}")
-                send_to_dlq(message_body, error_msg)
                 raise Exception(error_msg)
     
-    # If we exhausted retries, send to DLQ
+    # If we exhausted retries, SQS will automatically move to DLQ after max_receive_count failures
     if last_exception:
         error_msg = f'Exhausted retries for page {page}'
         print(f"❌ {error_msg}")
-        send_to_dlq(message_body, error_msg)
         raise Exception(error_msg)
     
-    # Should not reach here, but if we do, send to DLQ
+    # Should not reach here
     error_msg = f'Unknown error processing page {page}'
-    send_to_dlq(message_body, error_msg)
     raise Exception(error_msg)
 

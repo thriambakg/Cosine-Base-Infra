@@ -147,41 +147,42 @@ def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[st
     
     return successful
 
-def json_to_csv_values_only(data: List[Dict], value_column: str) -> str:
-    """Convert JSON data to CSV string with single column (values only) for autocomplete"""
+def json_to_csv_names_only(data: List[Dict], name_column: str) -> str:
+    """Convert JSON data to CSV string with single column (names only) for autocomplete"""
     if not data:
         return ''
     
     csv_buffer = StringIO()
     writer = csv.writer(csv_buffer)
-    writer.writerow(['value'])  # Header
+    writer.writerow(['value'])  # Header (using 'value' for consistency with autocomplete Lambda)
     
     for item in data:
-        value = item.get(value_column, '')
-        if value:
-            writer.writerow([value])
+        name = item.get(name_column, '')
+        if name and str(name).strip():
+            writer.writerow([str(name).strip()])
     
     return csv_buffer.getvalue()
 
 def fetch_and_store_constants(session: requests.Session):
-    """Fetch constants from LDA API, convert to single-column CSV (values only), and store in S3"""
+    """Fetch constants from LDA API, convert to single-column CSV (names only for autocomplete), and store in S3"""
     if not S3_BUCKET_NAME or not s3_client:
         print("⚠️  S3_BUCKET_NAME not configured, skipping constants storage")
         return
     
-    # Constants to fetch and store (single column CSV with values only)
+    # Constants to fetch and store (single column CSV with names for autocomplete)
+    # Note: We store names (not codes/IDs) because autocomplete needs human-readable names
     constants_config = {
         "general_issues": {
             "endpoint": f"{LDA_API_BASE_URL}/constants/filing/lobbyingactivityissues/",
-            "value_column": "value"
+            "name_column": "name"  # Store names for autocomplete, not codes
         },
         "government_entities": {
             "endpoint": f"{LDA_API_BASE_URL}/constants/filing/governmententities/",
-            "value_column": "id"
+            "name_column": "name"  # Store names for autocomplete, not IDs
         },
         "countries": {
             "endpoint": f"{LDA_API_BASE_URL}/constants/general/countries/",
-            "value_column": "value"
+            "name_column": "name"  # Store names for autocomplete, not codes
         }
     }
     
@@ -194,10 +195,10 @@ def fetch_and_store_constants(session: requests.Session):
             response.raise_for_status()
             constants = response.json()
             
-            # Convert to CSV with values only (single column)
-            csv_content = json_to_csv_values_only(
+            # Convert to CSV with names only (single column) for autocomplete
+            csv_content = json_to_csv_names_only(
                 constants,
-                config["value_column"]
+                config["name_column"]
             )
             
             # Store CSV in S3

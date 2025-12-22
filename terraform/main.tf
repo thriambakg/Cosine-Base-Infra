@@ -3151,7 +3151,8 @@ module "lda_filings_table" {
     { name = "contribution_item_type", type = "S" },
     { name = "is_foreign", type = "N" },
     { name = "pac", type = "N" },
-    { name = "filer_type", type = "S" }
+    { name = "filer_type", type = "S" },
+    { name = "item_type", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -3238,6 +3239,14 @@ module "lda_filings_table" {
     {
       name            = "FilerTypePostedDateIndex"
       hash_key        = "filer_type"
+      range_key       = "dt_posted"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "ItemTypePostedDateIndex"
+      hash_key        = "item_type"
       range_key       = "dt_posted"
       projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
@@ -3624,7 +3633,6 @@ module "lda_disclosures_indexer" {
     REQUEST_TIMEOUT    = "30"
     RATE_LIMIT_DELAY   = "0.5"
     PAC_QUEUE_URL      = module.lda_pac_autocomplete_queue.queue_url
-    DLQ_QUEUE_URL      = module.lda_batch_queue.dlq_url
   }
 
   # Lambda layers
