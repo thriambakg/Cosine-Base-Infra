@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
+    save_parameter_filing_mapping,
     filings_table, PAC_QUEUE_URL
 )
 
@@ -138,8 +139,8 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         indexed_fields['pac'] = 1 if (pacs and len(pacs) > 0) else 0
         item['pac'] = indexed_fields['pac']
         
-        # Send PAC names to SQS
-        if PAC_QUEUE_URL and pacs:
+        # Send PAC names to SQS and save parameter mappings
+        if pacs:
             for pac in pacs:
                 if isinstance(pac, dict):
                     pac_name = pac.get('name') or pac.get('S')
@@ -150,6 +151,15 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                 
                 if pac_name:
                     send_autocomplete_value('pac_name', pac_name)
+                    # Save parameter-filing mapping for each PAC
+                    save_parameter_filing_mapping(
+                        parameter_type='PAC',
+                        parameter_value=pac_name,
+                        filing_uuid=item['filing_uuid'],
+                        filing_type='CONTRIBUTION',
+                        dt_posted=indexed_fields.get('dt_posted'),
+                        filing_year=indexed_fields.get('filing_year')
+                    )
         
         # Set null values for filing-specific fields
         original_client = contribution.get('client')

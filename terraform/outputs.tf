@@ -624,6 +624,22 @@ output "lda_disclosures_s3_bucket_arn" {
   value       = module.lda_disclosures_s3.bucket_arn
 }
 
+# LDA Parameter Filings Table Outputs
+output "lda_parameter_filings_table_name" {
+  description = "Name of the LDA parameter-filings mapping DynamoDB table"
+  value       = module.lda_parameter_filings_table.table_name
+}
+
+output "lda_parameter_filings_table_arn" {
+  description = "ARN of the LDA parameter-filings mapping DynamoDB table"
+  value       = module.lda_parameter_filings_table.table_arn
+}
+
+output "lda_parameter_filings_table_policy_arn" {
+  description = "ARN of the IAM policy for accessing the LDA parameter-filings table"
+  value       = module.lda_parameter_filings_table.table_policy_arn
+}
+
 # OpenSearch Domain Outputs
 # DISABLED FOR MVP - OpenSearch is not being used
 # output "opensearch_domain_endpoint" {

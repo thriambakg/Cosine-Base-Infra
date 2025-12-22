@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
+    save_parameter_filing_mapping,
     filings_table, PAC_QUEUE_URL
 )
 
@@ -38,35 +39,19 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
     lobbying_activities = filing.get('lobbying_activities', [])
     all_general_issue_codes = []
     all_government_entity_ids = []
+    all_lobbyist_names = []
     
     if lobbying_activities:
         for activity in lobbying_activities:
-            # Extract general issue code
+            # Extract all general issue codes (no first element indexing)
             general_issue_code = activity.get('general_issue_code')
             if general_issue_code:
-                if not indexed.get('general_issue_code'):
-                    indexed['general_issue_code'] = general_issue_code
-                    indexed['general_issue_code_display'] = activity.get('general_issue_code_display')
                 if general_issue_code not in all_general_issue_codes:
                     all_general_issue_codes.append(general_issue_code)
             
-            # Extract government entity ID
+            # Extract all government entity IDs (no first element indexing)
             government_entities = activity.get('government_entities', [])
             if government_entities:
-                first_entity = government_entities[0]
-                entity_id = first_entity.get('id')
-                if entity_id:
-                    if 'government_entity_id' not in indexed:
-                        try:
-                            indexed['government_entity_id'] = int(entity_id)
-                        except (ValueError, TypeError):
-                            pass
-                    try:
-                        entity_id_int = int(entity_id)
-                        if entity_id_int not in all_government_entity_ids:
-                            all_government_entity_ids.append(entity_id_int)
-                    except (ValueError, TypeError):
-                        pass
                 for entity in government_entities:
                     entity_id = entity.get('id')
                     if entity_id:
@@ -77,12 +62,12 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
                         except (ValueError, TypeError):
                             pass
             
-            # Extract first lobbyist
+            # Extract all lobbyists (no first element indexing)
             lobbyists = activity.get('lobbyists', [])
             if lobbyists:
-                lobbyist = lobbyists[0].get('lobbyist', {})
-                if lobbyist:
-                    if 'lobbyist_name' not in indexed:
+                for lobbyist_obj in lobbyists:
+                    lobbyist = lobbyist_obj.get('lobbyist', {})
+                    if lobbyist:
                         name_parts = [
                             lobbyist.get('prefix_display', ''),
                             lobbyist.get('first_name', ''),
@@ -90,15 +75,17 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
                             lobbyist.get('last_name', ''),
                             lobbyist.get('suffix_display', '')
                         ]
-                        indexed['lobbyist_name'] = ' '.join(filter(None, name_parts))
-                        indexed['lobbyist_id'] = lobbyist.get('id')
-                    break
+                        lobbyist_name = ' '.join(filter(None, name_parts))
+                        if lobbyist_name and lobbyist_name not in all_lobbyist_names:
+                            all_lobbyist_names.append(lobbyist_name)
     
-    # Store all codes as lists for autocomplete
+    # Store all codes as lists for parameter-filings table mapping
     if all_general_issue_codes:
         indexed['all_general_issue_codes'] = all_general_issue_codes
     if all_government_entity_ids:
         indexed['all_government_entity_ids'] = all_government_entity_ids
+    if all_lobbyist_names:
+        indexed['all_lobbyist_names'] = all_lobbyist_names
     
     # Foreign Entities
     foreign_entities = filing.get('foreign_entities', [])
@@ -238,14 +225,12 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         if not indexed_fields.get('state'):
             item.pop('state', None)
         
-        if not indexed_fields.get('general_issue_code'):
-            item.pop('general_issue_code', None)
-            item.pop('general_issue_code_display', None)
-        
-        if not indexed_fields.get('government_entity_id'):
-            item.pop('government_entity_id', None)
-        else:
-            item['government_entity_id'] = int(indexed_fields['government_entity_id'])
+        # Remove first-element indexed fields (now only in parameter-filings table)
+        item.pop('general_issue_code', None)
+        item.pop('general_issue_code_display', None)
+        item.pop('government_entity_id', None)
+        item.pop('lobbyist_name', None)
+        item.pop('lobbyist_id', None)
         
         item.pop('contribution_item_type', None)
         item.pop('all_contribution_item_types', None)
@@ -257,6 +242,67 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         
         # Save to DynamoDB
         filings_table.put_item(Item=item)
+        
+        # Save parameter-filing mappings for all array values
+        filing_uuid = item['filing_uuid']
+        dt_posted = indexed_fields.get('dt_posted')
+        filing_year = indexed_fields.get('filing_year')
+        
+        # Save all general issue codes
+        all_general_issue_codes = indexed_fields.get('all_general_issue_codes', [])
+        if all_general_issue_codes:
+            for issue_code in all_general_issue_codes:
+                if issue_code:
+                    save_parameter_filing_mapping(
+                        parameter_type='GENERAL_ISSUE',
+                        parameter_value=issue_code,
+                        filing_uuid=filing_uuid,
+                        filing_type='FILING',
+                        dt_posted=dt_posted,
+                        filing_year=filing_year
+                    )
+        
+        # Save all government entity IDs
+        all_government_entity_ids = indexed_fields.get('all_government_entity_ids', [])
+        if all_government_entity_ids:
+            for entity_id in all_government_entity_ids:
+                if entity_id is not None:
+                    save_parameter_filing_mapping(
+                        parameter_type='GOVERNMENT_ENTITY',
+                        parameter_value=str(entity_id),
+                        filing_uuid=filing_uuid,
+                        filing_type='FILING',
+                        dt_posted=dt_posted,
+                        filing_year=filing_year
+                    )
+        
+        # Save all foreign countries
+        foreign_countries = indexed_fields.get('foreign_countries', [])
+        if foreign_countries:
+            for country_code in foreign_countries:
+                if country_code:
+                    save_parameter_filing_mapping(
+                        parameter_type='FOREIGN_COUNTRY',
+                        parameter_value=country_code,
+                        filing_uuid=filing_uuid,
+                        filing_type='FILING',
+                        dt_posted=dt_posted,
+                        filing_year=filing_year
+                    )
+        
+        # Save all lobbyist names
+        all_lobbyist_names = indexed_fields.get('all_lobbyist_names', [])
+        if all_lobbyist_names:
+            for lobbyist_name in all_lobbyist_names:
+                if lobbyist_name:
+                    save_parameter_filing_mapping(
+                        parameter_type='LOBBYIST',
+                        parameter_value=lobbyist_name,
+                        filing_uuid=filing_uuid,
+                        filing_type='FILING',
+                        dt_posted=dt_posted,
+                        filing_year=filing_year
+                    )
         
     except Exception as e:
         print(f"❌ Error saving filing to DynamoDB: {str(e)[:200]}")

@@ -17,6 +17,7 @@ from botocore.exceptions import ClientError
 LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
 LDA_SECRET_NAME = os.environ.get('LDA_SECRET_NAME')
 FILINGS_TABLE_NAME = os.environ.get('FILINGS_TABLE_NAME')
+PARAMETER_FILINGS_TABLE_NAME = os.environ.get('PARAMETER_FILINGS_TABLE_NAME')
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))
 RATE_LIMIT_DELAY = float(os.environ.get('RATE_LIMIT_DELAY', '0.5'))
@@ -28,8 +29,9 @@ s3_client = boto3.client('s3')
 secrets_client = boto3.client('secretsmanager')
 sqs_client = boto3.client('sqs')
 
-# DynamoDB table
-filings_table = dynamodb.Table(FILINGS_TABLE_NAME)
+# DynamoDB tables
+filings_table = dynamodb.Table(FILINGS_TABLE_NAME) if FILINGS_TABLE_NAME else None
+parameter_filings_table = dynamodb.Table(PARAMETER_FILINGS_TABLE_NAME) if PARAMETER_FILINGS_TABLE_NAME else None
 
 # Rate Limiter
 class RateLimiter:
@@ -205,4 +207,50 @@ def send_autocomplete_value(field_type: str, value: str):
         )
     except Exception as e:
         print(f"⚠️ Failed to send {field_type} to SQS: {str(e)[:200]}")
+
+
+def save_parameter_filing_mapping(
+    parameter_type: str,
+    parameter_value: str,
+    filing_uuid: str,
+    filing_type: str,
+    dt_posted: Optional[str] = None,
+    filing_year: Optional[int] = None
+):
+    """
+    Save a parameter-filing mapping to the parameter-filings table
+    
+    Args:
+        parameter_type: Type of parameter (e.g., "PAC", "GENERAL_ISSUE", "GOVERNMENT_ENTITY", "FOREIGN_COUNTRY", "LOBBYIST")
+        parameter_value: The actual value (e.g., "Dave Kamp 2008", "TAX", "12345", "FR", "John Doe")
+        filing_uuid: UUID of the filing or contribution
+        filing_type: "FILING" or "CONTRIBUTION"
+        dt_posted: Posted date (optional)
+        filing_year: Filing year (optional)
+    """
+    if not parameter_filings_table or not parameter_value or not filing_uuid:
+        return
+    
+    try:
+        # Create parameter key: "PARAMETER_TYPE#VALUE"
+        parameter_key = f"{parameter_type}#{parameter_value}"
+        
+        item = {
+            'parameter_key': parameter_key,
+            'filing_uuid': filing_uuid,
+            'parameter_type': parameter_type,
+            'parameter_value': parameter_value,
+            'filing_type': filing_type
+        }
+        
+        if dt_posted:
+            item['dt_posted'] = dt_posted
+        
+        if filing_year is not None:
+            item['filing_year'] = int(filing_year)
+        
+        parameter_filings_table.put_item(Item=item)
+        
+    except Exception as e:
+        print(f"⚠️ Failed to save parameter mapping {parameter_type}#{parameter_value} for {filing_uuid}: {str(e)[:200]}")
 
