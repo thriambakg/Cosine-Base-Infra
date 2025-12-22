@@ -3,12 +3,14 @@ LDA Disclosures Indexer Lambda Handler
 Processes individual pages from SQS queue.
 Each page is processed with 25 parallel workers.
 Implements rate limiting with exponential backoff.
+Failed transactions are sent to DLQ for future redriving.
 """
 
 import json
 import os
 import time
 import re
+import boto3
 from typing import Dict, Optional
 from botocore.exceptions import ClientError
 import requests
@@ -16,6 +18,12 @@ import requests
 # Import processing modules
 from filings import process_filings_page
 from contributions import process_contributions_page
+
+# Environment variables
+DLQ_QUEUE_URL = os.environ.get('DLQ_QUEUE_URL')
+
+# AWS clients
+sqs_client = boto3.client('sqs') if DLQ_QUEUE_URL else None
 
 def lambda_handler(event, context):
     """
@@ -49,9 +57,17 @@ def lambda_handler(event, context):
                 result = process_single_page_with_retry(message_body)
                 total_processed += result.get('processed_count', 0)
             except Exception as e:
-                # Log error but don't raise - return success to avoid DLQ
-                print(f"⚠️  Error processing SQS record: {str(e)[:500]}")
-                # Return success to avoid DLQ, but log the error
+                # Log error and send to DLQ
+                error_msg = str(e)[:500]
+                print(f"❌ Error processing SQS record: {error_msg}")
+                try:
+                    message_body = json.loads(record['body'])
+                    send_to_dlq(message_body, error_msg)
+                except:
+                    # If we can't parse the message, send the raw body
+                    send_to_dlq({'raw_body': record.get('body', '')}, error_msg)
+                # Return success so message is deleted from main queue (already sent to DLQ)
+                # This prevents unnecessary retries on messages we know will fail
                 total_processed += 0
         
         return {
@@ -62,11 +78,35 @@ def lambda_handler(event, context):
         # Direct invocation (for testing)
         return process_single_page_with_retry(event)
 
+def send_to_dlq(message_body: Dict, error: str):
+    """Send failed message to Dead Letter Queue for future redriving"""
+    if not DLQ_QUEUE_URL or not sqs_client:
+        print(f"⚠️  DLQ not configured, cannot send failed message: {error}")
+        return False
+    
+    try:
+        # Create DLQ message with original message body and error details
+        dlq_message = {
+            **message_body,
+            'error': error,
+            'failed_at': time.time(),
+            'dlq_source': 'lda_disclosures_indexer'
+        }
+        sqs_client.send_message(
+            QueueUrl=DLQ_QUEUE_URL,
+            MessageBody=json.dumps(dlq_message)
+        )
+        print(f"📤 Sent failed message to DLQ: {error}")
+        return True
+    except Exception as e:
+        print(f"❌ Failed to send message to DLQ: {str(e)[:200]}")
+        return False
+
 def process_single_page_with_retry(message_body: Dict, max_retries: int = 6) -> Dict:
     """Process a single page with exponential backoff retry on rate limiting
     
     For 429 errors: Retries with exponential backoff, using "Expected available in X seconds" if provided
-    For other errors: Returns success but logs the error (doesn't fail)
+    For other errors: Sends to DLQ for future redriving
     """
     page = message_body.get('page')
     endpoint = message_body.get('endpoint')
@@ -132,13 +172,16 @@ def process_single_page_with_retry(message_body: Dict, max_retries: int = 6) -> 
                     last_exception = e
                     continue
                 else:
-                    print(f"❌ Rate limited on page {page} after {max_retries} retries - returning success to avoid DLQ")
-                    # Return success to avoid DLQ, but log the error
-                    return {'processed_count': 0, 'success': False, 'error': 'Rate limited after retries'}
+                    error_msg = f'Rate limited on page {page} after {max_retries} retries'
+                    print(f"❌ {error_msg}")
+                    send_to_dlq(message_body, error_msg)
+                    raise Exception(error_msg)
             else:
-                # Not a rate limit error - log but don't fail
-                print(f"⚠️  HTTP error {e.response.status_code if e.response else 'unknown'} on page {page}: {str(e)[:200]}")
-                return {'processed_count': 0, 'success': False, 'error': f'HTTP {e.response.status_code if e.response else "unknown"}'}
+                # Not a rate limit error - send to DLQ
+                error_msg = f'HTTP {e.response.status_code if e.response else "unknown"} on page {page}: {str(e)[:200]}'
+                print(f"❌ {error_msg}")
+                send_to_dlq(message_body, error_msg)
+                raise Exception(error_msg)
                 
         except ClientError as e:
             error_code = e.response.get('Error', {}).get('Code', '')
@@ -152,12 +195,16 @@ def process_single_page_with_retry(message_body: Dict, max_retries: int = 6) -> 
                     last_exception = e
                     continue
                 else:
-                    print(f"❌ AWS throttling on page {page} after {max_retries} retries - returning success to avoid DLQ")
-                    return {'processed_count': 0, 'success': False, 'error': 'AWS throttling after retries'}
+                    error_msg = f'AWS throttling on page {page} after {max_retries} retries'
+                    print(f"❌ {error_msg}")
+                    send_to_dlq(message_body, error_msg)
+                    raise Exception(error_msg)
             else:
-                # Not a rate limit error - log but don't fail
-                print(f"⚠️  AWS error {error_code} on page {page}: {str(e)[:200]}")
-                return {'processed_count': 0, 'success': False, 'error': f'AWS {error_code}'}
+                # Not a rate limit error - send to DLQ
+                error_msg = f'AWS error {error_code} on page {page}: {str(e)[:200]}'
+                print(f"❌ {error_msg}")
+                send_to_dlq(message_body, error_msg)
+                raise Exception(error_msg)
                 
         except Exception as e:
             # Check if it's an HTTP 429 or rate limit related
@@ -170,17 +217,26 @@ def process_single_page_with_retry(message_body: Dict, max_retries: int = 6) -> 
                     last_exception = e
                     continue
                 else:
-                    print(f"❌ Rate limited on page {page} after {max_retries} retries - returning success to avoid DLQ")
-                    return {'processed_count': 0, 'success': False, 'error': 'Rate limited after retries'}
+                    error_msg = f'Rate limited on page {page} after {max_retries} retries'
+                    print(f"❌ {error_msg}")
+                    send_to_dlq(message_body, error_msg)
+                    raise Exception(error_msg)
             else:
-                # Other errors - log but don't fail
-                print(f"⚠️  Error processing page {page}: {str(e)[:200]}")
-                return {'processed_count': 0, 'success': False, 'error': str(e)[:200]}
+                # Other errors - send to DLQ
+                error_msg = f'Error processing page {page}: {str(e)[:200]}'
+                print(f"❌ {error_msg}")
+                send_to_dlq(message_body, error_msg)
+                raise Exception(error_msg)
     
-    # If we exhausted retries, return success to avoid DLQ
+    # If we exhausted retries, send to DLQ
     if last_exception:
-        print(f"⚠️  Exhausted retries for page {page} - returning success to avoid DLQ")
-        return {'processed_count': 0, 'success': False, 'error': 'Exhausted retries'}
+        error_msg = f'Exhausted retries for page {page}'
+        print(f"❌ {error_msg}")
+        send_to_dlq(message_body, error_msg)
+        raise Exception(error_msg)
     
-    return {'processed_count': 0, 'success': False}
+    # Should not reach here, but if we do, send to DLQ
+    error_msg = f'Unknown error processing page {page}'
+    send_to_dlq(message_body, error_msg)
+    raise Exception(error_msg)
 

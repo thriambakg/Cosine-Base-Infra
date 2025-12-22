@@ -3620,6 +3620,7 @@ module "lda_disclosures_indexer" {
     REQUEST_TIMEOUT    = "30"
     RATE_LIMIT_DELAY   = "0.5"
     PAC_QUEUE_URL      = module.lda_pac_autocomplete_queue.queue_url
+    DLQ_QUEUE_URL      = module.lda_batch_queue.dlq_url
   }
 
   # Lambda layers

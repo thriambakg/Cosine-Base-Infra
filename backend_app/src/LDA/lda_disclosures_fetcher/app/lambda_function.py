@@ -181,6 +181,14 @@ def lambda_handler(event, context):
     end_date = event.get('END_DATE')
     testing_limit = event.get('TESTING')  # Optional: number of records per endpoint
     
+    # Convert testing_limit to int if it's provided (might come as string from event)
+    if testing_limit is not None:
+        try:
+            testing_limit = int(testing_limit)
+        except (ValueError, TypeError):
+            print(f"⚠️  Invalid TESTING value: {testing_limit}, ignoring")
+            testing_limit = None
+    
     print(f"📅 Date range: START_DATE={start_date}, END_DATE={end_date}")
     if testing_limit:
         print(f"🧪 Testing mode: {testing_limit} records per endpoint")
@@ -198,7 +206,12 @@ def lambda_handler(event, context):
     print("\n📋 Fetching filings endpoint count...")
     try:
         filings_data = fetch_page_count(session, 'filings', start_date, end_date)
-        filings_count = filings_data.get('count', 0)
+        # Convert count to int (API might return it as string)
+        filings_count_raw = filings_data.get('count', 0)
+        try:
+            filings_count = int(filings_count_raw) if filings_count_raw else 0
+        except (ValueError, TypeError):
+            filings_count = 0
         filings_total_pages = (filings_count + 24) // 25 if filings_count > 0 else 1
         
         # Apply testing limit if provided
@@ -223,7 +236,12 @@ def lambda_handler(event, context):
     print("\n📋 Fetching contributions endpoint count...")
     try:
         contributions_data = fetch_page_count(session, 'contributions', start_date, end_date)
-        contributions_count = contributions_data.get('count', 0)
+        # Convert count to int (API might return it as string)
+        contributions_count_raw = contributions_data.get('count', 0)
+        try:
+            contributions_count = int(contributions_count_raw) if contributions_count_raw else 0
+        except (ValueError, TypeError):
+            contributions_count = 0
         contributions_total_pages = (contributions_count + 24) // 25 if contributions_count > 0 else 1
         
         # Apply testing limit if provided
