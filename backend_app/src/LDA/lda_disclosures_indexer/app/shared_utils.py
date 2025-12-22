@@ -228,8 +228,23 @@ def call_api(session: requests.Session, endpoint: str, params: Optional[Dict] = 
     return response.json()
 
 def download_document(session: requests.Session, url: str, s3_key: str) -> bool:
-    """Download a document from URL and upload to S3"""
+    """Download a document from URL and upload to S3
+    
+    Skips download if file already exists in S3 to avoid unnecessary re-downloads.
+    """
     try:
+        # Check if file already exists in S3 (cheaper than downloading)
+        try:
+            s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+            print(f"   ⏭️  File already exists in S3: {s3_key}, skipping download")
+            return True
+        except ClientError as e:
+            # If error code is 404, file doesn't exist, proceed with download
+            if e.response['Error']['Code'] != '404':
+                # Some other error occurred, log and proceed with download attempt
+                print(f"   ⚠️  Error checking S3 for {s3_key}: {str(e)[:200]}, proceeding with download")
+        
+        # File doesn't exist, download it
         rate_limiter.wait()
         response = session.get(url, timeout=REQUEST_TIMEOUT, stream=True)
         response.raise_for_status()
@@ -241,6 +256,7 @@ def download_document(session: requests.Session, url: str, s3_key: str) -> bool:
             ContentType=response.headers.get('Content-Type', 'application/pdf')
         )
         
+        print(f"   ✅ Downloaded and saved: {s3_key}")
         return True
     except Exception as e:
         print(f"   ❌ Failed to download {url}: {str(e)[:200]}")
