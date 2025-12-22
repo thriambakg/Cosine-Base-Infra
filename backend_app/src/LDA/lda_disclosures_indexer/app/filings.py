@@ -255,9 +255,8 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         if all_general_issue_codes:
             for issue_code in all_general_issue_codes:
                 if issue_code:
-                    # Send to autocomplete queue for CSV generation
-                    send_autocomplete_value('general_issue_code', issue_code)
                     # Save parameter-filing mapping
+                    # Note: General issue codes use static CSV in frontend, no autocomplete queue needed
                     save_parameter_filing_mapping(
                         parameter_type='GENERAL_ISSUE',
                         parameter_value=issue_code,
