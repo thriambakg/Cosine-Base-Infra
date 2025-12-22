@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
-    save_parameter_filing_mapping,
+    save_parameter_filing_mapping, get_government_entity_name,
     filings_table, PAC_QUEUE_URL
 )
 
@@ -105,9 +105,10 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
             state = registrant.get('state')
     indexed['state'] = state
     
-    # General Issue Codes (from lobbying_activities if present)
+    # General Issue Codes and Government Entity IDs (from lobbying_activities if present)
     lobbying_activities = contribution.get('lobbying_activities', [])
     all_general_issue_codes = []
+    all_government_entity_ids = []
     
     if lobbying_activities:
         for activity in lobbying_activities:
@@ -115,17 +116,59 @@ def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
             if general_issue_code:
                 if general_issue_code not in all_general_issue_codes:
                     all_general_issue_codes.append(general_issue_code)
+            
+            # Extract all government entity IDs from government_entities array
+            # Handle both direct array format and DynamoDB format: [{"N": "62"}, {"N": "64"}]
+            government_entities = activity.get('government_entities', [])
+            if government_entities:
+                for entity_item in government_entities:
+                    # Handle DynamoDB format: {"N": "62"} or nested structure
+                    entity_id = None
+                    if isinstance(entity_item, dict):
+                        # Check for DynamoDB number format: {"N": "62"}
+                        if 'N' in entity_item:
+                            entity_id = entity_item['N']
+                        else:
+                            # Check for nested entity structure
+                            entity = entity_item.get('entity', entity_item)
+                            if isinstance(entity, dict) and 'M' in entity:
+                                entity = entity['M']
+                            entity_id = entity.get('id')
+                            if isinstance(entity_id, dict) and 'N' in entity_id:
+                                entity_id = entity_id['N']
+                    elif isinstance(entity_item, (int, str)):
+                        entity_id = entity_item
+                    
+                    if entity_id:
+                        try:
+                            entity_id_int = int(entity_id)
+                            if entity_id_int not in all_government_entity_ids:
+                                all_government_entity_ids.append(entity_id_int)
+                        except (ValueError, TypeError):
+                            pass
     
     if all_general_issue_codes:
         indexed['all_general_issue_codes'] = all_general_issue_codes
+    if all_government_entity_ids:
+        indexed['all_government_entity_ids'] = all_government_entity_ids
     
     # Foreign Entities
     foreign_entities = contribution.get('foreign_entities', [])
     foreign_countries = set()
     
     if foreign_entities:
-        for entity in foreign_entities:
+        for entity_item in foreign_entities:
+            # Handle nested entity structure: entity can be in 'entity' field (DynamoDB format) or directly in the item
+            entity = entity_item.get('entity', entity_item)
+            
+            # Handle DynamoDB format: if entity is a dict with 'M' key, extract the map
+            if isinstance(entity, dict) and 'M' in entity:
+                entity = entity['M']
+            
+            # Extract country code (handle DynamoDB 'S' format)
             country_code = entity.get('country') or entity.get('ppb_country')
+            if isinstance(country_code, dict) and 'S' in country_code:
+                country_code = country_code['S']
             if country_code and country_code != 'US':
                 foreign_countries.add(country_code)
     
@@ -207,6 +250,22 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                         dt_posted=dt_posted
                     )
         
+        # Save all government entity IDs (mapped to names)
+        all_government_entity_ids = indexed_fields.get('all_government_entity_ids', [])
+        if all_government_entity_ids:
+            for entity_id in all_government_entity_ids:
+                if entity_id:
+                    # Map entity ID to name using constants file
+                    entity_name = get_government_entity_name(entity_id)
+                    if entity_name:
+                        save_parameter_filing_mapping(
+                            parameter_type='GOVERNMENT_ENTITY',
+                            parameter_value=entity_name,  # Store name, not ID
+                            filing_uuid=filing_uuid,
+                            filing_type='CONTRIBUTION',
+                            dt_posted=dt_posted
+                        )
+        
         # Save all foreign countries
         foreign_countries = indexed_fields.get('foreign_countries', [])
         if foreign_countries:
@@ -282,6 +341,7 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         # Remove arrays that are now only in parameter-filing mappings
         item.pop('all_general_issue_codes', None)
         item.pop('foreign_countries', None)
+        item.pop('all_entity_names', None)
         
         # Keep is_foreign and pac as boolean flags for GSI queries
         if indexed_fields.get('is_foreign') != 1:

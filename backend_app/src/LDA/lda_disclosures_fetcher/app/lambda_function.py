@@ -17,8 +17,12 @@ LDA_SECRET_NAME = os.environ.get('LDA_SECRET_NAME')
 REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))
 BATCH_QUEUE_URL = os.environ.get('BATCH_QUEUE_URL')  # SQS standard queue for batches
 
+# Environment variables
+S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
+
 # AWS clients
 secrets_client = boto3.client('secretsmanager')
+s3_client = boto3.client('s3') if S3_BUCKET_NAME else None
 
 # Configure SQS client with larger connection pool to avoid warnings
 # Default pool size is 10, increase to 25 to match our parallelism
@@ -141,6 +145,41 @@ def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[st
     
     return successful
 
+def fetch_and_store_constants(session: requests.Session):
+    """Fetch constants from LDA API and store in S3"""
+    if not S3_BUCKET_NAME or not s3_client:
+        print("⚠️  S3_BUCKET_NAME not configured, skipping constants storage")
+        return
+    
+    # Constants to fetch and store
+    constants_endpoints = {
+        "general_issues": f"{LDA_API_BASE_URL}/constants/filing/lobbyingactivityissues/",
+        "government_entities": f"{LDA_API_BASE_URL}/constants/filing/governmententities/",
+        "countries": f"{LDA_API_BASE_URL}/constants/general/countries/"
+    }
+    
+    print("\n📋 Fetching and storing constants to S3...")
+    
+    for constant_type, endpoint in constants_endpoints.items():
+        try:
+            print(f"   📡 Fetching {constant_type}...")
+            response = session.get(endpoint, timeout=REQUEST_TIMEOUT)
+            response.raise_for_status()
+            constants = response.json()
+            
+            # Store in S3
+            s3_key = f"lists/{constant_type}_constants.json"
+            s3_client.put_object(
+                Bucket=S3_BUCKET_NAME,
+                Key=s3_key,
+                Body=json.dumps(constants, indent=2, ensure_ascii=False).encode('utf-8'),
+                ContentType='application/json'
+            )
+            
+            print(f"   ✅ Stored {len(constants)} {constant_type} to s3://{S3_BUCKET_NAME}/{s3_key}")
+        except Exception as e:
+            print(f"   ⚠️  Error fetching/storing {constant_type}: {str(e)[:200]}")
+
 def lambda_handler(event, context):
     """
     Fetcher Lambda: Determines total pages and outputs batches for processing
@@ -199,6 +238,9 @@ def lambda_handler(event, context):
     
     # Create session
     session = create_session(api_key)
+    
+    # Fetch and store constants to S3 at the start
+    fetch_and_store_constants(session)
     
     total_pages_sent = 0
     

@@ -36,7 +36,8 @@ FIELD_TYPE_TO_S3_KEY = {
     'pac_name': 'lists/pacs.csv',
     'client_name': 'lists/client_names.csv',
     'lobbyist_name': 'lists/lobbyist_names.csv',
-    'registrant_name': 'lists/registrant_names.csv'
+    'registrant_name': 'lists/registrant_names.csv',
+    'entity_name': 'lists/entity_names.csv'
 }
 
 def clean_value(value: str) -> str:

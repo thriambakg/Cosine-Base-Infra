@@ -31,6 +31,57 @@ sqs_client = boto3.client('sqs')
 # DynamoDB tables
 filings_table = dynamodb.Table(FILINGS_TABLE_NAME) if FILINGS_TABLE_NAME else None
 
+# Government entities mapping (ID -> name)
+_government_entities_map = None
+_government_entities_map_lock = Lock()
+
+def load_government_entities_map() -> Dict[int, str]:
+    """Load government entities mapping from local file or S3"""
+    global _government_entities_map
+    
+    if _government_entities_map is not None:
+        return _government_entities_map
+    
+    with _government_entities_map_lock:
+        if _government_entities_map is not None:
+            return _government_entities_map
+        
+        try:
+            # Try to load from local file first (in Lambda package)
+            local_path = os.path.join(os.path.dirname(__file__), 'government_entities_constants.json')
+            if os.path.exists(local_path):
+                with open(local_path, 'r', encoding='utf-8') as f:
+                    entities_list = json.load(f)
+                    _government_entities_map = {entity['id']: entity['name'] for entity in entities_list}
+                    print(f"✅ Loaded {len(_government_entities_map)} government entities from local file")
+                    return _government_entities_map
+            
+            # Fallback: try to load from S3
+            if S3_BUCKET_NAME:
+                try:
+                    response = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key='lists/government_entities_constants.json')
+                    entities_list = json.loads(response['Body'].read().decode('utf-8'))
+                    _government_entities_map = {entity['id']: entity['name'] for entity in entities_list}
+                    print(f"✅ Loaded {len(_government_entities_map)} government entities from S3")
+                    return _government_entities_map
+                except Exception as e:
+                    print(f"⚠️  Could not load government entities from S3: {str(e)[:200]}")
+            
+            # If both fail, return empty map
+            print("⚠️  Could not load government entities mapping, using empty map")
+            _government_entities_map = {}
+            return _government_entities_map
+            
+        except Exception as e:
+            print(f"❌ Error loading government entities mapping: {str(e)[:200]}")
+            _government_entities_map = {}
+            return _government_entities_map
+
+def get_government_entity_name(entity_id: int) -> Optional[str]:
+    """Get government entity name by ID"""
+    entities_map = load_government_entities_map()
+    return entities_map.get(entity_id)
+
 # Rate Limiter
 class RateLimiter:
     """Thread-safe rate limiter for API calls"""

@@ -3575,6 +3575,7 @@ module "lda_disclosures_fetcher" {
     LDA_SECRET_NAME  = module.lda_api_secrets_manager.secret_names["lda-api"]
     REQUEST_TIMEOUT  = "30"
     BATCH_QUEUE_URL  = module.lda_batch_queue.queue_url
+    S3_BUCKET_NAME   = module.lda_disclosures_s3.bucket_id
   }
 
   # Lambda layers
@@ -3594,6 +3595,7 @@ module "lda_disclosures_fetcher" {
   depends_on = [
     module.lda_batch_queue,
     module.lda_api_secrets_manager,
+    module.lda_disclosures_s3,
     module.core_layer
   ]
 }
@@ -3702,6 +3704,41 @@ resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
       }
     ]
   })
+
+  tags = var.common_tags
+}
+
+# IAM Policy for Fetcher Lambda to write constants to S3
+resource "aws_iam_policy" "lda_fetcher_s3_policy" {
+  name        = "${var.project_name}-lda-fetcher-s3-${var.environment}"
+  description = "Allows Fetcher Lambda to write constants (general issues, government entities, countries) to S3"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject"
+        ]
+        Resource = "${module.lda_disclosures_s3.bucket_arn}/lists/*"
+      },
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:ListBucket"
+        ]
+        Resource = module.lda_disclosures_s3.bucket_arn
+        Condition = {
+          StringLike = {
+            "s3:prefix" = "lists/*"
+          }
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
 }
 
 # SQS Event Source Mapping for PAC Autocomplete Processor

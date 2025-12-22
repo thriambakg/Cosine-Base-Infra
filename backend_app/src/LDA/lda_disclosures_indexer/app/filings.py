@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
-    save_parameter_filing_mapping,
+    save_parameter_filing_mapping, get_government_entity_name,
     filings_table, PAC_QUEUE_URL
 )
 
@@ -49,11 +49,28 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
                 if general_issue_code not in all_general_issue_codes:
                     all_general_issue_codes.append(general_issue_code)
             
-            # Extract all government entity IDs (no first element indexing)
+            # Extract all government entity IDs from government_entities array
+            # Handle both direct array format and DynamoDB format: [{"N": "62"}, {"N": "64"}]
             government_entities = activity.get('government_entities', [])
             if government_entities:
-                for entity in government_entities:
-                    entity_id = entity.get('id')
+                for entity_item in government_entities:
+                    # Handle DynamoDB format: {"N": "62"} or nested structure
+                    entity_id = None
+                    if isinstance(entity_item, dict):
+                        # Check for DynamoDB number format: {"N": "62"}
+                        if 'N' in entity_item:
+                            entity_id = entity_item['N']
+                        else:
+                            # Check for nested entity structure
+                            entity = entity_item.get('entity', entity_item)
+                            if isinstance(entity, dict) and 'M' in entity:
+                                entity = entity['M']
+                            entity_id = entity.get('id')
+                            if isinstance(entity_id, dict) and 'N' in entity_id:
+                                entity_id = entity_id['N']
+                    elif isinstance(entity_item, (int, str)):
+                        entity_id = entity_item
+                    
                     if entity_id:
                         try:
                             entity_id_int = int(entity_id)
@@ -65,19 +82,30 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
             # Extract all lobbyists (no first element indexing)
             lobbyists = activity.get('lobbyists', [])
             if lobbyists:
-                for lobbyist_obj in lobbyists:
-                    lobbyist = lobbyist_obj.get('lobbyist', {})
-                    if lobbyist:
-                        name_parts = [
-                            lobbyist.get('prefix_display', ''),
-                            lobbyist.get('first_name', ''),
-                            lobbyist.get('middle_name', ''),
-                            lobbyist.get('last_name', ''),
-                            lobbyist.get('suffix_display', '')
-                        ]
-                        lobbyist_name = ' '.join(filter(None, name_parts))
-                        if lobbyist_name and lobbyist_name not in all_lobbyist_names:
-                            all_lobbyist_names.append(lobbyist_name)
+                for lobbyist_item in lobbyists:
+                    # Handle both formats: direct string or nested object
+                    if isinstance(lobbyist_item, str):
+                        lobbyist_name = lobbyist_item.strip()
+                    elif isinstance(lobbyist_item, dict):
+                        # Check if it's a DynamoDB format string: {"S": "NAME"}
+                        if 'S' in lobbyist_item:
+                            lobbyist_name = lobbyist_item['S'].strip()
+                        else:
+                            # Nested lobbyist object
+                            lobbyist = lobbyist_item.get('lobbyist', lobbyist_item)
+                            name_parts = [
+                                lobbyist.get('prefix_display', ''),
+                                lobbyist.get('first_name', ''),
+                                lobbyist.get('middle_name', ''),
+                                lobbyist.get('last_name', ''),
+                                lobbyist.get('suffix_display', '')
+                            ]
+                            lobbyist_name = ' '.join(filter(None, name_parts))
+                    else:
+                        lobbyist_name = str(lobbyist_item).strip()
+                    
+                    if lobbyist_name and lobbyist_name not in all_lobbyist_names:
+                        all_lobbyist_names.append(lobbyist_name)
     
     # Store all codes as lists for parameter-filings table mapping
     if all_general_issue_codes:
@@ -92,8 +120,18 @@ def extract_indexed_fields_filing(filing: Dict) -> Dict:
     foreign_countries = set()
     
     if foreign_entities:
-        for entity in foreign_entities:
+        for entity_item in foreign_entities:
+            # Handle nested entity structure: entity can be in 'entity' field (DynamoDB format) or directly in the item
+            entity = entity_item.get('entity', entity_item)
+            
+            # Handle DynamoDB format: if entity is a dict with 'M' key, extract the map
+            if isinstance(entity, dict) and 'M' in entity:
+                entity = entity['M']
+            
+            # Extract country code (handle DynamoDB 'S' format)
             country_code = entity.get('country') or entity.get('ppb_country')
+            if isinstance(country_code, dict) and 'S' in country_code:
+                country_code = country_code['S']
             if country_code and country_code != 'US':
                 foreign_countries.add(country_code)
     
@@ -209,10 +247,8 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         else:
             send_autocomplete_value('client_name', indexed_fields['client_name'])
         
-        if not indexed_fields.get('lobbyist_name'):
-            item.pop('lobbyist_name', None)
-        else:
-            send_autocomplete_value('lobbyist_name', indexed_fields['lobbyist_name'])
+        # Remove single lobbyist_name field (now using parameter-filing mappings for all lobbyists)
+        item.pop('lobbyist_name', None)
         
         if indexed_fields.get('amount_reported'):
             amount = indexed_fields['amount_reported']
@@ -235,6 +271,11 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         item.pop('contribution_item_type', None)
         item.pop('all_contribution_item_types', None)
         
+        # Remove arrays that are now only in parameter-filing mappings
+        item.pop('all_general_issue_codes', None)
+        item.pop('foreign_countries', None)
+        item.pop('all_government_entity_ids', None)
+        
         if indexed_fields.get('is_foreign') != 1:
             item.pop('is_foreign', None)
         else:
@@ -247,8 +288,7 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         filing_uuid = item['filing_uuid']
         dt_posted = indexed_fields.get('dt_posted')
         
-        # Save parameter-filing mappings only for: General Issue Codes, PACs, and Foreign Entities
-        # (Other fields like government entities and lobbyists have GSIs and are fast queries)
+        # Save parameter-filing mappings for: General Issue Codes, Government Entities, PACs, Foreign Entities, and Lobbyists
         
         # Save all general issue codes
         all_general_issue_codes = indexed_fields.get('all_general_issue_codes', [])
@@ -265,6 +305,22 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                         dt_posted=dt_posted
                     )
         
+        # Save all government entity IDs (mapped to names)
+        all_government_entity_ids = indexed_fields.get('all_government_entity_ids', [])
+        if all_government_entity_ids:
+            for entity_id in all_government_entity_ids:
+                if entity_id:
+                    # Map entity ID to name using constants file
+                    entity_name = get_government_entity_name(entity_id)
+                    if entity_name:
+                        save_parameter_filing_mapping(
+                            parameter_type='GOVERNMENT_ENTITY',
+                            parameter_value=entity_name,  # Store name, not ID
+                            filing_uuid=filing_uuid,
+                            filing_type='FILING',
+                            dt_posted=dt_posted
+                        )
+        
         # Save all foreign countries
         foreign_countries = indexed_fields.get('foreign_countries', [])
         if foreign_countries:
@@ -273,6 +329,22 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                     save_parameter_filing_mapping(
                         parameter_type='FOREIGN_COUNTRY',
                         parameter_value=country_code,
+                        filing_uuid=filing_uuid,
+                        filing_type='FILING',
+                        dt_posted=dt_posted
+                    )
+        
+        # Save all lobbyist names
+        all_lobbyist_names = indexed_fields.get('all_lobbyist_names', [])
+        if all_lobbyist_names:
+            for lobbyist_name in all_lobbyist_names:
+                if lobbyist_name:
+                    # Send to autocomplete queue for CSV generation
+                    send_autocomplete_value('lobbyist_name', lobbyist_name)
+                    # Save parameter-filing mapping
+                    save_parameter_filing_mapping(
+                        parameter_type='LOBBYIST',
+                        parameter_value=lobbyist_name,
                         filing_uuid=filing_uuid,
                         filing_type='FILING',
                         dt_posted=dt_posted
