@@ -26,11 +26,10 @@ S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
 secrets_client = boto3.client('secretsmanager')
 s3_client = boto3.client('s3') if S3_BUCKET_NAME else None
 
-# Configure SQS client with larger connection pool to avoid warnings
-# Default pool size is 10, increase to 25 to match our parallelism
+# Configure SQS client with larger connection pool for high parallelism
 from botocore.config import Config
 sqs_config = Config(
-    max_pool_connections=25  # Match our max_workers to avoid connection pool warnings
+    max_pool_connections=100  # Increased for high parallelism with batch sends
 )
 sqs_client = boto3.client('sqs', config=sqs_config)
 
@@ -91,59 +90,80 @@ def create_batches(total_pages: int, batch_size: int = 25) -> List[Dict]:
     
     return batches
 
-def send_page_to_queue(page: int, endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int]):
-    """Send a single page to SQS standard queue"""
+def send_message_batch_to_queue(pages_batch: List[int], endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int]):
+    """Send a batch of pages to SQS using send_message_batch (up to 10 messages per call)"""
     if not BATCH_QUEUE_URL:
         print(f"⚠️  BATCH_QUEUE_URL not configured, skipping SQS send")
-        return False
+        return 0
     
-    message_body = {
-        'page': page,
-        'endpoint': endpoint,
-        'start_date': start_date,
-        'end_date': end_date,
-        'testing_limit': testing_limit
-    }
+    if not pages_batch:
+        return 0
     
-    # Standard queue - no MessageGroupId or MessageDeduplicationId needed
-    # Standard queues allow full concurrency up to the Lambda's reserved_concurrent_executions limit (25)
+    # Prepare batch entries (SQS allows up to 10 messages per batch)
+    entries = []
+    for idx, page in enumerate(pages_batch):
+        message_body = {
+            'page': page,
+            'endpoint': endpoint,
+            'start_date': start_date,
+            'end_date': end_date,
+            'testing_limit': testing_limit
+        }
+        entries.append({
+            'Id': str(page),  # Unique ID for this message in the batch
+            'MessageBody': json.dumps(message_body)
+        })
     
     try:
-        sqs_client.send_message(
+        response = sqs_client.send_message_batch(
             QueueUrl=BATCH_QUEUE_URL,
-            MessageBody=json.dumps(message_body)
+            Entries=entries
         )
-        return True
+        # Count successful and failed
+        successful = len(response.get('Successful', []))
+        failed = len(response.get('Failed', []))
+        if failed > 0:
+            print(f"   ⚠️  Batch send: {successful} successful, {failed} failed")
+        return successful
     except Exception as e:
-        print(f"   ❌ Error sending page {page} to queue: {str(e)}")
-        return False
+        print(f"   ❌ Error sending batch to queue: {str(e)}")
+        return 0
 
-def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int], max_workers: int = 10):
-    """Send multiple pages to SQS queue in parallel (reduced to 10 to avoid connection pool issues)"""
+def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[str], end_date: Optional[str], testing_limit: Optional[int], max_workers: int = 50, batch_size: int = 10):
+    """Send multiple pages to SQS queue in parallel using batch sends
+    
+    Uses send_message_batch to send up to 10 messages per API call, significantly reducing
+    the number of API calls and improving throughput.
+    """
     if not pages:
         return 0
+    
+    # Group pages into batches of 10 (SQS batch limit)
+    page_batches = []
+    for i in range(0, len(pages), batch_size):
+        page_batches.append(pages[i:i + batch_size])
     
     successful = 0
     failed = 0
     
+    # Use ThreadPoolExecutor to send batches in parallel
     with ThreadPoolExecutor(max_workers=max_workers) as executor:
-        # Submit all send tasks
-        future_to_page = {
-            executor.submit(send_page_to_queue, page, endpoint, start_date, end_date, testing_limit): page
-            for page in pages
+        # Submit all batch send tasks
+        future_to_batch = {
+            executor.submit(send_message_batch_to_queue, batch, endpoint, start_date, end_date, testing_limit): batch
+            for batch in page_batches
         }
         
         # Process completed tasks
-        for future in as_completed(future_to_page):
-            page = future_to_page[future]
+        for future in as_completed(future_to_batch):
+            batch = future_to_batch[future]
             try:
-                if future.result():
-                    successful += 1
-                else:
-                    failed += 1
+                batch_successful = future.result()
+                successful += batch_successful
+                failed += (len(batch) - batch_successful)
             except Exception as e:
-                print(f"   ❌ Exception sending page {page}: {str(e)}")
-                failed += 1
+                print(f"   ❌ Exception sending batch: {str(e)}")
+                failed += len(batch)
     
     return successful
 
