@@ -2551,13 +2551,8 @@ resource "aws_security_group" "lda_efs_sg" {
     description = "NFS access from VPC"
   }
 
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
-    description = "Allow all outbound"
-  }
+  # No egress rule needed - EFS is a server-side service that doesn't initiate outbound connections
+  # Lambda functions connect to EFS, but EFS itself doesn't need outbound access
 
   tags = merge(
     var.common_tags,
