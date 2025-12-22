@@ -147,71 +147,45 @@ def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[st
     
     return successful
 
-def json_to_csv(data: List[Dict], code_column: str, name_column: str) -> str:
-    """Convert JSON data to CSV string with code and name columns"""
+def json_to_csv_values_only(data: List[Dict], value_column: str) -> str:
+    """Convert JSON data to CSV string with single column (values only) for autocomplete"""
     if not data:
         return ''
     
     csv_buffer = StringIO()
-    writer = csv.DictWriter(csv_buffer, fieldnames=[code_column, name_column])
-    writer.writeheader()
+    writer = csv.writer(csv_buffer)
+    writer.writerow(['value'])  # Header
     
     for item in data:
-        code = item.get(code_column, '')
-        name = item.get(name_column, '')
-        writer.writerow({code_column: code, name_column: name})
+        value = item.get(value_column, '')
+        if value:
+            writer.writerow([value])
     
     return csv_buffer.getvalue()
 
-def write_to_efs(file_path: str, content: str) -> bool:
-    """Write content to EFS if EFS is mounted"""
-    try:
-        # Check if EFS mount point exists
-        efs_base = '/mnt/efs'
-        if not os.path.exists(efs_base):
-            return False
-        
-        # Create directory if it doesn't exist
-        efs_dir = os.path.join(efs_base, 'lists')
-        os.makedirs(efs_dir, exist_ok=True)
-        
-        # Write file to EFS
-        efs_path = os.path.join(efs_dir, os.path.basename(file_path))
-        with open(efs_path, 'w', encoding='utf-8') as f:
-            f.write(content)
-        
-        print(f"   ✅ Also stored to EFS: {efs_path}")
-        return True
-    except Exception as e:
-        print(f"   ⚠️  Could not write to EFS: {str(e)[:200]}")
-        return False
-
 def fetch_and_store_constants(session: requests.Session):
-    """Fetch constants from LDA API, convert to CSV, and store in S3 and EFS"""
+    """Fetch constants from LDA API, convert to single-column CSV (values only), and store in S3"""
     if not S3_BUCKET_NAME or not s3_client:
         print("⚠️  S3_BUCKET_NAME not configured, skipping constants storage")
         return
     
-    # Constants to fetch and store (with CSV column mappings)
+    # Constants to fetch and store (single column CSV with values only)
     constants_config = {
         "general_issues": {
             "endpoint": f"{LDA_API_BASE_URL}/constants/filing/lobbyingactivityissues/",
-            "code_column": "value",
-            "name_column": "name"
+            "value_column": "value"
         },
         "government_entities": {
             "endpoint": f"{LDA_API_BASE_URL}/constants/filing/governmententities/",
-            "code_column": "id",
-            "name_column": "name"
+            "value_column": "id"
         },
         "countries": {
             "endpoint": f"{LDA_API_BASE_URL}/constants/general/countries/",
-            "code_column": "value",
-            "name_column": "name"
+            "value_column": "value"
         }
     }
     
-    print("\n📋 Fetching and storing constants as CSVs to S3 (and EFS if available)...")
+    print("\n📋 Fetching and storing constants as single-column CSVs to S3...")
     
     for constant_type, config in constants_config.items():
         try:
@@ -220,11 +194,10 @@ def fetch_and_store_constants(session: requests.Session):
             response.raise_for_status()
             constants = response.json()
             
-            # Convert to CSV
-            csv_content = json_to_csv(
+            # Convert to CSV with values only (single column)
+            csv_content = json_to_csv_values_only(
                 constants,
-                config["code_column"],
-                config["name_column"]
+                config["value_column"]
             )
             
             # Store CSV in S3
@@ -236,10 +209,7 @@ def fetch_and_store_constants(session: requests.Session):
                 ContentType='text/csv'
             )
             
-            print(f"   ✅ Stored {len(constants)} {constant_type} to s3://{S3_BUCKET_NAME}/{s3_key}")
-            
-            # Also write to EFS if available
-            write_to_efs(f"{constant_type}.csv", csv_content)
+            print(f"   ✅ Stored {len(constants)} {constant_type} values to s3://{S3_BUCKET_NAME}/{s3_key}")
             
         except Exception as e:
             print(f"   ⚠️  Error fetching/storing {constant_type}: {str(e)[:200]}")
