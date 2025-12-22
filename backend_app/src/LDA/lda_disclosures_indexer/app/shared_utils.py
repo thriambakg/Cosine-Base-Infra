@@ -376,3 +376,70 @@ def save_parameter_filing_mapping(
     except Exception as e:
         print(f"⚠️ Failed to save parameter mapping {parameter_type}#{parameter_value} for {filing_uuid}: {str(e)[:200]}")
 
+
+def save_search_index_item(
+    search_type: str,
+    search_value: str,
+    entity_pk: str,
+    entity_type: str,
+    dt_posted: Optional[str] = None
+):
+    """
+    Save a materialized search index item for efficient querying and pagination
+    
+    This creates a searchable index item that allows:
+    - Single query per search term (no fan-in needed)
+    - Native DynamoDB pagination (LastEvaluatedKey works)
+    - Sorting by date
+    - Easy intersection by entityPK
+    
+    Structure:
+    - PK = "SEARCH#<search_type>#<value>"
+    - SK = "DT_POSTED#<date>#<entityPK>"
+    - entityPK = FILING#uuid or CONTRIBUTION#uuid
+    - entityType = FILING or CONTRIBUTION
+    
+    Args:
+        search_type: Type of search (e.g., "REGISTRANT", "CLIENT", "LOBBYIST", "PAC", "GENERAL_ISSUE", "GOVERNMENT_ENTITY", "FOREIGN_COUNTRY")
+        search_value: The searchable value (e.g., "APPLE INC.", "CARMEN STACY", "Dave Kamp 2008")
+        entity_pk: The primary key of the entity (FILING#uuid or CONTRIBUTION#uuid)
+        entity_type: "FILING" or "CONTRIBUTION"
+        dt_posted: Posted date in ISO format (e.g., "2025-01-15T00:00:00-05:00")
+    """
+    if not filings_table or not search_value or not entity_pk:
+        return
+    
+    try:
+        # Normalize search value (remove quotes, trim whitespace)
+        normalized_value = str(search_value).strip().strip('"').strip()
+        if not normalized_value:
+            return
+        
+        # Create search index key: "SEARCH#<search_type>#<value>"
+        search_pk = f"SEARCH#{search_type}#{normalized_value}"
+        
+        # Create sort key: "DT_POSTED#<date>#<entityPK>"
+        # Use a default date if dt_posted is not provided
+        if dt_posted:
+            # Extract date part (YYYY-MM-DD) for consistent sorting
+            date_part = dt_posted.split('T')[0] if 'T' in dt_posted else dt_posted.split(' ')[0]
+        else:
+            date_part = "1970-01-01"  # Default to epoch if no date
+        
+        search_sk = f"DT_POSTED#{date_part}#{entity_pk}"
+        
+        item = {
+            'PK': search_pk,
+            'SK': search_sk,
+            'search_type': search_type,
+            'search_value': normalized_value,
+            'entity_pk': entity_pk,
+            'entity_type': entity_type,
+            'dt_posted': dt_posted or date_part
+        }
+        
+        filings_table.put_item(Item=item)
+        
+    except Exception as e:
+        print(f"⚠️ Failed to save search index {search_type}#{normalized_value} for {entity_pk}: {str(e)[:200]}")
+

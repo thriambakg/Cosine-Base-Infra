@@ -10,7 +10,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
-    save_parameter_filing_mapping, get_government_entity_name, get_general_issue_name, get_country_name,
+    save_parameter_filing_mapping, save_search_index_item, get_government_entity_name, get_general_issue_name, get_country_name,
     filings_table, PAC_QUEUE_URL
 )
 
@@ -358,6 +358,83 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                         filing_type='FILING',
                         dt_posted=dt_posted
                     )
+        
+        # Save materialized search index items for efficient querying and pagination
+        entity_pk = f"FILING#{filing_uuid}"
+        
+        # Save registrant search index
+        if indexed_fields.get('registrant_name'):
+            save_search_index_item(
+                search_type='REGISTRANT',
+                search_value=indexed_fields['registrant_name'],
+                entity_pk=entity_pk,
+                entity_type='FILING',
+                dt_posted=dt_posted
+            )
+        
+        # Save client search index
+        if indexed_fields.get('client_name'):
+            save_search_index_item(
+                search_type='CLIENT',
+                search_value=indexed_fields['client_name'],
+                entity_pk=entity_pk,
+                entity_type='FILING',
+                dt_posted=dt_posted
+            )
+        
+        # Save lobbyist search indexes
+        if all_lobbyist_names:
+            for lobbyist_name in all_lobbyist_names:
+                if lobbyist_name:
+                    save_search_index_item(
+                        search_type='LOBBYIST',
+                        search_value=lobbyist_name,
+                        entity_pk=entity_pk,
+                        entity_type='FILING',
+                        dt_posted=dt_posted
+                    )
+        
+        # Save general issue search indexes
+        if all_general_issue_codes:
+            for issue_code in all_general_issue_codes:
+                if issue_code:
+                    issue_name = get_general_issue_name(issue_code)
+                    if issue_name:
+                        save_search_index_item(
+                            search_type='GENERAL_ISSUE',
+                            search_value=issue_name,
+                            entity_pk=entity_pk,
+                            entity_type='FILING',
+                            dt_posted=dt_posted
+                        )
+        
+        # Save government entity search indexes
+        if all_government_entity_ids:
+            for entity_id in all_government_entity_ids:
+                if entity_id:
+                    entity_name = get_government_entity_name(entity_id)
+                    if entity_name:
+                        save_search_index_item(
+                            search_type='GOVERNMENT_ENTITY',
+                            search_value=entity_name,
+                            entity_pk=entity_pk,
+                            entity_type='FILING',
+                            dt_posted=dt_posted
+                        )
+        
+        # Save foreign country search indexes
+        if foreign_countries:
+            for country_code in foreign_countries:
+                if country_code:
+                    country_name = get_country_name(country_code)
+                    if country_name:
+                        save_search_index_item(
+                            search_type='FOREIGN_COUNTRY',
+                            search_value=country_name,
+                            entity_pk=entity_pk,
+                            entity_type='FILING',
+                            dt_posted=dt_posted
+                        )
         
     except Exception as e:
         print(f"❌ Error saving filing to DynamoDB: {str(e)[:200]}")
