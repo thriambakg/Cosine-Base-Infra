@@ -403,6 +403,78 @@ def get_congress_api_key() -> str:
         log_print(f"❌ Error retrieving Congress API key from Secrets Manager: {str(e)}")
         raise ValueError(f"Failed to retrieve Congress API key from Secrets Manager: {str(e)}")
 
+def calculate_congress_from_date(date: datetime) -> int:
+    """
+    Calculate congress number from a date.
+    
+    Formula: congress = ((year - 1789) // 2) + 1
+    Each congress spans 2 years (odd-numbered years start new congress).
+    Example: 118th Congress = 2023-2024, 119th Congress = 2025-2026
+    
+    Args:
+        date: datetime object (with or without timezone)
+        
+    Returns:
+        Congress number (integer)
+    """
+    year = date.year
+    congress = ((year - 1789) // 2) + 1
+    return congress
+
+
+def get_congresses_from_date_range(start_date: datetime, end_date: datetime) -> List[int]:
+    """
+    Get all congress numbers that overlap with the date range.
+    
+    Args:
+        start_date: Start date of the range
+        end_date: End date of the range
+        
+    Returns:
+        List of congress numbers (integers) that overlap with the date range
+    """
+    start_congress = calculate_congress_from_date(start_date)
+    end_congress = calculate_congress_from_date(end_date)
+    congresses = list(range(start_congress, end_congress + 1))
+    return congresses
+
+
+def calculate_congress_from_date(date: datetime) -> int:
+    """
+    Calculate congress number from a date.
+    
+    Formula: congress = ((year - 1789) // 2) + 1
+    Each congress spans 2 years (odd-numbered years start new congress).
+    Example: 118th Congress = 2023-2024, 119th Congress = 2025-2026
+    
+    Args:
+        date: datetime object (with or without timezone)
+        
+    Returns:
+        Congress number (integer)
+    """
+    year = date.year
+    congress = ((year - 1789) // 2) + 1
+    return congress
+
+
+def get_congresses_from_date_range(start_date: datetime, end_date: datetime) -> List[int]:
+    """
+    Get all congress numbers that overlap with the date range.
+    
+    Args:
+        start_date: Start date of the range
+        end_date: End date of the range
+        
+    Returns:
+        List of congress numbers (integers) that overlap with the date range
+    """
+    start_congress = calculate_congress_from_date(start_date)
+    end_congress = calculate_congress_from_date(end_date)
+    congresses = list(range(start_congress, end_congress + 1))
+    return congresses
+
+
 def get_current_congress(api_key: str) -> int:
     """Get the current Congress number."""
     url = f"{API_BASE_URL}/congress"
@@ -1316,7 +1388,82 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     # Store bipartisan as number for DynamoDB (0 = false, 1 = true)
     record["bipartisan"] = 1 if bipartisan else 0
     
+    # Save search index items for cosponsors (many-to-many relationship)
+    # Note: Sponsor doesn't need search index since it's 1:1 and has GSI
+    introduced_date = record.get("introduced_date", "")
+    bill_id = record.get("bill_id", "")
+    
+    if cosponsors_list and introduced_date and bill_id:
+        for cosponsor_obj in cosponsors_list:
+            cosponsor_name = cosponsor_obj.get("name", "").strip()
+            if cosponsor_name:
+                save_cosponsor_search_index_item(
+                    cosponsor_name=cosponsor_name,
+                    bill_id=bill_id,
+                    introduced_date=introduced_date
+                )
+    
     return record
+
+
+def save_cosponsor_search_index_item(
+    cosponsor_name: str,
+    bill_id: str,
+    introduced_date: str
+):
+    """
+    Save a materialized search index item for cosponsors (many-to-many relationship).
+    
+    Structure:
+    - PK = SEARCH#COSPONSOR#<cosponsor_name>
+    - SK = INTRODUCED_DATE#<date>#<bill_id>
+    
+    This allows efficient querying of bills by cosponsor name with native DynamoDB pagination.
+    
+    Args:
+        cosponsor_name: Name of the cosponsor (normalized)
+        bill_id: Bill ID (e.g., "119-HR-1234")
+        introduced_date: Introduced date in ISO format (e.g., "2023-01-15T00:00:00Z")
+    """
+    if not bills_table or not cosponsor_name or not bill_id:
+        return
+    
+    try:
+        # Normalize cosponsor name (trim whitespace)
+        normalized_name = str(cosponsor_name).strip()
+        if not normalized_name:
+            return
+        
+        # Create search index key: "SEARCH#COSPONSOR#<name>"
+        search_pk = f"SEARCH#COSPONSOR#{normalized_name}"
+        
+        # Create sort key: "INTRODUCED_DATE#<date>#<bill_id>"
+        # Extract date part (YYYY-MM-DD) for consistent sorting
+        if introduced_date:
+            if 'T' in introduced_date:
+                date_part = introduced_date.split('T')[0]
+            elif ' ' in introduced_date:
+                date_part = introduced_date.split(' ')[0]
+            else:
+                date_part = introduced_date[:10] if len(introduced_date) >= 10 else introduced_date
+        else:
+            date_part = "1970-01-01"  # Default to epoch if no date
+        
+        search_sk = f"INTRODUCED_DATE#{date_part}#{bill_id}"
+        
+        item = {
+            'PK': search_pk,
+            'SK': search_sk,
+            'search_type': 'COSPONSOR',
+            'search_value': normalized_name,
+            'entity_pk': bill_id,
+            'introduced_date': date_part
+        }
+        
+        bills_table.put_item(Item=item)
+        
+    except Exception as e:
+        log_print(f"      ⚠️ Failed to save cosponsor search index {normalized_name} for {bill_id}: {str(e)[:200]}")
 
 
 def convert_decimal_for_json(obj: Any) -> Any:
@@ -1560,27 +1707,55 @@ def main():
     
     log_print(f"📅 Date Range: {start_date_str} to {end_date_str}")
     
-    # Get Congress number if not provided
-    if not congress:
-        congress = get_current_congress(api_key)
-    else:
-        congress = int(congress)
+    # Parse dates to datetime objects for congress calculation
+    start_date_dt = None
+    end_date_dt = None
+    if start_date_str and end_date_str:
+        try:
+            if start_date_str.endswith('Z'):
+                start_date_dt = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
+            else:
+                start_date_dt = datetime.fromisoformat(start_date_str)
+            
+            if end_date_str.endswith('Z'):
+                end_date_dt = datetime.fromisoformat(end_date_str.replace('Z', '+00:00'))
+            else:
+                end_date_dt = datetime.fromisoformat(end_date_str)
+        except (ValueError, AttributeError):
+            log_print(f"⚠️ Could not parse dates for congress calculation, using provided congress or current")
+    
+    # Get Congress number(s) - auto-detect from date range if not provided
+    congresses_to_query = []
+    if congress:
+        # Use provided congress
+        congresses_to_query = [int(congress)]
         log_print(f"✅ Using provided Congress: {congress}")
+    elif start_date_dt and end_date_dt:
+        # Auto-detect congresses from date range
+        congresses_to_query = get_congresses_from_date_range(start_date_dt, end_date_dt)
+        log_print(f"✅ Auto-detected Congress(es) from date range: {congresses_to_query}")
+    else:
+        # Fallback to current congress
+        current_congress = get_current_congress(api_key)
+        congresses_to_query = [current_congress]
+        log_print(f"✅ Using current Congress: {current_congress}")
     
     log_print("")  # Empty line for readability
     
-    # Fetch all bills
+    # Fetch all bills from all congresses in the range
     log_print("📋 Fetching Bills...")
     log_print("-" * 80)
     
     all_bills = []
-    for bill_type in BILL_TYPES:
-        log_print(f"   📋 Fetching {bill_type} bills...")
-        bills = fetch_bills_list(congress, bill_type, start_date_str, end_date_str, api_key)
-        all_bills.extend(bills)
-        log_print(f"      ✅ Found {len(bills)} {bill_type} bills")
+    for congress_num in congresses_to_query:
+        log_print(f"   📋 Fetching bills for Congress {congress_num}...")
+        for bill_type in BILL_TYPES:
+            log_print(f"      📋 Fetching {bill_type} bills...")
+            bills = fetch_bills_list(congress_num, bill_type, start_date_str, end_date_str, api_key)
+            all_bills.extend(bills)
+            log_print(f"         ✅ Found {len(bills)} {bill_type} bills")
     
-    log_print(f"\n✅ Total bills found: {len(all_bills)}")
+    log_print(f"\n✅ Total bills found across {len(congresses_to_query)} congress(es): {len(all_bills)}")
     log_print("")  # Empty line for readability
     
     # Build comprehensive records and store to DynamoDB (parallelized)
