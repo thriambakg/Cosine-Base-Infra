@@ -11,13 +11,6 @@ resource "aws_sqs_queue" "dlq" {
   message_retention_seconds   = var.dlq_message_retention_seconds
   visibility_timeout_seconds  = var.dlq_visibility_timeout_seconds
 
-  # Redrive policy: allows redriving messages back to the source queue
-  # This enables the "Start DLQ Redrive" feature in the AWS console
-  redrive_allow_policy = var.enable_dlq ? jsonencode({
-    redrivePermission = "allowAll"
-    sourceQueueArns   = [aws_sqs_queue.main.arn]
-  }) : null
-
   # Server-side encryption
   kms_master_key_id                 = var.kms_key_id
   kms_data_key_reuse_period_seconds = var.kms_data_key_reuse_period_seconds
@@ -27,6 +20,24 @@ resource "aws_sqs_queue" "dlq" {
     Type    = "DeadLetterQueue"
     Purpose = var.purpose
   })
+}
+
+# Redrive allow policy for DLQ (separate resource to avoid cycle)
+# This enables the "Start DLQ Redrive" feature in the AWS console
+resource "aws_sqs_queue_redrive_allow_policy" "dlq_redrive_allow" {
+  count = var.enable_dlq ? 1 : 0
+
+  queue_url = aws_sqs_queue.dlq[0].id
+
+  redrive_allow_policy = jsonencode({
+    redrivePermission = "allowAll"
+    sourceQueueArns   = [aws_sqs_queue.main.arn]
+  })
+
+  depends_on = [
+    aws_sqs_queue.dlq,
+    aws_sqs_queue.main
+  ]
 }
 
 # Main SQS Queue
