@@ -3646,6 +3646,7 @@ module "lda_disclosures_indexer" {
     RATE_LIMIT_DELAY   = "0.5"
     PAC_QUEUE_URL      = module.lda_pac_autocomplete_queue.queue_url
     DLQ_QUEUE_URL      = module.lda_batch_queue.dlq_url
+    SOURCE_QUEUE_ARN   = module.lda_batch_queue.queue_arn # Source queue ARN for DLQ redrive support
   }
 
   # Lambda layers
