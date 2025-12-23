@@ -2474,6 +2474,15 @@ module "congress_bills_data_s3" {
   transition_to_ia_days        = 30
   transition_to_glacier_days   = 90
 
+  # Upload congress-legislators.csv to root level
+  static_files = [
+    {
+      source_path  = "${path.module}/../static-files/lists/congress-legislators.csv"
+      s3_key       = "congress-legislators.csv"
+      content_type = "text/csv"
+    }
+  ]
+
   tags = var.common_tags
 }
 
@@ -2658,14 +2667,13 @@ module "congress_bills_fetcher_glue_job" {
 
   # Job arguments
   default_arguments = {
-    "--PROJECT_NAME"                = var.project_name
-    "--ENVIRONMENT"                 = var.environment
-    "--CONGRESS_API_BASE_URL"       = "https://api.congress.gov/v3"
-    "--BILLS_TABLE_NAME"            = module.congress_bills_table.table_name
-    "--S3_BUCKET_NAME"              = module.congress_bills_data_s3.bucket_id
-    "--POLITICIAN_TRADES_S3_BUCKET" = module.politician_trades_s3.bucket_id
-    "--REQUEST_TIMEOUT"             = "30"
-    "--BILL_TEXT_SQS_URL"           = module.congress_bills_bill_text_queue.queue_url
+    "--PROJECT_NAME"          = var.project_name
+    "--ENVIRONMENT"           = var.environment
+    "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
+    "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
+    "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"       = "30"
+    "--BILL_TEXT_SQS_URL"     = module.congress_bills_bill_text_queue.queue_url
   }
 
   job_bookmark_option = "job-bookmark-disable"

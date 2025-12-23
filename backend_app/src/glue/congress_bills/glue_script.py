@@ -60,7 +60,7 @@ args = getResolvedOptions(sys.argv, [
 
 # Get optional date parameters (parse manually to avoid errors if not provided)
 # getResolvedOptions requires all arguments, so we parse manually for optional ones
-optional_params = ['CONGRESS', 'START_DATE', 'END_DATE', 'POLITICIAN_TRADES_S3_BUCKET', 'SOURCE']
+optional_params = ['CONGRESS', 'START_DATE', 'END_DATE', 'SOURCE']
 for param in optional_params:
     for i, arg in enumerate(sys.argv):
         if arg == f'--{param}' and i + 1 < len(sys.argv):
@@ -123,19 +123,19 @@ def format_state_district(politician: Dict[str, Any]) -> Optional[str]:
 
 def load_legislators_csv() -> List[Dict[str, Any]]:
     """
-    Load congress-legislators CSV from S3
+    Load congress-legislators CSV from S3 (bills data bucket root level)
     
     Returns:
         List of politician dicts with name, party, state, district, position, and alternativeNames
     """
     try:
-        if not POLITICIAN_TRADES_S3_BUCKET:
-            log_print("⚠️ POLITICIAN_TRADES_S3_BUCKET not set, skipping CSV load")
+        if not S3_BUCKET_NAME:
+            log_print("⚠️ S3_BUCKET_NAME not set, skipping CSV load")
             return []
         
-        # Download congress-legislators.csv from S3
+        # Download congress-legislators.csv from S3 (root level of bills data bucket)
         response = s3_client.get_object(
-            Bucket=POLITICIAN_TRADES_S3_BUCKET,
+            Bucket=S3_BUCKET_NAME,
             Key='congress-legislators.csv'
         )
         
@@ -373,7 +373,6 @@ ENVIRONMENT = args.get('ENVIRONMENT', 'staging')
 API_BASE_URL = args.get('CONGRESS_API_BASE_URL', 'https://api.congress.gov/v3')
 BILLS_TABLE_NAME = args.get('BILLS_TABLE_NAME')
 S3_BUCKET_NAME = args.get('S3_BUCKET_NAME')
-POLITICIAN_TRADES_S3_BUCKET = args.get('POLITICIAN_TRADES_S3_BUCKET')
 REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 MAX_RETRIES = int(args.get('MAX_RETRIES', '5'))
 RETRY_DELAY = int(args.get('RETRY_DELAY', '2'))
@@ -1650,17 +1649,17 @@ def main():
         congresses_to_query = get_congresses_from_date_range(start_date_dt, end_date_dt)
         log_print(f"✅ Auto-detected Congress(es) from date range: {congresses_to_query}")
     else:
-        # Fallback to current congress
-        # Use rotator for load balancing
-        current_congress = get_current_congress(None)
+        # Fallback to current congress (calculate from current date)
+        current_year = datetime.now().year
+        current_congress = ((current_year - 1789) // 2) + 1
         congresses_to_query = [current_congress]
-        log_print(f"✅ Using current Congress: {current_congress}")
+        log_print(f"✅ Using current Congress: {current_congress} (calculated from current year)")
     
     log_print("")  # Empty line for readability
     
     # Load politician CSV data for name matching
     log_print("📋 Loading politician CSV data for name matching...")
-    politicians = load_politicians_csv()
+    politicians = load_legislators_csv()
     log_print(f"✅ Loaded {len(politicians)} politician records")
     log_print("")  # Empty line for readability
     
