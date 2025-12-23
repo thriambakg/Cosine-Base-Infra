@@ -16,6 +16,7 @@ Fetches for each bill:
 Stores one row per bill in DynamoDB with all related data.
 """
 
+
 import sys
 import json
 import logging
