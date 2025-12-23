@@ -2486,10 +2486,11 @@ module "congress_bills_table" {
   table_name   = "congress-bills"
 
   hash_key  = "bill_id"
-  range_key = null
+  range_key = "search_index_sk" # Added for search index items (cosponsor many-to-many)
 
   attributes = [
     { name = "bill_id", type = "S" },
+    { name = "search_index_sk", type = "S" }, # Added for search index items
     { name = "sponsor_full_name", type = "S" },
     { name = "sponsor_party", type = "S" },
     { name = "sponsor_state", type = "S" },

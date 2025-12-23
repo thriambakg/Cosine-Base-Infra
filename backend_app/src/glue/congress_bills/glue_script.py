@@ -1113,10 +1113,18 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         log_print(f"      ⚠️  [{thread_id}] BILL_TEXT_SQS_URL not configured, skipping bill text download for {bill_id_str}")
     
     # Build comprehensive record
+    # Ensure congress is an integer (not None)
+    if not congress or congress is None:
+        raise ValueError(f"Congress number is required but was None for bill {bill_type} {bill_number}")
+    
+    congress_int = int(congress) if not isinstance(congress, int) else congress
+    bill_id_str = f"{congress_int}-{bill_type}-{bill_number}"
+    
     record = {
         # Bill Basic Info
-        "bill_id": f"{congress}-{bill_type}-{bill_number}",
-        "congress": congress,
+        "bill_id": bill_id_str,
+        "search_index_sk": bill_id_str,  # Range key: for regular bills, use bill_id (required)
+        "congress": congress_int,
         "bill_type": bill_type,
         "bill_number": int(bill_number) if bill_number else 0,  # Store as integer for GSI
         "bill_title": bill.get("title") or (details.get("title") if details else ""),
@@ -1451,10 +1459,11 @@ def save_cosponsor_search_index_item(
     Save a materialized search index item for cosponsors (many-to-many relationship).
     
     Structure:
-    - PK = SEARCH#COSPONSOR#<cosponsor_name>
-    - SK = INTRODUCED_DATE#<date>#<bill_id>
+    - bill_id = SEARCH#COSPONSOR#<cosponsor_name> (hash key)
+    - search_index_sk = INTRODUCED_DATE#<date>#<original_bill_id> (range key)
     
     This allows efficient querying of bills by cosponsor name with native DynamoDB pagination.
+    The table now has a range key (search_index_sk) to support this pattern.
     
     Args:
         cosponsor_name: Name of the cosponsor (normalized)
@@ -1470,10 +1479,10 @@ def save_cosponsor_search_index_item(
         if not normalized_name:
             return
         
-        # Create search index key: "SEARCH#COSPONSOR#<name>"
-        search_pk = f"SEARCH#COSPONSOR#{normalized_name}"
+        # Create search index hash key: "SEARCH#COSPONSOR#<name>"
+        search_bill_id = f"SEARCH#COSPONSOR#{normalized_name}"
         
-        # Create sort key: "INTRODUCED_DATE#<date>#<bill_id>"
+        # Create sort key: "INTRODUCED_DATE#<date>#<original_bill_id>"
         # Extract date part (YYYY-MM-DD) for consistent sorting
         if introduced_date:
             if 'T' in introduced_date:
@@ -1488,12 +1497,13 @@ def save_cosponsor_search_index_item(
         search_sk = f"INTRODUCED_DATE#{date_part}#{bill_id}"
         
         item = {
-            'PK': search_pk,
-            'SK': search_sk,
+            'bill_id': search_bill_id,  # Hash key (required)
+            'search_index_sk': search_sk,  # Range key (required)
             'search_type': 'COSPONSOR',
             'search_value': normalized_name,
-            'entity_pk': bill_id,
-            'introduced_date': date_part
+            'entity_bill_id': bill_id,  # Store the actual bill_id for reference
+            'introduced_date': date_part,
+            'is_search_index': True  # Flag to identify search index items
         }
         
         bills_table.put_item(Item=item)
@@ -1562,6 +1572,7 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
     gsi_fields = {
         # Primary key (required)
         'bill_id': full_item.get('bill_id'),
+        'search_index_sk': full_item.get('search_index_sk', full_item.get('bill_id')),  # Range key (required)
         
         # GSI hash keys
         'sponsor_party': full_item.get('sponsor_party'),
