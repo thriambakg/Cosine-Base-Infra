@@ -26,10 +26,12 @@ import gc
 import csv
 import re
 import gzip
+import zipfile
 import threading
+import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Tuple
-from io import StringIO
+from io import StringIO, BytesIO
 from difflib import SequenceMatcher
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -383,6 +385,9 @@ NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
 # Bill types to fetch
 BILL_TYPES = ["HR", "S", "HJRES", "SJRES", "HCONRES", "SCONRES", "HRES", "SRES"]
 
+# Bulk data repository base URL (public, no API key required)
+BULK_DATA_BASE_URL = "https://www.govinfo.gov/bulkdata/BILLSTATUS"
+
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
 s3_client = boto3.client('s3')
@@ -512,98 +517,45 @@ def get_congresses_from_date_range(start_date: datetime, end_date: datetime) -> 
     return congresses
 
 
-def calculate_congress_from_date(date: datetime) -> int:
-    """
-    Calculate congress number from a date.
+# ============================================================================
+# API Call Functions - REMOVED (using bulk downloads instead)
+# ============================================================================
+# The following functions have been removed as we now use bulk downloads:
+# - get_current_congress()
+# - make_api_request()
+# - fetch_bills_list()
+# - fetch_bill_details()
+# - fetch_bill_actions()
+# - fetch_bill_amendments()
+# - fetch_bill_cosponsors()
+# - fetch_bill_summaries()
+# - fetch_bill_subjects()
+# - fetch_bill_titles()
+# - fetch_bill_text_versions()
+# - download_bill_text_file()
+# - store_bill_text_to_s3()
+# - build_comprehensive_bill_record()
+# 
+# API key management functions (ApiKeyRotator, get_congress_api_keys) are kept
+# for use in other parts of the system.
+# ============================================================================
+
+# ============================================================================
+# Bulk Download Functions
+# ============================================================================
+
+def format_date_range_path(start_date: str, end_date: str) -> str:
+    """Format date range as YYYYMMDD-YYYYMMDD for S3 path"""
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
     
-    Formula: congress = ((year - 1789) // 2) + 1
-    Each congress spans 2 years (odd-numbered years start new congress).
-    Example: 118th Congress = 2023-2024, 119th Congress = 2025-2026
+    start_formatted = start_dt.strftime('%Y%m%d')
+    end_formatted = end_dt.strftime('%Y%m%d')
     
-    Args:
-        date: datetime object (with or without timezone)
-        
-    Returns:
-        Congress number (integer)
-    """
-    year = date.year
-    congress = ((year - 1789) // 2) + 1
-    return congress
+    return f"{start_formatted}-{end_formatted}"
 
 
-def get_congresses_from_date_range(start_date: datetime, end_date: datetime) -> List[int]:
-    """
-    Get all congress numbers that overlap with the date range.
-    
-    Args:
-        start_date: Start date of the range
-        end_date: End date of the range
-        
-    Returns:
-        List of congress numbers (integers) that overlap with the date range
-    """
-    start_congress = calculate_congress_from_date(start_date)
-    end_congress = calculate_congress_from_date(end_date)
-    congresses = list(range(start_congress, end_congress + 1))
-    return congresses
-
-
-def get_current_congress(api_key: Optional[str] = None) -> int:
-    """Get the current Congress number. Uses rotator if api_key is None."""
-    url = f"{API_BASE_URL}/congress"
-    # Use rotator if api_key not provided
-    if api_key is None:
-        rotator = get_congress_api_keys()
-        api_key = rotator.get_key()
-    params = {"api_key": api_key, "format": "json"}
-    
-    try:
-        response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-        response.raise_for_status()
-        data = response.json()
-        
-        # Handle different response structures
-        congresses = None
-        if isinstance(data, list):
-            congresses = data
-        elif "congresses" in data:
-            congresses_data = data["congresses"]
-            if isinstance(congresses_data, dict):
-                congresses = congresses_data.get("item", [])
-            elif isinstance(congresses_data, list):
-                congresses = congresses_data
-        
-        if not congresses:
-            current_year = datetime.now().year
-            congress = ((current_year - 1789) // 2) + 1
-            log_print(f"⚠️ Could not fetch Congress list, using calculated value: {congress}")
-            return congress
-        
-        sorted_congresses = sorted(congresses, key=lambda x: x.get("number", 0) if isinstance(x, dict) else (x if isinstance(x, (int, str)) else 0), reverse=True)
-        if not sorted_congresses:
-            raise ValueError("No congresses found")
-        
-        first_congress = sorted_congresses[0]
-        if isinstance(first_congress, dict):
-            current_congress = first_congress.get("number")
-        elif isinstance(first_congress, (int, str)):
-            current_congress = int(first_congress)
-        else:
-            raise ValueError(f"Unexpected congress format: {first_congress}")
-        
-        if current_congress is None:
-            raise ValueError("Congress number is None")
-        
-        log_print(f"✅ Current Congress: {current_congress}")
-        return int(current_congress)
-    except Exception as e:
-        log_print(f"⚠️ Error fetching current Congress: {e}. Using calculated value.")
-        current_year = datetime.now().year
-        congress = ((current_year - 1789) // 2) + 1
-        return congress
-
-
-def make_api_request(url: str, params: Dict[str, Any], api_key: Optional[str] = None, retries: int = MAX_RETRIES) -> Optional[Dict]:
+def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Optional[bytes]:
     """
     Make API request with retry logic and exponential backoff for rate limiting.
     If api_key is None, gets a key from the rotator (for load balancing across multiple keys).
@@ -645,23 +597,23 @@ def make_api_request(url: str, params: Dict[str, Any], api_key: Optional[str] = 
             return response.json()
         except requests.exceptions.HTTPError as e:
             if attempt < retries - 1:
-                # Switch to a different API key for retry (if rotator available)
-                if rotator is None:
-                    rotator = get_congress_api_keys()
-                new_api_key = rotator.get_key()
-                params["api_key"] = new_api_key
-                
-                # For other HTTP errors, use linear backoff
-                wait_time = RETRY_DELAY * (attempt + 1)
-                log_print(f"      ⚠️ Request failed (attempt {attempt + 1}/{retries}) - switching to different key and waiting {wait_time}s: {str(e)[:100]}")
-                time.sleep(wait_time)
-            else:
-                log_print(f"      ❌ Request failed after {retries} attempts: {str(e)[:100]}")
-                return None
-    return None
+# All API call functions removed - using bulk downloads instead
+# Removed functions:
+# - make_api_request
+# - fetch_bills_list
+# - fetch_bill_details
+# - fetch_bill_actions
+# - fetch_bill_amendments
+# - fetch_bill_cosponsors
+# - fetch_bill_summaries
+# - fetch_bill_subjects
+# - fetch_bill_titles
+# - fetch_bill_text_versions
+# - download_bill_text_file
+# - store_bill_text_to_s3
+# - build_comprehensive_bill_record
 
-
-def fetch_bills_list(congress: int, bill_type: str, from_date: str, to_date: str, api_key: str) -> List[Dict]:
+def check_s3_zip_exists(start_date: str, end_date: str, congress: int, bill_type: str) -> Optional[str]:
     """Fetch list of bills for a specific type and date range."""
     bills = []
     offset = 0
@@ -1133,440 +1085,10 @@ def store_bill_text_to_s3(bill_id: str, text_content: bytes) -> str:
     return s3_key
 
 
-def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, api_key: str) -> Optional[Dict]:
-    """
-    Build a comprehensive bill record with all related data.
-    One row per bill with all information.
-    Uses parallel API calls to speed up processing.
-    """
-    bill_number = bill.get("number")
-    if not bill_number:
-        return None
-    
-    import threading
-    thread_id = threading.current_thread().name
-    log_print(f"      📋 [{thread_id}] Processing {bill_type} {bill_number}...")
-    
-    # Fetch all related data in parallel (8 API calls including text versions)
-    log_print(f"      🔄 [{thread_id}] Starting 8 parallel API calls for {bill_type} {bill_number}...")
-    with ThreadPoolExecutor(max_workers=8) as executor:
-        futures = {
-            executor.submit(fetch_bill_details, congress, bill_type, bill_number, api_key): 'details',
-            executor.submit(fetch_bill_actions, congress, bill_type, bill_number, api_key): 'actions',
-            executor.submit(fetch_bill_amendments, congress, bill_type, bill_number, api_key): 'amendments',
-            executor.submit(fetch_bill_cosponsors, congress, bill_type, bill_number, api_key): 'cosponsors',
-            executor.submit(fetch_bill_summaries, congress, bill_type, bill_number, api_key): 'summaries',
-            executor.submit(fetch_bill_subjects, congress, bill_type, bill_number, api_key): 'subjects',
-            executor.submit(fetch_bill_titles, congress, bill_type, bill_number, api_key): 'titles',
-            executor.submit(fetch_bill_text_versions, congress, bill_type, bill_number, api_key): 'text_versions',
-        }
-        
-        results = {}
-        for future in as_completed(futures):
-            key = futures[future]
-            try:
-                results[key] = future.result()
-            except Exception as e:
-                log_print(f"      ⚠️ Error fetching {key} for {bill_type} {bill_number}: {str(e)}")
-                results[key] = None
-        
-        details = results.get('details')
-        actions = results.get('actions', [])
-        amendments = results.get('amendments', [])
-        cosponsors = results.get('cosponsors', [])
-        summaries = results.get('summaries', [])
-        subjects = results.get('subjects', [])
-        titles = results.get('titles', [])
-        text_versions = results.get('text_versions', [])
-    
-    # Extract primary sponsor (first sponsor from details)
-    primary_sponsor = {}
-    if details:
-        sponsors = details.get("sponsors", {})
-        if isinstance(sponsors, dict):
-            sponsor_items = sponsors.get("item", [])
-            if isinstance(sponsor_items, list) and len(sponsor_items) > 0:
-                primary_sponsor = sponsor_items[0]
-            elif isinstance(sponsor_items, dict):
-                primary_sponsor = sponsor_items
-        elif isinstance(sponsors, list) and len(sponsors) > 0:
-            primary_sponsor = sponsors[0]
-    
-    # Send bill text download request to SQS for Lambda processing
-    bill_text_html_s3_key = ""
-    # Ensure congress is valid before creating bill_id_str
-    if not congress or congress is None:
-        raise ValueError(f"Congress number is required but was None for bill {bill_type} {bill_number}")
-    congress_int = int(congress) if not isinstance(congress, int) else congress
-    bill_id_str = f"{congress_int}-{bill_type}-{bill_number}"
-    
-    if text_versions and BILL_TEXT_SQS_URL:
-        # Send message to SQS for Lambda to process
-        try:
-            message_body = {
-                'bill_id': bill_id_str
-            }
-            message_json = json.dumps(message_body, default=str)
-            
-            response = sqs_client.send_message(
-                QueueUrl=BILL_TEXT_SQS_URL,
-                MessageBody=message_json
-            )
-            
-            log_print(f"      📤 [{thread_id}] Sent bill text download request for {bill_id_str} to SQS (MessageId: {response.get('MessageId')})")
-            # Leave bill_text_html_s3_key as empty string - Lambda will update it
-        except Exception as e:
-            log_print(f"      ⚠️  [{thread_id}] Error sending bill text download to SQS: {str(e)[:200]}")
-            # Leave bill_text_html_s3_key as empty string on error
-    elif not BILL_TEXT_SQS_URL:
-        log_print(f"      ⚠️  [{thread_id}] BILL_TEXT_SQS_URL not configured, skipping bill text download for {bill_id_str}")
-    
-    # Build comprehensive record
-    # Ensure congress is an integer (not None)
-    if not congress or congress is None:
-        raise ValueError(f"Congress number is required but was None for bill {bill_type} {bill_number}")
-    
-    congress_int = int(congress) if not isinstance(congress, int) else congress
-    bill_id_str = f"{congress_int}-{bill_type}-{bill_number}"
-    
-    # Extract date values and convert empty strings to None (GSI keys cannot be empty strings)
-    introduced_date_raw = details.get("introducedDate") if details else bill.get("introducedDate", "")
-    introduced_date = introduced_date_raw if introduced_date_raw else None
-    
-    latest_action_date_raw = bill.get("latestAction", {}).get("actionDate") if isinstance(bill.get("latestAction"), dict) else (details.get("latestAction", {}).get("actionDate") if details and isinstance(details.get("latestAction"), dict) else "")
-    latest_action_date = latest_action_date_raw if latest_action_date_raw else None
-    
-    record = {
-        # Bill Basic Info
-        "bill_id": bill_id_str,
-        "search_index_sk": bill_id_str,  # Range key: for regular bills, use bill_id (required)
-        "congress": congress_int,
-        "bill_type": bill_type,
-        "bill_number": int(bill_number) if bill_number else 0,  # Store as integer for GSI
-        "bill_title": bill.get("title") or (details.get("title") if details else ""),
-        "bill_url": bill.get("url") or (details.get("url") if details else ""),
-        
-        # Bill Text S3 Key (HTML)
-        "bill_text_html_s3_key": bill_text_html_s3_key,
-        
-        # Dates (for sorting)
-        # Note: GSI keys cannot be empty strings, so use None instead
-        "introduced_date": introduced_date,
-        "latest_action_date": latest_action_date,
-        "update_date": bill.get("updateDate", ""),
-        "update_date_including_text": bill.get("updateDateIncludingText", ""),
-        
-        # Primary Sponsor (for sorting by proposer/party)
-        "sponsor_bioguide_id": primary_sponsor.get("bioguideId", ""),
-        "sponsor_full_name": primary_sponsor.get("fullName", ""),
-        "sponsor_first_name": primary_sponsor.get("firstName", ""),
-        "sponsor_last_name": primary_sponsor.get("lastName", ""),
-        "sponsor_party": primary_sponsor.get("party", ""),  # For party sorting
-        "sponsor_state": primary_sponsor.get("state", ""),
-        "sponsor_district": primary_sponsor.get("district", ""),
-        "sponsor_url": primary_sponsor.get("url", ""),
-        
-        # Cosponsors (will be populated with matched CSV data later)
-        "cosponsor_count": len(cosponsors),
-        "cosponsors": "",  # Will be populated as JSON array with matched CSV data
-        "cosponsor_parties": "|".join([c.get("party", "") for c in cosponsors if c.get("party")]),  # Temporary, will be updated
-        "cosponsors_json": json.dumps(cosponsors) if cosponsors else "",
-        
-        # Actions (full history - JSON for detailed access)
-        "action_count": len(actions),
-        "actions_json": json.dumps(actions) if actions else "",
-        "actions_summary": " | ".join([f"{a.get('actionDate', '')}: {a.get('text', '')[:100]}" for a in actions[:10]]) if actions else "",
-        
-        # Amendments (with sponsors - who's amending it)
-        "amendment_count": len(amendments),
-        "amendment_numbers": "|".join([str(a.get("number", "")) for a in amendments if a.get("number")]),
-        "amendment_sponsors": "|".join([
-            a.get("sponsors", {}).get("item", [{}])[0].get("fullName", "") if isinstance(a.get("sponsors"), dict) and a.get("sponsors", {}).get("item") else ""
-            for a in amendments
-        ]),
-        "amendments_json": json.dumps(amendments) if amendments else "",
-        
-        # Summaries (for text search)
-        "summary_count": len(summaries),
-        "summary_text": "",  # Will be populated below with fallback logic
-        "summaries_json": json.dumps(summaries) if summaries else "",
-        
-        # Subjects
-        "subjects_json": json.dumps(subjects) if subjects else "",
-        "policy_area": "",
-        "legislative_subjects": "",
-        
-        # Additional bill info
-        "origin_chamber": bill.get("originChamber") or (details.get("originChamber") if details else ""),
-        "origin_chamber_code": bill.get("originChamberCode") or (details.get("originChamberCode") if details else ""),
-        "latest_action_text": bill.get("latestAction", {}).get("text", "") if isinstance(bill.get("latestAction"), dict) else (details.get("latestAction", {}).get("text", "") if details and isinstance(details.get("latestAction"), dict) else ""),
-        
-        # Metadata
-        "indexed_at": datetime.now(timezone.utc).isoformat(),
-        "last_updated": datetime.now(timezone.utc).isoformat(),
-        "data_source": "congress_gov_api",
-        "api_version": "v3",
-    }
-    
-    # Parse subjects (handle different response structures)
-    if isinstance(subjects, dict):
-        # Parse policy area
-        policy_area_data = subjects.get("policyArea", {})
-        if isinstance(policy_area_data, dict):
-            record["policy_area"] = policy_area_data.get("name", "")
-        elif isinstance(policy_area_data, str):
-            record["policy_area"] = policy_area_data
-        
-        # Parse legislative subjects
-        legislative_subjects_data = subjects.get("legislativeSubjects", {})
-        subject_names = []
-        if isinstance(legislative_subjects_data, dict):
-            items = legislative_subjects_data.get("item", [])
-            if isinstance(items, list):
-                subject_names = [s.get("name", "") for s in items if isinstance(s, dict) and s.get("name")]
-            elif isinstance(items, dict):
-                subject_names = [items.get("name", "")] if items.get("name") else []
-        elif isinstance(legislative_subjects_data, list):
-            subject_names = [s.get("name", "") for s in legislative_subjects_data if isinstance(s, dict) and s.get("name")]
-        
-        record["legislative_subjects"] = "|".join(subject_names)
-    
-    # Ensure policy_area is not empty (DynamoDB GSI hash key cannot be empty string)
-    if not record.get("policy_area") or record.get("policy_area").strip() == "":
-        record["policy_area"] = "Other"
-    
-    # Build summary_text with fallback logic
-    # Priority: 1) Summaries, 2) Official Title as Introduced, 3) Display Title
-    summary_text = ""
-    if summaries and len(summaries) > 0:
-        # Use summaries if available
-        summary_text = " ".join([
-            s.get("text", "").replace("<p>", " ").replace("</p>", " ").replace("<strong>", "").replace("</strong>", "")
-            for s in summaries if s.get("text")
-        ])
-    elif titles:
-        # Fallback to Official Title as Introduced (titleTypeCode 6)
-        official_title = None
-        for title_item in titles:
-            if isinstance(title_item, dict):
-                title_type_code = title_item.get("titleTypeCode")
-                if title_type_code == 6 or (isinstance(title_type_code, str) and title_type_code == "6"):
-                    official_title = title_item.get("title", "")
-                    break
-        
-        if official_title:
-            summary_text = official_title
-        else:
-            # Use first available title as last resort
-            for title_item in titles:
-                if isinstance(title_item, dict):
-                    title_text = title_item.get("title", "")
-                    if title_text:
-                        summary_text = title_text
-                        break
-    
-    # If still no summary text, use display title
-    if not summary_text:
-        summary_text = record.get("bill_title", "")
-    
-    # Clean and limit summary_text
-    summary_text = summary_text.strip()[:5000]  # Limit to 5000 chars for DynamoDB
-    record["summary_text"] = summary_text
-    
-    # Load legislators CSV and match sponsor/cosponsors (cache at module level)
-    if not hasattr(load_legislators_csv, '_cache'):
-        load_legislators_csv._cache = load_legislators_csv()
-        log_print(f"✅ Loaded {len(load_legislators_csv._cache)} legislators from CSV")
-    
-    politicians = load_legislators_csv._cache
-    
-    # Match sponsor to CSV using multiple criteria
-    sponsor_name = record.get("sponsor_full_name", "")
-    sponsor_first = record.get("sponsor_first_name", "")
-    sponsor_last = record.get("sponsor_last_name", "")
-    sponsor_party_api = record.get("sponsor_party", "")  # From API (might be "R" or full name)
-    sponsor_state_api = record.get("sponsor_state", "")
-    
-    # Extract first character of party if it's a full name
-    if sponsor_party_api and len(sponsor_party_api) > 1:
-        sponsor_party_char = sponsor_party_api[0].upper()
-    else:
-        sponsor_party_char = sponsor_party_api.upper() if sponsor_party_api else ""
-    
-    if sponsor_name and politicians:
-        matched_sponsor = find_matching_politician(
-            sponsor_name, 
-            politicians,
-            first_name=sponsor_first,
-            last_name=sponsor_last,
-            party=sponsor_party_char,
-            state=sponsor_state_api
-        )
-        if matched_sponsor:
-            # Update all sponsor fields from CSV match
-            csv_name = matched_sponsor.get("name", "")
-            if csv_name:
-                record["sponsor_full_name"] = csv_name
-            
-            # Use first_name and last_name from CSV if available
-            if matched_sponsor.get("first_name"):
-                record["sponsor_first_name"] = matched_sponsor.get("first_name")
-            if matched_sponsor.get("last_name"):
-                record["sponsor_last_name"] = matched_sponsor.get("last_name")
-            
-            # Use full party name from CSV (e.g., "Republican" not just "R")
-            record["sponsor_party"] = matched_sponsor.get("party_full", record.get("sponsor_party", ""))
-            
-            # Format state/district same as politician trades matchers (MA01 for House, MA for Senate)
-            state_district_formatted = format_state_district(matched_sponsor)
-            if state_district_formatted:
-                record["sponsor_state"] = state_district_formatted
-            
-            # Update district from CSV
-            if matched_sponsor.get("district"):
-                record["sponsor_district"] = matched_sponsor.get("district")
-            
-            # Update bioguide_id from CSV
-            if matched_sponsor.get("bioguide_id"):
-                record["sponsor_bioguide_id"] = matched_sponsor["bioguide_id"]
-    
-    # Match cosponsors from cosponsors_json and build structured cosponsors array
-    cosponsors_list = []
-    cosponsor_parties_list = []
-    
-    # Parse cosponsors from JSON string
-    cosponsors_json_str = record.get("cosponsors_json", "")
-    if cosponsors_json_str and politicians:
-        try:
-            cosponsors_data = json.loads(cosponsors_json_str) if isinstance(cosponsors_json_str, str) else cosponsors_json_str
-            if isinstance(cosponsors_data, list):
-                for cosponsor in cosponsors_data:
-                    cosponsor_name = cosponsor.get("fullName", "")
-                    cosponsor_first = cosponsor.get("firstName", "")
-                    cosponsor_last = cosponsor.get("lastName", "")
-                    cosponsor_party_api = cosponsor.get("party", "")
-                    cosponsor_state_api = cosponsor.get("state", "")
-                    
-                    # Extract first character of party
-                    if cosponsor_party_api and len(cosponsor_party_api) > 1:
-                        cosponsor_party_char = cosponsor_party_api[0].upper()
-                    else:
-                        cosponsor_party_char = cosponsor_party_api.upper() if cosponsor_party_api else ""
-                    
-                    if cosponsor_name:
-                        matched_cosponsor = find_matching_politician(
-                            cosponsor_name,
-                            politicians,
-                            first_name=cosponsor_first,
-                            last_name=cosponsor_last,
-                            party=cosponsor_party_char,
-                            state=cosponsor_state_api
-                        )
-                        
-                        # Build cosponsor object with matched CSV data
-                        cosponsor_obj = {}
-                        if matched_cosponsor:
-                            # Use matched CSV name
-                            cosponsor_obj["name"] = matched_cosponsor.get("name", cosponsor_name)
-                            # Format state/district same as politician trades matchers
-                            state_district_formatted = format_state_district(matched_cosponsor)
-                            cosponsor_obj["state"] = state_district_formatted if state_district_formatted else cosponsor_state_api
-                            # Use full party name from CSV
-                            cosponsor_obj["party"] = matched_cosponsor.get("party_full", cosponsor_party_api)
-                            # Add position (House/Senate) from CSV
-                            cosponsor_obj["position"] = matched_cosponsor.get("position", "")
-                            cosponsor_parties_list.append(matched_cosponsor.get("party_full", cosponsor_party_api))
-                        else:
-                            # Fallback to API data if no match - try to infer position from district
-                            cosponsor_obj["name"] = cosponsor_name
-                            cosponsor_obj["state"] = cosponsor_state_api
-                            cosponsor_obj["party"] = cosponsor_party_api if cosponsor_party_api else ""
-                            # Infer position: if district is 0 or empty, likely Senate; otherwise House
-                            district_val = cosponsor.get("district", "")
-                            if district_val == 0 or district_val == "" or district_val is None:
-                                cosponsor_obj["position"] = "Senate"
-                            else:
-                                cosponsor_obj["position"] = "House"
-                            cosponsor_parties_list.append(cosponsor_party_api if cosponsor_party_api else "")
-                        
-                        cosponsors_list.append(cosponsor_obj)
-        except (json.JSONDecodeError, TypeError) as e:
-            log_print(f"⚠️ Error parsing cosponsors_json: {e}")
-    
-    # Update cosponsors (JSON array) and cosponsor_parties (pipe-separated for bipartisan calculation)
-    if cosponsors_list:
-        record["cosponsors"] = json.dumps(cosponsors_list)
-    if cosponsor_parties_list:
-        record["cosponsor_parties"] = "|".join(cosponsor_parties_list)
-    
-    # Calculate bipartisan: TRUE if sponsor party is different from cosponsor parties
-    # OR if both R and D are present in sponsor + cosponsors combined
-    # This means the bill has support from both parties (sponsor + cosponsors)
-    # Examples:
-    # - sponsor R, cosponsor_parties: "D|D" → TRUE (sponsor R different from cosponsors D)
-    # - sponsor R, cosponsor_parties: "R|D|R" → TRUE (has both R and D present)
-    # - sponsor R, cosponsor_parties: "R|R|R" → FALSE (sponsor R same as all cosponsors R, only one party)
-    # - sponsor D, cosponsor_parties: "R" → TRUE (sponsor D different from cosponsor R)
-    # - cosponsor_parties: "" (empty) → FALSE (no cosponsors to compare)
-    bipartisan = False
-    # Get first character of sponsor party (full name like "Republican" -> "R")
-    sponsor_party_full = record.get("sponsor_party", "").strip()
-    sponsor_party = sponsor_party_full[0].upper() if sponsor_party_full else ""
-    cosponsor_parties_str = record.get("cosponsor_parties", "").strip()
-    
-    if not cosponsor_parties_str:
-        # Empty cosponsor parties = not bipartisan (no cosponsors to compare)
-        bipartisan = False
-    elif sponsor_party:
-        # Get unique cosponsor parties (use first character for comparison)
-        cosponsor_parties_set = set()
-        for party in cosponsor_parties_str.split("|"):
-            party_clean = party.strip().upper()
-            if party_clean:
-                # Get first character if it's a full party name
-                party_char = party_clean[0] if party_clean else ""
-                if party_char:
-                    cosponsor_parties_set.add(party_char)
-        
-        if cosponsor_parties_set:
-            # Check if sponsor party is different from cosponsor parties
-            # (i.e., sponsor party is not in the set of cosponsor parties)
-            sponsor_different_from_cosponsors = sponsor_party not in cosponsor_parties_set
-            
-            # Also check if both R and D are present in the combined set (sponsor + cosponsors)
-            all_parties = {sponsor_party} | cosponsor_parties_set
-            has_both_parties = "R" in all_parties and "D" in all_parties
-            
-            # Bipartisan if sponsor is different from cosponsors OR both parties are present
-            bipartisan = sponsor_different_from_cosponsors or has_both_parties
-        else:
-            # No valid cosponsor parties = not bipartisan
-            bipartisan = False
-    else:
-        # No sponsor party = not bipartisan
-        bipartisan = False
-    
-    # Store bipartisan as number for DynamoDB (0 = false, 1 = true)
-    record["bipartisan"] = 1 if bipartisan else 0
-    
-    # Save search index items for cosponsors (many-to-many relationship)
-    # Note: Sponsor doesn't need search index since it's 1:1 and has GSI
-    introduced_date = record.get("introduced_date", "")
-    bill_id = record.get("bill_id", "")
-    
-    if cosponsors_list and introduced_date and bill_id:
-        for cosponsor_obj in cosponsors_list:
-            cosponsor_name = cosponsor_obj.get("name", "").strip()
-            if cosponsor_name:
-                save_cosponsor_search_index_item(
-                    cosponsor_name=cosponsor_name,
-                    bill_id=bill_id,
-                    introduced_date=introduced_date
-                )
-    
-    return record
+# build_comprehensive_bill_record removed - using bulk downloads instead
 
 
+def save_cosponsor_search_index_item(
 def save_cosponsor_search_index_item(
     cosponsor_name: str,
     bill_id: str,
@@ -1794,6 +1316,675 @@ def store_bill_to_dynamodb(record: Dict):
 
 
 # ============================================================================
+# Bulk Download Functions
+# ============================================================================
+
+def format_date_range_path(start_date: str, end_date: str) -> str:
+    """Format date range as YYYYMMDD-YYYYMMDD for S3 path"""
+    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
+    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
+    
+    start_formatted = start_dt.strftime('%Y%m%d')
+    end_formatted = end_dt.strftime('%Y%m%d')
+    
+    return f"{start_formatted}-{end_formatted}"
+
+
+def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Optional[bytes]:
+    """
+    Download ZIP file from bulk data repository for a specific Congress and bill type.
+    No API key required - bulk data is public.
+    
+    Args:
+        congress: Congress number (e.g., 119)
+        bill_type: Bill type (e.g., "hr", "s", "hjres", etc.)
+        max_retries: Maximum number of retry attempts
+    
+    Returns:
+        ZIP file content as bytes, or None if download fails
+    """
+    # Convert bill type to lowercase for URL (e.g., "HR" -> "hr")
+    bill_type_lower = bill_type.lower()
+    
+    # Bulk data URL format: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/
+    # The ZIP file is typically named after the bill type or available as a directory listing
+    # We need to check the actual structure - it may be a ZIP file or a directory with XML files
+    
+    # Try common ZIP file naming patterns
+    # Based on bill-status repo structure: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/
+    zip_urls = [
+        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/{bill_type_lower}.zip",
+        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/BILLSTATUS-{congress}{bill_type_lower}.zip",
+        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}.zip",  # Alternative: ZIP at bill_type level
+    ]
+    
+    log_print(f"📥 Downloading bulk ZIP for Congress {congress}, Bill Type {bill_type}...")
+    
+    for zip_url in zip_urls:
+        for attempt in range(max_retries):
+            try:
+                log_print(f"   Attempting: {zip_url} (attempt {attempt + 1}/{max_retries})")
+                response = requests.get(zip_url, timeout=REQUEST_TIMEOUT * 2, stream=True)
+                
+                if response.status_code == 200:
+                    content = response.content
+                    log_print(f"   ✅ Successfully downloaded {len(content):,} bytes from {zip_url}")
+                    return content
+                elif response.status_code == 404:
+                    log_print(f"   ⚠️ ZIP not found at {zip_url}, trying next URL...")
+                    break  # Try next URL
+                else:
+                    response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = RETRY_DELAY * (attempt + 1)
+                    log_print(f"   ⚠️ Download error: {str(e)[:100]}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    log_print(f"   ❌ Failed to download from {zip_url} after {max_retries} attempts")
+    
+    # If ZIP file not found, try downloading individual XML files from directory
+    log_print(f"   📂 ZIP file not found, attempting to download XML files from directory...")
+    return None
+
+
+def list_bulk_xml_files(congress: int, bill_type: str) -> List[str]:
+    """
+    List XML files available in bulk data repository for a Congress and bill type.
+    Since we can't easily list directory contents via HTTP, we'll try to download
+    a known XML file pattern or use the sitemap.
+    
+    Args:
+        congress: Congress number
+        bill_type: Bill type (lowercase, e.g., "hr")
+    
+    Returns:
+        List of XML file URLs (or empty list if unable to determine)
+    """
+    # For now, return empty list - we'll handle this by trying to download
+    # the ZIP file first, and if that fails, we'll need to use a different approach
+    # The bulk data repository structure may require checking the sitemap
+    return []
+
+
+def save_zip_to_s3(zip_content: bytes, start_date: str, end_date: str, congress: int, bill_type: str) -> str:
+    """Save downloaded ZIP file to S3 in downloads/{startdate-enddate}/ format"""
+    date_range_path = format_date_range_path(start_date, end_date)
+    bill_type_lower = bill_type.lower()
+    s3_key = f"downloads/{date_range_path}/BILLSTATUS-{congress}-{bill_type_lower}.zip"
+    
+    log_print(f"💾 Saving ZIP file to S3: s3://{S3_BUCKET_NAME}/{s3_key}")
+    
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_key,
+        Body=zip_content,
+        ContentType='application/zip'
+    )
+    
+    log_print(f"✅ ZIP file saved to S3: s3://{S3_BUCKET_NAME}/{s3_key} ({len(zip_content):,} bytes)")
+    return s3_key
+
+
+def check_s3_zip_exists(start_date: str, end_date: str, congress: int, bill_type: str) -> Optional[str]:
+    """
+    Check if a ZIP file exists in S3 for the given date range, Congress, and bill type.
+    
+    Returns:
+        S3 key of ZIP file if exists, None otherwise
+    """
+    date_range_path = format_date_range_path(start_date, end_date)
+    bill_type_lower = bill_type.lower()
+    zip_s3_key = f"downloads/{date_range_path}/BILLSTATUS-{congress}-{bill_type_lower}.zip"
+    
+    try:
+        s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
+        log_print(f"✅ Found existing ZIP file in S3: {zip_s3_key}")
+        return zip_s3_key
+    except s3_client.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            return None
+        else:
+            log_print(f"⚠️ Error checking S3 for ZIP file {zip_s3_key}: {str(e)[:200]}")
+            return None
+
+
+def extract_zip_from_s3(zip_s3_key: str) -> Dict[str, bytes]:
+    """
+    Extract ZIP file from S3 and return dict of XML filename -> XML content.
+    
+    Returns:
+        Dict mapping XML filename -> XML content as bytes
+    """
+    log_print(f"📦 Extracting ZIP file from S3: {zip_s3_key}")
+    
+    # Download ZIP from S3
+    zip_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
+    zip_content = zip_obj['Body'].read()
+    
+    # Extract XML files
+    xml_files = {}
+    zip_file = BytesIO(zip_content)
+    
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        file_list = zip_ref.namelist()
+        log_print(f"📋 ZIP contains {len(file_list)} file(s)")
+        
+        # Find XML files
+        xml_file_list = [f for f in file_list if f.lower().endswith('.xml')]
+        log_print(f"📄 Found {len(xml_file_list)} XML file(s)")
+        
+        for xml_file in xml_file_list:
+            try:
+                xml_content = zip_ref.read(xml_file)
+                # Store with just the filename (not full path)
+                filename = xml_file.split('/')[-1]
+                xml_files[filename] = xml_content
+            except Exception as e:
+                log_print(f"   ⚠️ Failed to extract {xml_file}: {str(e)[:200]}")
+    
+    log_print(f"✅ Extracted {len(xml_files)} XML file(s) from ZIP")
+    return xml_files
+
+
+def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Optional[Dict]:
+    """
+    Parse BILLSTATUS XML file and convert to DynamoDB record format.
+    Maintains existing table schema and field names.
+    
+    Args:
+        xml_content: XML file content as bytes
+        politicians: List of politician records for name matching
+    
+    Returns:
+        Bill record dict matching existing DynamoDB schema, or None if parsing fails
+    """
+    try:
+        # Parse XML
+        root = ET.fromstring(xml_content)
+        
+        # Find <bill> element
+        bill_elem = root.find('bill')
+        if bill_elem is None:
+            return None
+        
+        # Extract basic bill info
+        congress_elem = bill_elem.find('congress')
+        congress = int(congress_elem.text) if congress_elem is not None and congress_elem.text else None
+        
+        bill_type_elem = bill_elem.find('billType')
+        bill_type = bill_type_elem.text.upper() if bill_type_elem is not None and bill_type_elem.text else None
+        
+        bill_number_elem = bill_elem.find('billNumber')
+        bill_number = bill_number_elem.text if bill_number_elem is not None and bill_number_elem.text else None
+        
+        if not congress or not bill_type or not bill_number:
+            return None
+        
+        bill_id_str = f"{congress}-{bill_type}-{bill_number}"
+        
+        # Extract title (prefer Display Title, fallback to Official Title as Introduced)
+        bill_title = ""
+        titles_elem = bill_elem.find('titles')
+        if titles_elem is not None:
+            title_items = titles_elem.findall('item')
+            for title_item in title_items:
+                title_type_elem = title_item.find('titleType')
+                title_elem = title_item.find('title')
+                if title_type_elem is not None and title_elem is not None:
+                    title_type = title_type_elem.text if title_type_elem.text else ""
+                    title_text = title_elem.text if title_elem.text else ""
+                    if title_type == "Display Title" and title_text:
+                        bill_title = title_text
+                        break
+                    elif title_type == "Official Title as Introduced" and title_text and not bill_title:
+                        bill_title = title_text
+        # Fallback: try direct title element (legacy format)
+        if not bill_title:
+            title_elem = bill_elem.find('title')
+            if title_elem is not None and title_elem.text:
+                bill_title = title_elem.text
+        
+        # Extract introduced date
+        introduced_date_elem = bill_elem.find('introducedDate')
+        introduced_date = introduced_date_elem.text if introduced_date_elem is not None and introduced_date_elem.text else None
+        introduced_date = introduced_date if introduced_date else None
+        
+        # Extract latest action date
+        latest_action_date = None
+        actions_elem = bill_elem.find('actions')
+        if actions_elem is not None:
+            action_items = actions_elem.findall('item')
+            if action_items:
+                # Get first action (most recent)
+                first_action = action_items[0]
+                action_date_elem = first_action.find('actionDate')
+                if action_date_elem is not None and action_date_elem.text:
+                    latest_action_date = action_date_elem.text
+        
+        # Extract primary sponsor
+        primary_sponsor = {}
+        sponsors_elem = bill_elem.find('sponsors')
+        if sponsors_elem is not None:
+            sponsor_item = sponsors_elem.find('item')
+            if sponsor_item is not None:
+                # Extract identifiers (current format)
+                identifiers_elem = sponsor_item.find('identifiers')
+                if identifiers_elem is not None:
+                    bioguide_id_elem = identifiers_elem.find('bioguideId')
+                    if bioguide_id_elem is not None and bioguide_id_elem.text:
+                        primary_sponsor['bioguideId'] = bioguide_id_elem.text
+                else:
+                    # Legacy format: bioguideId might be direct child
+                    bioguide_id_elem = sponsor_item.find('bioguideId')
+                    if bioguide_id_elem is not None and bioguide_id_elem.text:
+                        primary_sponsor['bioguideId'] = bioguide_id_elem.text
+                
+                # Extract name (current format has firstName/lastName/fullName)
+                first_name_elem = sponsor_item.find('firstName')
+                last_name_elem = sponsor_item.find('lastName')
+                full_name_elem = sponsor_item.find('fullName')
+                
+                if first_name_elem is not None and last_name_elem is not None:
+                    primary_sponsor['firstName'] = first_name_elem.text if first_name_elem.text else ""
+                    primary_sponsor['lastName'] = last_name_elem.text if last_name_elem.text else ""
+                    if full_name_elem is not None and full_name_elem.text:
+                        primary_sponsor['fullName'] = full_name_elem.text
+                    else:
+                        primary_sponsor['fullName'] = f"{primary_sponsor.get('firstName', '')} {primary_sponsor.get('lastName', '')}".strip()
+                elif full_name_elem is not None and full_name_elem.text:
+                    # Legacy format: might only have fullName
+                    primary_sponsor['fullName'] = full_name_elem.text
+                    # Try to parse first/last from fullName
+                    name_parts = full_name_elem.text.split()
+                    if len(name_parts) >= 2:
+                        primary_sponsor['firstName'] = name_parts[0]
+                        primary_sponsor['lastName'] = " ".join(name_parts[1:])
+                
+                # Extract party and state
+                party_elem = sponsor_item.find('party')
+                if party_elem is not None and party_elem.text:
+                    primary_sponsor['party'] = party_elem.text
+                
+                state_elem = sponsor_item.find('state')
+                if state_elem is not None and state_elem.text:
+                    primary_sponsor['state'] = state_elem.text
+                
+                district_elem = sponsor_item.find('district')
+                if district_elem is not None and district_elem.text:
+                    primary_sponsor['district'] = district_elem.text
+        
+        # Match sponsor with politician CSV data
+        if primary_sponsor.get('fullName'):
+            matched_politician = find_matching_politician(
+                primary_sponsor.get('fullName', ''),
+                politicians,
+                first_name=primary_sponsor.get('firstName', ''),
+                last_name=primary_sponsor.get('lastName', ''),
+                party=primary_sponsor.get('party', ''),
+                state=primary_sponsor.get('state', '')
+            )
+            if matched_politician:
+                # Merge matched data
+                primary_sponsor.update(matched_politician)
+        
+        # Extract cosponsors
+        cosponsors = []
+        cosponsors_elem = bill_elem.find('cosponsors')
+        if cosponsors_elem is not None:
+            cosponsor_items = cosponsors_elem.findall('item')
+            for cosponsor_item in cosponsor_items:
+                cosponsor = {}
+                
+                # Extract name (handle both current and legacy formats)
+                first_name_elem = cosponsor_item.find('firstName')
+                last_name_elem = cosponsor_item.find('lastName')
+                full_name_elem = cosponsor_item.find('fullName')
+                name_elem = cosponsor_item.find('name')  # Legacy format
+                
+                if first_name_elem is not None and last_name_elem is not None:
+                    cosponsor['firstName'] = first_name_elem.text if first_name_elem.text else ""
+                    cosponsor['lastName'] = last_name_elem.text if last_name_elem.text else ""
+                    if full_name_elem is not None and full_name_elem.text:
+                        cosponsor['fullName'] = full_name_elem.text
+                    else:
+                        cosponsor['fullName'] = f"{cosponsor.get('firstName', '')} {cosponsor.get('lastName', '')}".strip()
+                elif full_name_elem is not None and full_name_elem.text:
+                    cosponsor['fullName'] = full_name_elem.text
+                    name_parts = full_name_elem.text.split()
+                    if len(name_parts) >= 2:
+                        cosponsor['firstName'] = name_parts[0]
+                        cosponsor['lastName'] = " ".join(name_parts[1:])
+                elif name_elem is not None and name_elem.text:
+                    # Legacy format: use 'name' field
+                    cosponsor['fullName'] = name_elem.text
+                    name_parts = name_elem.text.split(',')
+                    if len(name_parts) >= 2:
+                        cosponsor['lastName'] = name_parts[0].strip()
+                        cosponsor['firstName'] = name_parts[1].strip().split()[0] if name_parts[1].strip() else ""
+                
+                # Extract identifiers (handle both current and legacy formats)
+                identifiers_elem = cosponsor_item.find('identifiers')
+                if identifiers_elem is not None:
+                    bioguide_id_elem = identifiers_elem.find('bioguideId')
+                    if bioguide_id_elem is not None and bioguide_id_elem.text:
+                        cosponsor['bioguideId'] = bioguide_id_elem.text
+                else:
+                    # Legacy format: bioguideId might be direct child
+                    bioguide_id_elem = cosponsor_item.find('bioguideId')
+                    if bioguide_id_elem is not None and bioguide_id_elem.text:
+                        cosponsor['bioguideId'] = bioguide_id_elem.text
+                
+                # Extract party and state (may be in fullName for legacy format, e.g., "Rep. Gabbard, Tulsi [D-HI-2]")
+                party_elem = cosponsor_item.find('party')
+                if party_elem is not None and party_elem.text:
+                    cosponsor['party'] = party_elem.text
+                elif cosponsor.get('fullName'):
+                    # Try to extract from fullName format: "[D-HI-2]"
+                    import re
+                    match = re.search(r'\[([DRIL])-([A-Z]{2})(?:-(\d+))?\]', cosponsor['fullName'])
+                    if match:
+                        cosponsor['party'] = match.group(1)
+                        cosponsor['state'] = match.group(2)
+                        if match.group(3):
+                            cosponsor['district'] = match.group(3)
+                
+                state_elem = cosponsor_item.find('state')
+                if state_elem is not None and state_elem.text:
+                    cosponsor['state'] = state_elem.text
+                
+                district_elem = cosponsor_item.find('district')
+                if district_elem is not None and district_elem.text:
+                    cosponsor['district'] = district_elem.text
+                
+                # Match with politician CSV data
+                if cosponsor.get('fullName'):
+                    matched_politician = find_matching_politician(
+                        cosponsor.get('fullName', ''),
+                        politicians,
+                        first_name=cosponsor.get('firstName', ''),
+                        last_name=cosponsor.get('lastName', ''),
+                        party=cosponsor.get('party', ''),
+                        state=cosponsor.get('state', '')
+                    )
+                    if matched_politician:
+                        cosponsor.update(matched_politician)
+                
+                cosponsors.append(cosponsor)
+        
+        # Extract actions
+        actions = []
+        if actions_elem is not None:
+            action_items = actions_elem.findall('item')
+            for action_item in action_items:
+                action = {}
+                
+                action_date_elem = action_item.find('actionDate')
+                if action_date_elem is not None and action_date_elem.text:
+                    action['actionDate'] = action_date_elem.text
+                
+                action_text_elem = action_item.find('text')
+                if action_text_elem is not None and action_text_elem.text:
+                    action['text'] = action_text_elem.text
+                
+                action_type_elem = action_item.find('type')
+                if action_type_elem is not None and action_type_elem.text:
+                    action['type'] = action_type_elem.text
+                
+                action_code_elem = action_item.find('actionCode')
+                if action_code_elem is not None and action_code_elem.text:
+                    action['actionCode'] = action_code_elem.text
+                
+                actions.append(action)
+        
+        # Extract summaries
+        summaries = []
+        summaries_elem = bill_elem.find('summaries')
+        if summaries_elem is not None:
+            summary_items = summaries_elem.findall('item')
+            for summary_item in summary_items:
+                summary = {}
+                
+                text_elem = summary_item.find('text')
+                if text_elem is not None and text_elem.text:
+                    summary['text'] = text_elem.text
+                
+                version_elem = summary_item.find('versionCode')
+                if version_elem is not None and version_elem.text:
+                    summary['versionCode'] = version_elem.text
+                
+                summaries.append(summary)
+        
+        # Extract subjects/policy area
+        policy_area = ""
+        subjects_elem = bill_elem.find('subjects')
+        if subjects_elem is not None:
+            policy_area_item = subjects_elem.find('billSubjects')
+            if policy_area_item is not None:
+                policy_area_elem = policy_area_item.find('item')
+                if policy_area_elem is not None:
+                    name_elem = policy_area_elem.find('name')
+                    if name_elem is not None and name_elem.text:
+                        policy_area = name_elem.text
+        
+        # Extract amendments
+        amendments = []
+        amendments_elem = bill_elem.find('amendments')
+        if amendments_elem is not None:
+            amendment_items = amendments_elem.findall('amendment')
+            for amendment_item in amendment_items:
+                amendment = {}
+                
+                number_elem = amendment_item.find('number')
+                if number_elem is not None and number_elem.text:
+                    amendment['number'] = number_elem.text
+                
+                description_elem = amendment_item.find('description')
+                if description_elem is not None and description_elem.text:
+                    amendment['description'] = description_elem.text
+                
+                amendments.append(amendment)
+        
+        # Extract text versions (for SQS processing)
+        text_versions = []
+        text_versions_elem = bill_elem.find('textVersions')
+        if text_versions_elem is not None:
+            text_version_items = text_versions_elem.findall('item')
+            for text_version_item in text_version_items:
+                text_version = {}
+                
+                type_elem = text_version_item.find('type')
+                if type_elem is not None and type_elem.text:
+                    text_version['type'] = type_elem.text
+                
+                formats_elem = text_version_item.find('formats')
+                if formats_elem is not None:
+                    format_items = formats_elem.findall('item')
+                    for format_item in format_items:
+                        url_elem = format_item.find('url')
+                        if url_elem is not None and url_elem.text:
+                            text_version['url'] = url_elem.text
+                            break
+                
+                if text_version:
+                    text_versions.append(text_version)
+        
+        # Build record matching existing DynamoDB schema
+        record = {
+            # Bill Basic Info
+            "bill_id": bill_id_str,
+            "search_index_sk": bill_id_str,
+            "congress": congress,
+            "bill_type": bill_type,
+            "bill_number": int(bill_number) if bill_number.isdigit() else 0,
+            "bill_title": bill_title,
+            "bill_url": f"https://www.congress.gov/bill/{congress}th-congress/{bill_type.lower()}/{bill_number}",
+            
+            # Dates
+            "introduced_date": introduced_date,
+            "latest_action_date": latest_action_date,
+            "update_date": "",
+            "update_date_including_text": "",
+            
+            # Primary Sponsor
+            "sponsor_bioguide_id": primary_sponsor.get("bioguideId", ""),
+            "sponsor_full_name": primary_sponsor.get("fullName", ""),
+            "sponsor_first_name": primary_sponsor.get("firstName", ""),
+            "sponsor_last_name": primary_sponsor.get("lastName", ""),
+            "sponsor_party": primary_sponsor.get("party", ""),
+            "sponsor_state": primary_sponsor.get("state", ""),
+            "sponsor_district": primary_sponsor.get("district", ""),
+            "sponsor_url": primary_sponsor.get("url", ""),
+            
+            # Cosponsors
+            "cosponsor_count": len(cosponsors),
+            "cosponsors": "",
+            "cosponsor_parties": "|".join([c.get("party", "") for c in cosponsors if c.get("party")]),
+            "cosponsors_json": json.dumps(cosponsors) if cosponsors else "",
+            
+            # Actions
+            "action_count": len(actions),
+            "actions_json": json.dumps(actions) if actions else "",
+            "actions_summary": " | ".join([f"{a.get('actionDate', '')}: {a.get('text', '')[:100]}" for a in actions[:10]]) if actions else "",
+            
+            # Latest action
+            "latest_action_text": actions[0].get('text', '') if actions else "",
+            "latest_action_type": actions[0].get('type', '') if actions else "",
+            
+            # Summaries
+            "summary_count": len(summaries),
+            "summaries_json": json.dumps(summaries) if summaries else "",
+            "summary_text": " | ".join([s.get('text', '')[:200] for s in summaries[:3]]) if summaries else "",
+            
+            # Subjects/Policy Area
+            "policy_area": policy_area if policy_area else "Other",
+            "legislative_subjects": "",
+            
+            # Amendments
+            "amendment_count": len(amendments),
+            "amendments_json": json.dumps(amendments) if amendments else "",
+            
+            # Metadata
+            "indexed_at": datetime.now(timezone.utc).isoformat(),
+            "last_updated": datetime.now(timezone.utc).isoformat(),
+            "data_source": "congress_gov_bulk_data",
+        }
+        
+        # Calculate bipartisan (1 if cosponsors have different parties than sponsor)
+        sponsor_party = primary_sponsor.get("party", "")
+        if sponsor_party and cosponsors:
+            cosponsor_parties = set([c.get("party", "") for c in cosponsors if c.get("party")])
+            if sponsor_party not in cosponsor_parties and len(cosponsor_parties) > 0:
+                record["bipartisan"] = 1
+            else:
+                record["bipartisan"] = 0
+        else:
+            record["bipartisan"] = 0
+        
+        # Send bill text download request to SQS (maintain existing functionality)
+        if text_versions and BILL_TEXT_SQS_URL:
+            try:
+                message_body = {'bill_id': bill_id_str}
+                message_json = json.dumps(message_body, default=str)
+                
+                sqs_client.send_message(
+                    QueueUrl=BILL_TEXT_SQS_URL,
+                    MessageBody=message_json
+                )
+                log_print(f"      📤 Sent bill text download request for {bill_id_str} to SQS")
+            except Exception as e:
+                log_print(f"      ⚠️ Error sending bill text download to SQS: {str(e)[:200]}")
+        
+        return record
+        
+    except ET.ParseError as e:
+        log_print(f"      ⚠️ XML parsing error: {str(e)[:200]}")
+        return None
+    except Exception as e:
+        log_print(f"      ⚠️ Error parsing bill XML: {str(e)[:200]}")
+        return None
+
+
+def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_date: str, 
+                          politicians: List[Dict[str, Any]], zip_content: Optional[bytes] = None, 
+                          zip_s3_key: Optional[str] = None) -> Dict[str, Dict]:
+    """
+    Process a bulk ZIP file: extract XML files, parse them, and return bill records.
+    Follows govt_contracts pattern: download, parse, clear memory.
+    
+    Args:
+        congress: Congress number
+        bill_type: Bill type (e.g., "HR", "S")
+        start_date: Start date (YYYY-MM-DD) for filtering
+        end_date: End date (YYYY-MM-DD) for filtering
+        politicians: List of politician records for name matching
+        zip_content: ZIP file content as bytes (if already downloaded)
+        zip_s3_key: S3 key of ZIP file (if exists in S3)
+    
+    Returns:
+        Dict mapping bill_id -> bill_record
+    """
+    bill_type_lower = bill_type.lower()
+    log_print(f"📦 Processing bulk ZIP for Congress {congress}, Bill Type {bill_type}")
+    
+    # Get ZIP content
+    if zip_s3_key:
+        # Extract from S3
+        xml_files = extract_zip_from_s3(zip_s3_key)
+    elif zip_content:
+        # Extract from memory
+        xml_files = {}
+        zip_file = BytesIO(zip_content)
+        with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+            file_list = zip_ref.namelist()
+            xml_file_list = [f for f in file_list if f.lower().endswith('.xml')]
+            for xml_file in xml_file_list:
+                try:
+                    xml_content = zip_ref.read(xml_file)
+                    filename = xml_file.split('/')[-1]
+                    xml_files[filename] = xml_content
+                except Exception as e:
+                    log_print(f"   ⚠️ Failed to extract {xml_file}: {str(e)[:200]}")
+    else:
+        log_print(f"   ❌ No ZIP content or S3 key provided")
+        return {}
+    
+    log_print(f"📄 Found {len(xml_files)} XML file(s) to process")
+    
+    # Parse XML files in parallel
+    bills = {}
+    parse_workers = min(20, len(xml_files))  # Use up to 20 workers
+    
+    def parse_xml_file(filename: str, content: bytes):
+        try:
+            bill_record = parse_bill_xml(content, politicians)
+            if bill_record:
+                return bill_record.get('bill_id'), bill_record
+            return None, None
+        except Exception as e:
+            log_print(f"   ⚠️ Error parsing {filename}: {str(e)[:200]}")
+            return None, None
+    
+    with ThreadPoolExecutor(max_workers=parse_workers) as executor:
+        future_to_file = {
+            executor.submit(parse_xml_file, filename, content): filename
+            for filename, content in xml_files.items()
+        }
+        
+        for future in as_completed(future_to_file):
+            filename = future_to_file[future]
+            try:
+                bill_id, bill_record = future.result()
+                if bill_id and bill_record:
+                    bills[bill_id] = bill_record
+            except Exception as e:
+                log_print(f"   ⚠️ Error processing {filename}: {str(e)[:200]}")
+    
+    log_print(f"✅ Parsed {len(bills)} bill(s) from {len(xml_files)} XML file(s)")
+    return bills
+
+
+# ============================================================================
 # Main Execution
 # ============================================================================
 
@@ -1805,14 +1996,16 @@ def main():
     if not BILLS_TABLE_NAME:
         raise ValueError("BILLS_TABLE_NAME job parameter not set")
     
-    # Initialize API key rotator (supports multiple keys for load balancing)
+    # API keys not required for bulk downloads (public data)
+    # But keep initialization optional for backward compatibility
+    api_key = None
     try:
         rotator = get_congress_api_keys()
-        api_key = rotator.get_key()  # Get one key for backward compatibility (e.g., get_current_congress)
-        log_print(f"✅ Initialized API key rotator with {rotator.get_key_count()} key(s) for load balancing")
+        api_key = rotator.get_key()  # Get one key for backward compatibility
+        log_print(f"✅ Initialized API key rotator with {rotator.get_key_count()} key(s) (optional for bulk downloads)")
     except Exception as e:
-        log_print(f"❌ Failed to retrieve API keys: {str(e)}")
-        raise
+        log_print(f"ℹ️ API keys not available (not required for bulk downloads): {str(e)}")
+        # Don't raise - bulk downloads don't need API keys
     
     # Parse date parameters
     congress = args.get("CONGRESS")
@@ -1934,123 +2127,149 @@ def main():
     
     log_print("")  # Empty line for readability
     
-    # Fetch all bills from all congresses in the range
-    log_print("📋 Fetching Bills...")
-    log_print("-" * 80)
-    
-    all_bills = []
-    for congress_num in congresses_to_query:
-        log_print(f"   📋 Fetching bills for Congress {congress_num}...")
-        for bill_type in BILL_TYPES:
-            log_print(f"      📋 Fetching {bill_type} bills...")
-            bills = fetch_bills_list(congress_num, bill_type, start_date_str, end_date_str, api_key)
-            # Add congress number to each bill so we can use it later
-            for bill in bills:
-                bill['congress'] = congress_num
-            all_bills.extend(bills)
-            log_print(f"         ✅ Found {len(bills)} {bill_type} bills")
-    
-    log_print(f"\n✅ Total bills found across {len(congresses_to_query)} congress(es): {len(all_bills)}")
+    # Load politician CSV data for name matching
+    log_print("📋 Loading politician CSV data for name matching...")
+    politicians = load_politicians_csv()
+    log_print(f"✅ Loaded {len(politicians)} politician records")
     log_print("")  # Empty line for readability
     
-    # Build comprehensive records and store to DynamoDB (parallelized)
-    log_print("🔍 Building comprehensive bill records and storing to DynamoDB...")
+    # Convert date strings to YYYY-MM-DD format for S3 path
+    start_date_simple = start_date_str.split('T')[0] if start_date_str else None
+    end_date_simple = end_date_str.split('T')[0] if end_date_str else None
+    
+    if not start_date_simple or not end_date_simple:
+        raise ValueError("Start date and end date are required for bulk downloads")
+    
+    # Process bills using bulk downloads (follow govt_contracts pattern: download, parse, clear, repeat)
+    log_print("📦 Processing Bills via Bulk Downloads...")
     log_print("-" * 80)
-    log_print(f"   🚀 Using parallel processing with up to 20 concurrent workers...")
+    log_print(f"   📅 Date Range: {start_date_simple} to {end_date_simple}")
+    log_print(f"   📋 Congress(es): {congresses_to_query}")
+    log_print(f"   📋 Bill Types: {BILL_TYPES}")
+    log_print("")  # Empty line for readability
     
     processed_count = 0
     error_count = 0
+    total_bills_processed = 0
     
-    def process_bill(bill: Dict) -> Tuple[bool, Optional[str]]:
-        """Process a single bill and return (success, error_message)"""
-        import threading
-        thread_id = threading.current_thread().name
-        bill_type = bill.get("type", "")
-        bill_number = bill.get("number", "unknown")
+    # Process each Congress and bill type separately (clear memory between each)
+    for congress_num in congresses_to_query:
+        log_print(f"\n{'=' * 80}")
+        log_print(f"📋 Processing Congress {congress_num}")
+        log_print(f"{'=' * 80}")
         
-        if not bill_type:
-            return False, "No bill type"
-        
-        # Extract congress number from bill data
-        # The bill object from API should have congress field, or we can extract from URL
-        bill_congress = bill.get("congress")
-        if not bill_congress:
-            # Try to extract from URL if present
-            bill_url = bill.get("url", "")
-            if bill_url:
-                # URL format: https://www.congress.gov/bill/119th-congress/house-bill/1234
-                # or https://www.congress.gov/119/bills/hr1234/...
-                import re
-                url_match = re.search(r'/(\d+)(?:th|st|nd|rd)?-?congress', bill_url)
-                if url_match:
-                    bill_congress = int(url_match.group(1))
-                else:
-                    # Try alternative format: /119/bills/
-                    url_match = re.search(r'/(\d+)/bills/', bill_url)
-                    if url_match:
-                        bill_congress = int(url_match.group(1))
-        
-        if not bill_congress:
-            return False, f"No congress number found for {bill_type} {bill_number} (bill keys: {list(bill.keys())})"
-        
-        # Ensure congress is an integer
-        try:
-            bill_congress = int(bill_congress)
-        except (ValueError, TypeError):
-            return False, f"Invalid congress number '{bill_congress}' for {bill_type} {bill_number}"
-        
-        try:
-            log_print(f"      🧵 [{thread_id}] Starting {bill_type} {bill_number} (Congress {bill_congress})...")
-            record = build_comprehensive_bill_record(bill, bill_congress, bill_type, api_key)
-            if record:
-                store_bill_to_dynamodb(record)
-                log_print(f"      ✅ [{thread_id}] Completed {bill_type} {bill_number}")
-                return True, None
-            else:
-                return False, "No record built"
-        except Exception as e:
-            error_msg = f"Error processing {bill_type} {bill_number}: {str(e)}"
-            log_print(f"      ❌ [{thread_id}] {error_msg}")
-            return False, error_msg
-    
-    # Process bills in parallel (max 20 concurrent for Glue - more resources available)
-    log_print(f"   📤 Submitting {len(all_bills)} bills for parallel processing...")
-    with ThreadPoolExecutor(max_workers=20) as executor:
-        # Submit all tasks at once
-        future_to_bill = {}
-        for bill in all_bills:
-            future = executor.submit(process_bill, bill)
-            future_to_bill[future] = bill
-        
-        log_print(f"   ✅ All {len(future_to_bill)} tasks submitted, processing in parallel...")
-        
-        completed = 0
-        for future in as_completed(future_to_bill):
-            completed += 1
+        for bill_type in BILL_TYPES:
+            log_print(f"\n{'─' * 80}")
+            log_print(f"📦 Processing {bill_type} bills for Congress {congress_num}")
+            log_print(f"{'─' * 80}")
+            
             try:
-                success, error_msg = future.result()
+                # Check if ZIP exists in S3
+                zip_s3_key = check_s3_zip_exists(start_date_simple, end_date_simple, congress_num, bill_type)
                 
-                if success:
-                    processed_count += 1
+                zip_content = None
+                if zip_s3_key:
+                    log_print(f"✅ Using existing ZIP file from S3: {zip_s3_key}")
                 else:
-                    error_count += 1
-                    if error_msg:
-                        log_print(f"      ❌ {error_msg}")
+                    # Download ZIP from bulk data repository
+                    log_print(f"📥 Downloading ZIP file from bulk data repository...")
+                    zip_content = download_bulk_zip(congress_num, bill_type)
+                    
+                    if zip_content:
+                        # Save ZIP to S3
+                        zip_s3_key = save_zip_to_s3(zip_content, start_date_simple, end_date_simple, congress_num, bill_type)
+                        log_print(f"✅ Downloaded and saved ZIP file ({len(zip_content):,} bytes)")
+                    else:
+                        log_print(f"⚠️ No ZIP file available for Congress {congress_num}, Bill Type {bill_type}")
+                        continue
+                
+                # Process ZIP file: extract, parse, and store bills
+                log_print(f"📄 Processing ZIP file...")
+                bills = process_bulk_zip_file(
+                    congress_num, bill_type, start_date_simple, end_date_simple,
+                    politicians, zip_content=zip_content, zip_s3_key=zip_s3_key
+                )
+                
+                # Filter bills by date if needed (bulk data contains all bills for a Congress)
+                if start_date_dt and end_date_dt:
+                    filtered_bills = {}
+                    for bill_id, bill_record in bills.items():
+                        introduced_date = bill_record.get('introduced_date')
+                        if introduced_date:
+                            try:
+                                bill_date = datetime.strptime(introduced_date, '%Y-%m-%d')
+                                bill_date = bill_date.replace(tzinfo=timezone.utc)
+                                if start_date_dt <= bill_date <= end_date_dt:
+                                    filtered_bills[bill_id] = bill_record
+                            except ValueError:
+                                # If date parsing fails, include the bill
+                                filtered_bills[bill_id] = bill_record
+                        else:
+                            # If no introduced date, include the bill
+                            filtered_bills[bill_id] = bill_record
+                    bills = filtered_bills
+                    log_print(f"📅 Filtered to {len(bills)} bill(s) within date range")
+                
+                # Store bills to DynamoDB in parallel
+                if bills:
+                    log_print(f"💾 Storing {len(bills)} bill(s) to DynamoDB...")
+                    store_workers = min(20, len(bills))
+                    
+                    def store_bill(bill_id: str, bill_record: Dict):
+                        try:
+                            store_bill_to_dynamodb(bill_record)
+                            return True, None
+                        except Exception as e:
+                            error_msg = f"Error storing {bill_id}: {str(e)[:200]}"
+                            return False, error_msg
+                    
+                    with ThreadPoolExecutor(max_workers=store_workers) as executor:
+                        future_to_bill = {
+                            executor.submit(store_bill, bill_id, bill_record): bill_id
+                            for bill_id, bill_record in bills.items()
+                        }
+                        
+                        for future in as_completed(future_to_bill):
+                            bill_id = future_to_bill[future]
+                            try:
+                                success, error_msg = future.result()
+                                if success:
+                                    processed_count += 1
+                                    total_bills_processed += 1
+                                else:
+                                    error_count += 1
+                                    if error_msg:
+                                        log_print(f"      ❌ {error_msg}")
+                            except Exception as e:
+                                error_count += 1
+                                log_print(f"      ❌ Exception storing {bill_id}: {str(e)[:200]}")
+                    
+                    log_print(f"✅ Stored {len(bills)} {bill_type} bill(s) for Congress {congress_num}")
+                else:
+                    log_print(f"ℹ️ No bills found for {bill_type} in Congress {congress_num}")
+                
+                # Clear memory before next bill type
+                del bills
+                if zip_content:
+                    del zip_content
+                gc.collect()
+                log_print(f"🧹 Memory cleared after processing {bill_type}")
+                
             except Exception as e:
                 error_count += 1
-                bill = future_to_bill.get(future, {})
-                log_print(f"      ❌ Exception processing bill: {str(e)}")
-            
-            if completed % 10 == 0:
-                log_print(f"      ✅ Processed {completed}/{len(all_bills)} bills...")
-            
-            # Memory cleanup for large batches
-            if completed % 100 == 0:
-                gc.collect()
+                error_msg = f"Error processing {bill_type} for Congress {congress_num}: {str(e)[:300]}"
+                log_print(f"❌ {error_msg}")
+                logger.error(error_msg, exc_info=True)
+                # Continue with next bill type
+                continue
     
-    log_print(f"\n✅ Processed {processed_count} bills successfully")
+    log_print(f"\n{'=' * 80}")
+    log_print(f"✅ Bulk Download Processing Complete")
+    log_print(f"{'=' * 80}")
+    log_print(f"   📊 Total Bills Processed: {total_bills_processed}")
+    log_print(f"   ✅ Successfully Stored: {processed_count}")
     if error_count > 0:
-        log_print(f"⚠️ {error_count} bills had errors")
+        log_print(f"   ⚠️ Errors: {error_count}")
     
     log_print("")  # Empty line for readability
     log_print("=" * 80)
