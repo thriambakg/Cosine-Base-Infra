@@ -1614,10 +1614,10 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
 
 def clean_empty_gsi_keys(record: Dict) -> Dict:
     """
-    Remove empty string values from GSI key fields.
-    DynamoDB does not allow empty strings for GSI keys.
+    Remove empty string and None values from GSI key fields.
+    DynamoDB does not allow empty strings or NULL values for GSI keys.
     """
-    # List of GSI key fields that cannot be empty strings
+    # List of GSI key fields that cannot be empty strings or None
     gsi_key_fields = [
         'sponsor_party', 'sponsor_full_name', 'sponsor_state',
         'introduced_date', 'latest_action_date',
@@ -1626,8 +1626,8 @@ def clean_empty_gsi_keys(record: Dict) -> Dict:
     
     cleaned = record.copy()
     for field in gsi_key_fields:
-        if field in cleaned and cleaned[field] == "":
-            # Remove empty string GSI keys (DynamoDB will skip None values)
+        if field in cleaned and (cleaned[field] == "" or cleaned[field] is None):
+            # Remove empty string or None GSI keys (must be omitted entirely)
             del cleaned[field]
     
     return cleaned
