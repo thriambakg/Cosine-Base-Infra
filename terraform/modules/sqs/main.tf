@@ -30,7 +30,7 @@ resource "aws_sqs_queue_redrive_allow_policy" "dlq_redrive_allow" {
   queue_url = aws_sqs_queue.dlq[0].id
 
   redrive_allow_policy = jsonencode({
-    redrivePermission = "allowAll"
+    redrivePermission = "byQueue"
     sourceQueueArns   = [aws_sqs_queue.main.arn]
   })
 
