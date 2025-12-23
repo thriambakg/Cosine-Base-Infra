@@ -1121,6 +1121,13 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     congress_int = int(congress) if not isinstance(congress, int) else congress
     bill_id_str = f"{congress_int}-{bill_type}-{bill_number}"
     
+    # Extract date values and convert empty strings to None (GSI keys cannot be empty strings)
+    introduced_date_raw = details.get("introducedDate") if details else bill.get("introducedDate", "")
+    introduced_date = introduced_date_raw if introduced_date_raw else None
+    
+    latest_action_date_raw = bill.get("latestAction", {}).get("actionDate") if isinstance(bill.get("latestAction"), dict) else (details.get("latestAction", {}).get("actionDate") if details and isinstance(details.get("latestAction"), dict) else "")
+    latest_action_date = latest_action_date_raw if latest_action_date_raw else None
+    
     record = {
         # Bill Basic Info
         "bill_id": bill_id_str,
@@ -1135,8 +1142,9 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
         "bill_text_html_s3_key": bill_text_html_s3_key,
         
         # Dates (for sorting)
-        "introduced_date": details.get("introducedDate") if details else bill.get("introducedDate", ""),
-        "latest_action_date": bill.get("latestAction", {}).get("actionDate") if isinstance(bill.get("latestAction"), dict) else (details.get("latestAction", {}).get("actionDate") if details and isinstance(details.get("latestAction"), dict) else ""),
+        # Note: GSI keys cannot be empty strings, so use None instead
+        "introduced_date": introduced_date,
+        "latest_action_date": latest_action_date,
         "update_date": bill.get("updateDate", ""),
         "update_date_including_text": bill.get("updateDateIncludingText", ""),
         
@@ -1594,11 +1602,33 @@ def extract_gsi_fields_only(full_item: Dict[str, Any]) -> Dict[str, Any]:
         'oversize_s3_key': f"oversize/{full_item.get('bill_id')}.json.gz",
     }
     
-    # Remove None values (but keep False/0 values)
+    # Remove None values and empty strings (GSI keys cannot be empty strings)
+    # Keep False/0 values as they are valid
     cleaned = {}
     for k, v in gsi_fields.items():
-        if v is not None:
+        if v is not None and v != "":
             cleaned[k] = v
+    
+    return cleaned
+
+
+def clean_empty_gsi_keys(record: Dict) -> Dict:
+    """
+    Remove empty string values from GSI key fields.
+    DynamoDB does not allow empty strings for GSI keys.
+    """
+    # List of GSI key fields that cannot be empty strings
+    gsi_key_fields = [
+        'sponsor_party', 'sponsor_full_name', 'sponsor_state',
+        'introduced_date', 'latest_action_date',
+        'bill_title', 'policy_area'
+    ]
+    
+    cleaned = record.copy()
+    for field in gsi_key_fields:
+        if field in cleaned and cleaned[field] == "":
+            # Remove empty string GSI keys (DynamoDB will skip None values)
+            del cleaned[field]
     
     return cleaned
 
@@ -1610,6 +1640,10 @@ def store_bill_to_dynamodb(record: Dict):
         return
     
     bill_id = record.get('bill_id', 'unknown')
+    
+    # Clean up empty string GSI keys before storing
+    record = clean_empty_gsi_keys(record)
+    
     max_put_retries = 3
     
     for put_attempt in range(max_put_retries):
