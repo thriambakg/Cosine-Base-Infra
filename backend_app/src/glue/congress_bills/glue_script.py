@@ -265,6 +265,31 @@ def fuzzy_match_name(name: str, politician: Dict[str, Any]) -> float:
     return similarity
 
 
+def find_politician_by_bioguide_id(bioguide_id: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    """
+    Find politician by bioguide_id (most reliable matching method).
+    
+    Args:
+        bioguide_id: Bioguide ID to match
+        politicians: List of politician dicts
+    
+    Returns:
+        Matched politician dict, or None
+    """
+    if not bioguide_id or not politicians:
+        return None
+    
+    bioguide_id_clean = str(bioguide_id).strip().upper()
+    for politician in politicians:
+        pol_bioguide = politician.get('bioguide_id')
+        if pol_bioguide and str(pol_bioguide).strip().upper() == bioguide_id_clean:
+            return {
+                **politician,
+                'matchScore': 1.0  # Perfect match
+            }
+    return None
+
+
 def find_matching_politician(name: str, politicians: List[Dict[str, Any]], 
                             first_name: str = "", last_name: str = "", 
                             party: str = "", state: str = "") -> Optional[Dict[str, Any]]:
@@ -1272,8 +1297,17 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 if district_elem is not None and district_elem.text:
                     primary_sponsor['district'] = district_elem.text
         
-        # Match sponsor with politician CSV data
-        if primary_sponsor.get('fullName'):
+        # Match sponsor with politician CSV data (prefer bioguide_id, then name matching)
+        matched_politician = None
+        if primary_sponsor.get('bioguideId'):
+            # Try bioguide_id first (most reliable)
+            matched_politician = find_politician_by_bioguide_id(
+                primary_sponsor.get('bioguideId', ''),
+                politicians
+            )
+        
+        if not matched_politician and primary_sponsor.get('fullName'):
+            # Fall back to name matching
             matched_politician = find_matching_politician(
                 primary_sponsor.get('fullName', ''),
                 politicians,
@@ -1282,9 +1316,20 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 party=primary_sponsor.get('party', ''),
                 state=primary_sponsor.get('state', '')
             )
-            if matched_politician:
-                # Merge matched data
-                primary_sponsor.update(matched_politician)
+        
+        if matched_politician:
+            # Merge matched data - use CSV standardized name for sponsor_full_name
+            primary_sponsor.update(matched_politician)
+            # Override fullName with CSV standardized name for search compatibility
+            if matched_politician.get('name'):
+                primary_sponsor['fullName'] = matched_politician['name']
+                primary_sponsor['firstName'] = matched_politician.get('first_name', primary_sponsor.get('firstName', ''))
+                primary_sponsor['lastName'] = matched_politician.get('last_name', primary_sponsor.get('lastName', ''))
+                # Use CSV party/state if available (more reliable)
+                if matched_politician.get('party'):
+                    primary_sponsor['party'] = matched_politician['party']
+                if matched_politician.get('state'):
+                    primary_sponsor['state'] = matched_politician['state']
         
         # Extract cosponsors
         cosponsors = []
@@ -1355,8 +1400,17 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 if district_elem is not None and district_elem.text:
                     cosponsor['district'] = district_elem.text
                 
-                # Match with politician CSV data
-                if cosponsor.get('fullName'):
+                # Match with politician CSV data (prefer bioguide_id, then name matching)
+                matched_politician = None
+                if cosponsor.get('bioguideId'):
+                    # Try bioguide_id first (most reliable)
+                    matched_politician = find_politician_by_bioguide_id(
+                        cosponsor.get('bioguideId', ''),
+                        politicians
+                    )
+                
+                if not matched_politician and cosponsor.get('fullName'):
+                    # Fall back to name matching
                     matched_politician = find_matching_politician(
                         cosponsor.get('fullName', ''),
                         politicians,
@@ -1365,8 +1419,21 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                         party=cosponsor.get('party', ''),
                         state=cosponsor.get('state', '')
                     )
-                    if matched_politician:
-                        cosponsor.update(matched_politician)
+                
+                if matched_politician:
+                    # Merge matched data - use CSV standardized name for search compatibility
+                    cosponsor.update(matched_politician)
+                    # Override fullName with CSV standardized name
+                    if matched_politician.get('name'):
+                        cosponsor['fullName'] = matched_politician['name']
+                        cosponsor['name'] = matched_politician['name']  # Also set 'name' field for consistency
+                        cosponsor['firstName'] = matched_politician.get('first_name', cosponsor.get('firstName', ''))
+                        cosponsor['lastName'] = matched_politician.get('last_name', cosponsor.get('lastName', ''))
+                        # Use CSV party/state if available (more reliable)
+                        if matched_politician.get('party'):
+                            cosponsor['party'] = matched_politician['party']
+                        if matched_politician.get('state'):
+                            cosponsor['state'] = matched_politician['state']
                 
                 cosponsors.append(cosponsor)
         
@@ -1554,15 +1621,44 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             "data_source": "congress_gov_bulk_data",
         }
         
-        # Calculate bipartisan (1 if cosponsors have different parties than sponsor)
+        # Calculate bipartisan (1 if any cosponsor party differs from sponsor OR cosponsor parties are mixed)
+        # Use matched party values from CSV (more reliable)
         sponsor_party = primary_sponsor.get("party", "")
+        if sponsor_party:
+            # Normalize party to single character (R, D, I)
+            sponsor_party = sponsor_party.strip().upper()[0] if sponsor_party.strip() else ""
+        
         if sponsor_party and cosponsors:
-            cosponsor_parties = set([c.get("party", "") for c in cosponsors if c.get("party")])
-            if sponsor_party not in cosponsor_parties and len(cosponsor_parties) > 0:
-                record["bipartisan"] = 1
+            cosponsor_parties = []
+            for c in cosponsors:
+                cosp_party = c.get("party", "")
+                if cosp_party:
+                    # Normalize to single character
+                    cosp_party = cosp_party.strip().upper()[0] if cosp_party.strip() else ""
+                    if cosp_party:
+                        cosponsor_parties.append(cosp_party)
+            
+            if len(cosponsor_parties) > 0:
+                # Check if cosponsor parties are all the same
+                unique_cosponsor_parties = set(cosponsor_parties)
+                
+                # Bipartisan if:
+                # 1. Cosponsor parties are not all the same (mixed parties), OR
+                # 2. At least one cosponsor party is different from sponsor party
+                if len(unique_cosponsor_parties) > 1:
+                    # Mixed cosponsor parties = bipartisan
+                    record["bipartisan"] = 1
+                elif sponsor_party not in unique_cosponsor_parties:
+                    # All cosponsors are same party, but different from sponsor = bipartisan
+                    record["bipartisan"] = 1
+                else:
+                    # All cosponsors same party as sponsor = not bipartisan
+                    record["bipartisan"] = 0
             else:
+                # No cosponsors with parties = not bipartisan
                 record["bipartisan"] = 0
         else:
+            # No sponsor party or no cosponsors = not bipartisan
             record["bipartisan"] = 0
         
         # Store text versions in record for later SQS processing (after bill is stored)
@@ -1580,10 +1676,11 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
 
 def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_date: str, 
                           politicians: List[Dict[str, Any]], zip_content: Optional[bytes] = None, 
-                          zip_s3_key: Optional[str] = None) -> Dict[str, Dict]:
+                          zip_s3_key: Optional[str] = None, start_date_dt: Optional[datetime] = None,
+                          end_date_dt: Optional[datetime] = None) -> Tuple[int, int]:
     """
-    Process a bulk ZIP file: extract XML files, parse them, and return bill records.
-    Follows govt_contracts pattern: download, parse, clear memory.
+    Process a bulk ZIP file: extract XML files, parse them, and store each batch immediately.
+    Follows govt_contracts pattern: download, parse, store, clear memory.
     
     Args:
         congress: Congress number
@@ -1593,40 +1690,40 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         politicians: List of politician records for name matching
         zip_content: ZIP file content as bytes (if already downloaded)
         zip_s3_key: S3 key of ZIP file (if exists in S3)
+        start_date_dt: Start date as datetime object for filtering
+        end_date_dt: End date as datetime object for filtering
     
     Returns:
-        Dict mapping bill_id -> bill_record
+        Number of XML files processed
     """
     bill_type_lower = bill_type.lower()
     log_print(f"📦 Processing bulk ZIP for Congress {congress}, Bill Type {bill_type}")
     
-    # Get ZIP content
+    # Get ZIP content once (needed for all batches)
     if zip_s3_key:
-        # Extract from S3
-        xml_files = extract_zip_from_s3(zip_s3_key)
+        # Download ZIP from S3 to memory
+        zip_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
+        zip_content = zip_obj['Body'].read()
     elif zip_content:
-        # Extract from memory
-        xml_files = {}
-        zip_file = BytesIO(zip_content)
-        with zipfile.ZipFile(zip_file, 'r') as zip_ref:
-            file_list = zip_ref.namelist()
-            xml_file_list = [f for f in file_list if f.lower().endswith('.xml')]
-            for xml_file in xml_file_list:
-                try:
-                    xml_content = zip_ref.read(xml_file)
-                    filename = xml_file.split('/')[-1]
-                    xml_files[filename] = xml_content
-                except Exception as e:
-                    log_print(f"   ⚠️ Failed to extract {xml_file}: {str(e)[:200]}")
+        pass  # Already have content
     else:
         log_print(f"   ❌ No ZIP content or S3 key provided")
-        return {}
+        return 0, 0
     
-    log_print(f"📄 Found {len(xml_files)} XML file(s) to process")
+    # Extract file list first (ZIP is not thread-safe for concurrent reads)
+    zip_file = BytesIO(zip_content)
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        file_list = zip_ref.namelist()
+        xml_file_list = [f for f in file_list if f.lower().endswith('.xml')]
+        total_files = len(xml_file_list)
+        log_print(f"📄 Found {total_files} XML file(s) to process")
     
-    # Parse XML files in parallel
-    bills = {}
-    parse_workers = min(20, len(xml_files))  # Use up to 20 workers
+    # Process in batches: extract batch sequentially, then parse batch in parallel
+    batch_size = 100
+    parse_workers = min(20, batch_size)
+    log_print(f"🔄 Starting parallel parsing with {parse_workers} worker(s), processing in batches of {batch_size}...")
+    
+    total_stored = 0
     
     def parse_xml_file(filename: str, content: bytes):
         try:
@@ -1638,23 +1735,122 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
             log_print(f"   ⚠️ Error parsing {filename}: {str(e)[:200]}")
             return None, None
     
-    with ThreadPoolExecutor(max_workers=parse_workers) as executor:
-        future_to_file = {
-            executor.submit(parse_xml_file, filename, content): filename
-            for filename, content in xml_files.items()
-        }
+    # Process batches: extract sequentially, parse in parallel
+    for batch_start in range(0, total_files, batch_size):
+        batch_end = min(batch_start + batch_size, total_files)
+        batch_files = xml_file_list[batch_start:batch_end]
+        batch_num = (batch_start // batch_size) + 1
+        total_batches = (total_files + batch_size - 1) // batch_size
         
-        for future in as_completed(future_to_file):
-            filename = future_to_file[future]
-            try:
-                bill_id, bill_record = future.result()
-                if bill_id and bill_record:
-                    bills[bill_id] = bill_record
-            except Exception as e:
-                log_print(f"   ⚠️ Error processing {filename}: {str(e)[:200]}")
+        log_print(f"   📦 Processing batch {batch_num}/{total_batches} (files {batch_start+1}-{batch_end} of {total_files})...")
+        
+        # Initialize bills dict for this batch
+        bills = {}
+        
+        # Extract batch from ZIP sequentially (ZIP not thread-safe)
+        log_print(f"      📥 Extracting {len(batch_files)} files from ZIP...")
+        batch_xml_data = {}
+        zip_file_batch = BytesIO(zip_content)
+        with zipfile.ZipFile(zip_file_batch, 'r') as zip_ref:
+            for idx, filename in enumerate(batch_files):
+                try:
+                    xml_content = zip_ref.read(filename)
+                    batch_xml_data[filename] = xml_content
+                    if (idx + 1) % 20 == 0:
+                        log_print(f"      📥 Extracted {idx + 1}/{len(batch_files)} files...")
+                except Exception as e:
+                    log_print(f"   ⚠️ Failed to extract {filename}: {str(e)[:200]}")
+        
+        log_print(f"      ✅ Extracted {len(batch_xml_data)} files, starting parallel parsing...")
+        
+        # Parse batch in parallel (now we have the data in memory)
+        with ThreadPoolExecutor(max_workers=parse_workers) as executor:
+            future_to_file = {
+                executor.submit(parse_xml_file, filename, content): filename
+                for filename, content in batch_xml_data.items()
+            }
+            
+            processed_in_batch = 0
+            for future in as_completed(future_to_file):
+                filename = future_to_file[future]
+                processed_in_batch += 1
+                
+                try:
+                    bill_id, bill_record = future.result()
+                    if bill_id and bill_record:
+                        bills[bill_id] = bill_record
+                except Exception as e:
+                    log_print(f"   ⚠️ Error processing {filename}: {str(e)[:200]}")
+                
+                # Log progress every 10 files
+                if processed_in_batch % 10 == 0:
+                    log_print(f"      🔄 Parsed {processed_in_batch}/{len(batch_xml_data)} files in batch {batch_num}...")
+        
+        log_print(f"   ✅ Batch {batch_num} complete: {processed_in_batch} files processed, {len(bills)} bills parsed")
+        
+        # Filter batch by date if needed
+        if start_date_dt and end_date_dt:
+            filtered_batch = {}
+            for bill_id, bill_record in bills.items():
+                introduced_date = bill_record.get('introduced_date')
+                if introduced_date:
+                    try:
+                        bill_date = datetime.strptime(introduced_date, '%Y-%m-%d')
+                        bill_date = bill_date.replace(tzinfo=timezone.utc)
+                        if start_date_dt <= bill_date <= end_date_dt:
+                            filtered_batch[bill_id] = bill_record
+                    except ValueError:
+                        filtered_batch[bill_id] = bill_record
+                else:
+                    filtered_batch[bill_id] = bill_record
+            bills = filtered_batch
+        
+        # Store batch to DynamoDB immediately
+        if bills and len(bills) > 0:
+            log_print(f"   💾 Storing {len(bills)} bill(s) from batch {batch_num} to DynamoDB...")
+            store_workers = min(20, len(bills))
+            
+            def store_bill(bill_id: str, bill_record: Dict):
+                try:
+                    store_bill_to_dynamodb(bill_record)
+                    return True, None
+                except Exception as e:
+                    error_msg = f"Error storing {bill_id}: {str(e)[:200]}"
+                    return False, error_msg
+            
+            stored_count = 0
+            with ThreadPoolExecutor(max_workers=store_workers) as executor:
+                future_to_bill = {
+                    executor.submit(store_bill, bill_id, bill_record): bill_id
+                    for bill_id, bill_record in bills.items()
+                }
+                
+                for future in as_completed(future_to_bill):
+                    bill_id = future_to_bill[future]
+                    try:
+                        success, error_msg = future.result()
+                        if success:
+                            stored_count += 1
+                        else:
+                            if error_msg:
+                                log_print(f"      ❌ {error_msg}")
+                    except Exception as e:
+                        log_print(f"      ❌ Exception storing {bill_id}: {str(e)[:200]}")
+            
+            log_print(f"   ✅ Stored {stored_count}/{len(bills)} bill(s) from batch {batch_num} to DynamoDB")
+            total_stored += stored_count
+        
+        # Clear batch data from memory before next batch
+        del bills
+        del batch_xml_data
+        del zip_file_batch
+        import gc
+        gc.collect()
+        log_print(f"   🧹 Memory cleared after batch {batch_num}")
     
-    log_print(f"✅ Parsed {len(bills)} bill(s) from {len(xml_files)} XML file(s)")
-    return bills
+    log_print(f"✅ Completed processing {total_files} XML file(s), stored {total_stored} bill(s)")
+    
+    return total_files, total_stored
 
 
 # ============================================================================
@@ -1856,73 +2052,23 @@ def main():
                         log_print(f"⚠️ No ZIP file available for Congress {congress_num}, Bill Type {bill_type}")
                         continue
                 
-                # Process ZIP file: extract, parse, and store bills
+                # Process ZIP file: extract, parse, store each batch immediately
                 log_print(f"📄 Processing ZIP file...")
-                bills = process_bulk_zip_file(
-                    congress_num, bill_type, start_date_simple, end_date_simple,
-                    politicians, zip_content=zip_content, zip_s3_key=zip_s3_key
-                )
-                
-                # Filter bills by date if needed (bulk data contains all bills for a Congress)
-                if start_date_dt and end_date_dt:
-                    filtered_bills = {}
-                    for bill_id, bill_record in bills.items():
-                        introduced_date = bill_record.get('introduced_date')
-                        if introduced_date:
-                            try:
-                                bill_date = datetime.strptime(introduced_date, '%Y-%m-%d')
-                                bill_date = bill_date.replace(tzinfo=timezone.utc)
-                                if start_date_dt <= bill_date <= end_date_dt:
-                                    filtered_bills[bill_id] = bill_record
-                            except ValueError:
-                                # If date parsing fails, include the bill
-                                filtered_bills[bill_id] = bill_record
-                        else:
-                            # If no introduced date, include the bill
-                            filtered_bills[bill_id] = bill_record
-                    bills = filtered_bills
-                    log_print(f"📅 Filtered to {len(bills)} bill(s) within date range")
-                
-                # Store bills to DynamoDB in parallel
-                if bills:
-                    log_print(f"💾 Storing {len(bills)} bill(s) to DynamoDB...")
-                    store_workers = min(20, len(bills))
-                    
-                    def store_bill(bill_id: str, bill_record: Dict):
-                        try:
-                            store_bill_to_dynamodb(bill_record)
-                            return True, None
-                        except Exception as e:
-                            error_msg = f"Error storing {bill_id}: {str(e)[:200]}"
-                            return False, error_msg
-                    
-                    with ThreadPoolExecutor(max_workers=store_workers) as executor:
-                        future_to_bill = {
-                            executor.submit(store_bill, bill_id, bill_record): bill_id
-                            for bill_id, bill_record in bills.items()
-                        }
-                        
-                        for future in as_completed(future_to_bill):
-                            bill_id = future_to_bill[future]
-                            try:
-                                success, error_msg = future.result()
-                                if success:
-                                    processed_count += 1
-                                    total_bills_processed += 1
-                                else:
-                                    error_count += 1
-                                    if error_msg:
-                                        log_print(f"      ❌ {error_msg}")
-                            except Exception as e:
-                                error_count += 1
-                                log_print(f"      ❌ Exception storing {bill_id}: {str(e)[:200]}")
-                    
-                    log_print(f"✅ Stored {len(bills)} {bill_type} bill(s) for Congress {congress_num}")
-                else:
-                    log_print(f"ℹ️ No bills found for {bill_type} in Congress {congress_num}")
-                
-                # Clear memory before next bill type
-                del bills
+                try:
+                    files_processed, bills_stored = process_bulk_zip_file(
+                        congress_num, bill_type, start_date_simple, end_date_simple,
+                        politicians, zip_content=zip_content, zip_s3_key=zip_s3_key,
+                        start_date_dt=start_date_dt, end_date_dt=end_date_dt
+                    )
+                    log_print(f"📊 Processing complete: {files_processed} XML file(s) processed, {bills_stored} bill(s) stored for {bill_type} in Congress {congress_num}")
+                    processed_count += bills_stored
+                    total_bills_processed += bills_stored
+                except Exception as e:
+                    error_msg = f"❌ Error processing ZIP file for {bill_type} in Congress {congress_num}: {str(e)[:300]}"
+                    log_print(error_msg)
+                    logger.error(error_msg, exc_info=True)
+                    error_count += 1
+                    continue
                 if zip_content:
                     del zip_content
                 gc.collect()
