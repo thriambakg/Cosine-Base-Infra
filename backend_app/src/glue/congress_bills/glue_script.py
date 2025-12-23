@@ -26,6 +26,7 @@ import gc
 import csv
 import re
 import gzip
+import threading
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from io import StringIO
@@ -393,16 +394,87 @@ bills_table = dynamodb.Table(BILLS_TABLE_NAME) if BILLS_TABLE_NAME else None
 # Helper Functions (same as Lambda)
 # ============================================================================
 
-def get_congress_api_key() -> str:
-    """Get Congress.gov API key from AWS Secrets Manager"""
+class ApiKeyRotator:
+    """
+    Thread-safe round-robin API key rotator.
+    Distributes API calls equally across all available API keys.
+    """
+    def __init__(self, api_keys: List[str]):
+        if not api_keys:
+            raise ValueError("At least one API key is required")
+        self.api_keys = api_keys
+        self.lock = threading.Lock()
+        self.current_index = 0
+        log_print(f"✅ Initialized API key rotator with {len(api_keys)} key(s)")
+    
+    def get_key(self) -> str:
+        """Get the next API key in round-robin fashion (thread-safe)"""
+        with self.lock:
+            key = self.api_keys[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.api_keys)
+            return key
+    
+    def get_key_count(self) -> int:
+        """Get the number of available API keys"""
+        return len(self.api_keys)
+
+
+# Global API key rotator instance (initialized once)
+_api_key_rotator: Optional[ApiKeyRotator] = None
+
+
+def get_congress_api_keys() -> ApiKeyRotator:
+    """
+    Get all Congress.gov API keys from AWS Secrets Manager and return a rotator.
+    Supports api_key, api_key_2, api_key_3, etc. - any number of keys.
+    Returns a thread-safe rotator that distributes calls equally across all keys.
+    """
+    global _api_key_rotator
+    
+    # Return cached rotator if already initialized
+    if _api_key_rotator is not None:
+        return _api_key_rotator
+    
     try:
         secret_name = f"{PROJECT_NAME}-congress-api-{ENVIRONMENT}"
         response = secrets_client.get_secret_value(SecretId=secret_name)
         secret_data = json.loads(response['SecretString'])
-        return secret_data['api_key']
+        
+        # Collect all API keys (api_key, api_key_2, api_key_3, etc.)
+        api_keys = []
+        
+        # Always include api_key if present
+        if 'api_key' in secret_data and secret_data['api_key']:
+            api_keys.append(secret_data['api_key'])
+        
+        # Collect additional keys (api_key_2, api_key_3, etc.)
+        key_index = 2
+        while f'api_key_{key_index}' in secret_data:
+            key_value = secret_data[f'api_key_{key_index}']
+            if key_value and key_value.strip():  # Only add non-empty keys
+                api_keys.append(key_value)
+            key_index += 1
+        
+        if not api_keys:
+            raise ValueError("No valid API keys found in secret")
+        
+        # Initialize the rotator
+        _api_key_rotator = ApiKeyRotator(api_keys)
+        log_print(f"✅ Retrieved {len(api_keys)} Congress API key(s) from Secrets Manager")
+        return _api_key_rotator
+        
     except Exception as e:
-        log_print(f"❌ Error retrieving Congress API key from Secrets Manager: {str(e)}")
-        raise ValueError(f"Failed to retrieve Congress API key from Secrets Manager: {str(e)}")
+        log_print(f"❌ Error retrieving Congress API keys from Secrets Manager: {str(e)}")
+        raise ValueError(f"Failed to retrieve Congress API keys from Secrets Manager: {str(e)}")
+
+
+def get_congress_api_key() -> str:
+    """
+    Get a single Congress.gov API key using round-robin rotation.
+    This function maintains backward compatibility while using the rotator.
+    """
+    rotator = get_congress_api_keys()
+    return rotator.get_key()
 
 def calculate_congress_from_date(date: datetime) -> int:
     """
@@ -476,9 +548,13 @@ def get_congresses_from_date_range(start_date: datetime, end_date: datetime) -> 
     return congresses
 
 
-def get_current_congress(api_key: str) -> int:
-    """Get the current Congress number."""
+def get_current_congress(api_key: Optional[str] = None) -> int:
+    """Get the current Congress number. Uses rotator if api_key is None."""
     url = f"{API_BASE_URL}/congress"
+    # Use rotator if api_key not provided
+    if api_key is None:
+        rotator = get_congress_api_keys()
+        api_key = rotator.get_key()
     params = {"api_key": api_key, "format": "json"}
     
     try:
@@ -527,11 +603,22 @@ def get_current_congress(api_key: str) -> int:
         return congress
 
 
-def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
-    """Make API request with retry logic and exponential backoff for rate limiting."""
+def make_api_request(url: str, params: Dict[str, Any], api_key: Optional[str] = None, retries: int = MAX_RETRIES) -> Optional[Dict]:
+    """
+    Make API request with retry logic and exponential backoff for rate limiting.
+    If api_key is None, gets a key from the rotator (for load balancing across multiple keys).
+    On each retry, switches to a different API key to avoid rate limits on a single key.
+    """
+    rotator = None
+    # Get API key from rotator if not provided (for load balancing)
+    if api_key is None:
+        rotator = get_congress_api_keys()
+        api_key = rotator.get_key()
+    
     # Ensure API key is in params
     if "api_key" not in params:
         params["api_key"] = api_key
+    
     for attempt in range(retries):
         try:
             response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
@@ -539,9 +626,15 @@ def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: in
             # Handle 429 Too Many Requests with exponential backoff
             if response.status_code == 429:
                 if attempt < retries - 1:
+                    # Switch to a different API key for retry (if rotator available)
+                    if rotator is None:
+                        rotator = get_congress_api_keys()
+                    new_api_key = rotator.get_key()
+                    params["api_key"] = new_api_key
+                    
                     # Exponential backoff: 2^attempt seconds, with a minimum of 5 seconds for 429
                     wait_time = max(5, (2 ** attempt) * RETRY_DELAY)
-                    log_print(f"      ⚠️ Rate limited (429) - waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                    log_print(f"      ⚠️ Rate limited (429) with key - switching to different key and waiting {wait_time}s before retry {attempt + 1}/{retries}")
                     time.sleep(wait_time)
                     continue
                 else:
@@ -552,9 +645,15 @@ def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: in
             return response.json()
         except requests.exceptions.HTTPError as e:
             if attempt < retries - 1:
+                # Switch to a different API key for retry (if rotator available)
+                if rotator is None:
+                    rotator = get_congress_api_keys()
+                new_api_key = rotator.get_key()
+                params["api_key"] = new_api_key
+                
                 # For other HTTP errors, use linear backoff
                 wait_time = RETRY_DELAY * (attempt + 1)
-                log_print(f"      ⚠️ Request failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
+                log_print(f"      ⚠️ Request failed (attempt {attempt + 1}/{retries}) - switching to different key and waiting {wait_time}s: {str(e)[:100]}")
                 time.sleep(wait_time)
             else:
                 log_print(f"      ❌ Request failed after {retries} attempts: {str(e)[:100]}")
@@ -578,7 +677,8 @@ def fetch_bills_list(congress: int, bill_type: str, from_date: str, to_date: str
             "toDateTime": to_date
         }
         
-        data = make_api_request(url, params, api_key)
+        # Use rotator for load balancing across multiple API keys
+        data = make_api_request(url, params, None)
         if not data:
             break
         
@@ -625,7 +725,8 @@ def fetch_bill_details(congress: int, bill_type: str, bill_number: int, api_key:
     url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}"
     params = {"format": "json"}
     
-    data = make_api_request(url, params, api_key)
+    # Use rotator for load balancing across multiple API keys
+    data = make_api_request(url, params, None)
     if data and isinstance(data, dict):
         return data.get("bill", data)
     return data
@@ -649,7 +750,8 @@ def fetch_bill_actions(congress: int, bill_type: str, bill_number: int, api_key:
             "limit": limit
         }
         
-        data = make_api_request(url, params, api_key)
+        # Use rotator for load balancing across multiple API keys
+        data = make_api_request(url, params, None)
         if not data:
             break
         
@@ -704,7 +806,8 @@ def fetch_bill_amendments(congress: int, bill_type: str, bill_number: int, api_k
             "limit": limit
         }
         
-        data = make_api_request(url, params, api_key)
+        # Use rotator for load balancing across multiple API keys
+        data = make_api_request(url, params, None)
         if not data:
             break
         
@@ -759,7 +862,8 @@ def fetch_bill_cosponsors(congress: int, bill_type: str, bill_number: int, api_k
             "limit": limit
         }
         
-        data = make_api_request(url, params, api_key)
+        # Use rotator for load balancing across multiple API keys
+        data = make_api_request(url, params, None)
         if not data:
             break
         
@@ -814,7 +918,8 @@ def fetch_bill_summaries(congress: int, bill_type: str, bill_number: int, api_ke
             "limit": limit
         }
         
-        data = make_api_request(url, params, api_key)
+        # Use rotator for load balancing across multiple API keys
+        data = make_api_request(url, params, None)
         if not data:
             break
         
@@ -860,7 +965,8 @@ def fetch_bill_subjects(congress: int, bill_type: str, bill_number: int, api_key
     url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/subjects"
     params = {"format": "json"}
     
-    data = make_api_request(url, params, api_key)
+    # Use rotator for load balancing across multiple API keys
+    data = make_api_request(url, params, None)
     if data and isinstance(data, dict):
         return data.get("subjects", {})
     return {}
@@ -883,7 +989,8 @@ def fetch_bill_titles(congress: int, bill_type: str, bill_number: int, api_key: 
             "limit": limit
         }
         
-        data = make_api_request(url, params, api_key)
+        # Use rotator for load balancing across multiple API keys
+        data = make_api_request(url, params, None)
         if not data:
             break
         
@@ -932,7 +1039,8 @@ def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, ap
     url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/text"
     params = {"format": "json"}
     
-    data = make_api_request(url, params, api_key)
+    # Use rotator for load balancing across multiple API keys
+    data = make_api_request(url, params, None)
     if not data:
         return []
     
@@ -1697,12 +1805,13 @@ def main():
     if not BILLS_TABLE_NAME:
         raise ValueError("BILLS_TABLE_NAME job parameter not set")
     
-    # Get API key from Secrets Manager
+    # Initialize API key rotator (supports multiple keys for load balancing)
     try:
-        api_key = get_congress_api_key()
-        log_print("✅ Retrieved Congress API key from Secrets Manager")
+        rotator = get_congress_api_keys()
+        api_key = rotator.get_key()  # Get one key for backward compatibility (e.g., get_current_congress)
+        log_print(f"✅ Initialized API key rotator with {rotator.get_key_count()} key(s) for load balancing")
     except Exception as e:
-        log_print(f"❌ Failed to retrieve API key: {str(e)}")
+        log_print(f"❌ Failed to retrieve API keys: {str(e)}")
         raise
     
     # Parse date parameters
@@ -1818,7 +1927,8 @@ def main():
         log_print(f"✅ Auto-detected Congress(es) from date range: {congresses_to_query}")
     else:
         # Fallback to current congress
-        current_congress = get_current_congress(api_key)
+        # Use rotator for load balancing
+        current_congress = get_current_congress(None)
         congresses_to_query = [current_congress]
         log_print(f"✅ Using current Congress: {current_congress}")
     

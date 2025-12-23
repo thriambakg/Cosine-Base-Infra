@@ -123,8 +123,10 @@ module "congress_api_secrets_manager" {
     congress-api = {
       description = "Congress.gov API key for legislative data (populated manually)"
       secret_data = {
-        # Placeholder value - will be updated manually in console
-        api_key = "PLACEHOLDER_CONGRESS_API_KEY"
+        # Placeholder values - will be updated manually in console
+        # Supports multiple API keys for load balancing (api_key, api_key_2, api_key_3, etc.)
+        api_key   = "PLACEHOLDER_CONGRESS_API_KEY"
+        api_key_2 = "PLACEHOLDER_CONGRESS_API_KEY_2"
       }
     }
   }
