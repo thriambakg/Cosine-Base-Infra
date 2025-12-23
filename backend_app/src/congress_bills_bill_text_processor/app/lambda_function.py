@@ -38,40 +38,99 @@ RETRY_DELAY = int(os.environ.get('RETRY_DELAY', '2'))
 # Get DynamoDB table
 bills_table = dynamodb.Table(BILLS_TABLE_NAME) if BILLS_TABLE_NAME else None
 
-# Cache for API key
-_cached_api_key = None
+# API Key Rotator for load balancing across multiple keys
+import threading
 
+class ApiKeyRotator:
+    """Thread-safe API key rotator for round-robin distribution across multiple keys"""
+    def __init__(self, api_keys: list):
+        self.api_keys = api_keys
+        self.current_index = 0
+        self.lock = threading.Lock()
+    
+    def get_key(self) -> str:
+        """Get next API key in round-robin fashion"""
+        with self.lock:
+            key = self.api_keys[self.current_index]
+            self.current_index = (self.current_index + 1) % len(self.api_keys)
+            return key
+    
+    def switch_key(self) -> str:
+        """Switch to next API key (for retries)"""
+        return self.get_key()
+    
+    def count(self) -> int:
+        """Get number of available keys"""
+        return len(self.api_keys)
+
+# Global rotator instance
+_api_key_rotator = None
+_rotator_lock = threading.Lock()
+
+def get_congress_api_keys() -> ApiKeyRotator:
+    """Get Congress.gov API keys from AWS Secrets Manager and return rotator"""
+    global _api_key_rotator
+    
+    with _rotator_lock:
+        if _api_key_rotator:
+            return _api_key_rotator
+        
+        try:
+            secret_name = f"{PROJECT_NAME}-congress-api-{ENVIRONMENT}"
+            response = secrets_client.get_secret_value(SecretId=secret_name)
+            secret_data = json.loads(response['SecretString'])
+            
+            # Extract all API keys (api_key, api_key_2, api_key_3, etc.)
+            api_keys = []
+            key_index = 1
+            while True:
+                if key_index == 1:
+                    key_name = 'api_key'
+                else:
+                    key_name = f'api_key_{key_index}'
+                
+                if key_name in secret_data and secret_data[key_name]:
+                    api_keys.append(secret_data[key_name])
+                    key_index += 1
+                else:
+                    break
+            
+            if not api_keys:
+                raise ValueError("No API keys found in secret")
+            
+            _api_key_rotator = ApiKeyRotator(api_keys)
+            logger.info(f"✅ Initialized API key rotator with {len(api_keys)} key(s)")
+            return _api_key_rotator
+        except Exception as e:
+            logger.error(f"❌ Error retrieving Congress API keys from Secrets Manager: {str(e)}")
+            raise ValueError(f"Failed to retrieve Congress API keys from Secrets Manager: {str(e)}")
 
 def get_congress_api_key() -> str:
-    """Get Congress.gov API key from AWS Secrets Manager (with caching)"""
-    global _cached_api_key
-    if _cached_api_key:
-        return _cached_api_key
+    """Get next API key from rotator"""
+    rotator = get_congress_api_keys()
+    return rotator.get_key()
+
+
+def make_api_request(url: str, params: Dict[str, Any], retries: int = MAX_RETRIES) -> Optional[Dict]:
+    """Make API request with retry logic, exponential backoff, and API key rotation."""
+    rotator = get_congress_api_keys()
+    current_key = rotator.get_key()
     
-    try:
-        secret_name = f"{PROJECT_NAME}-congress-api-{ENVIRONMENT}"
-        response = secrets_client.get_secret_value(SecretId=secret_name)
-        secret_data = json.loads(response['SecretString'])
-        _cached_api_key = secret_data['api_key']
-        return _cached_api_key
-    except Exception as e:
-        logger.error(f"❌ Error retrieving Congress API key from Secrets Manager: {str(e)}")
-        raise ValueError(f"Failed to retrieve Congress API key from Secrets Manager: {str(e)}")
-
-
-def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
-    """Make API request with retry logic and exponential backoff for rate limiting."""
-    if "api_key" not in params:
-        params["api_key"] = api_key
     for attempt in range(retries):
         try:
-            response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
+            # Use current key for this attempt
+            params_with_key = params.copy()
+            params_with_key["api_key"] = current_key
             
-            # Handle 429 Too Many Requests with exponential backoff
+            response = requests.get(url, params=params_with_key, timeout=REQUEST_TIMEOUT)
+            
+            # Handle 429 Too Many Requests with exponential backoff and key switching
             if response.status_code == 429:
                 if attempt < retries - 1:
+                    # Switch to different key for retry
+                    current_key = rotator.switch_key()
                     wait_time = max(5, (2 ** attempt) * RETRY_DELAY)
-                    logger.warning(f"Rate limited (429) - waiting {wait_time}s before retry {attempt + 1}/{retries}")
+                    logger.warning(f"⚠️ Rate limited (429) with key - switching to different key and waiting {wait_time}s before retry {attempt + 1}/{retries}")
                     time.sleep(wait_time)
                     continue
                 else:
@@ -82,16 +141,20 @@ def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: in
             return response.json()
         except requests.exceptions.HTTPError as e:
             if attempt < retries - 1:
+                # Switch to different key for retry
+                current_key = rotator.switch_key()
                 wait_time = RETRY_DELAY * (attempt + 1)
-                logger.warning(f"Request failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
+                logger.warning(f"Request failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}. Switching API key and retrying...")
                 time.sleep(wait_time)
             else:
                 logger.error(f"Request failed after {retries} attempts: {str(e)[:100]}")
                 return None
         except requests.exceptions.RequestException as e:
             if attempt < retries - 1:
+                # Switch to different key for retry
+                current_key = rotator.switch_key()
                 wait_time = RETRY_DELAY * (attempt + 1)
-                logger.warning(f"Request failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
+                logger.warning(f"Request failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}. Switching API key and retrying...")
                 time.sleep(wait_time)
             else:
                 logger.error(f"Request failed after {retries} attempts: {str(e)[:100]}")
@@ -99,12 +162,12 @@ def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: in
     return None
 
 
-def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, api_key: str) -> list:
+def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int) -> list:
     """Fetch all text versions available for a bill."""
     url = f"{CONGRESS_API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/text"
     params = {"format": "json"}
     
-    data = make_api_request(url, params, api_key)
+    data = make_api_request(url, params)
     if not data:
         return []
     
@@ -186,13 +249,12 @@ def store_bill_text_to_s3(bill_id: str, text_content: bytes) -> str:
     return s3_key
 
 
-def process_bill_text_download(bill_id: str, api_key: str) -> tuple[bool, Optional[str]]:
+def process_bill_text_download(bill_id: str) -> tuple[bool, Optional[str]]:
     """
     Process a single bill text download.
     
     Args:
         bill_id: Bill ID (e.g., "119-HR-303")
-        api_key: Congress.gov API key
         
     Returns:
         (success: bool, s3_key: Optional[str])
@@ -209,13 +271,16 @@ def process_bill_text_download(bill_id: str, api_key: str) -> tuple[bool, Option
         
         logger.info(f"📋 Processing {bill_id}...")
         
-        # Fetch text versions
-        text_versions = fetch_bill_text_versions(congress, bill_type, bill_number, api_key)
+        # Fetch text versions (API key rotation handled internally)
+        text_versions = fetch_bill_text_versions(congress, bill_type, bill_number)
         if not text_versions:
             logger.warning(f"⚠️  No text versions found for {bill_id}, setting key to empty")
-            # Update DynamoDB with empty key
+            # Update DynamoDB with empty key (include both keys for composite key table)
             bills_table.update_item(
-                Key={'bill_id': bill_id},
+                Key={
+                    'bill_id': bill_id,
+                    'search_index_sk': bill_id  # For regular bills, search_index_sk equals bill_id
+                },
                 UpdateExpression="SET bill_text_html_s3_key = :html_key",
                 ExpressionAttributeValues={':html_key': ""}
             )
@@ -267,9 +332,12 @@ def process_bill_text_download(bill_id: str, api_key: str) -> tuple[bool, Option
                     html_content = download_bill_text_file(html_url)
                     if html_content:
                         bill_text_html_s3_key = store_bill_text_to_s3(bill_id, html_content)
-                        # Update DynamoDB
+                        # Update DynamoDB (include both keys for composite key table)
                         bills_table.update_item(
-                            Key={'bill_id': bill_id},
+                            Key={
+                                'bill_id': bill_id,
+                                'search_index_sk': bill_id  # For regular bills, search_index_sk equals bill_id
+                            },
                             UpdateExpression="SET bill_text_html_s3_key = :html_key",
                             ExpressionAttributeValues={':html_key': bill_text_html_s3_key}
                         )
@@ -278,7 +346,10 @@ def process_bill_text_download(bill_id: str, api_key: str) -> tuple[bool, Option
                     else:
                         logger.warning(f"⚠️  Failed to download HTML bill text, setting key to empty")
                         bills_table.update_item(
-                            Key={'bill_id': bill_id},
+                            Key={
+                                'bill_id': bill_id,
+                                'search_index_sk': bill_id
+                            },
                             UpdateExpression="SET bill_text_html_s3_key = :html_key",
                             ExpressionAttributeValues={':html_key': ""}
                         )
@@ -286,7 +357,10 @@ def process_bill_text_download(bill_id: str, api_key: str) -> tuple[bool, Option
                 except Exception as e:
                     logger.error(f"⚠️  Error downloading HTML bill text: {str(e)}, setting key to empty")
                     bills_table.update_item(
-                        Key={'bill_id': bill_id},
+                        Key={
+                            'bill_id': bill_id,
+                            'search_index_sk': bill_id
+                        },
                         UpdateExpression="SET bill_text_html_s3_key = :html_key",
                         ExpressionAttributeValues={':html_key': ""}
                     )
@@ -294,7 +368,10 @@ def process_bill_text_download(bill_id: str, api_key: str) -> tuple[bool, Option
             else:
                 logger.warning(f"⚠️  No HTML URL found, setting key to empty")
                 bills_table.update_item(
-                    Key={'bill_id': bill_id},
+                    Key={
+                        'bill_id': bill_id,
+                        'search_index_sk': bill_id
+                    },
                     UpdateExpression="SET bill_text_html_s3_key = :html_key",
                     ExpressionAttributeValues={':html_key': ""}
                 )
@@ -302,7 +379,10 @@ def process_bill_text_download(bill_id: str, api_key: str) -> tuple[bool, Option
         else:
             logger.warning(f"⚠️  No format items found, setting key to empty")
             bills_table.update_item(
-                Key={'bill_id': bill_id},
+                Key={
+                    'bill_id': bill_id,
+                    'search_index_sk': bill_id
+                },
                 UpdateExpression="SET bill_text_html_s3_key = :html_key",
                 ExpressionAttributeValues={':html_key': ""}
             )
@@ -314,7 +394,7 @@ def process_bill_text_download(bill_id: str, api_key: str) -> tuple[bool, Option
         return False, None
 
 
-def process_message(record: Dict[str, Any], api_key: str) -> tuple[bool, Optional[str]]:
+def process_message(record: Dict[str, Any]) -> tuple[bool, Optional[str]]:
     """
     Process a single SQS message.
     
@@ -338,7 +418,7 @@ def process_message(record: Dict[str, Any], api_key: str) -> tuple[bool, Optiona
             logger.error("❌ Message missing bill_id")
             return (False, None)
         
-        success, s3_key = process_bill_text_download(bill_id, api_key)
+        success, s3_key = process_bill_text_download(bill_id)
         return (success, bill_id)
         
     except Exception as e:
@@ -361,16 +441,16 @@ def lambda_handler(event, context):
     
     logger.info(f"Processing {total_messages} message(s) sequentially")
     
-    # Get API key once for all messages
+    # Initialize API key rotator (will be used by make_api_request)
     try:
-        api_key = get_congress_api_key()
+        get_congress_api_keys()
     except Exception as e:
-        logger.error(f"❌ Failed to retrieve API key: {str(e)}")
+        logger.error(f"❌ Failed to retrieve API keys: {str(e)}")
         return {
             'statusCode': 500,
             'body': json.dumps({
                 'success': False,
-                'error': f"Failed to retrieve API key: {str(e)}"
+                'error': f"Failed to retrieve API keys: {str(e)}"
             })
         }
     
@@ -380,7 +460,7 @@ def lambda_handler(event, context):
     # Process messages sequentially (one at a time)
     for i, record in enumerate(records, 1):
         logger.info(f"Processing message {i}/{total_messages}")
-        success, bill_id = process_message(record, api_key)
+        success, bill_id = process_message(record)
         
         if success:
             success_count += 1

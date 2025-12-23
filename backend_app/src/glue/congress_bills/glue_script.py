@@ -1049,13 +1049,20 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             return None
         
         # Extract basic bill info
+        # XML uses <number> and <type> (not <billNumber> and <billType>)
         congress_elem = bill_elem.find('congress')
         congress = int(congress_elem.text) if congress_elem is not None and congress_elem.text else None
         
-        bill_type_elem = bill_elem.find('billType')
+        # Try both <type> and <billType> for compatibility
+        bill_type_elem = bill_elem.find('type')
+        if bill_type_elem is None:
+            bill_type_elem = bill_elem.find('billType')
         bill_type = bill_type_elem.text.upper() if bill_type_elem is not None and bill_type_elem.text else None
         
-        bill_number_elem = bill_elem.find('billNumber')
+        # Try both <number> and <billNumber> for compatibility
+        bill_number_elem = bill_elem.find('number')
+        if bill_number_elem is None:
+            bill_number_elem = bill_elem.find('billNumber')
         bill_number = bill_number_elem.text if bill_number_elem is not None and bill_number_elem.text else None
         
         if not congress or not bill_type or not bill_number:
@@ -1090,17 +1097,25 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         introduced_date = introduced_date_elem.text if introduced_date_elem is not None and introduced_date_elem.text else None
         introduced_date = introduced_date if introduced_date else None
         
-        # Extract latest action date
+        # Extract latest action date (from <latestAction> or first action)
         latest_action_date = None
-        actions_elem = bill_elem.find('actions')
-        if actions_elem is not None:
-            action_items = actions_elem.findall('item')
-            if action_items:
-                # Get first action (most recent)
-                first_action = action_items[0]
-                action_date_elem = first_action.find('actionDate')
-                if action_date_elem is not None and action_date_elem.text:
-                    latest_action_date = action_date_elem.text
+        latest_action_elem = bill_elem.find('latestAction')
+        if latest_action_elem is not None:
+            action_date_elem = latest_action_elem.find('actionDate')
+            if action_date_elem is not None and action_date_elem.text:
+                latest_action_date = action_date_elem.text
+        
+        # Fallback to first action if latestAction not found
+        if not latest_action_date:
+            actions_elem = bill_elem.find('actions')
+            if actions_elem is not None:
+                action_items = actions_elem.findall('item')
+                if action_items:
+                    # Get first action (most recent)
+                    first_action = action_items[0]
+                    action_date_elem = first_action.find('actionDate')
+                    if action_date_elem is not None and action_date_elem.text:
+                        latest_action_date = action_date_elem.text
         
         # Extract primary sponsor
         primary_sponsor = {}
@@ -1281,31 +1296,45 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         summaries = []
         summaries_elem = bill_elem.find('summaries')
         if summaries_elem is not None:
-            summary_items = summaries_elem.findall('item')
+            # Summaries use <summary> elements, not <item>
+            summary_items = summaries_elem.findall('summary')
             for summary_item in summary_items:
                 summary = {}
                 
-                text_elem = summary_item.find('text')
-                if text_elem is not None and text_elem.text:
-                    summary['text'] = text_elem.text
+                # Try to get text from <cdata><text> structure (current format)
+                cdata_elem = summary_item.find('cdata')
+                if cdata_elem is not None:
+                    text_in_cdata = cdata_elem.find('text')
+                    if text_in_cdata is not None and text_in_cdata.text:
+                        summary['text'] = text_in_cdata.text
+                
+                # Fallback to direct <text> element
+                if not summary.get('text'):
+                    text_elem = summary_item.find('text')
+                    if text_elem is not None and text_elem.text:
+                        summary['text'] = text_elem.text
                 
                 version_elem = summary_item.find('versionCode')
                 if version_elem is not None and version_elem.text:
                     summary['versionCode'] = version_elem.text
                 
-                summaries.append(summary)
+                action_desc_elem = summary_item.find('actionDesc')
+                if action_desc_elem is not None and action_desc_elem.text:
+                    summary['actionDesc'] = action_desc_elem.text
+                
+                if summary.get('text'):  # Only add if we have text
+                    summaries.append(summary)
         
         # Extract subjects/policy area
         policy_area = ""
         subjects_elem = bill_elem.find('subjects')
         if subjects_elem is not None:
-            policy_area_item = subjects_elem.find('billSubjects')
-            if policy_area_item is not None:
-                policy_area_elem = policy_area_item.find('item')
-                if policy_area_elem is not None:
-                    name_elem = policy_area_elem.find('name')
-                    if name_elem is not None and name_elem.text:
-                        policy_area = name_elem.text
+            # Policy area is directly under <subjects> as <policyArea>
+            policy_area_elem = subjects_elem.find('policyArea')
+            if policy_area_elem is not None:
+                name_elem = policy_area_elem.find('name')
+                if name_elem is not None and name_elem.text:
+                    policy_area = name_elem.text
         
         # Extract amendments
         amendments = []
