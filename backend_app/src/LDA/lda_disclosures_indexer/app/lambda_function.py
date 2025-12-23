@@ -21,6 +21,7 @@ from contributions import process_contributions_page
 
 # Environment variables
 DLQ_QUEUE_URL = os.environ.get('DLQ_QUEUE_URL')
+SOURCE_QUEUE_ARN = os.environ.get('SOURCE_QUEUE_ARN')  # Source queue ARN for DLQ redrive support
 
 # AWS clients
 sqs_client = boto3.client('sqs') if DLQ_QUEUE_URL else None
@@ -39,10 +40,26 @@ def send_to_dlq(message_body: Dict, error: str):
             'failed_at': time.time(),
             'dlq_source': 'lda_disclosures_indexer'
         }
-        sqs_client.send_message(
-            QueueUrl=DLQ_QUEUE_URL,
-            MessageBody=json.dumps(dlq_message)
-        )
+        
+        # Prepare message attributes for redrive support
+        message_attributes = {}
+        if SOURCE_QUEUE_ARN:
+            # Include source queue ARN as message attribute to enable redrive
+            message_attributes['sourceQueueArn'] = {
+                'StringValue': SOURCE_QUEUE_ARN,
+                'DataType': 'String'
+            }
+        
+        send_params = {
+            'QueueUrl': DLQ_QUEUE_URL,
+            'MessageBody': json.dumps(dlq_message)
+        }
+        
+        # Add message attributes if source queue ARN is available
+        if message_attributes:
+            send_params['MessageAttributes'] = message_attributes
+        
+        sqs_client.send_message(**send_params)
         print(f"📤 Sent failed message to DLQ: {error}")
         return True
     except Exception as e:
