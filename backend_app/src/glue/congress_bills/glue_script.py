@@ -889,15 +889,36 @@ def store_bill_to_dynamodb(record: Dict):
     if 'search_index_sk' not in record or not record.get('search_index_sk'):
         record['search_index_sk'] = bill_id
     
+    # Validate that we have the essential fields
+    if not bill_id or bill_id == 'unknown':
+        log_print(f"      ⚠️ Skipping bill with invalid bill_id: {bill_id}")
+        return
+    
+    # Log record size and key fields for debugging
+    record_size = len(str(record))
+    key_fields = {
+        'bill_id': record.get('bill_id'),
+        'search_index_sk': record.get('search_index_sk'),
+        'bill_title': record.get('bill_title', '')[:50] if record.get('bill_title') else '',
+        'sponsor_full_name': record.get('sponsor_full_name', '')[:50] if record.get('sponsor_full_name') else '',
+        'congress': record.get('congress'),
+        'bill_type': record.get('bill_type'),
+        'bill_number': record.get('bill_number'),
+    }
+    log_print(f"      📝 Storing {bill_id}: {len(record)} fields, {record_size:,} bytes. Key fields: {key_fields}")
+    
     # Clean up empty string GSI keys before storing
     record = clean_empty_gsi_keys(record)
     
     max_put_retries = 3
     
+    # Remove temporary _text_versions field before storing (store it separately for SQS)
+    text_versions = record.pop('_text_versions', [])
+    
     for put_attempt in range(max_put_retries):
         try:
             bills_table.put_item(Item=record)
-            log_print(f"      ✅ Stored {bill_id} to DynamoDB")
+            log_print(f"      ✅ Stored {bill_id} to DynamoDB with {len(record)} fields")
             
             # Create cosponsor search index items
             cosponsors_json = record.get('cosponsors_json', '')
@@ -920,6 +941,20 @@ def store_bill_to_dynamodb(record: Dict):
                                     log_print(f"      ⚠️ Failed to create cosponsor index for {cosponsor_name} on {bill_id}: {str(idx_error)[:200]}")
                 except (json.JSONDecodeError, TypeError) as e:
                     log_print(f"      ⚠️ Failed to parse cosponsors_json for {bill_id}: {str(e)[:200]}")
+            
+            # Send bill text download request to SQS AFTER bill is stored (maintain existing functionality)
+            if text_versions and BILL_TEXT_SQS_URL:
+                try:
+                    message_body = {'bill_id': bill_id}
+                    message_json = json.dumps(message_body, default=str)
+                    
+                    sqs_client.send_message(
+                        QueueUrl=BILL_TEXT_SQS_URL,
+                        MessageBody=message_json
+                    )
+                    log_print(f"      📤 Sent bill text download request for {bill_id} to SQS")
+                except Exception as e:
+                    log_print(f"      ⚠️ Error sending bill text download to SQS: {str(e)[:200]}")
             
             return
         except Exception as put_error:
@@ -960,6 +995,20 @@ def store_bill_to_dynamodb(record: Dict):
                                             log_print(f"      ⚠️ Failed to create cosponsor index for {cosponsor_name} on {bill_id}: {str(idx_error)[:200]}")
                         except (json.JSONDecodeError, TypeError) as e:
                             log_print(f"      ⚠️ Failed to parse cosponsors_json for {bill_id}: {str(e)[:200]}")
+                    
+                    # Send bill text download request to SQS AFTER bill is stored
+                    if text_versions and BILL_TEXT_SQS_URL:
+                        try:
+                            message_body = {'bill_id': bill_id}
+                            message_json = json.dumps(message_body, default=str)
+                            
+                            sqs_client.send_message(
+                                QueueUrl=BILL_TEXT_SQS_URL,
+                                MessageBody=message_json
+                            )
+                            log_print(f"      📤 Sent bill text download request for {bill_id} to SQS")
+                        except Exception as e:
+                            log_print(f"      ⚠️ Error sending bill text download to SQS: {str(e)[:200]}")
                     
                     return
                 except Exception as gsi_error:
@@ -1516,19 +1565,8 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         else:
             record["bipartisan"] = 0
         
-        # Send bill text download request to SQS (maintain existing functionality)
-        if text_versions and BILL_TEXT_SQS_URL:
-            try:
-                message_body = {'bill_id': bill_id_str}
-                message_json = json.dumps(message_body, default=str)
-                
-                sqs_client.send_message(
-                    QueueUrl=BILL_TEXT_SQS_URL,
-                    MessageBody=message_json
-                )
-                log_print(f"      📤 Sent bill text download request for {bill_id_str} to SQS")
-            except Exception as e:
-                log_print(f"      ⚠️ Error sending bill text download to SQS: {str(e)[:200]}")
+        # Store text versions in record for later SQS processing (after bill is stored)
+        record["_text_versions"] = text_versions  # Temporary field, will be removed before storage
         
         return record
         
