@@ -1097,6 +1097,9 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         introduced_date = introduced_date_elem.text if introduced_date_elem is not None and introduced_date_elem.text else None
         introduced_date = introduced_date if introduced_date else None
         
+        # Find actions element (used for both latest action date and actions extraction)
+        actions_elem = bill_elem.find('actions')
+        
         # Extract latest action date (from <latestAction> or first action)
         latest_action_date = None
         latest_action_elem = bill_elem.find('latestAction')
@@ -1106,16 +1109,14 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 latest_action_date = action_date_elem.text
         
         # Fallback to first action if latestAction not found
-        if not latest_action_date:
-            actions_elem = bill_elem.find('actions')
-            if actions_elem is not None:
-                action_items = actions_elem.findall('item')
-                if action_items:
-                    # Get first action (most recent)
-                    first_action = action_items[0]
-                    action_date_elem = first_action.find('actionDate')
-                    if action_date_elem is not None and action_date_elem.text:
-                        latest_action_date = action_date_elem.text
+        if not latest_action_date and actions_elem is not None:
+            action_items = actions_elem.findall('item')
+            if action_items:
+                # Get first action (most recent)
+                first_action = action_items[0]
+                action_date_elem = first_action.find('actionDate')
+                if action_date_elem is not None and action_date_elem.text:
+                    latest_action_date = action_date_elem.text
         
         # Extract primary sponsor
         primary_sponsor = {}
