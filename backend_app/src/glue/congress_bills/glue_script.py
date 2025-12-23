@@ -877,12 +877,17 @@ def clean_empty_gsi_keys(record: Dict) -> Dict:
 
 
 def store_bill_to_dynamodb(record: Dict):
-    """Store bill record to DynamoDB. Handles oversized items by storing to S3."""
+    """Store bill record to DynamoDB. Handles oversized items by storing to S3. Also creates cosponsor search index items."""
     if not bills_table:
         log_print("⚠️ DynamoDB table not configured, skipping storage")
         return
     
     bill_id = record.get('bill_id', 'unknown')
+    introduced_date = record.get('introduced_date', '')
+    
+    # Ensure search_index_sk is set (for regular bills, it equals bill_id)
+    if 'search_index_sk' not in record or not record.get('search_index_sk'):
+        record['search_index_sk'] = bill_id
     
     # Clean up empty string GSI keys before storing
     record = clean_empty_gsi_keys(record)
@@ -893,6 +898,29 @@ def store_bill_to_dynamodb(record: Dict):
         try:
             bills_table.put_item(Item=record)
             log_print(f"      ✅ Stored {bill_id} to DynamoDB")
+            
+            # Create cosponsor search index items
+            cosponsors_json = record.get('cosponsors_json', '')
+            if cosponsors_json:
+                try:
+                    import json
+                    cosponsors = json.loads(cosponsors_json) if isinstance(cosponsors_json, str) else cosponsors_json
+                    if isinstance(cosponsors, list):
+                        for cosponsor in cosponsors:
+                            # Extract cosponsor name (try fullName first, then name)
+                            cosponsor_name = cosponsor.get('fullName') or cosponsor.get('name', '')
+                            if cosponsor_name:
+                                try:
+                                    save_cosponsor_search_index_item(
+                                        cosponsor_name=cosponsor_name,
+                                        bill_id=bill_id,
+                                        introduced_date=introduced_date
+                                    )
+                                except Exception as idx_error:
+                                    log_print(f"      ⚠️ Failed to create cosponsor index for {cosponsor_name} on {bill_id}: {str(idx_error)[:200]}")
+                except (json.JSONDecodeError, TypeError) as e:
+                    log_print(f"      ⚠️ Failed to parse cosponsors_json for {bill_id}: {str(e)[:200]}")
+            
             return
         except Exception as put_error:
             error_str = str(put_error)
@@ -904,10 +932,35 @@ def store_bill_to_dynamodb(record: Dict):
                 oversize_s3_key = store_oversized_item_to_s3(bill_id, record)
                 gsi_only_item = extract_gsi_fields_only(record)
                 gsi_only_item['oversize_s3_key'] = oversize_s3_key
+                # Ensure search_index_sk is set for GSI-only item too
+                if 'search_index_sk' not in gsi_only_item or not gsi_only_item.get('search_index_sk'):
+                    gsi_only_item['search_index_sk'] = bill_id
                 
                 try:
                     bills_table.put_item(Item=gsi_only_item)
                     log_print(f"      ✅ Stored GSI fields for oversized bill {bill_id} to DynamoDB, full data in S3")
+                    
+                    # Still create cosponsor search index items even for oversized bills
+                    cosponsors_json = record.get('cosponsors_json', '')
+                    if cosponsors_json:
+                        try:
+                            import json
+                            cosponsors = json.loads(cosponsors_json) if isinstance(cosponsors_json, str) else cosponsors_json
+                            if isinstance(cosponsors, list):
+                                for cosponsor in cosponsors:
+                                    cosponsor_name = cosponsor.get('fullName') or cosponsor.get('name', '')
+                                    if cosponsor_name:
+                                        try:
+                                            save_cosponsor_search_index_item(
+                                                cosponsor_name=cosponsor_name,
+                                                bill_id=bill_id,
+                                                introduced_date=introduced_date
+                                            )
+                                        except Exception as idx_error:
+                                            log_print(f"      ⚠️ Failed to create cosponsor index for {cosponsor_name} on {bill_id}: {str(idx_error)[:200]}")
+                        except (json.JSONDecodeError, TypeError) as e:
+                            log_print(f"      ⚠️ Failed to parse cosponsors_json for {bill_id}: {str(e)[:200]}")
+                    
                     return
                 except Exception as gsi_error:
                     log_print(f"      ❌ Even GSI-only item too large for {bill_id}: {str(gsi_error)}")
@@ -1327,15 +1380,27 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     summaries.append(summary)
         
         # Extract subjects/policy area
+        # Policy area can be:
+        # 1. Directly under <bill> as <policyArea><name>
+        # 2. Under <subjects> as <policyArea><name>
         policy_area = ""
-        subjects_elem = bill_elem.find('subjects')
-        if subjects_elem is not None:
-            # Policy area is directly under <subjects> as <policyArea>
-            policy_area_elem = subjects_elem.find('policyArea')
-            if policy_area_elem is not None:
-                name_elem = policy_area_elem.find('name')
-                if name_elem is not None and name_elem.text:
-                    policy_area = name_elem.text
+        
+        # Try direct <policyArea> under <bill> first
+        policy_area_elem = bill_elem.find('policyArea')
+        if policy_area_elem is not None:
+            name_elem = policy_area_elem.find('name')
+            if name_elem is not None and name_elem.text:
+                policy_area = name_elem.text
+        
+        # Fallback to <subjects><policyArea><name>
+        if not policy_area:
+            subjects_elem = bill_elem.find('subjects')
+            if subjects_elem is not None:
+                policy_area_elem = subjects_elem.find('policyArea')
+                if policy_area_elem is not None:
+                    name_elem = policy_area_elem.find('name')
+                    if name_elem is not None and name_elem.text:
+                        policy_area = name_elem.text
         
         # Extract amendments
         amendments = []
