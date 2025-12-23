@@ -127,6 +127,7 @@ module "congress_api_secrets_manager" {
         # Supports multiple API keys for load balancing (api_key, api_key_2, api_key_3, etc.)
         api_key   = "PLACEHOLDER_CONGRESS_API_KEY"
         api_key_2 = "PLACEHOLDER_CONGRESS_API_KEY_2"
+        api_key_3 = "PLACEHOLDER_CONGRESS_API_KEY_3"
       }
     }
   }
