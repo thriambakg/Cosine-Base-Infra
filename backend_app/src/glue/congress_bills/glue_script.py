@@ -555,48 +555,6 @@ def format_date_range_path(start_date: str, end_date: str) -> str:
     return f"{start_formatted}-{end_formatted}"
 
 
-def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Optional[bytes]:
-    """
-    Make API request with retry logic and exponential backoff for rate limiting.
-    If api_key is None, gets a key from the rotator (for load balancing across multiple keys).
-    On each retry, switches to a different API key to avoid rate limits on a single key.
-    """
-    rotator = None
-    # Get API key from rotator if not provided (for load balancing)
-    if api_key is None:
-        rotator = get_congress_api_keys()
-        api_key = rotator.get_key()
-    
-    # Ensure API key is in params
-    if "api_key" not in params:
-        params["api_key"] = api_key
-    
-    for attempt in range(retries):
-        try:
-            response = requests.get(url, params=params, timeout=REQUEST_TIMEOUT)
-            
-            # Handle 429 Too Many Requests with exponential backoff
-            if response.status_code == 429:
-                if attempt < retries - 1:
-                    # Switch to a different API key for retry (if rotator available)
-                    if rotator is None:
-                        rotator = get_congress_api_keys()
-                    new_api_key = rotator.get_key()
-                    params["api_key"] = new_api_key
-                    
-                    # Exponential backoff: 2^attempt seconds, with a minimum of 5 seconds for 429
-                    wait_time = max(5, (2 ** attempt) * RETRY_DELAY)
-                    log_print(f"      ⚠️ Rate limited (429) with key - switching to different key and waiting {wait_time}s before retry {attempt + 1}/{retries}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    log_print(f"      ❌ Rate limited (429) after {retries} attempts")
-                    return None
-            
-            response.raise_for_status()
-            return response.json()
-        except requests.exceptions.HTTPError as e:
-            if attempt < retries - 1:
 # All API call functions removed - using bulk downloads instead
 # Removed functions:
 # - make_api_request
@@ -613,482 +571,128 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
 # - store_bill_text_to_s3
 # - build_comprehensive_bill_record
 
-def check_s3_zip_exists(start_date: str, end_date: str, congress: int, bill_type: str) -> Optional[str]:
-    """Fetch list of bills for a specific type and date range."""
-    bills = []
-    offset = 0
-    limit = 250
-    
-    while True:
-        url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}"
-        params = {
-            "format": "json",
-            "offset": offset,
-            "limit": limit,
-            "fromDateTime": from_date,
-            "toDateTime": to_date
-        }
-        
-        # Use rotator for load balancing across multiple API keys
-        data = make_api_request(url, params, None)
-        if not data:
-            break
-        
-        # Handle different response structures
-        bill_list = []
-        if isinstance(data, list):
-            bill_list = data
-        elif "bills" in data:
-            bills_data = data["bills"]
-            if isinstance(bills_data, dict):
-                bill_list = bills_data.get("bill", [])
-            elif isinstance(bills_data, list):
-                bill_list = bills_data
-        
-        if not bill_list:
-            break
-        
-        bills.extend(bill_list)
-        
-        # Check pagination
-        pagination = {}
-        if isinstance(data, dict):
-            if "bills" in data and isinstance(data["bills"], dict):
-                pagination = data["bills"].get("pagination", {})
-            elif "pagination" in data:
-                pagination = data["pagination"]
-        
-        count = pagination.get("count", 0) if pagination else 0
-        if count > 0 and offset + limit >= count:
-            break
-        
-        offset += limit
-        time.sleep(0.3)  # Rate limiting
-    
-    return bills
-
-
-def fetch_bill_details(congress: int, bill_type: str, bill_number: int, api_key: str) -> Optional[Dict]:
-    """Fetch full bill details."""
-    if not congress or congress is None:
-        log_print(f"      ⚠️ Cannot fetch details: congress is None for {bill_type} {bill_number}")
-        return None
-    
-    url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}"
-    params = {"format": "json"}
-    
-    # Use rotator for load balancing across multiple API keys
-    data = make_api_request(url, params, None)
-    if data and isinstance(data, dict):
-        return data.get("bill", data)
-    return data
-
-
-def fetch_bill_actions(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
-    """Fetch all actions for a bill."""
-    if not congress or congress is None:
-        log_print(f"      ⚠️ Cannot fetch actions: congress is None for {bill_type} {bill_number}")
-        return []
-    
-    actions = []
-    offset = 0
-    limit = 250
-    
-    while True:
-        url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/actions"
-        params = {
-            "format": "json",
-            "offset": offset,
-            "limit": limit
-        }
-        
-        # Use rotator for load balancing across multiple API keys
-        data = make_api_request(url, params, None)
-        if not data:
-            break
-        
-        action_list = []
-        if isinstance(data, list):
-            action_list = data
-        elif "actions" in data:
-            actions_data = data["actions"]
-            if isinstance(actions_data, dict):
-                action_list = actions_data.get("item", [])
-            elif isinstance(actions_data, list):
-                action_list = actions_data
-        
-        if not action_list:
-            break
-        
-        actions.extend(action_list)
-        
-        # Check pagination
-        pagination = {}
-        if isinstance(data, dict):
-            if "actions" in data and isinstance(data["actions"], dict):
-                pagination = data["actions"].get("pagination", {})
-            elif "pagination" in data:
-                pagination = data["pagination"]
-        
-        count = pagination.get("count", 0) if pagination else 0
-        if count > 0 and offset + limit >= count:
-            break
-        
-        offset += limit
-        time.sleep(0.2)
-    
-    return actions
-
-
-def fetch_bill_amendments(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
-    """Fetch all amendments for a bill."""
-    if not congress or congress is None:
-        log_print(f"      ⚠️ Cannot fetch amendments: congress is None for {bill_type} {bill_number}")
-        return []
-    
-    amendments = []
-    offset = 0
-    limit = 250
-    
-    while True:
-        url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/amendments"
-        params = {
-            "format": "json",
-            "offset": offset,
-            "limit": limit
-        }
-        
-        # Use rotator for load balancing across multiple API keys
-        data = make_api_request(url, params, None)
-        if not data:
-            break
-        
-        amendment_list = []
-        if isinstance(data, list):
-            amendment_list = data
-        elif "amendments" in data:
-            amendments_data = data["amendments"]
-            if isinstance(amendments_data, dict):
-                amendment_list = amendments_data.get("amendment", [])
-            elif isinstance(amendments_data, list):
-                amendment_list = amendments_data
-        
-        if not amendment_list:
-            break
-        
-        amendments.extend(amendment_list)
-        
-        # Check pagination
-        pagination = {}
-        if isinstance(data, dict):
-            if "amendments" in data and isinstance(data["amendments"], dict):
-                pagination = data["amendments"].get("pagination", {})
-            elif "pagination" in data:
-                pagination = data["pagination"]
-        
-        count = pagination.get("count", 0) if pagination else 0
-        if count > 0 and offset + limit >= count:
-            break
-        
-        offset += limit
-        time.sleep(0.2)
-    
-    return amendments
-
-
-def fetch_bill_cosponsors(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
-    """Fetch all cosponsors for a bill."""
-    if not congress or congress is None:
-        log_print(f"      ⚠️ Cannot fetch cosponsors: congress is None for {bill_type} {bill_number}")
-        return []
-    
-    cosponsors = []
-    offset = 0
-    limit = 250
-    
-    while True:
-        url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/cosponsors"
-        params = {
-            "format": "json",
-            "offset": offset,
-            "limit": limit
-        }
-        
-        # Use rotator for load balancing across multiple API keys
-        data = make_api_request(url, params, None)
-        if not data:
-            break
-        
-        cosponsor_list = []
-        if isinstance(data, list):
-            cosponsor_list = data
-        elif "cosponsors" in data:
-            cosponsors_data = data["cosponsors"]
-            if isinstance(cosponsors_data, dict):
-                cosponsor_list = cosponsors_data.get("item", [])
-            elif isinstance(cosponsors_data, list):
-                cosponsor_list = cosponsors_data
-        
-        if not cosponsor_list:
-            break
-        
-        cosponsors.extend(cosponsor_list)
-        
-        # Check pagination
-        pagination = {}
-        if isinstance(data, dict):
-            if "cosponsors" in data and isinstance(data["cosponsors"], dict):
-                pagination = data["cosponsors"].get("pagination", {})
-            elif "pagination" in data:
-                pagination = data["pagination"]
-        
-        count = pagination.get("count", 0) if pagination else 0
-        if count > 0 and offset + limit >= count:
-            break
-        
-        offset += limit
-        time.sleep(0.2)
-    
-    return cosponsors
-
-
-def fetch_bill_summaries(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
-    """Fetch all summaries for a bill."""
-    if not congress or congress is None:
-        log_print(f"      ⚠️ Cannot fetch summaries: congress is None for {bill_type} {bill_number}")
-        return []
-    
-    summaries = []
-    offset = 0
-    limit = 250
-    
-    while True:
-        url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/summaries"
-        params = {
-            "format": "json",
-            "offset": offset,
-            "limit": limit
-        }
-        
-        # Use rotator for load balancing across multiple API keys
-        data = make_api_request(url, params, None)
-        if not data:
-            break
-        
-        summary_list = []
-        if isinstance(data, list):
-            summary_list = data
-        elif "summaries" in data:
-            summaries_data = data["summaries"]
-            if isinstance(summaries_data, dict):
-                summary_list = summaries_data.get("summary", [])
-            elif isinstance(summaries_data, list):
-                summary_list = summaries_data
-        
-        if not summary_list:
-            break
-        
-        summaries.extend(summary_list)
-        
-        # Check pagination
-        pagination = {}
-        if isinstance(data, dict):
-            if "summaries" in data and isinstance(data["summaries"], dict):
-                pagination = data["summaries"].get("pagination", {})
-            elif "pagination" in data:
-                pagination = data["pagination"]
-        
-        count = pagination.get("count", 0) if pagination else 0
-        if count > 0 and offset + limit >= count:
-            break
-        
-        offset += limit
-        time.sleep(0.2)
-    
-    return summaries
-
-
-def fetch_bill_subjects(congress: int, bill_type: str, bill_number: int, api_key: str) -> Dict:
-    """Fetch subjects for a bill."""
-    if not congress or congress is None:
-        log_print(f"      ⚠️ Cannot fetch subjects: congress is None for {bill_type} {bill_number}")
-        return {}
-    
-    url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/subjects"
-    params = {"format": "json"}
-    
-    # Use rotator for load balancing across multiple API keys
-    data = make_api_request(url, params, None)
-    if data and isinstance(data, dict):
-        return data.get("subjects", {})
-    return {}
-
-def fetch_bill_titles(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
-    """Fetch all titles for a bill, including official titles."""
-    if not congress or congress is None:
-        log_print(f"      ⚠️ Cannot fetch titles: congress is None for {bill_type} {bill_number}")
-        return []
-    
-    titles = []
-    offset = 0
-    limit = 250
-    
-    while True:
-        url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/titles"
-        params = {
-            "format": "json",
-            "offset": offset,
-            "limit": limit
-        }
-        
-        # Use rotator for load balancing across multiple API keys
-        data = make_api_request(url, params, None)
-        if not data:
-            break
-        
-        title_list = []
-        if isinstance(data, list):
-            title_list = data
-        elif "titles" in data:
-            titles_data = data["titles"]
-            if isinstance(titles_data, dict):
-                title_list = titles_data.get("item", [])
-            elif isinstance(titles_data, list):
-                title_list = titles_data
-        
-        if not title_list:
-            break
-        
-        titles.extend(title_list)
-        
-        # Check pagination
-        pagination = {}
-        if isinstance(data, dict):
-            if "titles" in data and isinstance(data["titles"], dict):
-                pagination = data["titles"].get("pagination", {})
-            elif "pagination" in data:
-                pagination = data["pagination"]
-        
-        count = pagination.get("count", 0) if pagination else 0
-        if count > 0 and offset + limit >= count:
-            break
-        
-        # If we got fewer items than limit, we're done
-        if len(title_list) < limit:
-            break
-        
-        offset += limit
-    
-    return titles
-
-
-def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
-    """Fetch all text versions available for a bill."""
-    if not congress or congress is None:
-        log_print(f"      ⚠️ Cannot fetch text versions: congress is None for {bill_type} {bill_number}")
-        return []
-    
-    url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/text"
-    params = {"format": "json"}
-    
-    # Use rotator for load balancing across multiple API keys
-    data = make_api_request(url, params, None)
-    if not data:
-        return []
-    
-    # Handle different response structures
-    text_versions = []
-    if isinstance(data, list):
-        text_versions = data
-    elif "textVersions" in data:
-        versions_data = data["textVersions"]
-        if isinstance(versions_data, dict):
-            text_versions = versions_data.get("item", [])
-        elif isinstance(versions_data, list):
-            text_versions = versions_data
-    
-    return text_versions if isinstance(text_versions, list) else []
-
-
-def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Optional[bytes]:
+def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Optional[bytes]:
     """
-    Download bill text file (XML/HTML) from Congress.gov with exponential backoff for rate limiting.
+    Download ZIP file from bulk data repository for a specific Congress and bill type.
+    No API key required - bulk data is public.
     
     Args:
-        text_url: URL to the bill text file (e.g., https://www.congress.gov/119/bills/hr303/BILLS-119hr303ih.html)
-        retries: Number of retry attempts
-        
+        congress: Congress number (e.g., 119)
+        bill_type: Bill type (e.g., "hr", "s", "hjres", etc.)
+        max_retries: Maximum number of retry attempts
+    
     Returns:
-        File content as bytes, or None if download failed
+        ZIP file content as bytes, or None if download fails
     """
-    for attempt in range(retries):
-        try:
-            response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2)  # Longer timeout for file downloads
-            
-            # Handle 429 Too Many Requests with exponential backoff
-            if response.status_code == 429:
-                if attempt < retries - 1:
-                    # Exponential backoff: 2^attempt seconds, with a minimum of 10 seconds for 429
-                    wait_time = max(10, (2 ** attempt) * RETRY_DELAY * 2)
-                    log_print(f"      ⚠️ Rate limited (429) - waiting {wait_time}s before retry {attempt + 1}/{retries}")
-                    time.sleep(wait_time)
-                    continue
+    # Convert bill type to lowercase for URL (e.g., "HR" -> "hr")
+    bill_type_lower = bill_type.lower()
+    
+    # Bulk data URL format: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/
+    # The ZIP file is typically named after the bill type or available as a directory listing
+    # We need to check the actual structure - it may be a ZIP file or a directory with XML files
+    
+    # Try common ZIP file naming patterns
+    # Based on bill-status repo structure: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/
+    zip_urls = [
+        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/{bill_type_lower}.zip",
+        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/BILLSTATUS-{congress}{bill_type_lower}.zip",
+        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}.zip",  # Alternative: ZIP at bill_type level
+    ]
+    
+    log_print(f"📥 Downloading bulk ZIP for Congress {congress}, Bill Type {bill_type}...")
+    
+    for zip_url in zip_urls:
+        for attempt in range(max_retries):
+            try:
+                log_print(f"   Attempting: {zip_url} (attempt {attempt + 1}/{max_retries})")
+                response = requests.get(zip_url, timeout=REQUEST_TIMEOUT * 2, stream=True)
+                
+                if response.status_code == 200:
+                    content = response.content
+                    log_print(f"   ✅ Successfully downloaded {len(content):,} bytes from {zip_url}")
+                    return content
+                elif response.status_code == 404:
+                    log_print(f"   ⚠️ ZIP not found at {zip_url}, trying next URL...")
+                    break  # Try next URL
                 else:
-                    log_print(f"      ❌ Rate limited (429) after {retries} attempts")
-                    return None
-            
-            response.raise_for_status()
-            return response.content
-        except requests.exceptions.HTTPError as e:
-            if attempt < retries - 1:
-                # For other HTTP errors, use linear backoff
-                wait_time = RETRY_DELAY * (attempt + 1)
-                log_print(f"      ⚠️ Download failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
-                time.sleep(wait_time)
-            else:
-                log_print(f"      ❌ Download failed after {retries} attempts: {str(e)[:100]}")
-                return None
-        except requests.exceptions.RequestException as e:
-            if attempt < retries - 1:
-                wait_time = RETRY_DELAY * (attempt + 1)
-                log_print(f"      ⚠️ Download failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
-                time.sleep(wait_time)
-            else:
-                log_print(f"      ❌ Download failed after {retries} attempts: {str(e)[:100]}")
-                return None
+                    response.raise_for_status()
+            except requests.exceptions.RequestException as e:
+                if attempt < max_retries - 1:
+                    wait_time = RETRY_DELAY * (attempt + 1)
+                    log_print(f"   ⚠️ Download error: {str(e)[:100]}. Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+                else:
+                    log_print(f"   ❌ Failed to download from {zip_url} after {max_retries} attempts")
+    
+    # If ZIP file not found, try downloading individual XML files from directory
+    log_print(f"   📂 ZIP file not found, attempting to download XML files from directory...")
     return None
 
 
-def store_bill_text_to_s3(bill_id: str, text_content: bytes) -> str:
+def check_s3_zip_exists(start_date: str, end_date: str, congress: int, bill_type: str) -> Optional[str]:
     """
-    Store bill text HTML file to S3 in billtext/ folder.
+    Check if a ZIP file exists in S3 for the given date range, Congress, and bill type.
     
     Args:
-        bill_id: Bill ID (e.g., "119-HR-303")
-        text_content: Bill text HTML content as bytes
-        
+        start_date: Start date in YYYY-MM-DD format
+        end_date: End date in YYYY-MM-DD format
+        congress: Congress number
+        bill_type: Bill type (e.g., "hr", "s", etc.)
+    
     Returns:
-        S3 key where the file was stored
+        S3 key if file exists, None otherwise
     """
-    # Create S3 key: billtext/{bill_id}.html
-    s3_key = f"billtext/{bill_id}.html"
+    date_range_path = format_date_range_path(start_date, end_date)
+    bill_type_lower = bill_type.lower()
+    s3_key = f"downloads/{date_range_path}/BILLSTATUS-{congress}-{bill_type_lower}.zip"
     
-    # Upload to S3 (S3 bucket encryption is handled at bucket level via Terraform)
-    s3_client.put_object(
-        Bucket=S3_BUCKET_NAME,
-        Key=s3_key,
-        Body=text_content,
-        ContentType='text/html'
-    )
+    try:
+        s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+        return s3_key
+    except s3_client.exceptions.ClientError as e:
+        if e.response['Error']['Code'] == '404':
+            return None
+        raise
+
+
+def extract_zip_from_s3(zip_s3_key: str) -> Dict[str, bytes]:
+    """
+    Extract ZIP file from S3 and return dict of XML filename -> XML content.
     
-    log_print(f"      💾 Stored HTML bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
-    return s3_key
+    Returns:
+        Dict mapping XML filename -> XML content as bytes
+    """
+    log_print(f"📦 Extracting ZIP file from S3: {zip_s3_key}")
+    
+    # Download ZIP from S3
+    zip_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
+    zip_content = zip_obj['Body'].read()
+    
+    # Extract XML files
+    xml_files = {}
+    zip_file = BytesIO(zip_content)
+    
+    with zipfile.ZipFile(zip_file, 'r') as zip_ref:
+        file_list = zip_ref.namelist()
+        log_print(f"📋 ZIP contains {len(file_list)} file(s)")
+        
+        # Find XML files
+        xml_file_list = [f for f in file_list if f.lower().endswith('.xml')]
+        log_print(f"📄 Found {len(xml_file_list)} XML file(s)")
+        
+        for xml_file in xml_file_list:
+            try:
+                xml_content = zip_ref.read(xml_file)
+                # Store with just the filename (not full path)
+                filename = xml_file.split('/')[-1]
+                xml_files[filename] = xml_content
+            except Exception as e:
+                log_print(f"   ⚠️ Failed to extract {xml_file}: {str(e)[:200]}")
+    
+    log_print(f"✅ Extracted {len(xml_files)} XML file(s) from ZIP")
+    return xml_files
 
 
-# build_comprehensive_bill_record removed - using bulk downloads instead
-
-
-def save_cosponsor_search_index_item(
 def save_cosponsor_search_index_item(
     cosponsor_name: str,
     bill_id: str,
@@ -1313,79 +917,6 @@ def store_bill_to_dynamodb(record: Dict):
     
     log_print(f"      ❌ Failed to store {bill_id} after {max_put_retries} attempts")
     raise Exception(f"Failed to store bill {bill_id} to DynamoDB after retries")
-
-
-# ============================================================================
-# Bulk Download Functions
-# ============================================================================
-
-def format_date_range_path(start_date: str, end_date: str) -> str:
-    """Format date range as YYYYMMDD-YYYYMMDD for S3 path"""
-    start_dt = datetime.strptime(start_date, '%Y-%m-%d')
-    end_dt = datetime.strptime(end_date, '%Y-%m-%d')
-    
-    start_formatted = start_dt.strftime('%Y%m%d')
-    end_formatted = end_dt.strftime('%Y%m%d')
-    
-    return f"{start_formatted}-{end_formatted}"
-
-
-def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Optional[bytes]:
-    """
-    Download ZIP file from bulk data repository for a specific Congress and bill type.
-    No API key required - bulk data is public.
-    
-    Args:
-        congress: Congress number (e.g., 119)
-        bill_type: Bill type (e.g., "hr", "s", "hjres", etc.)
-        max_retries: Maximum number of retry attempts
-    
-    Returns:
-        ZIP file content as bytes, or None if download fails
-    """
-    # Convert bill type to lowercase for URL (e.g., "HR" -> "hr")
-    bill_type_lower = bill_type.lower()
-    
-    # Bulk data URL format: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/
-    # The ZIP file is typically named after the bill type or available as a directory listing
-    # We need to check the actual structure - it may be a ZIP file or a directory with XML files
-    
-    # Try common ZIP file naming patterns
-    # Based on bill-status repo structure: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/
-    zip_urls = [
-        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/{bill_type_lower}.zip",
-        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/BILLSTATUS-{congress}{bill_type_lower}.zip",
-        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}.zip",  # Alternative: ZIP at bill_type level
-    ]
-    
-    log_print(f"📥 Downloading bulk ZIP for Congress {congress}, Bill Type {bill_type}...")
-    
-    for zip_url in zip_urls:
-        for attempt in range(max_retries):
-            try:
-                log_print(f"   Attempting: {zip_url} (attempt {attempt + 1}/{max_retries})")
-                response = requests.get(zip_url, timeout=REQUEST_TIMEOUT * 2, stream=True)
-                
-                if response.status_code == 200:
-                    content = response.content
-                    log_print(f"   ✅ Successfully downloaded {len(content):,} bytes from {zip_url}")
-                    return content
-                elif response.status_code == 404:
-                    log_print(f"   ⚠️ ZIP not found at {zip_url}, trying next URL...")
-                    break  # Try next URL
-                else:
-                    response.raise_for_status()
-            except requests.exceptions.RequestException as e:
-                if attempt < max_retries - 1:
-                    wait_time = RETRY_DELAY * (attempt + 1)
-                    log_print(f"   ⚠️ Download error: {str(e)[:100]}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
-                    log_print(f"   ❌ Failed to download from {zip_url} after {max_retries} attempts")
-    
-    # If ZIP file not found, try downloading individual XML files from directory
-    log_print(f"   📂 ZIP file not found, attempting to download XML files from directory...")
-    return None
 
 
 def list_bulk_xml_files(congress: int, bill_type: str) -> List[str]:
