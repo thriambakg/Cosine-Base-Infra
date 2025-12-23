@@ -575,6 +575,11 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
     Download ZIP file from bulk data repository for a specific Congress and bill type.
     No API key required - bulk data is public.
     
+    Based on govinfo.gov bulk data structure:
+    - ZIP files may not be available for current Congress (119)
+    - Individual XML files are available at: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/BILLSTATUS-{congress}{bill_type}{number}.xml
+    - For completed Congresses, ZIP files may be available with pattern: BILLSTATUS-{congress}-{bill_type}.zip
+    
     Args:
         congress: Congress number (e.g., 119)
         bill_type: Bill type (e.g., "hr", "s", "hjres", etc.)
@@ -586,16 +591,18 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
     # Convert bill type to lowercase for URL (e.g., "HR" -> "hr")
     bill_type_lower = bill_type.lower()
     
-    # Bulk data URL format: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/
-    # The ZIP file is typically named after the bill type or available as a directory listing
-    # We need to check the actual structure - it may be a ZIP file or a directory with XML files
-    
-    # Try common ZIP file naming patterns
-    # Based on bill-status repo structure: https://www.govinfo.gov/bulkdata/BILLSTATUS/{congress}/{bill_type}/
+    # Try ZIP file patterns based on govinfo.gov structure
+    # Note: ZIP files may only be available for completed Congresses
+    # Current Congress (119) may only have individual XML files
     zip_urls = [
+        # Pattern 1: BILLSTATUS-{congress}-{bill_type}.zip (most common for completed Congresses)
+        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/BILLSTATUS-{congress}-{bill_type_lower}.zip",
+        # Pattern 2: {bill_type}.zip in subdirectory
         f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/{bill_type_lower}.zip",
+        # Pattern 3: BILLSTATUS-{congress}{bill_type}.zip (no hyphen)
         f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}/BILLSTATUS-{congress}{bill_type_lower}.zip",
-        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}.zip",  # Alternative: ZIP at bill_type level
+        # Pattern 4: ZIP at bill_type level (without subdirectory)
+        f"{BULK_DATA_BASE_URL}/{congress}/{bill_type_lower}.zip",
     ]
     
     log_print(f"📥 Downloading bulk ZIP for Congress {congress}, Bill Type {bill_type}...")
@@ -623,8 +630,11 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
                 else:
                     log_print(f"   ❌ Failed to download from {zip_url} after {max_retries} attempts")
     
-    # If ZIP file not found, try downloading individual XML files from directory
-    log_print(f"   📂 ZIP file not found, attempting to download XML files from directory...")
+    # ZIP files not available - this is expected for current Congress (119)
+    # Individual XML files are available but would require directory listing or bill number iteration
+    log_print(f"   ⚠️ ZIP file not available for Congress {congress}, Bill Type {bill_type}")
+    log_print(f"   ℹ️  Note: ZIP files may only be available for completed Congresses")
+    log_print(f"   ℹ️  Individual XML files are available but require different download approach")
     return None
 
 
