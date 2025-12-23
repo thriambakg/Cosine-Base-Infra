@@ -617,6 +617,10 @@ def fetch_bills_list(congress: int, bill_type: str, from_date: str, to_date: str
 
 def fetch_bill_details(congress: int, bill_type: str, bill_number: int, api_key: str) -> Optional[Dict]:
     """Fetch full bill details."""
+    if not congress or congress is None:
+        log_print(f"      ⚠️ Cannot fetch details: congress is None for {bill_type} {bill_number}")
+        return None
+    
     url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}"
     params = {"format": "json"}
     
@@ -628,6 +632,10 @@ def fetch_bill_details(congress: int, bill_type: str, bill_number: int, api_key:
 
 def fetch_bill_actions(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
     """Fetch all actions for a bill."""
+    if not congress or congress is None:
+        log_print(f"      ⚠️ Cannot fetch actions: congress is None for {bill_type} {bill_number}")
+        return []
+    
     actions = []
     offset = 0
     limit = 250
@@ -679,6 +687,10 @@ def fetch_bill_actions(congress: int, bill_type: str, bill_number: int, api_key:
 
 def fetch_bill_amendments(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
     """Fetch all amendments for a bill."""
+    if not congress or congress is None:
+        log_print(f"      ⚠️ Cannot fetch amendments: congress is None for {bill_type} {bill_number}")
+        return []
+    
     amendments = []
     offset = 0
     limit = 250
@@ -730,6 +742,10 @@ def fetch_bill_amendments(congress: int, bill_type: str, bill_number: int, api_k
 
 def fetch_bill_cosponsors(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
     """Fetch all cosponsors for a bill."""
+    if not congress or congress is None:
+        log_print(f"      ⚠️ Cannot fetch cosponsors: congress is None for {bill_type} {bill_number}")
+        return []
+    
     cosponsors = []
     offset = 0
     limit = 250
@@ -781,6 +797,10 @@ def fetch_bill_cosponsors(congress: int, bill_type: str, bill_number: int, api_k
 
 def fetch_bill_summaries(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
     """Fetch all summaries for a bill."""
+    if not congress or congress is None:
+        log_print(f"      ⚠️ Cannot fetch summaries: congress is None for {bill_type} {bill_number}")
+        return []
+    
     summaries = []
     offset = 0
     limit = 250
@@ -832,6 +852,10 @@ def fetch_bill_summaries(congress: int, bill_type: str, bill_number: int, api_ke
 
 def fetch_bill_subjects(congress: int, bill_type: str, bill_number: int, api_key: str) -> Dict:
     """Fetch subjects for a bill."""
+    if not congress or congress is None:
+        log_print(f"      ⚠️ Cannot fetch subjects: congress is None for {bill_type} {bill_number}")
+        return {}
+    
     url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/subjects"
     params = {"format": "json"}
     
@@ -842,6 +866,10 @@ def fetch_bill_subjects(congress: int, bill_type: str, bill_number: int, api_key
 
 def fetch_bill_titles(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
     """Fetch all titles for a bill, including official titles."""
+    if not congress or congress is None:
+        log_print(f"      ⚠️ Cannot fetch titles: congress is None for {bill_type} {bill_number}")
+        return []
+    
     titles = []
     offset = 0
     limit = 250
@@ -896,6 +924,10 @@ def fetch_bill_titles(congress: int, bill_type: str, bill_number: int, api_key: 
 
 def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
     """Fetch all text versions available for a bill."""
+    if not congress or congress is None:
+        log_print(f"      ⚠️ Cannot fetch text versions: congress is None for {bill_type} {bill_number}")
+        return []
+    
     url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/text"
     params = {"format": "json"}
     
@@ -1053,7 +1085,11 @@ def build_comprehensive_bill_record(bill: Dict, congress: int, bill_type: str, a
     
     # Send bill text download request to SQS for Lambda processing
     bill_text_html_s3_key = ""
-    bill_id_str = f"{congress}-{bill_type}-{bill_number}"
+    # Ensure congress is valid before creating bill_id_str
+    if not congress or congress is None:
+        raise ValueError(f"Congress number is required but was None for bill {bill_type} {bill_number}")
+    congress_int = int(congress) if not isinstance(congress, int) else congress
+    bill_id_str = f"{congress_int}-{bill_type}-{bill_number}"
     
     if text_versions and BILL_TEXT_SQS_URL:
         # Send message to SQS for Lambda to process
@@ -1752,6 +1788,9 @@ def main():
         for bill_type in BILL_TYPES:
             log_print(f"      📋 Fetching {bill_type} bills...")
             bills = fetch_bills_list(congress_num, bill_type, start_date_str, end_date_str, api_key)
+            # Add congress number to each bill so we can use it later
+            for bill in bills:
+                bill['congress'] = congress_num
             all_bills.extend(bills)
             log_print(f"         ✅ Found {len(bills)} {bill_type} bills")
     
@@ -1776,9 +1815,37 @@ def main():
         if not bill_type:
             return False, "No bill type"
         
+        # Extract congress number from bill data
+        # The bill object from API should have congress field, or we can extract from URL
+        bill_congress = bill.get("congress")
+        if not bill_congress:
+            # Try to extract from URL if present
+            bill_url = bill.get("url", "")
+            if bill_url:
+                # URL format: https://www.congress.gov/bill/119th-congress/house-bill/1234
+                # or https://www.congress.gov/119/bills/hr1234/...
+                import re
+                url_match = re.search(r'/(\d+)(?:th|st|nd|rd)?-?congress', bill_url)
+                if url_match:
+                    bill_congress = int(url_match.group(1))
+                else:
+                    # Try alternative format: /119/bills/
+                    url_match = re.search(r'/(\d+)/bills/', bill_url)
+                    if url_match:
+                        bill_congress = int(url_match.group(1))
+        
+        if not bill_congress:
+            return False, f"No congress number found for {bill_type} {bill_number} (bill keys: {list(bill.keys())})"
+        
+        # Ensure congress is an integer
         try:
-            log_print(f"      🧵 [{thread_id}] Starting {bill_type} {bill_number}...")
-            record = build_comprehensive_bill_record(bill, congress, bill_type, api_key)
+            bill_congress = int(bill_congress)
+        except (ValueError, TypeError):
+            return False, f"Invalid congress number '{bill_congress}' for {bill_type} {bill_number}"
+        
+        try:
+            log_print(f"      🧵 [{thread_id}] Starting {bill_type} {bill_number} (Congress {bill_congress})...")
+            record = build_comprehensive_bill_record(bill, bill_congress, bill_type, api_key)
             if record:
                 store_bill_to_dynamodb(record)
                 log_print(f"      ✅ [{thread_id}] Completed {bill_type} {bill_number}")
