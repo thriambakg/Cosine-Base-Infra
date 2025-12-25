@@ -3639,6 +3639,36 @@ module "lda_disclosures_fetcher" {
   ]
 }
 
+# EventBridge Scheduler for LDA Disclosures Fetcher (daily at 5pm EST)
+# 5pm EST = 22:00 UTC (standard time) or 21:00 UTC (daylight time)
+# Using 22:00 UTC which is 5pm EST standard time (6pm EDT during daylight time)
+module "lda_disclosures_fetcher_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-lda-disclosures-fetcher-daily-${var.environment}"
+  rule_description    = "Trigger LDA disclosures fetcher daily at 5pm EST to process previous day's disclosures"
+  schedule_expression = "cron(0 22 * * ? *)" # 22:00 UTC = 5pm EST (standard time) or 6pm EDT (daylight time)
+  enabled             = true
+
+  target_arn           = module.lda_disclosures_fetcher.function_arn
+  target_id            = "LDADisclosuresFetcherScheduler"
+  target_type          = "lambda"
+  target_function_name = module.lda_disclosures_fetcher.function_name
+  target_input = jsonencode({
+    source     = "Scheduler"
+    start_date = ""
+    end_date   = ""
+  })
+
+  purpose     = "LDADisclosuresFetching"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [
+    module.lda_disclosures_fetcher
+  ]
+}
+
 # LDA Disclosures Indexer Lambda
 module "lda_disclosures_indexer" {
   source = "./modules/lambda"
@@ -3711,6 +3741,102 @@ resource "aws_lambda_event_source_mapping" "lda_batch_sqs_trigger" {
     module.lda_disclosures_indexer,
     module.lda_batch_queue
   ]
+}
+
+# Lambda Function for LDA Batch DLQ Automatic Redrive
+# This Lambda automatically redrives messages from DLQ back to the source queue
+module "lda_batch_dlq_redrive_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-lda-batch-dlq-redrive-${var.environment}"
+  description   = "Automatically redrives messages from LDA batch DLQ back to source queue"
+  runtime       = "python3.11"
+  handler       = "lambda_function.lambda_handler"
+  timeout       = 300 # 5 minutes (enough for redrive operation)
+  memory_size   = 256 # Minimal memory needed
+
+  source_dir = "${path.module}/../backend_app/src/LDA/lda_batch_dlq_redrive/app"
+
+  environment_variables = {
+    DLQ_QUEUE_URL    = module.lda_batch_queue.dlq_url
+    SOURCE_QUEUE_ARN = module.lda_batch_queue.queue_arn
+  }
+
+  layers = [
+    module.core_layer.layer_arn
+  ]
+
+  additional_policy_arns = [
+    module.lda_batch_queue.sqs_access_policy_arn,
+    module.kms.kms_access_policy_arn,
+    aws_iam_policy.lda_batch_dlq_redrive_sqs_policy.arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.lda_batch_queue,
+    module.core_layer,
+    aws_iam_policy.lda_batch_dlq_redrive_sqs_policy
+  ]
+}
+
+# EventBridge Rule for Automatic DLQ Redrive (runs every hour)
+# This automatically redrives messages from DLQ back to the source queue
+resource "aws_cloudwatch_event_rule" "lda_batch_dlq_redrive" {
+  name                = "${var.project_name}-lda-batch-dlq-redrive-${var.environment}"
+  description         = "Automatically redrive messages from LDA batch DLQ back to source queue every hour"
+  schedule_expression = "rate(1 hour)"
+  state               = "ENABLED"
+
+  tags = merge(var.common_tags, {
+    Name        = "${var.project_name}-lda-batch-dlq-redrive-${var.environment}"
+    Type        = "EventBridgeRule"
+    Purpose     = "DLQRedrive"
+    Environment = var.environment
+  })
+}
+
+# EventBridge Target for DLQ Redrive Lambda
+resource "aws_cloudwatch_event_target" "lda_batch_dlq_redrive_target" {
+  rule      = aws_cloudwatch_event_rule.lda_batch_dlq_redrive.name
+  target_id = "LDABatchDLQRedrive"
+  arn       = module.lda_batch_dlq_redrive_lambda.function_arn
+
+  depends_on = [
+    aws_cloudwatch_event_rule.lda_batch_dlq_redrive,
+    module.lda_batch_dlq_redrive_lambda
+  ]
+}
+
+# IAM Policy for DLQ Redrive Lambda to access SQS queues
+resource "aws_iam_policy" "lda_batch_dlq_redrive_sqs_policy" {
+  name        = "${var.project_name}-lda-batch-dlq-redrive-sqs-${var.environment}"
+  description = "Allows DLQ redrive Lambda to get queue URLs and redrive messages"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "sqs:GetQueueUrl"
+        ]
+        Resource = "*" # GetQueueUrl requires * or account-level permission
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# Lambda Permission for EventBridge to invoke redrive Lambda
+resource "aws_lambda_permission" "allow_eventbridge_lda_dlq_redrive" {
+  statement_id  = "AllowExecutionFromEventBridge"
+  action        = "lambda:InvokeFunction"
+  function_name = module.lda_batch_dlq_redrive_lambda.function_name
+  principal     = "events.amazonaws.com"
+  source_arn    = aws_cloudwatch_event_rule.lda_batch_dlq_redrive.arn
 }
 
 # IAM Policy for Lambda to access S3 for autocomplete CSVs

@@ -12,6 +12,7 @@ from botocore.exceptions import ClientError
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from io import StringIO
+from datetime import datetime, timedelta
 
 # Environment variables
 LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
@@ -273,10 +274,25 @@ def lambda_handler(event, context):
     print("🚀 LDA Disclosures Fetcher Lambda - Starting")
     print("=" * 80)
     
+    # Check if this is a scheduled invocation
+    source = event.get('source', '')
+    is_scheduled = source == 'Scheduler' or source == 'scheduler'
+    
     # Get input parameters
-    start_date = event.get('START_DATE')
-    end_date = event.get('END_DATE')
-    testing_limit = event.get('TESTING')  # Optional: number of records per endpoint
+    start_date = event.get('START_DATE') or event.get('start_date')
+    end_date = event.get('END_DATE') or event.get('end_date')
+    testing_limit = event.get('TESTING') or event.get('testing')  # Optional: number of records per endpoint
+    
+    # If triggered by scheduler, set start_date to previous day and end_date to empty
+    if is_scheduled:
+        print("📅 Scheduled invocation detected - setting date range to previous day")
+        # Calculate previous day in YYYY-MM-DD format
+        previous_day = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+        start_date = previous_day
+        end_date = ""  # Empty string for end_date means "no end date" (fetch all from start_date onwards)
+        print(f"📅 Scheduler date range: START_DATE={start_date}, END_DATE={end_date} (empty)")
+    else:
+        print(f"📅 Manual invocation - Date range: START_DATE={start_date}, END_DATE={end_date}")
     
     # Convert testing_limit to int if it's provided (might come as string from event)
     if testing_limit is not None:
@@ -286,7 +302,6 @@ def lambda_handler(event, context):
             print(f"⚠️  Invalid TESTING value: {testing_limit}, ignoring")
             testing_limit = None
     
-    print(f"📅 Date range: START_DATE={start_date}, END_DATE={end_date}")
     if testing_limit:
         print(f"🧪 Testing mode: {testing_limit} records per endpoint")
     
