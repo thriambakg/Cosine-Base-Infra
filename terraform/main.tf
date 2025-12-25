@@ -877,6 +877,22 @@ module "docprocessing_layer" {
   depends_on = [module.static_hosting_bucket]
 }
 
+# Utility Dependencies Layer for Lambda functions
+module "utility_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "utility"
+  layer_description   = "Utility dependencies (cryptography, pillow, sympy, rich, etc.)"
+  requirements_file   = "utility-dependencies.txt"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.static_hosting_bucket.bucket_id
+  python_command      = "python3.11"
+
+  depends_on = [module.static_hosting_bucket]
+}
+
 # SQS Queue for News Processing
 module "news_queue" {
   source = "./modules/sqs"

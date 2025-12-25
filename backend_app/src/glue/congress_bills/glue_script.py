@@ -609,7 +609,7 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
         congress: Congress number (e.g., 119)
         bill_type: Bill type (e.g., "hr", "s", "hjres", etc.)
         max_retries: Maximum number of retry attempts
-    
+        
     Returns:
         ZIP file content as bytes, or None if download fails
     """
@@ -646,13 +646,13 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
                     log_print(f"   ⚠️ ZIP not found at {zip_url}, trying next URL...")
                     break  # Try next URL
                 else:
-                    response.raise_for_status()
-            except requests.exceptions.RequestException as e:
+            response.raise_for_status()
+        except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
-                    wait_time = RETRY_DELAY * (attempt + 1)
+                wait_time = RETRY_DELAY * (attempt + 1)
                     log_print(f"   ⚠️ Download error: {str(e)[:100]}. Retrying in {wait_time}s...")
-                    time.sleep(wait_time)
-                else:
+                time.sleep(wait_time)
+            else:
                     log_print(f"   ❌ Failed to download from {zip_url} after {max_retries} attempts")
     
     # ZIP files not available - this is expected for current Congress (119)
@@ -672,7 +672,7 @@ def check_s3_zip_exists(start_date: str, end_date: str, congress: int, bill_type
         end_date: End date in YYYY-MM-DD format
         congress: Congress number
         bill_type: Bill type (e.g., "hr", "s", etc.)
-    
+        
     Returns:
         S3 key if file exists, None otherwise
     """
@@ -682,7 +682,7 @@ def check_s3_zip_exists(start_date: str, end_date: str, congress: int, bill_type
     
     try:
         s3_client.head_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
-        return s3_key
+    return s3_key
     except s3_client.exceptions.ClientError as e:
         if e.response['Error']['Code'] == '404':
             return None
@@ -720,7 +720,7 @@ def extract_zip_from_s3(zip_s3_key: str) -> Dict[str, bytes]:
                 # Store with just the filename (not full path)
                 filename = xml_file.split('/')[-1]
                 xml_files[filename] = xml_content
-            except Exception as e:
+        except Exception as e:
                 log_print(f"   ⚠️ Failed to extract {xml_file}: {str(e)[:200]}")
     
     log_print(f"✅ Extracted {len(xml_files)} XML file(s) from ZIP")
@@ -766,9 +766,9 @@ def save_cosponsor_search_index_item(
                 date_part = introduced_date.split('T')[0]
             elif ' ' in introduced_date:
                 date_part = introduced_date.split(' ')[0]
-            else:
+                        else:
                 date_part = introduced_date[:10] if len(introduced_date) >= 10 else introduced_date
-        else:
+                            else:
             date_part = "1970-01-01"  # Default to epoch if no date
         
         search_sk = f"INTRODUCED_DATE#{date_part}#{bill_id}"
@@ -1967,7 +1967,7 @@ def main():
         try:
             if start_date_str.endswith('Z'):
                 start_date_dt = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
-            else:
+    else:
                 start_date_dt = datetime.fromisoformat(start_date_str)
             
             if end_date_str.endswith('Z'):
@@ -2039,7 +2039,7 @@ def main():
                 zip_content = None
                 if zip_s3_key:
                     log_print(f"✅ Using existing ZIP file from S3: {zip_s3_key}")
-                else:
+            else:
                     # Download ZIP from bulk data repository
                     log_print(f"📥 Downloading ZIP file from bulk data repository...")
                     zip_content = download_bulk_zip(congress_num, bill_type)
@@ -2063,11 +2063,11 @@ def main():
                     log_print(f"📊 Processing complete: {files_processed} XML file(s) processed, {bills_stored} bill(s) stored for {bill_type} in Congress {congress_num}")
                     processed_count += bills_stored
                     total_bills_processed += bills_stored
-                except Exception as e:
+            except Exception as e:
                     error_msg = f"❌ Error processing ZIP file for {bill_type} in Congress {congress_num}: {str(e)[:300]}"
                     log_print(error_msg)
                     logger.error(error_msg, exc_info=True)
-                    error_count += 1
+                error_count += 1
                     continue
                 if zip_content:
                     del zip_content
