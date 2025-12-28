@@ -3628,7 +3628,7 @@ module "lda_disclosures_fetcher" {
   environment_variables = {
     LDA_API_BASE_URL = "https://lda.senate.gov/api/v1"
     LDA_SECRET_NAME  = module.lda_api_secrets_manager.secret_names["lda-api"]
-    REQUEST_TIMEOUT  = "30"
+    REQUEST_TIMEOUT  = "60" # Increased from 30 to 60 seconds for slower pages
     BATCH_QUEUE_URL  = module.lda_batch_queue.queue_url
     S3_BUCKET_NAME   = module.lda_disclosures_s3.bucket_id
   }
@@ -3705,7 +3705,7 @@ module "lda_disclosures_indexer" {
     LDA_SECRET_NAME    = module.lda_api_secrets_manager.secret_names["lda-api"]
     FILINGS_TABLE_NAME = module.lda_filings_table.table_name
     S3_BUCKET_NAME     = module.lda_disclosures_s3.bucket_id
-    REQUEST_TIMEOUT    = "30"
+    REQUEST_TIMEOUT    = "60" # Increased from 30 to 60 seconds for slower pages
     RATE_LIMIT_DELAY   = "0.5"
     PAC_QUEUE_URL      = module.lda_pac_autocomplete_queue.queue_url
     DLQ_QUEUE_URL      = module.lda_batch_queue.dlq_url

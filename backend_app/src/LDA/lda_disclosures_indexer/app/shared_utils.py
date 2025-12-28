@@ -20,7 +20,7 @@ LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/ap
 LDA_SECRET_NAME = os.environ.get('LDA_SECRET_NAME')
 FILINGS_TABLE_NAME = os.environ.get('FILINGS_TABLE_NAME')
 S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
-REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '30'))
+REQUEST_TIMEOUT = int(os.environ.get('REQUEST_TIMEOUT', '60'))  # Increased from 30 to 60 seconds for slower pages
 RATE_LIMIT_DELAY = float(os.environ.get('RATE_LIMIT_DELAY', '0.5'))
 PAC_QUEUE_URL = os.environ.get('PAC_QUEUE_URL', '')
 
