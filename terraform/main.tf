@@ -1080,6 +1080,23 @@ module "chat_files_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 7
 
+  # Additional lifecycle rules for specific prefixes
+  lifecycle_rules = [
+    {
+      id     = "shared-dashboards-expiration"
+      status = "Enabled"
+      filter = {
+        prefix = "shared/dashboards/"
+      }
+      expiration = {
+        days = 7 # Delete shared dashboard files after 7 days (covers both downloads and share links)
+      }
+      abort_incomplete_multipart_upload = {
+        days_after_initiation = 1 # Clean up incomplete uploads quickly
+      }
+    }
+  ]
+
   # S3 notifications disabled - handled by separate notification resource below
   notification_topic_arn = ""
 
