@@ -1,0 +1,6 @@
+# Payment Dependencies Layer
+# Libraries for payment processing
+
+# Payment processing
+stripe>=7.0.0
+

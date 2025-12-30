@@ -893,6 +893,22 @@ module "utility_layer" {
   depends_on = [module.static_hosting_bucket]
 }
 
+# Payment Dependencies Layer for Lambda functions
+module "payment_layer" {
+  source = "./modules/lambda-layer"
+
+  project_name        = var.project_name
+  environment         = var.environment
+  layer_name_suffix   = "payment"
+  layer_description   = "Payment processing dependencies (stripe)"
+  requirements_file   = "payment-dependencies.txt"
+  compatible_runtimes = ["python3.11", "python3.12"]
+  s3_bucket_name      = module.static_hosting_bucket.bucket_id
+  python_command      = "python3.11"
+
+  depends_on = [module.static_hosting_bucket]
+}
+
 # SQS Queue for News Processing
 module "news_queue" {
   source = "./modules/sqs"
@@ -1099,6 +1115,43 @@ module "chat_files_s3" {
 
   # S3 notifications disabled - handled by separate notification resource below
   notification_topic_arn = ""
+
+  kms_key_arn = module.kms.main_key_arn
+  tags        = var.common_tags
+}
+
+# S3 Bucket for Spending Data (Billing and Donations)
+module "spending_s3" {
+  source = "./modules/s3"
+
+  # Required providers
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "cosine-spending-${var.environment}"
+  environment = var.environment
+  purpose     = "BillingSpendingData"
+
+  # Disable lifecycle transitions for spending data (keep all records)
+  enable_lifecycle_transitions = false
+
+  # No expiration - keep spending records indefinitely for historical tracking
+  enable_expiration = false
+
+  # Abort incomplete multipart uploads after 7 days
+  abort_incomplete_multipart_upload_days = 7
+
+  # Noncurrent version expiration (keep versions for 90 days)
+  noncurrent_version_expiration_days = 90
+
+  # No CloudFront OAC needed (private bucket)
+  allow_cloudfront_oac    = false
+  block_public_acls       = true
+  block_public_policy     = true
+  ignore_public_acls      = true
+  restrict_public_buckets = true
 
   kms_key_arn = module.kms.main_key_arn
   tags        = var.common_tags

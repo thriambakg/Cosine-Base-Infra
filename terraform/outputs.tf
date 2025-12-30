@@ -437,6 +437,16 @@ output "utility_layer_version" {
   value       = module.utility_layer.layer_version
 }
 
+output "payment_layer_arn" {
+  description = "ARN of the payment dependencies Lambda layer"
+  value       = module.payment_layer.layer_arn
+}
+
+output "payment_layer_version" {
+  description = "Version of the payment dependencies Lambda layer"
+  value       = module.payment_layer.layer_version
+}
+
 # News Table Outputs
 output "news_table_name" {
   description = "Name of the news DynamoDB table"
@@ -524,6 +534,22 @@ output "stock_historical_bucket_arn" {
 output "stock_historical_bucket_domain_name" {
   description = "Domain name of the stock historical data S3 bucket"
   value       = module.stock_data_historical_s3.bucket_domain_name
+}
+
+# Spending S3 Bucket Outputs
+output "spending_bucket_name" {
+  description = "Name of the spending S3 bucket"
+  value       = module.spending_s3.bucket_id
+}
+
+output "spending_bucket_arn" {
+  description = "ARN of the spending S3 bucket"
+  value       = module.spending_s3.bucket_arn
+}
+
+output "spending_bucket_domain_name" {
+  description = "Domain name of the spending S3 bucket"
+  value       = module.spending_s3.bucket_domain_name
 }
 
 # Agent File Upload Notifications
