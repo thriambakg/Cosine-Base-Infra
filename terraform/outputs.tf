@@ -368,6 +368,17 @@ output "newsdata_secret_names" {
   value       = module.newsdata_secrets_manager.secret_names
 }
 
+# Stripe Secrets Manager Outputs
+output "stripe_secret_arns" {
+  description = "ARNs of Stripe secrets in Secrets Manager"
+  value       = module.stripe_secrets_manager.secret_arns
+}
+
+output "stripe_secret_names" {
+  description = "Names of Stripe secrets in Secrets Manager"
+  value       = module.stripe_secrets_manager.secret_names
+}
+
 
 # ============================================================================
 # FRONTEND CONFIGURATION OUTPUT

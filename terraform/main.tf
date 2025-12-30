@@ -163,6 +163,43 @@ module "lda_api_secrets_manager" {
   depends_on = [module.kms]
 }
 
+# Secrets Manager for Stripe payment processing
+module "stripe_secrets_manager" {
+  source = "./modules/secrets-manager"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  tags                 = var.common_tags
+  kms_key_id           = module.kms.main_key_id
+  recovery_window_days = var.secrets_recovery_window_days
+  policy_name_suffix   = "stripe"
+
+  # No automatic rotation for API keys
+  automatic_rotation = {}
+
+  # Create secrets for Stripe integration
+  secrets = {
+    stripe-secret = {
+      description = "Stripe secret key for payment processing (populated manually)"
+      secret_data = {
+        # Placeholder value - will be updated manually in console
+        stripe_secret_key = "PLACEHOLDER_STRIPE_SECRET_KEY"
+        secret_key        = "PLACEHOLDER_STRIPE_SECRET_KEY" # Alternative key name for compatibility
+      }
+    }
+    stripe-webhook-secret = {
+      description = "Stripe webhook secret for webhook signature verification (populated manually)"
+      secret_data = {
+        # Placeholder value - will be updated manually in console
+        webhook_secret = "PLACEHOLDER_STRIPE_WEBHOOK_SECRET"
+        secret         = "PLACEHOLDER_STRIPE_WEBHOOK_SECRET" # Alternative key name for compatibility
+      }
+    }
+  }
+
+  depends_on = [module.kms]
+}
+
 # Cognito User Pool for authentication
 module "cognito" {
   source = "./modules/cognito"
