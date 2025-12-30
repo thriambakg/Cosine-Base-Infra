@@ -1,6 +1,6 @@
 # Payment Dependencies Layer
 # Libraries for payment processing
 
-# Payment processing
-stripe>=7.0.0
+# Payment processing - Updated for Stripe API version 2025-12-15.clover compatibility
+stripe>=10.0.0
 
