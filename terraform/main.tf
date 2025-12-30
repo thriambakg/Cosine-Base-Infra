@@ -163,7 +163,7 @@ module "lda_api_secrets_manager" {
   depends_on = [module.kms]
 }
 
-# Secrets Manager for Stripe payment processing
+# Secrets Manager for Stripe payment processing (consolidated)
 module "stripe_secrets_manager" {
   source = "./modules/secrets-manager"
 
@@ -177,22 +177,16 @@ module "stripe_secrets_manager" {
   # No automatic rotation for API keys
   automatic_rotation = {}
 
-  # Create secrets for Stripe integration
+  # Create single consolidated secret for Stripe integration
   secrets = {
-    stripe-secret = {
-      description = "Stripe secret key for payment processing (populated manually)"
+    stripe = {
+      description = "Stripe API keys for payment processing (secret key and webhook secret) - populated manually"
       secret_data = {
-        # Placeholder value - will be updated manually in console
+        # Placeholder values - will be updated manually in console
         stripe_secret_key = "PLACEHOLDER_STRIPE_SECRET_KEY"
         secret_key        = "PLACEHOLDER_STRIPE_SECRET_KEY" # Alternative key name for compatibility
-      }
-    }
-    stripe-webhook-secret = {
-      description = "Stripe webhook secret for webhook signature verification (populated manually)"
-      secret_data = {
-        # Placeholder value - will be updated manually in console
-        webhook_secret = "PLACEHOLDER_STRIPE_WEBHOOK_SECRET"
-        secret         = "PLACEHOLDER_STRIPE_WEBHOOK_SECRET" # Alternative key name for compatibility
+        webhook_secret    = "PLACEHOLDER_STRIPE_WEBHOOK_SECRET"
+        secret            = "PLACEHOLDER_STRIPE_WEBHOOK_SECRET" # Alternative key name for compatibility
       }
     }
   }
