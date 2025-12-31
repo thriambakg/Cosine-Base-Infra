@@ -11,7 +11,7 @@ from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
     save_parameter_filing_mapping, save_search_index_item, get_government_entity_name, get_general_issue_name, get_country_name,
-    filings_table, PAC_QUEUE_URL
+    clean_value, filings_table, PAC_QUEUE_URL
 )
 
 def extract_indexed_fields_filing(filing: Dict) -> Dict:
@@ -240,15 +240,26 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         item['item_type'] = 'FILING'
         
         # Handle GSI fields - only set if values exist
+        # Clean values before storing to ensure uniform field names (no commas)
         if indexed_fields.get('registrant_name'):
-            send_autocomplete_value('registrant_name', indexed_fields['registrant_name'])
+            cleaned_registrant = clean_value(indexed_fields['registrant_name'])
+            if cleaned_registrant:
+                item['registrant_name'] = cleaned_registrant
+                send_autocomplete_value('registrant_name', cleaned_registrant)
+            else:
+                item.pop('registrant_name', None)
         else:
             item.pop('registrant_name', None)
         
-        if not indexed_fields.get('client_name'):
-            item.pop('client_name', None)
+        if indexed_fields.get('client_name'):
+            cleaned_client = clean_value(indexed_fields['client_name'])
+            if cleaned_client:
+                item['client_name'] = cleaned_client
+                send_autocomplete_value('client_name', cleaned_client)
+            else:
+                item.pop('client_name', None)
         else:
-            send_autocomplete_value('client_name', indexed_fields['client_name'])
+            item.pop('client_name', None)
         
         # Remove single lobbyist_name field (now using parameter-filing mappings for all lobbyists)
         item.pop('lobbyist_name', None)
@@ -348,51 +359,60 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         if all_lobbyist_names:
             for lobbyist_name in all_lobbyist_names:
                 if lobbyist_name:
-                    # Send to autocomplete queue for CSV generation
-                    send_autocomplete_value('lobbyist_name', lobbyist_name)
-                    # Save parameter-filing mapping
-                    save_parameter_filing_mapping(
-                        parameter_type='LOBBYIST',
-                        parameter_value=lobbyist_name,
-                        filing_uuid=filing_uuid,
-                        filing_type='FILING',
-                        dt_posted=dt_posted
-                    )
+                    # Clean value before storing to ensure uniform field names (no commas)
+                    cleaned_lobbyist = clean_value(lobbyist_name)
+                    if cleaned_lobbyist:
+                        # Send to autocomplete queue for CSV generation
+                        send_autocomplete_value('lobbyist_name', cleaned_lobbyist)
+                        # Save parameter-filing mapping
+                        save_parameter_filing_mapping(
+                            parameter_type='LOBBYIST',
+                            parameter_value=cleaned_lobbyist,
+                            filing_uuid=filing_uuid,
+                            filing_type='FILING',
+                            dt_posted=dt_posted
+                        )
         
         # Save materialized search index items for efficient querying and pagination
         entity_pk = f"FILING#{filing_uuid}"
         
         # Save registrant search index
         if indexed_fields.get('registrant_name'):
-            save_search_index_item(
-                search_type='REGISTRANT',
-                search_value=indexed_fields['registrant_name'],
-                entity_pk=entity_pk,
-                entity_type='FILING',
-                dt_posted=dt_posted
-            )
+            cleaned_registrant = clean_value(indexed_fields['registrant_name'])
+            if cleaned_registrant:
+                save_search_index_item(
+                    search_type='REGISTRANT',
+                    search_value=cleaned_registrant,
+                    entity_pk=entity_pk,
+                    entity_type='FILING',
+                    dt_posted=dt_posted
+                )
         
         # Save client search index
         if indexed_fields.get('client_name'):
-            save_search_index_item(
-                search_type='CLIENT',
-                search_value=indexed_fields['client_name'],
-                entity_pk=entity_pk,
-                entity_type='FILING',
-                dt_posted=dt_posted
-            )
+            cleaned_client = clean_value(indexed_fields['client_name'])
+            if cleaned_client:
+                save_search_index_item(
+                    search_type='CLIENT',
+                    search_value=cleaned_client,
+                    entity_pk=entity_pk,
+                    entity_type='FILING',
+                    dt_posted=dt_posted
+                )
         
         # Save lobbyist search indexes
         if all_lobbyist_names:
             for lobbyist_name in all_lobbyist_names:
                 if lobbyist_name:
-                    save_search_index_item(
-                        search_type='LOBBYIST',
-                        search_value=lobbyist_name,
-                        entity_pk=entity_pk,
-                        entity_type='FILING',
-                        dt_posted=dt_posted
-                    )
+                    cleaned_lobbyist = clean_value(lobbyist_name)
+                    if cleaned_lobbyist:
+                        save_search_index_item(
+                            search_type='LOBBYIST',
+                            search_value=cleaned_lobbyist,
+                            entity_pk=entity_pk,
+                            entity_type='FILING',
+                            dt_posted=dt_posted
+                        )
         
         # Save general issue search indexes
         if all_general_issue_codes:

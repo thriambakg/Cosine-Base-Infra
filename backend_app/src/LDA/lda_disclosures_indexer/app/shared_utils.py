@@ -303,16 +303,46 @@ def create_unified_entity(client: Optional[Dict], lobbyist: Optional[Dict]) -> O
         return {'entity_type': 'lobbyist', 'entity': lobbyist}
     return None
 
+def clean_value(value: str) -> str:
+    """
+    Clean autocomplete value by removing double quotes, commas, and extra whitespace.
+    This matches the cleaning logic in the autocomplete processor to ensure uniform field names.
+    Double quotes and commas are removed to avoid CSV parsing issues and ensure consistency.
+    
+    Args:
+        value: Raw value string
+    
+    Returns:
+        Cleaned value with double quotes and commas removed, and stripped
+    """
+    if not value:
+        return ''
+    
+    # Strip whitespace first
+    cleaned = value.strip()
+    
+    # Remove surrounding double quotes if present
+    if cleaned.startswith('"') and cleaned.endswith('"'):
+        cleaned = cleaned[1:-1]
+    
+    # Remove any remaining double quotes (shouldn't happen, but be safe)
+    cleaned = cleaned.replace('"', '')
+    
+    # Remove commas (would confuse CSV structure and search, ensures uniform field names)
+    cleaned = cleaned.replace(',', '')
+    
+    # Normalize whitespace (multiple spaces to single space)
+    cleaned = ' '.join(cleaned.split())
+    
+    return cleaned.strip()
+
 def send_autocomplete_value(field_type: str, value: str):
     """Send an autocomplete value to SQS queue for CSV generation"""
     if not PAC_QUEUE_URL or not value:
         return
     
-    cleaned_value = value.strip()
-    if cleaned_value.startswith('"') and cleaned_value.endswith('"'):
-        cleaned_value = cleaned_value[1:-1]
-    cleaned_value = cleaned_value.replace('"', '').replace(',', '')
-    cleaned_value = ' '.join(cleaned_value.split())
+    # Use shared cleaning function to ensure consistency
+    cleaned_value = clean_value(value)
     
     if not cleaned_value:
         return
