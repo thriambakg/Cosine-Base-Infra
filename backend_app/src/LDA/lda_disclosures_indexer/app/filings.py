@@ -362,7 +362,7 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
                     # Clean value before storing to ensure uniform field names (no commas)
                     cleaned_lobbyist = clean_value(lobbyist_name)
                     if cleaned_lobbyist:
-                        # Send to autocomplete queue for CSV generation
+                        # Send to autocomplete queue for autocomplete file generation
                         send_autocomplete_value('lobbyist_name', cleaned_lobbyist)
                         # Save parameter-filing mapping
                         save_parameter_filing_mapping(

@@ -5,7 +5,6 @@ Contains common helper functions used by both filings.py and contributions.py
 
 import json
 import os
-import csv
 import time
 import requests
 import boto3
@@ -13,7 +12,6 @@ from typing import Dict, Optional
 from decimal import Decimal
 from threading import Lock
 from botocore.exceptions import ClientError
-from io import StringIO
 
 # Environment variables
 LDA_API_BASE_URL = os.environ.get('LDA_API_BASE_URL', 'https://lda.senate.gov/api/v1')
@@ -307,7 +305,7 @@ def clean_value(value: str) -> str:
     """
     Clean autocomplete value by removing double quotes, commas, and extra whitespace.
     This matches the cleaning logic in the autocomplete processor to ensure uniform field names.
-    Double quotes and commas are removed to avoid CSV parsing issues and ensure consistency.
+    Double quotes and commas are removed to ensure consistency and uniform field names.
     
     Args:
         value: Raw value string
@@ -328,7 +326,7 @@ def clean_value(value: str) -> str:
     # Remove any remaining double quotes (shouldn't happen, but be safe)
     cleaned = cleaned.replace('"', '')
     
-    # Remove commas (would confuse CSV structure and search, ensures uniform field names)
+    # Remove commas (ensures uniform field names for consistent searching)
     cleaned = cleaned.replace(',', '')
     
     # Normalize whitespace (multiple spaces to single space)
@@ -337,7 +335,7 @@ def clean_value(value: str) -> str:
     return cleaned.strip()
 
 def send_autocomplete_value(field_type: str, value: str):
-    """Send an autocomplete value to SQS queue for CSV generation"""
+    """Send an autocomplete value to SQS queue for autocomplete file generation"""
     if not PAC_QUEUE_URL or not value:
         return
     
