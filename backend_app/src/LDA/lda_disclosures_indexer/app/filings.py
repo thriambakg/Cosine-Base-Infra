@@ -11,7 +11,7 @@ from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
     save_parameter_filing_mapping, save_search_index_item, get_government_entity_name, get_general_issue_name, get_country_name,
-    clean_value, filings_table, PAC_QUEUE_URL
+    filings_table, PAC_QUEUE_URL
 )
 
 def extract_indexed_fields_filing(filing: Dict) -> Dict:
@@ -240,22 +240,22 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         item['item_type'] = 'FILING'
         
         # Handle GSI fields - only set if values exist
-        # Clean values before storing to ensure uniform field names (no commas)
+        # Store raw values as they come from the API
         if indexed_fields.get('registrant_name'):
-            cleaned_registrant = clean_value(indexed_fields['registrant_name'])
-            if cleaned_registrant:
-                item['registrant_name'] = cleaned_registrant
-                send_autocomplete_value('registrant_name', cleaned_registrant)
+            registrant_name = str(indexed_fields['registrant_name']).strip() if indexed_fields['registrant_name'] else ''
+            if registrant_name:
+                item['registrant_name'] = registrant_name
+                send_autocomplete_value('registrant_name', registrant_name)
             else:
                 item.pop('registrant_name', None)
         else:
             item.pop('registrant_name', None)
         
         if indexed_fields.get('client_name'):
-            cleaned_client = clean_value(indexed_fields['client_name'])
-            if cleaned_client:
-                item['client_name'] = cleaned_client
-                send_autocomplete_value('client_name', cleaned_client)
+            client_name = str(indexed_fields['client_name']).strip() if indexed_fields['client_name'] else ''
+            if client_name:
+                item['client_name'] = client_name
+                send_autocomplete_value('client_name', client_name)
             else:
                 item.pop('client_name', None)
         else:
@@ -359,15 +359,15 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         if all_lobbyist_names:
             for lobbyist_name in all_lobbyist_names:
                 if lobbyist_name:
-                    # Clean value before storing to ensure uniform field names (no commas)
-                    cleaned_lobbyist = clean_value(lobbyist_name)
-                    if cleaned_lobbyist:
+                    # Store raw value as it comes from the API
+                    raw_lobbyist = str(lobbyist_name).strip() if lobbyist_name else ''
+                    if raw_lobbyist:
                         # Send to autocomplete queue for autocomplete file generation
-                        send_autocomplete_value('lobbyist_name', cleaned_lobbyist)
+                        send_autocomplete_value('lobbyist_name', raw_lobbyist)
                         # Save parameter-filing mapping
                         save_parameter_filing_mapping(
                             parameter_type='LOBBYIST',
-                            parameter_value=cleaned_lobbyist,
+                            parameter_value=raw_lobbyist,
                             filing_uuid=filing_uuid,
                             filing_type='FILING',
                             dt_posted=dt_posted
@@ -378,11 +378,11 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         
         # Save registrant search index
         if indexed_fields.get('registrant_name'):
-            cleaned_registrant = clean_value(indexed_fields['registrant_name'])
-            if cleaned_registrant:
+            registrant_name = str(indexed_fields['registrant_name']).strip() if indexed_fields['registrant_name'] else ''
+            if registrant_name:
                 save_search_index_item(
                     search_type='REGISTRANT',
-                    search_value=cleaned_registrant,
+                    search_value=registrant_name,
                     entity_pk=entity_pk,
                     entity_type='FILING',
                     dt_posted=dt_posted
@@ -390,11 +390,11 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         
         # Save client search index
         if indexed_fields.get('client_name'):
-            cleaned_client = clean_value(indexed_fields['client_name'])
-            if cleaned_client:
+            client_name = str(indexed_fields['client_name']).strip() if indexed_fields['client_name'] else ''
+            if client_name:
                 save_search_index_item(
                     search_type='CLIENT',
-                    search_value=cleaned_client,
+                    search_value=client_name,
                     entity_pk=entity_pk,
                     entity_type='FILING',
                     dt_posted=dt_posted
@@ -404,11 +404,11 @@ def save_filing_to_dynamodb(filing: Dict, indexed_fields: Dict, s3_key: Optional
         if all_lobbyist_names:
             for lobbyist_name in all_lobbyist_names:
                 if lobbyist_name:
-                    cleaned_lobbyist = clean_value(lobbyist_name)
-                    if cleaned_lobbyist:
+                    raw_lobbyist = str(lobbyist_name).strip() if lobbyist_name else ''
+                    if raw_lobbyist:
                         save_search_index_item(
                             search_type='LOBBYIST',
-                            search_value=cleaned_lobbyist,
+                            search_value=raw_lobbyist,
                             entity_pk=entity_pk,
                             entity_type='FILING',
                             dt_posted=dt_posted

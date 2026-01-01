@@ -301,48 +301,15 @@ def create_unified_entity(client: Optional[Dict], lobbyist: Optional[Dict]) -> O
         return {'entity_type': 'lobbyist', 'entity': lobbyist}
     return None
 
-def clean_value(value: str) -> str:
-    """
-    Clean autocomplete value by removing double quotes, commas, and extra whitespace.
-    This matches the cleaning logic in the autocomplete processor to ensure uniform field names.
-    Double quotes and commas are removed to ensure consistency and uniform field names.
-    
-    Args:
-        value: Raw value string
-    
-    Returns:
-        Cleaned value with double quotes and commas removed, and stripped
-    """
-    if not value:
-        return ''
-    
-    # Strip whitespace first
-    cleaned = value.strip()
-    
-    # Remove surrounding double quotes if present
-    if cleaned.startswith('"') and cleaned.endswith('"'):
-        cleaned = cleaned[1:-1]
-    
-    # Remove any remaining double quotes (shouldn't happen, but be safe)
-    cleaned = cleaned.replace('"', '')
-    
-    # Remove commas (ensures uniform field names for consistent searching)
-    cleaned = cleaned.replace(',', '')
-    
-    # Normalize whitespace (multiple spaces to single space)
-    cleaned = ' '.join(cleaned.split())
-    
-    return cleaned.strip()
-
 def send_autocomplete_value(field_type: str, value: str):
     """Send an autocomplete value to SQS queue for autocomplete file generation"""
     if not PAC_QUEUE_URL or not value:
         return
     
-    # Use shared cleaning function to ensure consistency
-    cleaned_value = clean_value(value)
+    # Store raw value as it comes from the API (just strip whitespace)
+    raw_value = str(value).strip() if value else ''
     
-    if not cleaned_value:
+    if not raw_value:
         return
     
     try:
@@ -350,7 +317,7 @@ def send_autocomplete_value(field_type: str, value: str):
             QueueUrl=PAC_QUEUE_URL,
             MessageBody=json.dumps({
                 'field_type': field_type,
-                'value': cleaned_value
+                'value': raw_value
             })
         )
     except Exception as e:

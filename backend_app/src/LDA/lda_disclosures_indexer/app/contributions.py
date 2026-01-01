@@ -11,7 +11,7 @@ from shared_utils import (
     get_api_key, create_session, call_api, download_document,
     merge_address_fields, create_unified_entity, send_autocomplete_value,
     save_parameter_filing_mapping, save_search_index_item, get_government_entity_name, get_general_issue_name, get_country_name,
-    clean_value, filings_table, PAC_QUEUE_URL
+    filings_table, PAC_QUEUE_URL
 )
 
 def extract_indexed_fields_contribution(contribution: Dict) -> Dict:
@@ -221,14 +221,14 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                     pac_name = str(pac)
                 
                 if pac_name:
-                    # Clean value before storing to ensure uniform field names (no commas)
-                    cleaned_pac = clean_value(pac_name)
-                    if cleaned_pac:
-                        send_autocomplete_value('pac_name', cleaned_pac)
+                    # Store raw value as it comes from the API
+                    raw_pac = str(pac_name).strip() if pac_name else ''
+                    if raw_pac:
+                        send_autocomplete_value('pac_name', raw_pac)
                         # Save parameter-filing mapping for each PAC
                         save_parameter_filing_mapping(
                             parameter_type='PAC',
-                            parameter_value=cleaned_pac,
+                            parameter_value=raw_pac,
                             filing_uuid=item['filing_uuid'],
                             filing_type='CONTRIBUTION',
                             dt_posted=indexed_fields.get('dt_posted')
@@ -313,32 +313,32 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         item['item_type'] = 'CONTRIBUTION'
         
         # Handle GSI fields - only set if values exist
-        # Clean values before storing to ensure uniform field names (no commas)
+        # Store raw values as they come from the API
         if indexed_fields.get('registrant_name'):
-            cleaned_registrant = clean_value(indexed_fields['registrant_name'])
-            if cleaned_registrant:
-                item['registrant_name'] = cleaned_registrant
-                send_autocomplete_value('registrant_name', cleaned_registrant)
+            registrant_name = str(indexed_fields['registrant_name']).strip() if indexed_fields['registrant_name'] else ''
+            if registrant_name:
+                item['registrant_name'] = registrant_name
+                send_autocomplete_value('registrant_name', registrant_name)
             else:
                 item.pop('registrant_name', None)
         else:
             item.pop('registrant_name', None)
         
         if indexed_fields.get('client_name'):
-            cleaned_client = clean_value(indexed_fields['client_name'])
-            if cleaned_client:
-                item['client_name'] = cleaned_client
-                send_autocomplete_value('client_name', cleaned_client)
+            client_name = str(indexed_fields['client_name']).strip() if indexed_fields['client_name'] else ''
+            if client_name:
+                item['client_name'] = client_name
+                send_autocomplete_value('client_name', client_name)
             else:
                 item.pop('client_name', None)
         else:
             item.pop('client_name', None)
         
         if indexed_fields.get('lobbyist_name'):
-            cleaned_lobbyist = clean_value(indexed_fields['lobbyist_name'])
-            if cleaned_lobbyist:
-                item['lobbyist_name'] = cleaned_lobbyist
-                send_autocomplete_value('lobbyist_name', cleaned_lobbyist)
+            lobbyist_name = str(indexed_fields['lobbyist_name']).strip() if indexed_fields['lobbyist_name'] else ''
+            if lobbyist_name:
+                item['lobbyist_name'] = lobbyist_name
+                send_autocomplete_value('lobbyist_name', lobbyist_name)
             else:
                 item.pop('lobbyist_name', None)
         else:
@@ -390,11 +390,11 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         
         # Save registrant search index
         if indexed_fields.get('registrant_name'):
-            cleaned_registrant = clean_value(indexed_fields['registrant_name'])
-            if cleaned_registrant:
+            registrant_name = str(indexed_fields['registrant_name']).strip() if indexed_fields['registrant_name'] else ''
+            if registrant_name:
                 save_search_index_item(
                     search_type='REGISTRANT',
-                    search_value=cleaned_registrant,
+                    search_value=registrant_name,
                     entity_pk=entity_pk,
                     entity_type='CONTRIBUTION',
                     dt_posted=dt_posted
@@ -402,11 +402,11 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         
         # Save client search index
         if indexed_fields.get('client_name'):
-            cleaned_client = clean_value(indexed_fields['client_name'])
-            if cleaned_client:
+            client_name = str(indexed_fields['client_name']).strip() if indexed_fields['client_name'] else ''
+            if client_name:
                 save_search_index_item(
                     search_type='CLIENT',
-                    search_value=cleaned_client,
+                    search_value=client_name,
                     entity_pk=entity_pk,
                     entity_type='CONTRIBUTION',
                     dt_posted=dt_posted
@@ -423,11 +423,11 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
                     pac_name = str(pac)
                 
                 if pac_name:
-                    cleaned_pac = clean_value(pac_name)
-                    if cleaned_pac:
+                    raw_pac = str(pac_name).strip() if pac_name else ''
+                    if raw_pac:
                         save_search_index_item(
                             search_type='PAC',
-                            search_value=cleaned_pac,
+                            search_value=raw_pac,
                             entity_pk=entity_pk,
                             entity_type='CONTRIBUTION',
                             dt_posted=dt_posted
@@ -438,11 +438,11 @@ def save_contribution_to_dynamodb(contribution: Dict, indexed_fields: Dict, s3_k
         if all_lobbyist_names:
             for lobbyist_name in all_lobbyist_names:
                 if lobbyist_name:
-                    cleaned_lobbyist = clean_value(lobbyist_name)
-                    if cleaned_lobbyist:
+                    raw_lobbyist = str(lobbyist_name).strip() if lobbyist_name else ''
+                    if raw_lobbyist:
                         save_search_index_item(
                             search_type='LOBBYIST',
-                            search_value=cleaned_lobbyist,
+                            search_value=raw_lobbyist,
                             entity_pk=entity_pk,
                             entity_type='CONTRIBUTION',
                             dt_posted=dt_posted
