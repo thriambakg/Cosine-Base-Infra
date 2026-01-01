@@ -1,27 +1,25 @@
 """
 Lambda Function: LDA Autocomplete Processor
 Processes autocomplete strings (PAC names, client names, lobbyist names, registrant names) 
-from SQS and maintains sorted, deduplicated CSVs in S3.
+from SQS and maintains sorted, deduplicated TXT files in S3.
 
 This Lambda:
 1. Receives autocomplete strings from SQS messages (with field_type)
-2. Reads existing CSV from S3 (if it exists)
+2. Reads existing TXT file from S3 (if it exists)
 3. Merges new strings with existing ones (deduplicates)
 4. Sorts the list alphabetically
-5. Writes updated CSV back to S3
+5. Writes updated TXT file back to S3 (one value per line, preserves commas and special characters)
 
 Supports multiple field types:
-- pac_name -> lists/pacs.csv
-- client_name -> lists/client_names.csv
-- lobbyist_name -> lists/lobbyist_names.csv
-- registrant_name -> lists/registrant_names.csv
+- pac_name -> lists/pacs.txt
+- client_name -> lists/client_names.txt
+- lobbyist_name -> lists/lobbyist_names.txt
+- registrant_name -> lists/registrant_names.txt
 """
 
 import json
-import csv
 import os
 import boto3
-from io import StringIO
 from typing import Set, List, Dict
 from collections import defaultdict
 
@@ -33,22 +31,22 @@ S3_BUCKET_NAME = os.environ.get('S3_BUCKET_NAME')
 
 # Field type to S3 key mapping
 FIELD_TYPE_TO_S3_KEY = {
-    'pac_name': 'lists/pacs.csv',
-    'client_name': 'lists/client_names.csv',
-    'lobbyist_name': 'lists/lobbyist_names.csv',
-    'registrant_name': 'lists/registrant_names.csv'
+    'pac_name': 'lists/pacs.txt',
+    'client_name': 'lists/client_names.txt',
+    'lobbyist_name': 'lists/lobbyist_names.txt',
+    'registrant_name': 'lists/registrant_names.txt'
 }
 
 def clean_value(value: str) -> str:
     """
-    Clean autocomplete value by removing double quotes, commas, and extra whitespace.
-    Double quotes and commas are not indexed and would confuse CSV structure/parsing.
+    Clean autocomplete value by removing surrounding quotes and normalizing whitespace.
+    Preserves commas and other special characters as they come from the API.
     
     Args:
         value: Raw value string
     
     Returns:
-        Cleaned value with double quotes and commas removed, and stripped
+        Cleaned value with surrounding quotes removed and whitespace normalized, but preserving commas and special characters
     """
     if not value:
         return ''
@@ -60,69 +58,60 @@ def clean_value(value: str) -> str:
     if cleaned.startswith('"') and cleaned.endswith('"'):
         cleaned = cleaned[1:-1]
     
-    # Remove any remaining double quotes (shouldn't happen, but be safe)
-    cleaned = cleaned.replace('"', '')
-    
-    # Remove commas (would confuse CSV structure and search)
-    cleaned = cleaned.replace(',', '')
-    
     # Normalize whitespace (multiple spaces to single space)
     cleaned = ' '.join(cleaned.split())
     
     return cleaned.strip()
 
-def read_existing_csv(bucket: str, key: str, field_name: str) -> Set[str]:
-    """Read existing values from S3 CSV, return as a set for deduplication"""
+def read_existing_txt(bucket: str, key: str, field_name: str) -> Set[str]:
+    """Read existing values from S3 TXT file (one value per line), return as a set for deduplication"""
     try:
         response = s3_client.get_object(Bucket=bucket, Key=key)
-        csv_content = response['Body'].read().decode('utf-8')
-        reader = csv.reader(StringIO(csv_content))
-        # Skip header if present
-        next(reader, None)
-        # Collect all values (clean double quotes)
+        txt_content = response['Body'].read().decode('utf-8')
+        # Split by newlines and process each line
         values = set()
-        for row in reader:
-            if row and row[0]:
-                cleaned_value = clean_value(row[0])
+        for line in txt_content.split('\n'):
+            line = line.strip()
+            # Skip empty lines and header lines (if present)
+            if line and line.lower() not in ['value', field_name]:
+                cleaned_value = clean_value(line)
                 if cleaned_value:
                     values.add(cleaned_value)
         return values
     except s3_client.exceptions.NoSuchKey:
-        # CSV doesn't exist yet, return empty set
+        # TXT file doesn't exist yet, return empty set
         return set()
     except Exception as e:
-        print(f"⚠️ Error reading existing CSV: {str(e)}")
+        print(f"⚠️ Error reading existing TXT file: {str(e)}")
         return set()
 
-def write_csv_to_s3(bucket: str, key: str, values: List[str], field_name: str):
+def write_txt_to_s3(bucket: str, key: str, values: List[str], field_name: str):
     """
-    Write sorted values to S3 as CSV without double quotes.
-    Manually writes CSV lines to avoid csv.writer's automatic quoting of values with commas.
+    Write sorted values to S3 as TXT file (one value per line).
+    Preserves commas and special characters as they come from the API.
     """
     # Sort alphabetically
     sorted_values = sorted(values)
     
-    # Manually write CSV to avoid automatic quoting
-    # This ensures values like "CARFAX, INC." are written as CARFAX, INC. (no quotes)
-    csv_lines = [field_name]  # Header
+    # Write TXT file - one value per line
+    # No header needed for TXT files, but we can add it for compatibility
+    txt_lines = []
     
     for value in sorted_values:
-        # Ensure value is already cleaned (no quotes)
+        # Clean value (removes surrounding quotes, normalizes whitespace, but preserves commas)
         cleaned = clean_value(value) if value else ''
         if cleaned:
-            # Manually write the line - values with commas will be written as-is (no quotes)
-            # This matches the format expected by the frontend (no quotes in CSV)
-            csv_lines.append(cleaned)
+            txt_lines.append(cleaned)
     
-    # Join with newlines (simple CSV format - one value per line)
-    csv_content = '\n'.join(csv_lines) + '\n'
+    # Join with newlines
+    txt_content = '\n'.join(txt_lines) + '\n'
     
     # Upload to S3
     s3_client.put_object(
         Bucket=bucket,
         Key=key,
-        Body=csv_content.encode('utf-8'),
-        ContentType='text/csv',
+        Body=txt_content.encode('utf-8'),
+        ContentType='text/plain',
         CacheControl='max-age=3600'  # Cache for 1 hour
     )
     
@@ -185,8 +174,8 @@ def lambda_handler(event, context):
         print(f"📝 Processing {len(new_values)} new {field_type} values")
         
         # Read existing values from S3
-        existing_values = read_existing_csv(S3_BUCKET_NAME, s3_key, field_type)
-        print(f"📖 Found {len(existing_values)} existing {field_type} values in CSV")
+        existing_values = read_existing_txt(S3_BUCKET_NAME, s3_key, field_type)
+        print(f"📖 Found {len(existing_values)} existing {field_type} values in TXT file")
         
         # Merge new with existing (set automatically deduplicates)
         all_values = existing_values.union(new_values)
@@ -197,15 +186,15 @@ def lambda_handler(event, context):
         if new_count > 0:
             print(f"✨ Added {new_count} new {field_type} values (total: {len(all_values)})")
             
-            # Write updated CSV to S3
-            write_csv_to_s3(S3_BUCKET_NAME, s3_key, list(all_values), field_type)
+            # Write updated TXT file to S3
+            write_txt_to_s3(S3_BUCKET_NAME, s3_key, list(all_values), field_type)
             
             results[field_type] = {
                 'total': len(all_values),
                 'new': new_count
             }
         else:
-            print(f"ℹ️ All {field_type} values already exist in CSV (no updates needed)")
+            print(f"ℹ️ All {field_type} values already exist in TXT file (no updates needed)")
             results[field_type] = {
                 'total': len(all_values),
                 'new': 0
@@ -214,7 +203,7 @@ def lambda_handler(event, context):
     return {
         'statusCode': 200,
         'body': json.dumps({
-            'message': 'Autocomplete CSVs updated',
+            'message': 'Autocomplete TXT files updated',
             'results': results
         })
     }

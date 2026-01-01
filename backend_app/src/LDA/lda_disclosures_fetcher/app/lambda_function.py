@@ -5,13 +5,11 @@ Determines total pages for filings and contributions endpoints and creates batch
 
 import json
 import os
-import csv
 import requests
 import boto3
 from botocore.exceptions import ClientError
 from typing import Dict, List, Optional
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from io import StringIO
 from datetime import datetime, timedelta
 
 # Environment variables
@@ -171,30 +169,30 @@ def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[st
     
     return successful
 
-def json_to_csv_names_only(data: List[Dict], name_column: str) -> str:
-    """Convert JSON data to CSV string with single column (names only) for autocomplete"""
+def json_to_txt_names_only(data: List[Dict], name_column: str) -> str:
+    """Convert JSON data to TXT file with names only (one per line, preserves commas and special characters)"""
     if not data:
         return ''
     
-    csv_buffer = StringIO()
-    writer = csv.writer(csv_buffer)
-    writer.writerow(['value'])  # Header (using 'value' for consistency with autocomplete Lambda)
+    lines = []
     
     for item in data:
         name = item.get(name_column, '')
         if name and str(name).strip():
-            writer.writerow([str(name).strip()])
+            # Preserve commas and special characters as they come from the API
+            lines.append(str(name).strip())
     
-    return csv_buffer.getvalue()
+    return '\n'.join(lines) + '\n'
 
 def fetch_and_store_constants(session: requests.Session):
-    """Fetch constants from LDA API, convert to single-column CSV (names only for autocomplete), and store in S3"""
+    """Fetch constants from LDA API, convert to TXT file (names only for autocomplete, one per line), and store in S3"""
     if not S3_BUCKET_NAME or not s3_client:
         print("⚠️  S3_BUCKET_NAME not configured, skipping constants storage")
         return
     
-    # Constants to fetch and store (single column CSV with names for autocomplete)
+    # Constants to fetch and store (TXT file with names for autocomplete, one per line)
     # Note: We store names (not codes/IDs) because autocomplete needs human-readable names
+    # TXT format preserves commas and special characters as they come from the API
     constants_config = {
         "general_issues": {
             "endpoint": f"{LDA_API_BASE_URL}/constants/filing/lobbyingactivityissues/",
@@ -210,7 +208,7 @@ def fetch_and_store_constants(session: requests.Session):
         }
     }
     
-    print("\n📋 Fetching and storing constants as single-column CSVs to S3...")
+    print("\n📋 Fetching and storing constants as TXT files to S3...")
     
     for constant_type, config in constants_config.items():
         try:
@@ -219,19 +217,20 @@ def fetch_and_store_constants(session: requests.Session):
             response.raise_for_status()
             constants = response.json()
             
-            # Convert to CSV with names only (single column) for autocomplete
-            csv_content = json_to_csv_names_only(
+            # Convert to TXT with names only (one per line) for autocomplete
+            # Preserves commas and special characters as they come from the API
+            txt_content = json_to_txt_names_only(
                 constants,
                 config["name_column"]
             )
             
-            # Store CSV in S3
-            s3_key = f"lists/{constant_type}.csv"
+            # Store TXT file in S3
+            s3_key = f"lists/{constant_type}.txt"
             s3_client.put_object(
                 Bucket=S3_BUCKET_NAME,
                 Key=s3_key,
-                Body=csv_content.encode('utf-8'),
-                ContentType='text/csv'
+                Body=txt_content.encode('utf-8'),
+                ContentType='text/plain'
             )
             
             print(f"   ✅ Stored {len(constants)} {constant_type} values to s3://{S3_BUCKET_NAME}/{s3_key}")
