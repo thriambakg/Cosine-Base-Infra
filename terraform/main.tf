@@ -4422,6 +4422,7 @@ module "usaspending_awards_index_table" {
     { name = "period_start_date", type = "S" },
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
+    { name = "recipient_zip_code", type = "S" },
     { name = "award_type", type = "S" },
     { name = "is_assistance", type = "N" }
   ]
@@ -4472,6 +4473,14 @@ module "usaspending_awards_index_table" {
       hash_key        = "recipient_location_state"
       range_key       = "fiscal_year"
       projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "ZipCodeFiscalYearIndex"
+      hash_key        = "recipient_zip_code"
+      range_key       = "fiscal_year"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
