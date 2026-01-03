@@ -2707,14 +2707,6 @@ module "congress_bills_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "SponsorStateDateIndex"
-      hash_key        = "sponsor_state"
-      range_key       = "introduced_date"
-      projection_type = "KEYS_ONLY"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
       name            = "IntroducedDateIndex"
       hash_key        = "introduced_date"
       range_key       = null
