@@ -4477,14 +4477,6 @@ module "usaspending_awards_index_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "AwardTypeFiscalYearIndex"
-      hash_key        = "award_type"
-      range_key       = "fiscal_year"
-      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
       name            = "PeriodStartDateIndex"
       hash_key        = "fiscal_year"
       range_key       = "period_start_date"
