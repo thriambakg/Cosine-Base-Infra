@@ -739,7 +739,7 @@ module "user_profile_creation_lambda" {
   source_dir = "../backend_app/src/user_profile_creation/app"
 
   # Lambda layers
-  layer_arns = [
+  layers = [
     module.utility_layer.layer_arn
   ]
 
