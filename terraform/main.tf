@@ -738,6 +738,11 @@ module "user_profile_creation_lambda" {
   # Source directory
   source_dir = "../backend_app/src/user_profile_creation/app"
 
+  # Lambda layers
+  layer_arns = [
+    module.utility_layer.layer_arn
+  ]
+
   # Environment variables
   environment_variables = {
     USER_PROFILES_TABLE_NAME = module.user_profiles_table.table_name
@@ -750,7 +755,7 @@ module "user_profile_creation_lambda" {
 
   tags = var.common_tags
 
-  depends_on = [module.user_profiles_table]
+  depends_on = [module.user_profiles_table, module.utility_layer]
 }
 
 # ============================================================================
