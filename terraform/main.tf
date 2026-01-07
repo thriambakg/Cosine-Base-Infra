@@ -217,7 +217,6 @@ module "cognito" {
 
   # Lambda trigger for user profile creation
   post_authentication_lambda_arn = module.user_profile_creation_lambda.function_arn
-  post_confirmation_lambda_arn   = module.user_profile_creation_lambda.function_arn
 
   # Secrets Manager Integration
   use_secrets_manager         = var.oauth_secrets_enabled
@@ -739,11 +738,6 @@ module "user_profile_creation_lambda" {
   # Source directory
   source_dir = "../backend_app/src/user_profile_creation/app"
 
-  # Lambda layers
-  layers = [
-    module.utility_layer.layer_arn
-  ]
-
   # Environment variables
   environment_variables = {
     USER_PROFILES_TABLE_NAME = module.user_profiles_table.table_name
@@ -756,15 +750,8 @@ module "user_profile_creation_lambda" {
 
   tags = var.common_tags
 
-  depends_on = [module.user_profiles_table, module.utility_layer]
+  depends_on = [module.user_profiles_table]
 }
-
-# ============================================================================
-# API KEY AUTHORIZATION LAMBDA (Lambda Authorizer)
-# ============================================================================
-# Validates API keys and returns IAM policy for API Gateway
-
-
 
 # Lambda permission for Cognito to invoke the user profile creation function
 resource "aws_lambda_permission" "cognito_user_profile_creation" {
@@ -2635,6 +2622,7 @@ module "congress_bills_table" {
     { name = "search_index_sk", type = "S" }, # Added for search index items
     { name = "sponsor_full_name", type = "S" },
     { name = "sponsor_party", type = "S" },
+    { name = "sponsor_state", type = "S" },
     { name = "introduced_date", type = "S" },
     { name = "latest_action_date", type = "S" },
     { name = "congress", type = "N" },
@@ -4427,6 +4415,7 @@ module "usaspending_awards_index_table" {
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
     { name = "recipient_zip_code", type = "S" },
+    { name = "award_type", type = "S" },
     { name = "is_assistance", type = "N" }
   ]
 
