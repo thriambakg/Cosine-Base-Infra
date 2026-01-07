@@ -2622,7 +2622,6 @@ module "congress_bills_table" {
     { name = "search_index_sk", type = "S" }, # Added for search index items
     { name = "sponsor_full_name", type = "S" },
     { name = "sponsor_party", type = "S" },
-    { name = "sponsor_state", type = "S" },
     { name = "introduced_date", type = "S" },
     { name = "latest_action_date", type = "S" },
     { name = "congress", type = "N" },
@@ -4415,7 +4414,6 @@ module "usaspending_awards_index_table" {
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
     { name = "recipient_zip_code", type = "S" },
-    { name = "award_type", type = "S" },
     { name = "is_assistance", type = "N" }
   ]
 
