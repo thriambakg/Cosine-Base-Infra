@@ -2677,7 +2677,6 @@ module "congress_bills_table" {
     { name = "search_index_sk", type = "S" }, # Added for search index items
     { name = "sponsor_full_name", type = "S" },
     { name = "sponsor_party", type = "S" },
-    { name = "sponsor_state", type = "S" },
     { name = "introduced_date", type = "S" },
     { name = "latest_action_date", type = "S" },
     { name = "congress", type = "N" },
