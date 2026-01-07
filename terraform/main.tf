@@ -243,7 +243,8 @@ module "user_profiles_table" {
   attributes = [
     { name = "user_id", type = "S" },
     { name = "email", type = "S" },
-    { name = "created_at", type = "S" }
+    { name = "created_at", type = "S" },
+    { name = "api_key_prefix", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -258,6 +259,14 @@ module "user_profiles_table" {
     {
       name            = "CreatedAtIndex"
       hash_key        = "created_at"
+      range_key       = null
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "api_key_prefix-index"
+      hash_key        = "api_key_prefix"
       range_key       = null
       projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
@@ -752,6 +761,52 @@ module "user_profile_creation_lambda" {
 
   depends_on = [module.user_profiles_table]
 }
+
+# ============================================================================
+# API KEY AUTHORIZATION LAMBDA (Lambda Authorizer)
+# ============================================================================
+# Validates API keys and returns IAM policy for API Gateway
+
+module "api_key_authorizer_lambda" {
+  source = "./modules/lambda"
+
+  function_name = "${var.project_name}-api-key-authorizer-${var.environment}"
+  description   = "Lambda Authorizer for validating API keys"
+  handler       = "lambda_function.lambda_handler"
+  runtime       = "python3.11"
+  timeout       = 30
+  memory_size   = 256
+
+  source_dir = "../backend_app/src/authorizers/api_key_authorizer"
+
+  # Environment variables
+  environment_variables = {
+    USER_PROFILES_TABLE_NAME = module.user_profiles_table.table_name
+  }
+
+  # IAM policies for DynamoDB access
+  additional_policy_arns = [
+    module.user_profiles_table.table_policy_arn
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.user_profiles_table]
+}
+
+# Lambda permission for API Gateway to invoke authorizer
+resource "aws_lambda_permission" "api_gateway_invoke_authorizer" {
+  statement_id  = "AllowAPIGatewayInvoke"
+  action        = "lambda:InvokeFunction"
+  function_name = module.api_key_authorizer_lambda.function_name
+  principal     = "apigateway.amazonaws.com"
+  source_arn    = "arn:aws:execute-api:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*/*"
+}
+
+# Data sources for current AWS account and region
+data "aws_caller_identity" "current" {}
+
+data "aws_region" "current" {}
 
 # Lambda permission for Cognito to invoke the user profile creation function
 resource "aws_lambda_permission" "cognito_user_profile_creation" {
