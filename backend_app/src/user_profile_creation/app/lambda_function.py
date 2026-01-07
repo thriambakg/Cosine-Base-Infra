@@ -1,6 +1,8 @@
 import json
 import boto3
 import os
+import uuid
+import bcrypt
 from datetime import datetime
 from typing import Dict, Any
 import logging
@@ -36,6 +38,14 @@ def lambda_handler(event, context):
             existing_profile = table.get_item(Key={'user_id': user_id})
             if 'Item' in existing_profile:
                 logger.info(f"User profile already exists for user: {user_id}")
+                # Update last login
+                table.update_item(
+                    Key={'user_id': user_id},
+                    UpdateExpression='SET last_login = :now',
+                    ExpressionAttributeValues={
+                        ':now': datetime.utcnow().isoformat()
+                    }
+                )
                 return event
         except Exception as e:
             logger.warning(f"Error checking existing profile: {str(e)}")
@@ -45,8 +55,28 @@ def lambda_handler(event, context):
         given_name = user_attributes.get('given_name', '')
         family_name = user_attributes.get('family_name', '')
         
+        # Generate API key for new user
+        # Format: sk_{user_id}_{random_uuid}
+        api_key = f"sk_{user_id}_{uuid.uuid4().hex}"
+        
+        # Hash the API key using bcrypt
+        api_key_hash = bcrypt.hashpw(api_key.encode('utf-8'), bcrypt.gensalt(rounds=10))
+        
+        logger.info(f"Generated API key for new user: {user_id}")
+        
         # Create user profile with default dashboard
         user_profile = create_user_profile(user_id, email, given_name, family_name)
+        
+        # Add API key fields to the profile
+        user_profile.update({
+            'api_key_hash': api_key_hash.decode('utf-8'),
+            'api_key_created_at': datetime.utcnow().isoformat(),
+            'subscription_tier': 'free',
+            'usage': {
+                'api_calls': 0,
+                'quota_limit': 1000  # Free tier: 1000 calls/month
+            }
+        })
         
         # Store in DynamoDB
         table.put_item(Item=user_profile)
