@@ -243,8 +243,7 @@ module "user_profiles_table" {
   attributes = [
     { name = "user_id", type = "S" },
     { name = "email", type = "S" },
-    { name = "created_at", type = "S" },
-    { name = "api_key_prefix", type = "S" }
+    { name = "created_at", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -259,14 +258,6 @@ module "user_profiles_table" {
     {
       name            = "CreatedAtIndex"
       hash_key        = "created_at"
-      range_key       = null
-      projection_type = "KEYS_ONLY"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "api_key_prefix-index"
-      hash_key        = "api_key_prefix"
       range_key       = null
       projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
