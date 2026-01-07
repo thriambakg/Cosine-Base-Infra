@@ -800,7 +800,7 @@ resource "aws_lambda_permission" "api_gateway_invoke_authorizer" {
   action        = "lambda:InvokeFunction"
   function_name = module.api_key_authorizer_lambda.function_name
   principal     = "apigateway.amazonaws.com"
-  source_arn    = "arn:aws:execute-api:${var.aws_region}:${data.aws_caller_identity.current.account_id}:*/*"
+  source_arn    = "arn:aws:execute-api:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:*/*"
 }
 
 # Data sources for current AWS account and region
