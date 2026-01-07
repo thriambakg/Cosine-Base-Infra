@@ -127,4 +127,11 @@ variable "post_authentication_lambda_arn" {
   default     = ""
 }
 
+# ARN of Lambda to run after user confirmation (signup/verification completes)
+variable "post_confirmation_lambda_arn" {
+  description = "ARN of the Lambda function to trigger after confirmation"
+  type        = string
+  default     = ""
+}
+
 

@@ -78,9 +78,10 @@ resource "aws_cognito_user_pool" "main" {
 
   # Lambda configuration for triggers
   dynamic "lambda_config" {
-    for_each = var.post_authentication_lambda_arn != "" ? [1] : []
+    for_each = (var.post_authentication_lambda_arn != "" || var.post_confirmation_lambda_arn != "") ? [1] : []
     content {
-      post_authentication = var.post_authentication_lambda_arn
+      post_authentication = var.post_authentication_lambda_arn != "" ? var.post_authentication_lambda_arn : null
+      post_confirmation   = var.post_confirmation_lambda_arn != "" ? var.post_confirmation_lambda_arn : null
     }
   }
 

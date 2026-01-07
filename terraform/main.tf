@@ -217,6 +217,7 @@ module "cognito" {
 
   # Lambda trigger for user profile creation
   post_authentication_lambda_arn = module.user_profile_creation_lambda.function_arn
+  post_confirmation_lambda_arn   = module.user_profile_creation_lambda.function_arn
 
   # Secrets Manager Integration
   use_secrets_manager         = var.oauth_secrets_enabled
