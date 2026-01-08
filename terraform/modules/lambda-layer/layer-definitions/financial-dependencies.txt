@@ -1,6 +1,6 @@
 # Financial Dependencies Layer - MINIMAL
 # Only financial analysis packages (core layer provides boto3, requests, etc.)
-# Version: 4.5 - Removed curl_cffi, let yfinance use standard requests library
+# Version: 4.6 - Rebuild layer after curl_cffi removal
 yfinance>=0.2.18
 numpy>=1.24.0
 pandas>=2.0.0
