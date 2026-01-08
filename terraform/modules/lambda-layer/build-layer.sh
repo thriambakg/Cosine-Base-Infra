@@ -40,7 +40,7 @@ if [ -f "${REQUIREMENTS_FILE}" ]; then
     # Remove unnecessary files to reduce layer size
     find python/ -name "*.pyc" -delete 2>/dev/null || true
     find python/ -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
-    find python/ -name "*.dist-info" -type d -exec rm -rf {} + 2>/dev/null || true
+    # Keep *.dist-info to preserve package metadata needed by importlib
     find python/ -name "tests" -type d -exec rm -rf {} + 2>/dev/null || true
     find python/ -name "test_*" -delete 2>/dev/null || true
     find python/ -name "*_test.py" -delete 2>/dev/null || true
