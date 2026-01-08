@@ -1,6 +1,6 @@
 # Financial Dependencies Layer - MINIMAL
 # Only financial analysis packages (core layer provides boto3, requests, etc.)
-# Version: 4.2 - Added pandas_market_calendars for NYSE holiday checking
+# Version: 4.3 - Added curl_cffi for yfinance compatibility
 yfinance>=0.2.18
 numpy>=1.24.0
 pandas>=2.0.0
@@ -8,3 +8,4 @@ scipy>=1.10.0
 Nasdaq-Data-Link>=1.0.0
 pandas_market_calendars>=4.3.0
 pytz>=2023.3
+curl_cffi>=0.5.8
