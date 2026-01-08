@@ -88,87 +88,14 @@ resource "aws_cognito_user_pool" "main" {
   # Verification message templates - using LINK for better UX
   verification_message_template {
     default_email_option  = "CONFIRM_WITH_LINK"
-    email_subject         = "Welcome to Cosine! Please verify your email"
-    email_subject_by_link = "Welcome to Cosine! Please verify your email"
-    email_message_by_link = <<-EOT
-<!DOCTYPE html>
-<html>
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Verify Your Email - Cosine</title>
-</head>
-<body style="margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif; background-color: #f8fafc;">
-    <table role="presentation" style="width: 100%; border-collapse: collapse;">
-        <tr>
-            <td style="padding: 40px 20px;">
-                <table role="presentation" style="max-width: 600px; margin: 0 auto; background-color: white; border-radius: 12px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);">
-                    <!-- Header with Branding -->
-                    <tr>
-                        <td style="padding: 40px 40px 20px; text-align: center; background: linear-gradient(135deg, #1e3a8a 0%, #581c87 50%, #3730a3 100%); border-radius: 12px 12px 0 0;">
-                            <div style="display: inline-flex; align-items: center; font-family: system-ui, -apple-system, sans-serif;">
-                                <!-- Cosine logo image -->
-                                <img src="https://investcosine.com/email-logo.png" 
-                                     width="48" 
-                                     height="48" 
-                                     alt="Cosine Logo" 
-                                     style="margin-right: 15px; display: inline-block; vertical-align: middle;">
-                                
-                                <!-- Company name and tagline -->
-                                <div style="text-align: left;">
-                                    <div style="color: white; font-size: 24px; font-weight: 600; line-height: 1.2; text-shadow: 0 2px 4px rgba(0,0,0,0.2);">
-                                        Cosine
-                                    </div>
-                                    <div style="color: rgba(255,255,255,0.7); font-size: 11px; font-weight: 400; line-height: 1.2;">
-                                        AI-Powered Trading Intelligence
-                                    </div>
-                                </div>
-                            </div>
-                        </td>
-                    </tr>
-                    
-                    <!-- Content -->
-                    <tr>
-                        <td style="padding: 40px;">
-                            <h2 style="margin: 0 0 20px; color: #1e293b; font-size: 24px; font-weight: 600;">Welcome to Cosine!</h2>
-                            
-                            <p style="margin: 0 0 20px; color: #475569; font-size: 16px; line-height: 1.6;">
-                                Thank you for joining our AI-powered trading platform. To get started and ensure the security of your account, please verify your email address.
-                            </p>
-                            
-                            <div style="text-align: center; margin: 40px 0;">
-                                <p style="margin: 0; font-size: 24px; font-weight: 700; color: #1e3a8a;">${var.verification_link_placeholder}</p>
-                            </div>
-                            
-                            <hr style="margin: 32px 0; border: none; border-top: 1px solid #e2e8f0;">
-                            
-                            <p style="margin: 0; color: #64748b; font-size: 14px; line-height: 1.6;">
-                                <strong>What's next?</strong><br>
-                                • Access real-time market analysis<br>
-                                • Get AI-powered trading insights<br>
-                                • Optimize your portfolio with advanced tools<br>
-                                • Connect with other traders in our community
-                            </p>
-                        </td>
-                    </tr>
-                    
-                    <!-- Footer -->
-                    <tr>
-                        <td style="padding: 20px 40px; background-color: #f8fafc; border-radius: 0 0 12px 12px; text-align: center;">
-                            <p style="margin: 0; color: #64748b; font-size: 12px;">
-                                This email was sent by Cosine Trading Platform<br>
-                                If you didn't create an account, you can safely ignore this email.
-                            </p>
-                        </td>
-                    </tr>
-                </table>
-            </td>
-        </tr>
-    </table>
-</body>
-</html>
-EOT
-    email_message         = "Your verification code is {####}. Use this code to verify your Cosine account."
+    email_subject         = "✅ Verify Your Cosine Account"
+    email_subject_by_link = "✅ Verify Your Cosine Account"
+    email_message_by_link = replace(
+      file("${path.module}/verification-email.html"),
+      "##VERIFICATION_LINK##",
+      var.verification_link_placeholder
+    )
+    email_message = "Your verification code is {####}. Use this code to verify your Cosine account."
   }
 
   # User attribute update settings
