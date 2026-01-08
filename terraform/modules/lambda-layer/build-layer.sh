@@ -27,12 +27,12 @@ if [ -f "${REQUIREMENTS_FILE}" ]; then
     echo "📦 Installing dependencies from ${REQUIREMENTS_FILE}..."
     
     # Install dependencies with Linux compatibility
-    # Use prefer-binary instead of only-binary for better compatibility with complex packages
+    # Note: When using platform/python-version constraints, must use --only-binary=:all:
     pip install -r "${REQUIREMENTS_FILE}" -t python/ \
         --platform manylinux2014_x86_64 \
         --implementation cp \
         --python-version 3.11 \
-        --prefer-binary \
+        --only-binary=:all: \
         --no-cache-dir
     
     echo "🧹 Cleaning up unnecessary dependency files..."
