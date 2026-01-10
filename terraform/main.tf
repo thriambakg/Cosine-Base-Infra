@@ -4410,7 +4410,6 @@ module "usaspending_awards_index_table" {
     { name = "awarding_agency_name", type = "S" },
     { name = "fiscal_year", type = "N" },
     { name = "total_obligated_amount", type = "N" },
-    { name = "period_start_date", type = "S" },
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
     { name = "recipient_zip_code", type = "S" },
