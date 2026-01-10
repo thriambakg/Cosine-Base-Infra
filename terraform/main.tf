@@ -4419,30 +4419,6 @@ module "usaspending_awards_index_table" {
 
   global_secondary_indexes = [
     {
-      name            = "AwardingAgencyCodeFiscalYearIndex"
-      hash_key        = "awarding_agency_code"
-      range_key       = "fiscal_year"
-      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "AwardingAgencyNameFiscalYearIndex"
-      hash_key        = "awarding_agency_name"
-      range_key       = "fiscal_year"
-      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "RecipientNameFiscalYearIndex"
-      hash_key        = "recipient_name_normalized"
-      range_key       = "fiscal_year"
-      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
       name            = "FiscalYearObligationIndex"
       hash_key        = "fiscal_year"
       range_key       = "total_obligated_amount"
@@ -4451,34 +4427,42 @@ module "usaspending_awards_index_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "FiscalYearStartDateIndex"
-      hash_key        = "fiscal_year"
-      range_key       = "period_start_date"
-      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
+      name            = "AwardingAgencyCodeObligationIndex"
+      hash_key        = "awarding_agency_code"
+      range_key       = "total_obligated_amount"
+      projection_type = "KEYS_ONLY" # Optimized for obligation range queries combined with agency code
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "StateFiscalYearIndex"
+      name            = "AwardingAgencyNameObligationIndex"
+      hash_key        = "awarding_agency_name"
+      range_key       = "total_obligated_amount"
+      projection_type = "KEYS_ONLY" # Optimized for obligation range queries combined with agency name
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "RecipientNameObligationIndex"
+      hash_key        = "recipient_name_normalized"
+      range_key       = "total_obligated_amount"
+      projection_type = "KEYS_ONLY" # Optimized for obligation range queries combined with recipient name
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "StateObligationIndex"
       hash_key        = "recipient_location_state"
-      range_key       = "fiscal_year"
-      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
+      range_key       = "total_obligated_amount"
+      projection_type = "KEYS_ONLY" # Optimized for obligation range queries combined with state
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "ZipCodeFiscalYearIndex"
+      name            = "ZipCodeObligationIndex"
       hash_key        = "recipient_zip_code"
-      range_key       = "fiscal_year"
-      projection_type = "KEYS_ONLY"
-      read_capacity   = var.dynamodb_gsi_read_capacity
-      write_capacity  = var.dynamodb_gsi_write_capacity
-    },
-    {
-      name            = "PeriodStartDateIndex"
-      hash_key        = "fiscal_year"
-      range_key       = "period_start_date"
-      projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
+      range_key       = "total_obligated_amount"
+      projection_type = "KEYS_ONLY" # Optimized for obligation range queries combined with zip code
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
@@ -5312,3 +5296,4 @@ module "politician_trades_scheduler" {
 
 # Note: KMS key policies are managed by the KMS module
 # No additional policy updates needed
+
