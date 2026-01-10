@@ -4433,6 +4433,7 @@ module "usaspending_awards_index_table" {
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
+
     {
       name            = "AwardingAgencyNameObligationIndex"
       hash_key        = "awarding_agency_name"
