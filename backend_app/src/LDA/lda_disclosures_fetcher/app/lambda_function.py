@@ -170,7 +170,10 @@ def send_pages_parallel(pages: List[int], endpoint: str, start_date: Optional[st
     return successful
 
 def json_to_txt_names_only(data: List[Dict], name_column: str) -> str:
-    """Convert JSON data to TXT file with names only (one per line, preserves commas and special characters)"""
+    """Convert JSON data to TXT file with names only (one per line, preserves commas and special characters)
+    
+    Lists are sorted alphabetically (case-insensitive) for efficient binary search in autocomplete.
+    """
     if not data:
         return ''
     
@@ -181,6 +184,9 @@ def json_to_txt_names_only(data: List[Dict], name_column: str) -> str:
         if name and str(name).strip():
             # Preserve commas and special characters as they come from the API
             lines.append(str(name).strip())
+    
+    # Sort alphabetically (case-insensitive) for efficient binary search
+    lines.sort(key=lambda x: x.lower())
     
     return '\n'.join(lines) + '\n'
 
