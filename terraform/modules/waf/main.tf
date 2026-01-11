@@ -9,7 +9,6 @@ resource "aws_wafv2_web_acl" "this" {
   default_action {
     allow {}
   }
-
   # Rate limiting rule
   rule {
     name     = "RateLimitRule"
