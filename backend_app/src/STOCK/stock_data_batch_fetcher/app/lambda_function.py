@@ -216,27 +216,26 @@ def send_batches_to_sqs(batches: List[Dict[str, Any]], queue_url: str) -> int:
         for i, batch in enumerate(batches):
             try:
                 # Send message to SQS
-        response = sqs.send_message(
-            QueueUrl=queue_url,
+                response = sqs.send_message(
+                    QueueUrl=queue_url,
                     MessageBody=json.dumps(batch),
-            MessageAttributes={
+                    MessageAttributes={
                         'priority': {
                             'StringValue': batch['priority'],
-                    'DataType': 'String'
-                },
+                            'DataType': 'String'
+                        },
                         'timeframe': {
                             'StringValue': batch['timeframe'],
-                    'DataType': 'String'
-                }
-            }
-        )
-        
+                            'DataType': 'String'
+                        }
+                    }
+                )
+                
                 sent_count += 1
                 
                 if (i + 1) % 10 == 0:  # Log every 10 batches
                     logger.info(f"📤 Sent {i + 1}/{len(batches)} batches to SQS")
-        
-    except Exception as e:
+            except Exception as e:
                 logger.error(f"Error sending batch {i} to SQS: {str(e)}")
                 continue
         

@@ -394,7 +394,6 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                         logger.warning(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...")
                         print(f"   ⚠️ 403 Forbidden for {date_str} (attempt {attempt + 1}/{max_retries}), retrying in {wait_time:.1f}s...", flush=True)
                         time.sleep(wait_time)
-                continue
                     else:
                         # Last attempt failed - likely no index file exists (holiday or not available yet)
                         logger.info(f"   ⏭️ Skipping {date_str} (403 Forbidden - likely no index file exists, may be holiday or not yet available)")
@@ -407,7 +406,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                     response = None  # Mark as skipped
                     break  # 404 is expected for weekends/holidays, don't retry
                 else:
-            response.raise_for_status()
+                    response.raise_for_status()
             except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
                     wait_time = retry_delay * (2 ** attempt)
@@ -427,47 +426,47 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
             logger.error(f"   ❌ Unexpected status code {response.status_code} for {date_str}")
             print(f"   ❌ Unexpected status code {response.status_code} for {date_str}", flush=True)
             return []
-            
-            # Parse the index file
-            # Format: CIK|Company Name|Form Type|Date Filed|File Name
-            content = response.text
-            lines = content.split('\n')
-            
-            # Find the header line and data start
-            header_found = False
-            data_start_idx = 0
-            
-            for idx, line in enumerate(lines):
-                if line.startswith('CIK|'):
-                    header_found = True
-                    data_start_idx = idx + 1
-                    break
-            
-            if not header_found:
-                logger.warning(f"   ⚠️ No header line found in index file for {date_str}")
+        
+        # Parse the index file
+        # Format: CIK|Company Name|Form Type|Date Filed|File Name
+        content = response.text
+        lines = content.split('\n')
+        
+        # Find the header line and data start
+        header_found = False
+        data_start_idx = 0
+        
+        for idx, line in enumerate(lines):
+            if line.startswith('CIK|'):
+                header_found = True
+                data_start_idx = idx + 1
+                break
+        
+        if not header_found:
+            logger.warning(f"   ⚠️ No header line found in index file for {date_str}")
             return []
+        
+        # Parse data lines
+        forms_for_date = []
+        form_type_nums = [ft.replace('form', '') for ft in form_types]
+        
+        for line in lines[data_start_idx:]:
+            if not line.strip():
+                continue
             
-            # Parse data lines
-            forms_for_date = []
-            form_type_nums = [ft.replace('form', '') for ft in form_types]
+            # Parse pipe-delimited format: CIK|Company Name|Form Type|Date Filed|File Name
+            parts = line.split('|')
+            if len(parts) < 5:
+                continue
             
-            for line in lines[data_start_idx:]:
-                if not line.strip():
-                    continue
+            try:
+                cik = parts[0].strip()
+                company_name = parts[1].strip()
+                form_type_raw = parts[2].strip()
+                date_filed = parts[3].strip()
+                filename = parts[4].strip()
                 
-                # Parse pipe-delimited format: CIK|Company Name|Form Type|Date Filed|File Name
-                parts = line.split('|')
-                if len(parts) < 5:
-                    continue
-                
-                try:
-                    cik = parts[0].strip()
-                    company_name = parts[1].strip()
-                    form_type_raw = parts[2].strip()
-                    date_filed = parts[3].strip()
-                    filename = parts[4].strip()
-                    
-                    # Check if this is a Form 3, 4, or 5
+                # Check if this is a Form 3, 4, or 5
                 # Be strict: only match exact form types (3, 4, 5) or "FORM 3", "FORM 4", "FORM 5"
                 # Don't match numbers from other form types like "N-MFP3", "10-K", "8-K", etc.
                 form_num = None
@@ -491,17 +490,17 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
                         if date_filed != date_str_idx:
                             continue
                         
-                                # Extract accession number from filename
-                                # Format: {accession}-{form_type}.txt or {accession}-index.htm
-                                accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
-                                if accession_match:
-                                    accession_dashed = accession_match.group(1)
-                                    accession_clean = accession_dashed.replace('-', '')
-                                    
-                                    form_data = {
-                                        'cik': cik,
-                                        'accession_number': accession_clean,  # Without dashes (matching downloader input format)
-                                        'form_type': f'form{form_num}',
+                        # Extract accession number from filename
+                        # Format: {accession}-{form_type}.txt or {accession}-index.htm
+                        accession_match = re.search(r'(\d{10}-\d{2}-\d{6})', filename)
+                        if accession_match:
+                            accession_dashed = accession_match.group(1)
+                            accession_clean = accession_dashed.replace('-', '')
+                            
+                            form_data = {
+                                'cik': cik,
+                                'accession_number': accession_clean,  # Without dashes (matching downloader input format)
+                                'form_type': f'form{form_num}',
                                 'filing_date': filing_date_str,  # Use parsed date in YYYY-MM-DD format
                                         'company_name': company_name,
                                         'filename': filename
