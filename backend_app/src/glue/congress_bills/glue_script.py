@@ -1967,7 +1967,7 @@ def main():
         try:
             if start_date_str.endswith('Z'):
                 start_date_dt = datetime.fromisoformat(start_date_str.replace('Z', '+00:00'))
-    else:
+            else:
                 start_date_dt = datetime.fromisoformat(start_date_str)
             
             if end_date_str.endswith('Z'):
@@ -2039,7 +2039,7 @@ def main():
                 zip_content = None
                 if zip_s3_key:
                     log_print(f"✅ Using existing ZIP file from S3: {zip_s3_key}")
-            else:
+                else:
                     # Download ZIP from bulk data repository
                     log_print(f"📥 Downloading ZIP file from bulk data repository...")
                     zip_content = download_bulk_zip(congress_num, bill_type)
@@ -2063,12 +2063,13 @@ def main():
                     log_print(f"📊 Processing complete: {files_processed} XML file(s) processed, {bills_stored} bill(s) stored for {bill_type} in Congress {congress_num}")
                     processed_count += bills_stored
                     total_bills_processed += bills_stored
-            except Exception as e:
+                except Exception as e:
                     error_msg = f"❌ Error processing ZIP file for {bill_type} in Congress {congress_num}: {str(e)[:300]}"
                     log_print(error_msg)
                     logger.error(error_msg, exc_info=True)
-                error_count += 1
+                    error_count += 1
                     continue
+                
                 if zip_content:
                     del zip_content
                 gc.collect()
