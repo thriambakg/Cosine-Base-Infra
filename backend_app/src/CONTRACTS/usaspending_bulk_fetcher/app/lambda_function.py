@@ -876,7 +876,7 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
         reader = csv.DictReader(csv_file_obj)
         
         for row in reader:
-        row_count += 1
+            row_count += 1
         
         # Log progress for large files
         if row_count % 100000 == 0:

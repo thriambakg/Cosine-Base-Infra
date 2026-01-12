@@ -356,16 +356,16 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
     
     # Fetch forms from the single date's index file
     date_to_fetch = target_date_obj
-        # Daily index file URL
-        index_url = f"{SEC_BASE_URL}/Archives/edgar/daily-index/{year}/QTR{quarter}/master.{date_str_idx}.idx"
-        
-        logger.info(f"📥 Fetching daily index file for {date_str}...")
-        print(f"📥 Fetching daily index file for {date_str}...", flush=True)
-        
-        try:
+    # Daily index file URL
+    index_url = f"{SEC_BASE_URL}/Archives/edgar/daily-index/{year}/QTR{quarter}/master.{date_str_idx}.idx"
+    
+    logger.info(f"📥 Fetching daily index file for {date_str}...")
+    print(f"📥 Fetching daily index file for {date_str}...", flush=True)
+    
+    try:
         # Add delay to avoid rate limiting
-            time.sleep(0.3)
-            
+        time.sleep(0.3)
+        
         # Retry logic for 403 errors (SEC may temporarily block rapid requests)
         max_retries = 3
         retry_delay = 1.0
@@ -375,7 +375,7 @@ def fetch_sec_forms_paginated(target_date: str, form_types: List[str] = ['3', '4
             try:
                 # Use session with pre-configured headers (includes User-Agent)
                 # The session already has User-Agent and other headers set
-            response = session.get(index_url, timeout=30)
+                response = session.get(index_url, timeout=30)
             
                 if response.status_code == 200:
                     break  # Success, exit retry loop

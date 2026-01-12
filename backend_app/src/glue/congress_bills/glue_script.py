@@ -646,7 +646,7 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
                     log_print(f"   ⚠️ ZIP not found at {zip_url}, trying next URL...")
                     break  # Try next URL
                 else:
-            response.raise_for_status()
+                    response.raise_for_status()
         except requests.exceptions.RequestException as e:
                 if attempt < max_retries - 1:
                 wait_time = RETRY_DELAY * (attempt + 1)

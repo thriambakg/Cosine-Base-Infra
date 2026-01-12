@@ -195,8 +195,7 @@ def create_batches(symbols: List[str], priority_tier: str, timeframe: str) -> Li
         
         logger.info(f"✅ Created {len(batches)} batches (size: {batch_size}) for {priority_tier} priority")
         return batches
-                
-            except Exception as e:
+    except Exception as e:
         logger.error(f"Error creating batches: {str(e)}")
         return []
 
