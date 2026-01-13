@@ -99,15 +99,14 @@ jobs:
           echo "📊 Found $FILE_COUNT Python file(s) to validate"
           
           # Final validation - compile all files and capture errors
-          echo ""
-          echo "🔍 Running syntax validation..."
           FAILED=0
+          ERROR_FILES=()
           for file in $(find backend_app/src -name "*.py" -type f); do
-            echo "🔍 Checking: $file"
-            if python -m py_compile "$file" 2>&1; then
-              echo "  ✅ Syntax OK"
-            else
-              echo "  ❌ Syntax error in: $file"
+            if ! python -m py_compile "$file" 2>&1 >/dev/null; then
+              ERROR_OUTPUT=$(python -m py_compile "$file" 2>&1)
+              echo "❌ Syntax error in: $file"
+              echo "$ERROR_OUTPUT"
+              ERROR_FILES+=("$file")
               FAILED=1
             fi
           done
@@ -115,12 +114,12 @@ jobs:
           if [ $FAILED -eq 1 ]; then
             echo ""
             echo "❌ Python syntax validation failed!"
+            echo "Files with errors: ${#ERROR_FILES[@]}"
             echo "Please fix all syntax errors before proceeding."
             exit 1
           fi
           
-          echo ""
-          echo "✅ All Python files passed syntax validation!"
+          echo "✅ All $FILE_COUNT Python files passed syntax validation!"
 
       - name: Install Python Dependencies
         run: |

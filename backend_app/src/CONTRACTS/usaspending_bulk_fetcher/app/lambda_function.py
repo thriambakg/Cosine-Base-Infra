@@ -876,40 +876,40 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
         reader = csv.DictReader(csv_file_obj)
         
         for row in reader:
-            row_count += 1
-            
-            # Log progress for large files
-            if row_count % 100000 == 0:
-                log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
-                # Log memory usage if available
-                try:
-                    import psutil
-                    process = psutil.Process()
-                    mem_info = process.memory_info()
-                    mem_mb = mem_info.rss / 1024 / 1024
-                    log_print(f"   💾 Memory usage: {mem_mb:.1f} MB, Awards in memory: {len(awards):,}")
-                except:
-                    pass  # psutil not available, skip memory logging
-            
-            # Periodic memory cleanup for very large files
-            if row_count - last_gc_row >= gc_interval:
-                gc.collect()
-                last_gc_row = row_count
-            
-            # Get award ID - primary key for grouping and DynamoDB primary key
-            # For contracts: uses contract_award_unique_key
-            # For assistance: uses assistance_award_unique_key (this becomes the award_id primary key)
-            # Check both contract and assistance award unique keys
-            award_id = (
-                row.get('contract_award_unique_key') or      # For contracts
-                row.get('assistance_award_unique_key') or    # For assistance awards (becomes primary key award_id)
-                row.get('generated_unique_award_id') or     # Generic fallback (works for both)
-                row.get('award_id') or                       # Generic fallback
-                None
-            )
-            
-            if not award_id:
-                continue
+        row_count += 1
+        
+        # Log progress for large files
+        if row_count % 100000 == 0:
+            log_print(f"   📊 Processing row {row_count:,} of {csv_filename}...")
+            # Log memory usage if available
+            try:
+                import psutil
+                process = psutil.Process()
+                mem_info = process.memory_info()
+                mem_mb = mem_info.rss / 1024 / 1024
+                log_print(f"   💾 Memory usage: {mem_mb:.1f} MB, Awards in memory: {len(awards):,}")
+            except:
+                pass  # psutil not available, skip memory logging
+        
+        # Periodic memory cleanup for very large files
+        if row_count - last_gc_row >= gc_interval:
+            gc.collect()
+            last_gc_row = row_count
+        
+        # Get award ID - primary key for grouping and DynamoDB primary key
+        # For contracts: uses contract_award_unique_key
+        # For assistance: uses assistance_award_unique_key (this becomes the award_id primary key)
+        # Check both contract and assistance award unique keys
+        award_id = (
+            row.get('contract_award_unique_key') or      # For contracts
+            row.get('assistance_award_unique_key') or    # For assistance awards (becomes primary key award_id)
+            row.get('generated_unique_award_id') or     # Generic fallback (works for both)
+            row.get('award_id') or                       # Generic fallback
+            None
+        )
+        
+        if not award_id:
+            continue
         
         # Initialize award record if first time seeing this award
         if award_id not in awards:
