@@ -66,5 +66,5 @@ oauth_secrets_enabled = true # Create empty secret resource for console populati
 # Scheduler Configuration (disabled for staging to reduce costs)
 enable_all_schedulers = false # Disable all EventBridge schedulers and CloudWatch Event rules
 
-# Lambda Concurrency Configuration (set to 0 for staging to reduce costs)
-lambda_reserved_concurrency_default = 0 # Set all reserved concurrency to 0
+# Lambda Concurrency Configuration (limit to 5 concurrent requests for staging)
+lambda_reserved_concurrency_default = 5 # Set all reserved concurrency to 5 (5 concurrent requests allowed at a time)

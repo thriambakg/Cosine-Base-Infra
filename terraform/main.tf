@@ -748,6 +748,9 @@ module "user_profile_creation_lambda" {
     module.user_profiles_table.table_policy_arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 
   depends_on = [module.user_profiles_table]
@@ -993,6 +996,9 @@ module "news_fetcher" {
     module.kms.kms_access_policy_arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 }
 
@@ -1024,6 +1030,9 @@ module "news_processor" {
     module.news_queue.sqs_access_policy_arn,
     module.news_table.table_policy_arn
   ]
+
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   tags = var.common_tags
 }
@@ -2126,6 +2135,9 @@ module "usaspending_orphan_subaward_processor_lambda" {
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 
   depends_on = [
@@ -2247,6 +2259,9 @@ module "usaspending_individual_award_processor_lambda" {
     module.usaspending_dlq_queue.sqs_access_policy_arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 
   depends_on = [
@@ -2317,6 +2332,9 @@ module "usaspending_bulk_router_lambda" {
 
   environment_variables = {}
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 }
 
@@ -2348,6 +2366,9 @@ module "usaspending_bulk_fetcher_lambda" {
     module.kms.kms_access_policy_arn,
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn
   ]
+
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   tags = var.common_tags
 
@@ -2875,6 +2896,9 @@ module "congress_bills_bill_text_processor_lambda" {
     module.congress_bills_bill_text_queue.sqs_access_policy_arn,
     aws_iam_policy.lambda_congress_bills_data_s3_policy.arn
   ]
+
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   tags = var.common_tags
 
@@ -3865,6 +3889,9 @@ module "lda_batch_dlq_redrive_lambda" {
     module.kms.kms_access_policy_arn,
     aws_iam_policy.lda_batch_dlq_redrive_sqs_policy.arn
   ]
+
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   tags = var.common_tags
 
