@@ -62,3 +62,9 @@ cognito_domain_name            = "cosine-auth-staging"
 
 # OAuth Secrets Manager Integration (console-managed secrets)
 oauth_secrets_enabled = true # Create empty secret resource for console population
+
+# Scheduler Configuration (disabled for staging to reduce costs)
+enable_all_schedulers = false # Disable all EventBridge schedulers and CloudWatch Event rules
+
+# Lambda Concurrency Configuration (set to 0 for staging to reduce costs)
+lambda_reserved_concurrency_default = 0 # Set all reserved concurrency to 0

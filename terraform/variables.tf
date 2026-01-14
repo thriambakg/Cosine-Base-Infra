@@ -339,3 +339,17 @@ variable "automatic_secret_rotation" {
     error_message = "CKV_AWS_304: Automatic rotation must be configured between 1 and 90 days to meet compliance requirements. All values must be <= 90 days."
   }
 }
+
+# Scheduler Configuration
+variable "enable_all_schedulers" {
+  description = "Enable all EventBridge schedulers and CloudWatch Event rules. Set to false to disable all scheduled jobs (useful for staging/dev environments)"
+  type        = bool
+  default     = true
+}
+
+# Lambda Concurrency Configuration
+variable "lambda_reserved_concurrency_default" {
+  description = "Default reserved concurrent executions for Lambda functions. Set to 0 to disable reserved concurrency (useful for staging/dev environments)"
+  type        = number
+  default     = null
+}
