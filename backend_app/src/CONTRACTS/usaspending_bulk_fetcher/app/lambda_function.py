@@ -910,6 +910,7 @@ def parse_prime_award_csv_streaming(csv_file_obj, csv_filename: str) -> Dict[str
             
             if not award_id:
                 continue
+                
         
         # Initialize award record if first time seeing this award
         if award_id not in awards:
