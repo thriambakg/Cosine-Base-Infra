@@ -748,6 +748,9 @@ module "user_profile_creation_lambda" {
     module.user_profiles_table.table_policy_arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 
   depends_on = [module.user_profiles_table]
@@ -993,6 +996,9 @@ module "news_fetcher" {
     module.kms.kms_access_policy_arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 }
 
@@ -1025,6 +1031,9 @@ module "news_processor" {
     module.news_table.table_policy_arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 }
 
@@ -1043,7 +1052,7 @@ module "news_fetcher_scheduler" {
   rule_name           = "${var.project_name}-news-fetcher-${var.environment}"
   rule_description    = "Trigger news fetcher every 8 minutes to distribute 200 credits across 24 hours"
   schedule_expression = "rate(8 minutes)"
-  enabled             = true
+  enabled             = var.enable_all_schedulers
 
   target_arn           = module.news_fetcher.function_arn
   target_id            = "NewsFetcherScheduler"
@@ -1439,7 +1448,7 @@ module "historical_loader_scheduler" {
   rule_name           = "${var.project_name}-historical-loader-${var.environment}"
   rule_description    = "Trigger historical data loader daily at 4:30 PM ET (after market close) to fetch EOD data and update S3"
   schedule_expression = "cron(30 20 ? * MON-FRI *)" # 4:30 PM ET = 8:30 PM UTC during DST
-  enabled             = true
+  enabled             = var.enable_all_schedulers
 
   # Target is Step Functions state machine, not Lambda
   target_arn = module.stock_data_historical_loader_state_machine.state_machine_arn
@@ -1709,7 +1718,7 @@ module "eod_aggregator_scheduler" {
   rule_name           = "${var.project_name}-eod-aggregator-${var.environment}"
   rule_description    = "Trigger EOD aggregator daily at 5:00 PM ET (30 min after historical loader) to update DynamoDB from S3"
   schedule_expression = "cron(0 21 ? * MON-FRI *)" # 5:00 PM ET = 9:00 PM UTC during DST
-  enabled             = true
+  enabled             = var.enable_all_schedulers
 
   # Target is Step Functions state machine, not Lambda
   target_arn = module.eod_aggregator_state_machine.state_machine_arn
@@ -2126,6 +2135,9 @@ module "usaspending_orphan_subaward_processor_lambda" {
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 
   depends_on = [
@@ -2247,6 +2259,9 @@ module "usaspending_individual_award_processor_lambda" {
     module.usaspending_dlq_queue.sqs_access_policy_arn
   ]
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 
   depends_on = [
@@ -2317,6 +2332,9 @@ module "usaspending_bulk_router_lambda" {
 
   environment_variables = {}
 
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
+
   tags = var.common_tags
 }
 
@@ -2348,6 +2366,9 @@ module "usaspending_bulk_fetcher_lambda" {
     module.kms.kms_access_policy_arn,
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn
   ]
+
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   tags = var.common_tags
 
@@ -2493,7 +2514,7 @@ resource "aws_cloudwatch_event_rule" "usaspending_bulk_indexing_scheduler" {
   name                = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
   description         = "Trigger daily bulk indexing of USAspending contracts at 9:00 AM EST (14:00 UTC) - processes previous day's contract updates"
   schedule_expression = "cron(0 14 * * ? *)" # 14:00 UTC = 9:00 AM EST (standard time) or 10:00 AM EDT (daylight time)
-  state               = "ENABLED"
+  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
 
   tags = merge(var.common_tags, {
     Name        = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
@@ -2505,6 +2526,8 @@ resource "aws_cloudwatch_event_rule" "usaspending_bulk_indexing_scheduler" {
 
 # EventBridge Target for Step Function
 resource "aws_cloudwatch_event_target" "usaspending_bulk_indexing_scheduler_target" {
+  count = var.enable_all_schedulers ? 1 : 0
+
   rule      = aws_cloudwatch_event_rule.usaspending_bulk_indexing_scheduler.name
   target_id = "USASpendingBulkIndexingScheduler"
   arn       = module.usaspending_bulk_indexing_state_machine.state_machine_arn
@@ -2873,6 +2896,9 @@ module "congress_bills_bill_text_processor_lambda" {
     module.congress_bills_bill_text_queue.sqs_access_policy_arn,
     aws_iam_policy.lambda_congress_bills_data_s3_policy.arn
   ]
+
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   tags = var.common_tags
 
@@ -3740,7 +3766,7 @@ module "lda_disclosures_fetcher_scheduler" {
   rule_name           = "${var.project_name}-lda-disclosures-fetcher-daily-${var.environment}"
   rule_description    = "Trigger LDA disclosures fetcher daily at 5pm EST to process previous day's disclosures"
   schedule_expression = "cron(0 22 * * ? *)" # 22:00 UTC = 5pm EST (standard time) or 6pm EDT (daylight time)
-  enabled             = true
+  enabled             = var.enable_all_schedulers
 
   target_arn           = module.lda_disclosures_fetcher.function_arn
   target_id            = "LDADisclosuresFetcherScheduler"
@@ -3792,8 +3818,8 @@ module "lda_disclosures_indexer" {
     module.core_layer.layer_arn
   ]
 
-  # Reserved concurrency limit of 25
-  reserved_concurrent_executions = 20
+  # Reserved concurrency limit
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default != null ? var.lambda_reserved_concurrency_default : 20
 
   # IAM policies
   additional_policy_arns = [
@@ -3863,6 +3889,9 @@ module "lda_batch_dlq_redrive_lambda" {
     module.kms.kms_access_policy_arn,
     aws_iam_policy.lda_batch_dlq_redrive_sqs_policy.arn
   ]
+
+  # Reserved concurrency (uses default from environment variables)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   tags = var.common_tags
 
@@ -4020,7 +4049,7 @@ resource "aws_cloudwatch_event_rule" "congress_bills_bill_text_prefill_scheduler
   name                = "${var.project_name}-congress-bill-text-prefill-daily-${var.environment}"
   description         = "Trigger Congress bills bill text prefill daily at 2:00 PM UTC (3 hours after bills fetcher) to crawl for bills with empty bill_text_html_s3_key"
   schedule_expression = "cron(0 14 * * ? *)" # 2:00 PM UTC daily (9:00 AM EST / 10:00 AM EDT)
-  state               = "ENABLED"
+  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
 
   tags = merge(var.common_tags, {
     Name        = "${var.project_name}-congress-bills-bill-text-prefill-daily-${var.environment}"
@@ -4032,6 +4061,8 @@ resource "aws_cloudwatch_event_rule" "congress_bills_bill_text_prefill_scheduler
 
 # EventBridge Target for Step Function
 resource "aws_cloudwatch_event_target" "congress_bills_bill_text_prefill_scheduler_target" {
+  count = var.enable_all_schedulers ? 1 : 0
+
   rule      = aws_cloudwatch_event_rule.congress_bills_bill_text_prefill_scheduler.name
   target_id = "CongressBillsBillTextPrefillScheduler"
   arn       = module.congress_bills_bill_text_prefill_state_machine.state_machine_arn
@@ -4094,7 +4125,7 @@ resource "aws_cloudwatch_event_rule" "congress_bills_fetcher_scheduler" {
   name                = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
   description         = "Trigger Congress bills fetcher daily at 11:00 AM UTC (after Congress.gov's 10:00 AM data publication) to fetch yesterday's data"
   schedule_expression = "cron(0 11 * * ? *)" # 11:00 AM UTC daily (6:00 AM EST / 7:00 AM EDT)
-  state               = "ENABLED"
+  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
 
   tags = merge(var.common_tags, {
     Name        = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
@@ -4106,6 +4137,8 @@ resource "aws_cloudwatch_event_rule" "congress_bills_fetcher_scheduler" {
 
 # EventBridge Target for Step Function
 resource "aws_cloudwatch_event_target" "congress_bills_fetcher_scheduler_target" {
+  count = var.enable_all_schedulers ? 1 : 0
+
   rule      = aws_cloudwatch_event_rule.congress_bills_fetcher_scheduler.name
   target_id = "CongressBillsFetcherScheduler"
   arn       = module.congress_bills_fetcher_state_machine.state_machine_arn
@@ -5172,7 +5205,7 @@ module "politician_trades_scheduler" {
   rule_name           = "${var.project_name}-politician-trades-${var.environment}"
   rule_description    = "Trigger politician trades aggregation daily at 2:00 AM EST (after SEC filings are typically complete)"
   schedule_expression = "cron(0 6 ? * * *)" # 2:00 AM EST = 6:00 AM UTC (DST) or 7:00 AM UTC (Standard)
-  enabled             = true
+  enabled             = var.enable_all_schedulers
 
   # Target is Step Functions state machine
   target_arn = module.politician_trades_state_machine.state_machine_arn

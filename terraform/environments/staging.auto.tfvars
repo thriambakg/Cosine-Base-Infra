@@ -23,12 +23,22 @@ kms_deletion_window_in_days = 10
 cognito_mfa_configuration      = "OPTIONAL" # Optional MFA for testing
 cognito_advanced_security_mode = "ENFORCED" # Full security
 cognito_callback_urls = [
-  "https://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/",
-  "https://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/auth/callback"
+  "https://d5b4qcbiesv5t.cloudfront.net/dashboard",
+  "https://d5b4qcbiesv5t.cloudfront.net/auth/callback",
+  "https://d5b4qcbiesv5t.cloudfront.net/app",
+  "https://d5b4qcbiesv5t.cloudfront.net/auth/verify",
+  "https://www.d5b4qcbiesv5t.cloudfront.net",
+  "https://www.d5b4qcbiesv5t.cloudfront.net/app",
+  "https://www.d5b4qcbiesv5t.cloudfront.net/auth/callback",
+  "https://www.d5b4qcbiesv5t.cloudfront.net/auth/verify",
+  "http://localhost:3000/auth/callback"
 ]
 cognito_logout_urls = [
-  "https://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/",
-  "https://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/auth/logout"
+  "https://d5b4qcbiesv5t.cloudfront.net/",
+  "https://d5b4qcbiesv5t.cloudfront.net/auth/logout",
+  "https://www.d5b4qcbiesv5t.cloudfront.net",
+  "https://www.d5b4qcbiesv5t.cloudfront.net/auth/logout",
+  "http://localhost:3000"
 ]
 cognito_access_token_validity  = 60 # 1 hour
 cognito_id_token_validity      = 60 # 1 hour
@@ -57,9 +67,14 @@ cloudwatch_failed_login_threshold        = 5
 cloudwatch_suspicious_activity_threshold = 10
 
 # Federated Authentication Configuration
-cognito_enable_google_provider    = true
-cognito_enable_microsoft_provider = false
-cognito_domain_name               = "cosine-auth-staging"
+cognito_enable_google_provider = true
+cognito_domain_name            = "cosine-auth-staging"
 
 # OAuth Secrets Manager Integration (console-managed secrets)
 oauth_secrets_enabled = true # Create empty secret resource for console population
+
+# Scheduler Configuration (disabled for staging to reduce costs)
+enable_all_schedulers = false # Disable all EventBridge schedulers and CloudWatch Event rules
+
+# Lambda Concurrency Configuration (limit to 5 concurrent requests for staging)
+lambda_reserved_concurrency_default = 5 # Set all reserved concurrency to 5 (5 concurrent requests allowed at a time)
