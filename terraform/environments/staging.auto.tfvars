@@ -23,12 +23,22 @@ kms_deletion_window_in_days = 10
 cognito_mfa_configuration      = "OPTIONAL" # Optional MFA for testing
 cognito_advanced_security_mode = "ENFORCED" # Full security
 cognito_callback_urls = [
-  "https://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/",
-  "https://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/auth/callback"
+  "https://d5b4qcbiesv5t.cloudfront.net/dashboard",
+  "https://d5b4qcbiesv5t.cloudfront.net/auth/callback",
+  "https://d5b4qcbiesv5t.cloudfront.net/app",
+  "https://d5b4qcbiesv5t.cloudfront.net/auth/verify",
+  "https://www.d5b4qcbiesv5t.cloudfront.net",
+  "https://www.d5b4qcbiesv5t.cloudfront.net/app",
+  "https://www.d5b4qcbiesv5t.cloudfront.net/auth/callback",
+  "https://www.d5b4qcbiesv5t.cloudfront.net/auth/verify",
+  "http://localhost:3000/auth/callback"
 ]
 cognito_logout_urls = [
-  "https://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/",
-  "https://cosine-alb-v2-staging-1054813572.us-east-1.elb.amazonaws.com/auth/logout"
+  "https://d5b4qcbiesv5t.cloudfront.net/",
+  "https://d5b4qcbiesv5t.cloudfront.net/auth/logout",
+  "https://www.d5b4qcbiesv5t.cloudfront.net",
+  "https://www.d5b4qcbiesv5t.cloudfront.net/auth/logout",
+  "http://localhost:3000"
 ]
 cognito_access_token_validity  = 60 # 1 hour
 cognito_id_token_validity      = 60 # 1 hour
