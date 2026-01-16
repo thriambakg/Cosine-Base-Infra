@@ -387,6 +387,15 @@ resource "aws_s3_bucket_cors_configuration" "this" {
   depends_on = [aws_s3_bucket.this]
 }
 
+# S3 Transfer Acceleration for faster uploads
+# Routes uploads through CloudFront edge locations for ~40% speed improvement
+resource "aws_s3_bucket_acceleration_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
+  status = "Enabled"
+
+  depends_on = [aws_s3_bucket.this]
+}
+
 # Upload static files to the bucket
 resource "aws_s3_object" "static_files" {
   for_each = {
