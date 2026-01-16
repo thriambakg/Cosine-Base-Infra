@@ -18,13 +18,6 @@ resource "aws_s3_bucket" "this" {
   })
 }
 
-# S3 Transfer Acceleration for faster uploads
-# Routes uploads through CloudFront edge locations for ~40% speed improvement
-resource "aws_s3_bucket_acceleration_configuration" "this" {
-  bucket = aws_s3_bucket.this.id
-  status = "Enabled"
-}
-
 # Versioning - Always enabled for compliance
 resource "aws_s3_bucket_versioning" "this" {
   bucket = aws_s3_bucket.this.id
@@ -359,44 +352,6 @@ resource "aws_s3_bucket_replication_configuration" "this" {
     aws_s3_bucket_versioning.replica
   ]
 }
-
-# CORS configuration for presigned URL uploads
-# Allows browser to upload files directly to S3 using presigned URLs
-resource "aws_s3_bucket_cors_configuration" "this" {
-  bucket = aws_s3_bucket.this.id
-
-  cors_rule {
-    allowed_headers = [
-      "*"
-    ]
-    allowed_methods = [
-      "PUT",
-      "POST",
-      "GET",
-      "HEAD"
-    ]
-    allowed_origins = [
-      "http://localhost:3000",
-      "https://investcosine.com",
-      "https://www.investcosine.com",
-      "https://*.investcosine.com",
-      "https://*.cloudfront.net"
-    ]
-    expose_headers = [
-      "ETag",
-      "x-amz-server-side-encryption",
-      "x-amz-request-id",
-      "x-amz-id-2"
-    ]
-    max_age_seconds = 3000
-  }
-
-  depends_on = [aws_s3_bucket.this]
-}
-
-# S3 Transfer Acceleration is configured via the bucket's acceleration_status
-# Note: This is managed through the AWS API, not a separate Terraform resource
-# The backend code will use the accelerate endpoint when S3_USE_ACCELERATION is enabled
 
 # Upload static files to the bucket
 resource "aws_s3_object" "static_files" {
