@@ -353,6 +353,40 @@ resource "aws_s3_bucket_replication_configuration" "this" {
   ]
 }
 
+# CORS configuration for presigned URL uploads
+# Allows browser to upload files directly to S3 using presigned URLs
+resource "aws_s3_bucket_cors_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
+
+  cors_rule {
+    allowed_headers = [
+      "*"
+    ]
+    allowed_methods = [
+      "PUT",
+      "POST",
+      "GET",
+      "HEAD"
+    ]
+    allowed_origins = [
+      "http://localhost:3000",
+      "https://investcosine.com",
+      "https://www.investcosine.com",
+      "https://*.investcosine.com",
+      "https://*.cloudfront.net"
+    ]
+    expose_headers = [
+      "ETag",
+      "x-amz-server-side-encryption",
+      "x-amz-request-id",
+      "x-amz-id-2"
+    ]
+    max_age_seconds = 3000
+  }
+
+  depends_on = [aws_s3_bucket.this]
+}
+
 # Upload static files to the bucket
 resource "aws_s3_object" "static_files" {
   for_each = {
