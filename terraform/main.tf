@@ -4620,6 +4620,74 @@ module "sec_search_query_cache_table" {
   depends_on = [module.kms]
 }
 
+# Document Index Table - Stores extracted structured data from parsed documents
+module "document_index_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "document-index"
+
+  hash_key  = "document_id"
+  range_key = null
+
+  attributes = [
+    { name = "document_id", type = "S" },
+    { name = "user_id", type = "S" },
+    { name = "document_type", type = "S" },
+    { name = "company_name", type = "S" },
+    { name = "indexed_at", type = "S" }
+  ]
+
+  global_secondary_indexes = [
+    {
+      name            = "UserTypeIndex"
+      hash_key        = "user_id"
+      range_key       = "document_type"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "UserCompanyIndex"
+      hash_key        = "user_id"
+      range_key       = "company_name"
+      projection_type = "ALL"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    }
+  ]
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = false
+  stream_view_type               = null
+  point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = false
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "IndexData"
+  table_purpose = "DocumentFinancialIndex"
+
+  iam_policy_actions = [
+    "dynamodb:GetItem",
+    "dynamodb:PutItem",
+    "dynamodb:UpdateItem",
+    "dynamodb:DeleteItem",
+    "dynamodb:Query",
+    "dynamodb:Scan",
+    "dynamodb:BatchGetItem",
+    "dynamodb:BatchWriteItem"
+  ]
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
 # Lambda 1: Fetch SEC Forms and Congressional PTRs
 module "politician_trades_fetcher" {
   source = "./modules/lambda"
