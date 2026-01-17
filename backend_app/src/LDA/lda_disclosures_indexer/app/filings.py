@@ -14,7 +14,6 @@ from shared_utils import (
     filings_table, PAC_QUEUE_URL
 )
 
-
 def extract_indexed_fields_filing(filing: Dict) -> Dict:
     """Extract indexed fields for a filing (LD-1 or LD-2)"""
     indexed = {}
