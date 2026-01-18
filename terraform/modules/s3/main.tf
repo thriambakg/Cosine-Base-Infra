@@ -145,6 +145,19 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
   depends_on = [aws_s3_bucket_versioning.this]
 }
 
+# CORS configuration - Enable for buckets that need browser uploads
+resource "aws_s3_bucket_cors_configuration" "this" {
+  bucket = aws_s3_bucket.this.id
+
+  cors_rule {
+    allowed_headers = ["*"]
+    allowed_methods = ["GET", "POST", "PUT", "HEAD"]
+    allowed_origins = ["*"] # In production, restrict to specific origins
+    expose_headers  = ["ETag"]
+    max_age_seconds = 3000
+  }
+}
+
 # Notification configuration - Optional
 resource "aws_s3_bucket_notification" "this" {
   count  = var.notification_topic_arn != "" ? 1 : 0
