@@ -458,10 +458,15 @@ def main():
         if last_evaluated_key:
             scan_params['ExclusiveStartKey'] = last_evaluated_key
         
-        # Filter for items where bill_text_html_s3_key is empty or doesn't exist
+        # Filter for items where:
+        # 1. bill_id exists (to ensure we have a valid bill)
+        # 2. bill_id does NOT start with "SEARCH#" (exclude search index items)
+        # 3. bill_text_html_s3_key is empty or doesn't exist
         scan_params['FilterExpression'] = (
-            Attr('bill_text_html_s3_key').not_exists() | 
-            Attr('bill_text_html_s3_key').eq('')
+            Attr('bill_id').exists() &
+            ~Attr('bill_id').begins_with('SEARCH#') &
+            (Attr('bill_text_html_s3_key').not_exists() | 
+             Attr('bill_text_html_s3_key').eq(''))
         )
         
         response = bills_table.scan(**scan_params)
