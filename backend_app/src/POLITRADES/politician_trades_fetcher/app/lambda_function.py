@@ -118,13 +118,19 @@ def lambda_handler(event, context):
             target_dates = [event.get('date')]
             logger.info(f"📅 Single date mode: {target_dates[0]}")
         else:
-            # Default: today for scheduled runs (matches Glue job behavior)
-            target_dates = [get_today_date()]
-            logger.info(f"📅 Default date mode (today): {target_dates[0]}")
+            # Default: for scheduled runs, query both yesterday and today
+            # This accounts for timezone differences (Lambda runs in UTC, Senate site uses Eastern)
+            # and ensures we catch filings posted late in the day
+            today = datetime.now().date()
+            yesterday = today - timedelta(days=1)
+            target_dates = [yesterday.strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d')]
+            logger.info(f"📅 Default date mode (scheduled): {target_dates[0]} to {target_dates[-1]} (yesterday + today)")
     else:
-        # Default: today for scheduled runs (matches Glue job behavior)
-        target_dates = [get_today_date()]
-        logger.info(f"📅 Default date mode (today): {target_dates[0]}")
+        # Default: for scheduled runs, query both yesterday and today
+        today = datetime.now().date()
+        yesterday = today - timedelta(days=1)
+        target_dates = [yesterday.strftime('%Y-%m-%d'), today.strftime('%Y-%m-%d')]
+        logger.info(f"📅 Default date mode (scheduled): {target_dates[0]} to {target_dates[-1]} (yesterday + today)")
     
     logger.info(f"📅 Processing {len(target_dates)} date(s): {target_dates[0] if len(target_dates) == 1 else f'{target_dates[0]} to {target_dates[-1]}'}")
     
