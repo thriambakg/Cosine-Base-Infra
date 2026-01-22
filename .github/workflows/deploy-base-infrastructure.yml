@@ -28,7 +28,6 @@ on:
         default: 'staging'
         type: choice
         options:
-          - development
           - staging
           - production
       destroy:
@@ -63,7 +62,8 @@ jobs:
           elif [ "${{ github.ref }}" == "refs/heads/staging" ]; then
             echo "environment=staging" >> $GITHUB_OUTPUT
           else
-            echo "environment=development" >> $GITHUB_OUTPUT
+            echo "⚠️ Unknown branch: ${{ github.ref }} - defaulting to staging" >> $GITHUB_STEP_SUMMARY
+            echo "environment=staging" >> $GITHUB_OUTPUT
           fi
 
   build-lambda-layers:
