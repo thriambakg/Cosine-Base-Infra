@@ -89,16 +89,75 @@ bills_table = dynamodb.Table(BILLS_TABLE_NAME) if BILLS_TABLE_NAME else None
 # Helper Functions
 # ============================================================================
 
-def get_congress_api_key() -> str:
-    """Get Congress.gov API key from AWS Secrets Manager"""
+# Global API key rotator instance (initialized once)
+_api_key_rotator = None
+
+
+def get_congress_api_keys() -> 'ApiKeyRotator':
+    """
+    Get all Congress.gov API keys from AWS Secrets Manager and return a rotator.
+    Supports api_key, api_key_2, api_key_3, etc. - any number of keys.
+    Returns a thread-safe rotator that distributes calls equally across all keys.
+    """
+    global _api_key_rotator
+    
+    # Return cached rotator if already initialized
+    if _api_key_rotator is not None:
+        return _api_key_rotator
+    
     try:
         secret_name = f"{PROJECT_NAME}-congress-api-{ENVIRONMENT}"
         response = secrets_client.get_secret_value(SecretId=secret_name)
         secret_data = json.loads(response['SecretString'])
-        return secret_data['api_key']
+        
+        # Collect all API keys (api_key, api_key_2, api_key_3, etc.)
+        api_keys = []
+        
+        # Always include api_key if present
+        if 'api_key' in secret_data and secret_data['api_key']:
+            api_keys.append(secret_data['api_key'])
+        
+        # Collect additional keys (api_key_2, api_key_3, etc.)
+        key_index = 2
+        while f'api_key_{key_index}' in secret_data:
+            key_value = secret_data[f'api_key_{key_index}']
+            if key_value and key_value.strip():  # Only add non-empty keys
+                api_keys.append(key_value)
+            key_index += 1
+        
+        if not api_keys:
+            raise ValueError("No valid API keys found in secret")
+        
+        # Initialize the rotator (simple round-robin, no threading needed for sequential processing)
+        class SimpleApiKeyRotator:
+            def __init__(self, keys):
+                self.keys = keys
+                self.current_index = 0
+                log_print(f"✅ Retrieved {len(keys)} Congress API key(s) from Secrets Manager")
+            
+            def get_key(self):
+                key = self.keys[self.current_index]
+                self.current_index = (self.current_index + 1) % len(self.keys)
+                return key
+            
+            def get_key_count(self):
+                return len(self.keys)
+        
+        _api_key_rotator = SimpleApiKeyRotator(api_keys)
+        return _api_key_rotator
+        
     except Exception as e:
-        log_print(f"❌ Error retrieving Congress API key from Secrets Manager: {str(e)}")
-        raise ValueError(f"Failed to retrieve Congress API key from Secrets Manager: {str(e)}")
+        log_print(f"❌ Error retrieving Congress API keys from Secrets Manager: {str(e)}")
+        raise ValueError(f"Failed to retrieve Congress API keys from Secrets Manager: {str(e)}")
+
+
+def get_congress_api_key() -> str:
+    """
+    Get a single Congress.gov API key using round-robin rotation.
+    This function maintains backward compatibility while using the rotator.
+    """
+    rotator = get_congress_api_keys()
+    return rotator.get_key()
 
 def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
     """Make API request with retry logic and exponential backoff for rate limiting."""
@@ -165,9 +224,17 @@ def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, ap
 
 def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Optional[bytes]:
     """Download bill text file (XML/HTML) from Congress.gov with exponential backoff for rate limiting."""
+    # Add headers to mimic browser request (may help with 403 errors)
+    headers = {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Connection': 'keep-alive',
+    }
+    
     for attempt in range(retries):
         try:
-            response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2)
+            response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2, headers=headers)
             
             # Handle 429 Too Many Requests with exponential backoff
             if response.status_code == 429:
@@ -179,6 +246,19 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
                     continue
                 else:
                     log_print(f"      ❌ Rate limited (429) after {retries} attempts")
+                    return None
+            
+            # Handle 403 Forbidden specifically
+            if response.status_code == 403:
+                log_print(f"      ❌ 403 Forbidden - Access denied for {text_url}")
+                log_print(f"      Response body (first 200 chars): {response.text[:200]}")
+                if attempt < retries - 1:
+                    wait_time = RETRY_DELAY * (attempt + 1)
+                    log_print(f"      Waiting {wait_time}s before retry...")
+                    time.sleep(wait_time)
+                    continue
+                else:
+                    log_print(f"      ❌ 403 Forbidden after {retries} attempts")
                     return None
             
             response.raise_for_status()
@@ -436,12 +516,13 @@ def main():
     if not BILLS_TABLE_NAME:
         raise ValueError("BILLS_TABLE_NAME job parameter not set")
     
-    # Get API key from Secrets Manager
+    # Get API key rotator from Secrets Manager
     try:
-        api_key = get_congress_api_key()
-        log_print("✅ Retrieved Congress API key from Secrets Manager")
+        api_key_rotator = get_congress_api_keys()
+        log_print(f"✅ Retrieved {api_key_rotator.get_key_count()} Congress API key(s) from Secrets Manager")
+        log_print(f"   Will rotate through {api_key_rotator.get_key_count()} key(s) during processing")
     except Exception as e:
-        log_print(f"❌ Failed to retrieve API key: {str(e)}")
+        log_print(f"❌ Failed to retrieve API keys: {str(e)}")
         raise
     
     # Scan DynamoDB table for bills missing bill text
@@ -501,6 +582,8 @@ def main():
     # Process bills sequentially
     for idx, bill_item in enumerate(items_to_process, 1):
         try:
+            # Get API key for this bill (rotates through all available keys)
+            api_key = api_key_rotator.get_key()
             success, error_msg = process_bill_item(bill_item, api_key)
             
             if success:
