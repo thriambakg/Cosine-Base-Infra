@@ -949,7 +949,6 @@ def store_bill_to_dynamodb(record: Dict):
             cosponsors_json = record.get('cosponsors_json', '')
             if cosponsors_json:
                 try:
-                    import json
                     cosponsors = json.loads(cosponsors_json) if isinstance(cosponsors_json, str) else cosponsors_json
                     if isinstance(cosponsors, list):
                         for cosponsor in cosponsors:
@@ -1004,7 +1003,6 @@ def store_bill_to_dynamodb(record: Dict):
                     cosponsors_json = record.get('cosponsors_json', '')
                     if cosponsors_json:
                         try:
-                            import json
                             cosponsors = json.loads(cosponsors_json) if isinstance(cosponsors_json, str) else cosponsors_json
                             if isinstance(cosponsors, list):
                                 for cosponsor in cosponsors:
