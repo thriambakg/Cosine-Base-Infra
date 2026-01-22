@@ -949,7 +949,6 @@ def store_bill_to_dynamodb(record: Dict):
             cosponsors_json = record.get('cosponsors_json', '')
             if cosponsors_json:
                 try:
-                    import json
                     cosponsors = json.loads(cosponsors_json) if isinstance(cosponsors_json, str) else cosponsors_json
                     if isinstance(cosponsors, list):
                         for cosponsor in cosponsors:
@@ -1004,7 +1003,6 @@ def store_bill_to_dynamodb(record: Dict):
                     cosponsors_json = record.get('cosponsors_json', '')
                     if cosponsors_json:
                         try:
-                            import json
                             cosponsors = json.loads(cosponsors_json) if isinstance(cosponsors_json, str) else cosponsors_json
                             if isinstance(cosponsors, list):
                                 for cosponsor in cosponsors:
@@ -1789,19 +1787,31 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         log_print(f"   ✅ Batch {batch_num} complete: {processed_in_batch} files processed, {len(bills)} bills parsed")
         
         # Filter batch by date if needed
+        # For daily runs, filter by latest_action_date to catch bills with new actions
+        # For historical runs, filter by introduced_date
         if start_date_dt and end_date_dt:
             filtered_batch = {}
             for bill_id, bill_record in bills.items():
-                introduced_date = bill_record.get('introduced_date')
-                if introduced_date:
+                # Prefer latest_action_date for daily updates (catches bills with new actions)
+                # Fall back to introduced_date if latest_action_date not available
+                filter_date_str = bill_record.get('latest_action_date') or bill_record.get('introduced_date')
+                if filter_date_str:
                     try:
-                        bill_date = datetime.strptime(introduced_date, '%Y-%m-%d')
-                        bill_date = bill_date.replace(tzinfo=timezone.utc)
+                        # Parse date (handle both YYYY-MM-DD and ISO format)
+                        if 'T' in filter_date_str:
+                            bill_date = datetime.fromisoformat(filter_date_str.replace('Z', '+00:00'))
+                        else:
+                            bill_date = datetime.strptime(filter_date_str, '%Y-%m-%d')
+                            bill_date = bill_date.replace(tzinfo=timezone.utc)
+                        
                         if start_date_dt <= bill_date <= end_date_dt:
                             filtered_batch[bill_id] = bill_record
-                    except ValueError:
-                        filtered_batch[bill_id] = bill_record
+                    except (ValueError, AttributeError):
+                        # If date parsing fails, include bill if it has no date filter
+                        # (for backwards compatibility)
+                        pass
                 else:
+                    # No date available - include in batch (for backwards compatibility)
                     filtered_batch[bill_id] = bill_record
             bills = filtered_batch
         
