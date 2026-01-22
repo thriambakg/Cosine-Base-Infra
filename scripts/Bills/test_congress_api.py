@@ -22,7 +22,7 @@ import time
 # ============================================================================
 
 API_BASE_URL = "https://api.congress.gov/v3"
-API_KEY = "jVFi0sHwg2iolTUws0lSj5r0tHqfh98bcXnTiEAX"  # TODO: Paste your API key here
+API_KEY = ""  # TODO: Paste your API key here
 
 # Bill types to fetch
 BILL_TYPES = ["HR", "S", "HJRES", "SJRES", "HCONRES", "SCONRES", "HRES", "SRES"]
