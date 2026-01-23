@@ -23,20 +23,20 @@ kms_deletion_window_in_days = 30 # Maximum retention
 cognito_mfa_configuration      = "OPTIONAL" # Optional MFA
 cognito_advanced_security_mode = "ENFORCED" # Full security enforcement
 cognito_callback_urls = [
-  "https://investcosine.com",
-  "https://investcosine.com/app",
-  "https://investcosine.com/auth/callback",
-  "https://investcosine.com/auth/verify",
-  "https://www.investcosine.com",
-  "https://www.investcosine.com/app",
-  "https://www.investcosine.com/auth/callback",
-  "https://www.investcosine.com/auth/verify"
+  "https://fingov.ai",
+  "https://fingov.ai/app",
+  "https://fingov.ai/auth/callback",
+  "https://fingov.ai/auth/verify",
+  "https://www.fingov.ai",
+  "https://www.fingov.ai/app",
+  "https://www.fingov.ai/auth/callback",
+  "https://www.fingov.ai/auth/verify"
 ]
 cognito_logout_urls = [
-  "https://investcosine.com",
-  "https://investcosine.com/auth/logout",
-  "https://www.investcosine.com",
-  "https://www.investcosine.com/auth/logout"
+  "https://fingov.ai",
+  "https://fingov.ai/auth/logout",
+  "https://www.fingov.ai",
+  "https://www.fingov.ai/auth/logout"
 ]
 cognito_access_token_validity  = 5 # 60 minutes (1 hour)
 cognito_id_token_validity      = 5 # 60 minutes (1 hour)  
