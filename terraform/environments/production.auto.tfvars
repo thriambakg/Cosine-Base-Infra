@@ -30,13 +30,29 @@ cognito_callback_urls = [
   "https://www.fingov.ai",
   "https://www.fingov.ai/app",
   "https://www.fingov.ai/auth/callback",
-  "https://www.fingov.ai/auth/verify"
+  "https://www.fingov.ai/auth/verify",
+  "https://investcosine.com",
+  "https://investcosine.com/app",
+  "https://investcosine.com/auth/callback",
+  "https://investcosine.com/auth/verify",
+  "https://www.investcosine.com",
+  "https://www.investcosine.com/app",
+  "https://www.investcosine.com/auth/callback",
+  "https://www.investcosine.com/auth/verify"
 ]
 cognito_logout_urls = [
   "https://fingov.ai",
   "https://fingov.ai/auth/logout",
+  "https://fingov.ai/?",
   "https://www.fingov.ai",
-  "https://www.fingov.ai/auth/logout"
+  "https://www.fingov.ai/auth/logout",
+  "https://www.fingov.ai/?",
+  "https://investcosine.com",
+  "https://investcosine.com/auth/logout",
+  "https://investcosine.com/?",
+  "https://www.investcosine.com",
+  "https://www.investcosine.com/auth/logout",
+  "https://www.investcosine.com/?"
 ]
 cognito_access_token_validity  = 5 # 60 minutes (1 hour)
 cognito_id_token_validity      = 5 # 60 minutes (1 hour)  
