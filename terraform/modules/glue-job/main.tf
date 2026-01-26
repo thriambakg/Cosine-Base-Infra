@@ -167,6 +167,7 @@ resource "aws_iam_role_policy" "dynamodb_access" {
           "dynamodb:GetItem",
           "dynamodb:UpdateItem",
           "dynamodb:DeleteItem",
+          "dynamodb:BatchGetItem",
           "dynamodb:BatchWriteItem",
           "dynamodb:Query",
           "dynamodb:Scan"
