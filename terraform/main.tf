@@ -2095,7 +2095,7 @@ module "idv_obligation_update_glue_job" {
 
   # Job configuration
   max_retries           = 1
-  timeout               = 60     # 1 hour (should be plenty for this update)
+  timeout               = 2880   # 2 days (48 hours) - GSI queries across multiple fiscal years may take time
   concurrent_executions = 1      # Only allow 1 concurrent run
   worker_type           = "G.1X" # 16 GB memory per worker
   number_of_workers     = 2      # 2 × 16 GB = 32 GB total memory (sufficient for scanning)
