@@ -1973,6 +1973,11 @@ module "glue_scripts_s3" {
       content_type = "text/x-python"
     },
     {
+      source_path  = "${path.module}/../backend_app/src/glue/govt_contracts/update_idv_obligations.py"
+      s3_key       = "govt_contracts/update_idv_obligations.py"
+      content_type = "text/x-python"
+    },
+    {
       source_path  = "${path.module}/../backend_app/src/glue/congress_bills/glue_script.py"
       s3_key       = "congress_bills/glue_script.py"
       content_type = "text/x-python"
@@ -2071,6 +2076,78 @@ resource "aws_kms_grant" "glue_dynamodb_key_access" {
 
   depends_on = [
     module.usaspending_bulk_indexing_glue_job,
+    module.kms
+  ]
+}
+
+# Temporary Glue Job for IDV Obligation Update (one-time maintenance)
+# This job updates total_obligated_amount from combined_obligated_amount for IDV parent awards.
+# Can be destroyed after running.
+module "idv_obligation_update_glue_job" {
+  source = "./modules/glue-job"
+
+  job_name = "${var.project_name}-idv-obligation-update-${var.environment}"
+
+  # Script location - uploaded to glue scripts bucket
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/govt_contracts/update_idv_obligations.py"
+  python_version  = "3"
+  glue_version    = "4.0"
+
+  # Job configuration
+  max_retries           = 1
+  timeout               = 60     # 1 hour (should be plenty for this update)
+  concurrent_executions = 1      # Only allow 1 concurrent run
+  worker_type           = "G.1X" # 16 GB memory per worker
+  number_of_workers     = 2      # 2 × 16 GB = 32 GB total memory (sufficient for scanning)
+
+  # S3 buckets
+  s3_bucket_arn     = module.glue_scripts_s3.bucket_arn
+  spark_logs_bucket = module.static_hosting_bucket.bucket_id
+  temp_bucket       = module.static_hosting_bucket.bucket_id
+
+  # DynamoDB access (same table as indexing job)
+  dynamodb_table_arn = module.usaspending_awards_index_table.table_arn
+
+  # KMS for encryption (same keys as indexing job)
+  kms_key_arn = module.kms.main_key_arn
+  additional_kms_key_arns = [
+    module.kms.dynamodb_key_arn
+  ]
+
+  # Job arguments
+  default_arguments = {
+    "--AWARDS_TABLE_NAME" = module.usaspending_awards_index_table.table_name
+  }
+
+  job_bookmark_option = "job-bookmark-disable"
+
+  tags = merge(var.common_tags, {
+    Purpose = "TemporaryMaintenance"
+    Note    = "One-time job to update IDV obligations. Can be destroyed after completion."
+  })
+
+  depends_on = [
+    module.glue_scripts_s3,
+    module.static_hosting_bucket,
+    module.usaspending_awards_index_table,
+    module.kms
+  ]
+}
+
+# Grant Glue job role access to DynamoDB KMS key (same as indexing job)
+resource "aws_kms_grant" "idv_update_glue_dynamodb_key_access" {
+  name              = "${var.project_name}-idv-obligation-update-${var.environment}-dynamodb-key-grant"
+  key_id            = module.kms.dynamodb_key_id
+  grantee_principal = module.idv_obligation_update_glue_job.role_arn
+  operations = [
+    "Decrypt",
+    "Encrypt",
+    "GenerateDataKey",
+    "DescribeKey"
+  ]
+
+  depends_on = [
+    module.idv_obligation_update_glue_job,
     module.kms
   ]
 }
