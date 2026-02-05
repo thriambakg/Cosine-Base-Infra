@@ -86,6 +86,21 @@ variable "dynamodb_table_arn" {
   # evaluate count expressions that depend on it. Workaround: Use -target to create the table first.
 }
 
+variable "dynamodb_actions" {
+  description = "List of DynamoDB IAM actions for the job (least privilege). Used only when dynamodb_table_arn is set."
+  type        = list(string)
+  default = [
+    "dynamodb:PutItem",
+    "dynamodb:GetItem",
+    "dynamodb:UpdateItem",
+    "dynamodb:DeleteItem",
+    "dynamodb:BatchGetItem",
+    "dynamodb:BatchWriteItem",
+    "dynamodb:Query",
+    "dynamodb:Scan"
+  ]
+}
+
 variable "kms_key_arn" {
   description = "ARN of KMS key for encryption (optional, deprecated - use additional_kms_key_arns instead)"
   type        = string

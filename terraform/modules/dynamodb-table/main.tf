@@ -63,35 +63,3 @@ resource "aws_dynamodb_table" "this" {
     prevent_destroy = false
   }
 }
-
-# IAM Policy for table access
-resource "aws_iam_policy" "table_policy" {
-  name        = "${var.project_name}-${var.table_name}-table-policy-${var.environment}"
-  description = "IAM policy for accessing the ${var.table_name} table"
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = concat([
-      {
-        Effect = "Allow"
-        Action = var.iam_policy_actions
-        Resource = [
-          aws_dynamodb_table.this.arn,
-          "${aws_dynamodb_table.this.arn}/index/*"
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey",
-          "kms:DescribeKey"
-        ]
-        Resource = var.kms_key_arn
-      }
-    ], var.additional_iam_policy_statements)
-  })
-
-  tags = var.tags
-}
-

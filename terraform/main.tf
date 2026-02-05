@@ -707,21 +707,141 @@ module "news_table" {
   table_type    = "NewsData"
   table_purpose = "FinancialNews"
 
-  additional_iam_policy_statements = [
-    {
-      Effect = "Allow"
-      Action = [
-        "comprehend:DetectKeyPhrases",
-        "comprehend:DetectEntities",
-        "comprehend:DetectSentiment"
-      ]
-      Resource = "*"
-    }
-  ]
-
   tags = var.common_tags
 
   depends_on = [module.kms]
+}
+
+# Dedicated DynamoDB policies - least privilege per Python usage (get_item/put_item/update_item/query/scan only as used)
+resource "aws_iam_policy" "user_profiles_table_dynamodb_policy" {
+  name        = "${var.project_name}-user-profiles-table-dynamodb-${var.environment}"
+  description = "user_profile_creation: GetItem, UpdateItem, PutItem only (from lambda_function.py)"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem"]
+        Resource = [module.user_profiles_table.table_arn, "${module.user_profiles_table.table_arn}/index/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+        Resource = module.kms.dynamodb_key_arn
+      }
+    ]
+  })
+  tags = var.common_tags
+}
+
+resource "aws_iam_policy" "news_table_dynamodb_policy" {
+  name        = "${var.project_name}-news-table-dynamodb-${var.environment}"
+  description = "news_processor: PutItem, GetItem, Scan only (from lambda_function.py)"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:Scan"]
+        Resource = [module.news_table.table_arn, "${module.news_table.table_arn}/index/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+        Resource = module.kms.dynamodb_key_arn
+      }
+    ]
+  })
+  tags = var.common_tags
+}
+
+# news_fetcher: least privilege - SendMessage only on news queue (lambda sends to SQS)
+resource "aws_iam_policy" "news_fetcher_sqs_policy" {
+  name        = "${var.project_name}-news-fetcher-sqs-${var.environment}"
+  description = "News fetcher Lambda: SendMessage on news queue only"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = module.news_queue.queue_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+        Resource = module.kms.main_key_arn
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# news_processor: Comprehend - DetectKeyPhrases, DetectEntities only (enhanced_keyword_extractor.py)
+resource "aws_iam_policy" "news_processor_comprehend_policy" {
+  name        = "${var.project_name}-news-processor-comprehend-${var.environment}"
+  description = "News processor Lambda: Comprehend DetectKeyPhrases, DetectEntities only"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["comprehend:DetectKeyPhrases", "comprehend:DetectEntities"]
+        Resource = "*"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_policy" "lda_filings_table_dynamodb_policy" {
+  name        = "${var.project_name}-lda-filings-table-dynamodb-${var.environment}"
+  description = "lda_disclosures_indexer: PutItem only (filings.py, shared_utils.py, contributions.py)"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem"]
+        Resource = [module.lda_filings_table.table_arn, "${module.lda_filings_table.table_arn}/index/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+        Resource = module.kms.dynamodb_key_arn
+      }
+    ]
+  })
+  tags = var.common_tags
+}
+
+resource "aws_iam_policy" "politician_trades_table_dynamodb_policy" {
+  name        = "${var.project_name}-politician-trades-table-dynamodb-${var.environment}"
+  description = "politician_trades: PutItem (senate_matcher, saver), Scan (house_matcher) only"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem", "dynamodb:Scan"]
+        Resource = [module.politician_trades_table.table_arn, "${module.politician_trades_table.table_arn}/index/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
+        Resource = module.kms.dynamodb_key_arn
+      }
+    ]
+  })
+  tags = var.common_tags
 }
 
 # User Profile Creation Lambda Function (Cognito Trigger)
@@ -743,9 +863,9 @@ module "user_profile_creation_lambda" {
     USER_PROFILES_TABLE_NAME = module.user_profiles_table.table_name
   }
 
-  # IAM policies for DynamoDB access
+  # IAM policies for DynamoDB access (dedicated policy; narrow to least-privilege when auditing this Lambda)
   additional_policy_arns = [
-    module.user_profiles_table.table_policy_arn
+    aws_iam_policy.user_profiles_table_dynamodb_policy.arn
   ]
 
   # Reserved concurrency (uses default from environment variables)
@@ -989,9 +1109,9 @@ module "news_fetcher" {
     module.news_layer.layer_arn
   ]
 
-  # IAM policies
+  # IAM policies - least privilege: SendMessage only on news queue (fetcher only sends)
   additional_policy_arns = [
-    module.news_queue.sqs_access_policy_arn,
+    aws_iam_policy.news_fetcher_sqs_policy.arn,
     module.newsdata_secrets_manager.secret_access_policy_arn,
     module.kms.kms_access_policy_arn
   ]
@@ -1025,10 +1145,11 @@ module "news_processor" {
     module.core_layer.layer_arn
   ]
 
-  # IAM policies
+  # IAM policies - queue consumer + DynamoDB + Comprehend (DetectKeyPhrases, DetectEntities only)
   additional_policy_arns = [
     module.news_queue.sqs_access_policy_arn,
-    module.news_table.table_policy_arn
+    aws_iam_policy.news_table_dynamodb_policy.arn,
+    aws_iam_policy.news_processor_comprehend_policy.arn
   ]
 
   # Reserved concurrency (uses default from environment variables)
@@ -1264,10 +1385,69 @@ module "stock_data_historical_loader" {
   tags = var.common_tags
 }
 
-# IAM Policy for Lambda to access S3 historical data bucket
+# IAM Policy for stock_data_historical_loader - least privilege: GetObject, PutObject only
 resource "aws_iam_policy" "stock_data_historical_s3_access" {
   name        = "${var.project_name}-stock-historical-s3-access-${var.environment}"
-  description = "Allows Lambda to read/write to stock historical data S3 bucket"
+  description = "Stock historical loader Lambda: GetObject (stock-lists/*), PutObject (historical/*) only"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
+        Resource = "${module.stock_data_historical_s3.bucket_arn}/*"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# EOD Batch Generator: ListBucket only (list_objects_v2 to list historical/* keys)
+resource "aws_iam_policy" "eod_batch_generator_s3_policy" {
+  name        = "${var.project_name}-eod-batch-generator-s3-${var.environment}"
+  description = "EOD batch generator Lambda: ListBucket only on stock historical S3"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:ListBucket"]
+        Resource = [module.stock_data_historical_s3.bucket_arn]
+        Condition = {
+          StringLike = { "s3:prefix" = ["historical/*"] }
+        }
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# EOD Aggregator: GetObject only on historical/*, DynamoDB PutItem/BatchWriteItem only
+resource "aws_iam_policy" "eod_aggregator_s3_policy" {
+  name        = "${var.project_name}-eod-aggregator-s3-${var.environment}"
+  description = "EOD aggregator Lambda: GetObject only on stock historical S3 historical/*"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:GetObject"]
+        Resource = ["${module.stock_data_historical_s3.bucket_arn}/historical/*"]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_policy" "eod_aggregator_dynamodb_policy" {
+  name        = "${var.project_name}-eod-aggregator-dynamodb-${var.environment}"
+  description = "EOD aggregator Lambda: PutItem and BatchWriteItem only on stock_data table"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -1275,14 +1455,12 @@ resource "aws_iam_policy" "stock_data_historical_s3_access" {
       {
         Effect = "Allow"
         Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject",
-          "s3:ListBucket"
+          "dynamodb:PutItem",
+          "dynamodb:BatchWriteItem"
         ]
         Resource = [
-          module.stock_data_historical_s3.bucket_arn,
-          "${module.stock_data_historical_s3.bucket_arn}/*"
+          module.stock_data_table.table_arn,
+          "${module.stock_data_table.table_arn}/index/*"
         ]
       }
     ]
@@ -1505,9 +1683,9 @@ module "eod_batch_generator" {
     module.financial_layer.layer_arn
   ]
 
-  # IAM policies
+  # IAM policies - ListBucket only for listing historical/* keys
   additional_policy_arns = [
-    aws_iam_policy.stock_data_historical_s3_access.arn,
+    aws_iam_policy.eod_batch_generator_s3_policy.arn,
     module.kms.kms_access_policy_arn
   ]
 
@@ -1541,10 +1719,10 @@ module "eod_aggregator" {
     module.financial_layer.layer_arn
   ]
 
-  # IAM policies
+  # IAM policies - GetObject on historical/*, PutItem/BatchWriteItem on stock_data table
   additional_policy_arns = [
-    aws_iam_policy.stock_data_historical_s3_access.arn,
-    module.stock_data_table.table_policy_arn,
+    aws_iam_policy.eod_aggregator_s3_policy.arn,
+    aws_iam_policy.eod_aggregator_dynamodb_policy.arn,
     module.kms.kms_access_policy_arn
   ]
 
@@ -1878,10 +2056,10 @@ module "usaspending_data_s3" {
   tags = var.common_tags
 }
 
-# IAM Policy for Lambda to access S3 politician trades bucket
+# IAM Policy for Lambda to access S3 politician trades bucket - least privilege: no DeleteObject (unused)
 resource "aws_iam_policy" "lambda_politician_trades_s3_policy" {
   name        = "${var.project_name}-lambda-politician-trades-s3-access-${var.environment}"
-  description = "Allows Lambda to read/write to politician trades S3 bucket"
+  description = "Politician trades Lambdas: GetObject, PutObject, ListBucket only (fetcher/downloader/matchers/saver)"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -1891,7 +2069,6 @@ resource "aws_iam_policy" "lambda_politician_trades_s3_policy" {
         Action = [
           "s3:GetObject",
           "s3:PutObject",
-          "s3:DeleteObject",
           "s3:ListBucket"
         ]
         Resource = [
@@ -1905,10 +2082,10 @@ resource "aws_iam_policy" "lambda_politician_trades_s3_policy" {
   tags = var.common_tags
 }
 
-# IAM Policy for Lambda to access S3 USAspending data bucket
+# IAM Policy for Lambda to access S3 USAspending data bucket (GetObject, PutObject, HeadObject, ListBucket only; no DeleteObject)
 resource "aws_iam_policy" "lambda_usaspending_data_s3_policy" {
   name        = "${var.project_name}-lambda-usaspending-data-s3-access-${var.environment}"
-  description = "Allows Lambda to read/write to USAspending award details S3 bucket"
+  description = "Allows Lambda to read/write USAspending award data in S3 (no delete)"
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -1918,12 +2095,75 @@ resource "aws_iam_policy" "lambda_usaspending_data_s3_policy" {
         Action = [
           "s3:GetObject",
           "s3:PutObject",
-          "s3:DeleteObject",
+          "s3:HeadObject",
           "s3:ListBucket"
         ]
         Resource = [
           module.usaspending_data_s3.bucket_arn,
           "${module.usaspending_data_s3.bucket_arn}/*"
+        ]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# USAspending Orphan Subaward Processor: DynamoDB PutItem only on awards table
+resource "aws_iam_policy" "usaspending_orphan_subaward_processor_dynamodb_policy" {
+  name        = "${var.project_name}-usaspending-orphan-subaward-dynamodb-${var.environment}"
+  description = "Orphan subaward processor Lambda: PutItem only on usaspending_awards_index table"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem"]
+        Resource = [module.usaspending_awards_index_table.table_arn]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# USAspending Individual Award Processor: DynamoDB PutItem only on awards table
+resource "aws_iam_policy" "usaspending_individual_award_processor_dynamodb_policy" {
+  name        = "${var.project_name}-usaspending-individual-award-dynamodb-${var.environment}"
+  description = "Individual award processor Lambda: PutItem only on usaspending_awards_index table"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:PutItem"]
+        Resource = [module.usaspending_awards_index_table.table_arn]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+# USAspending Bulk Fetcher: DynamoDB GetItem and PutItem only on awards table
+resource "aws_iam_policy" "usaspending_bulk_fetcher_dynamodb_policy" {
+  name        = "${var.project_name}-usaspending-bulk-fetcher-dynamodb-${var.environment}"
+  description = "Bulk fetcher Lambda: GetItem and PutItem only on usaspending_awards_index table"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "dynamodb:GetItem",
+          "dynamodb:PutItem"
+        ]
+        Resource = [
+          module.usaspending_awards_index_table.table_arn,
+          "${module.usaspending_awards_index_table.table_arn}/index/*"
         ]
       }
     ]
@@ -2026,8 +2266,9 @@ module "usaspending_bulk_indexing_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access
+  # DynamoDB access - least privilege: glue_script.py uses get_item, put_item only
   dynamodb_table_arn = module.usaspending_awards_index_table.table_arn
+  dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
@@ -2105,8 +2346,9 @@ module "idv_obligation_update_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access (same table as indexing job)
+  # DynamoDB access - least privilege: update_idv_obligations.py uses update_item, query, batch_get_item only
   dynamodb_table_arn = module.usaspending_awards_index_table.table_arn
+  dynamodb_actions   = ["dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:BatchGetItem"]
 
   # KMS for encryption (same keys as indexing job)
   kms_key_arn = module.kms.main_key_arn
@@ -2206,7 +2448,7 @@ module "usaspending_orphan_subaward_processor_lambda" {
   }
 
   additional_policy_arns = [
-    module.usaspending_awards_index_table.table_policy_arn,
+    aws_iam_policy.usaspending_orphan_subaward_processor_dynamodb_policy.arn,
     module.kms.kms_access_policy_arn,
     module.usaspending_orphan_subaward_queue.sqs_access_policy_arn,
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn
@@ -2330,7 +2572,7 @@ module "usaspending_individual_award_processor_lambda" {
   }
 
   additional_policy_arns = [
-    module.usaspending_awards_index_table.table_policy_arn,
+    aws_iam_policy.usaspending_individual_award_processor_dynamodb_policy.arn,
     module.kms.kms_access_policy_arn,
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn,
     module.usaspending_dlq_queue.sqs_access_policy_arn
@@ -2439,7 +2681,7 @@ module "usaspending_bulk_fetcher_lambda" {
   }
 
   additional_policy_arns = [
-    module.usaspending_awards_index_table.table_policy_arn,
+    aws_iam_policy.usaspending_bulk_fetcher_dynamodb_policy.arn,
     module.kms.kms_access_policy_arn,
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn
   ]
@@ -2859,8 +3101,9 @@ module "congress_bills_fetcher_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access
+  # DynamoDB access - least privilege: congress_bills/glue_script.py uses put_item only
   dynamodb_table_arn = module.congress_bills_table.table_arn
+  dynamodb_actions   = ["dynamodb:PutItem"]
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
@@ -2938,6 +3181,25 @@ module "congress_bills_bill_text_queue" {
   tags = var.common_tags
 }
 
+# Congress Bills Bill Text Processor Lambda - least privilege: DynamoDB UpdateItem only, S3 PutObject only, Secrets GetSecretValue, SQS consume
+resource "aws_iam_policy" "congress_bills_bill_text_processor_dynamodb_policy" {
+  name        = "${var.project_name}-congress-bills-bill-text-processor-dynamodb-${var.environment}"
+  description = "Bill text processor Lambda: UpdateItem only on congress_bills table"
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["dynamodb:UpdateItem"]
+        Resource = [module.congress_bills_table.table_arn]
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
 # Lambda Function for Congress Bills Bill Text Processor
 module "congress_bills_bill_text_processor_lambda" {
   source = "./modules/lambda"
@@ -2967,7 +3229,7 @@ module "congress_bills_bill_text_processor_lambda" {
   }
 
   additional_policy_arns = [
-    module.congress_bills_table.table_policy_arn,
+    aws_iam_policy.congress_bills_bill_text_processor_dynamodb_policy.arn,
     module.kms.kms_access_policy_arn,
     module.congress_api_secrets_manager.secret_access_policy_arn,
     module.congress_bills_bill_text_queue.sqs_access_policy_arn,
@@ -2989,34 +3251,18 @@ module "congress_bills_bill_text_processor_lambda" {
   ]
 }
 
-# IAM Policy for Lambda to access Congress Bills Data S3 bucket
+# IAM Policy for Bill Text Processor Lambda - PutObject only on billtext/ (writes HTML; no read/delete/list)
 resource "aws_iam_policy" "lambda_congress_bills_data_s3_policy" {
   name        = "${var.project_name}-lambda-congress-bills-data-s3-${var.environment}"
-  description = "Allows Lambda to read/write Congress bills data in S3"
+  description = "Bill text processor Lambda: PutObject only on congress bills data S3 billtext/ prefix"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject"
-        ]
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
         Resource = "${module.congress_bills_data_s3.bucket_arn}/billtext/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:ListBucket"
-        ]
-        Resource = module.congress_bills_data_s3.bucket_arn
-        Condition = {
-          StringLike = {
-            "s3:prefix" = "billtext/*"
-          }
-        }
       }
     ]
   })
@@ -3180,8 +3426,9 @@ module "congress_bills_bill_text_backfill_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access
+  # DynamoDB access - least privilege: backfill_bill_text.py uses update_item, scan only
   dynamodb_table_arn = module.congress_bills_table.table_arn
+  dynamodb_actions   = ["dynamodb:UpdateItem", "dynamodb:Scan"]
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
@@ -3530,8 +3777,9 @@ module "lda_disclosures_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access
+  # DynamoDB access - least privilege: lda_disclosures/glue_script.py uses put_item only
   dynamodb_table_arn = module.lda_filings_table.table_arn
+  dynamodb_actions   = ["dynamodb:PutItem"]
   # Note: Parameter-filing mappings are stored in the same table using different PK/SK patterns
 
   # KMS for encryption
@@ -3734,29 +3982,18 @@ module "lda_pac_autocomplete_processor" {
   ]
 }
 
-# IAM Policy for Indexer Lambda to access S3 for document downloads
+# IAM Policy for Indexer Lambda to access S3 - least privilege: PutObject only (shared_utils put_object)
 resource "aws_iam_policy" "lda_indexer_s3_policy" {
   name        = "${var.project_name}-lda-indexer-s3-${var.environment}"
-  description = "Allows LDA indexer Lambda to read/write documents in S3"
+  description = "LDA indexer Lambda: PutObject only on disclosures bucket"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject"
-        ]
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
         Resource = "${module.lda_disclosures_s3.bucket_arn}/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:ListBucket"
-        ]
-        Resource = module.lda_disclosures_s3.bucket_arn
       }
     ]
   })
@@ -3901,7 +4138,7 @@ module "lda_disclosures_indexer" {
   # IAM policies
   additional_policy_arns = [
     module.lda_api_secrets_manager.secret_access_policy_arn,
-    module.lda_filings_table.table_policy_arn,
+    aws_iam_policy.lda_filings_table_dynamodb_policy.arn,
     module.lda_batch_queue.sqs_access_policy_arn,
     module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
     module.kms.kms_access_policy_arn,
@@ -3962,7 +4199,6 @@ module "lda_batch_dlq_redrive_lambda" {
   ]
 
   additional_policy_arns = [
-    module.lda_batch_queue.sqs_access_policy_arn,
     module.kms.kms_access_policy_arn,
     aws_iam_policy.lda_batch_dlq_redrive_sqs_policy.arn
   ]
@@ -4007,20 +4243,32 @@ resource "aws_cloudwatch_event_target" "lda_batch_dlq_redrive_target" {
   ]
 }
 
-# IAM Policy for DLQ Redrive Lambda to access SQS queues
+# IAM Policy for DLQ Redrive Lambda - least privilege: DLQ receive/delete/get attrs, source send, GetQueueUrl
 resource "aws_iam_policy" "lda_batch_dlq_redrive_sqs_policy" {
   name        = "${var.project_name}-lda-batch-dlq-redrive-sqs-${var.environment}"
-  description = "Allows DLQ redrive Lambda to get queue URLs and redrive messages"
+  description = "LDA DLQ redrive: ReceiveMessage/DeleteMessage/GetQueueAttributes on DLQ, SendMessage on source, GetQueueUrl"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
+        Effect   = "Allow"
+        Action   = ["sqs:GetQueueUrl"]
+        Resource = "*"
+      },
+      {
         Effect = "Allow"
         Action = [
-          "sqs:GetQueueUrl"
+          "sqs:ReceiveMessage",
+          "sqs:DeleteMessage",
+          "sqs:GetQueueAttributes"
         ]
-        Resource = "*" # GetQueueUrl requires * or account-level permission
+        Resource = module.lda_batch_queue.dlq_arn
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["sqs:SendMessage"]
+        Resource = module.lda_batch_queue.queue_arn
       }
     ]
   })
@@ -4037,34 +4285,18 @@ resource "aws_lambda_permission" "allow_eventbridge_lda_dlq_redrive" {
   source_arn    = aws_cloudwatch_event_rule.lda_batch_dlq_redrive.arn
 }
 
-# IAM Policy for Lambda to access S3 for autocomplete CSVs
+# IAM Policy for Lambda to access S3 for autocomplete - least privilege: GetObject, PutObject on lists/* only
 resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
   name        = "${var.project_name}-lda-pac-autocomplete-s3-${var.environment}"
-  description = "Allows Lambda to read/write autocomplete CSVs (PACs, client names, lobbyist names, registrant names) in S3"
+  description = "LDA PAC autocomplete Lambda: GetObject, PutObject on lists/* only"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "s3:GetObject",
-          "s3:PutObject",
-          "s3:DeleteObject"
-        ]
+        Effect   = "Allow"
+        Action   = ["s3:GetObject", "s3:PutObject"]
         Resource = "${module.lda_disclosures_s3.bucket_arn}/lists/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:ListBucket"
-        ]
-        Resource = module.lda_disclosures_s3.bucket_arn
-        Condition = {
-          StringLike = {
-            "s3:prefix" = "lists/*"
-          }
-        }
       }
     ]
   })
@@ -4072,32 +4304,18 @@ resource "aws_iam_policy" "lda_pac_autocomplete_s3_policy" {
   tags = var.common_tags
 }
 
-# IAM Policy for Fetcher Lambda to write constants to S3
+# IAM Policy for Fetcher Lambda - least privilege: PutObject on lists/* only
 resource "aws_iam_policy" "lda_fetcher_s3_policy" {
   name        = "${var.project_name}-lda-fetcher-s3-${var.environment}"
-  description = "Allows Fetcher Lambda to write constants (general issues, government entities, countries) to S3"
+  description = "LDA fetcher Lambda: PutObject on lists/* only (constants)"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "s3:PutObject"
-        ]
+        Effect   = "Allow"
+        Action   = ["s3:PutObject"]
         Resource = "${module.lda_disclosures_s3.bucket_arn}/lists/*"
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "s3:ListBucket"
-        ]
-        Resource = module.lda_disclosures_s3.bucket_arn
-        Condition = {
-          StringLike = {
-            "s3:prefix" = "lists/*"
-          }
-        }
       }
     ]
   })
@@ -4235,25 +4453,17 @@ resource "aws_cloudwatch_event_target" "congress_bills_fetcher_scheduler_target"
   ]
 }
 
-resource "aws_iam_policy" "lambda_politician_trades_textract_policy" {
-  name        = "${var.project_name}-lambda-politician-trades-textract-access-${var.environment}"
-  description = "Allows Lambda to use Textract for parsing PTR PDFs"
+# Senate matcher only: uses analyze_document (sync) with Document.Bytes - no async Start/Get
+resource "aws_iam_policy" "lambda_politician_trades_senate_matcher_textract_policy" {
+  name        = "${var.project_name}-lambda-politician-trades-senate-matcher-textract-${var.environment}"
+  description = "Senate matcher Lambda: Textract AnalyzeDocument only (sync API)"
 
   policy = jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
-        Effect = "Allow"
-        Action = [
-          "textract:DetectDocumentText",
-          "textract:AnalyzeDocument",
-          "textract:AnalyzeExpense",
-          "textract:AnalyzeID",
-          "textract:GetDocumentAnalysis",
-          "textract:GetExpenseAnalysis",
-          "textract:StartDocumentAnalysis",
-          "textract:StartExpenseAnalysis"
-        ]
+        Effect   = "Allow"
+        Action   = ["textract:AnalyzeDocument"]
         Resource = "*"
       }
     ]
@@ -4720,10 +4930,9 @@ module "politician_trades_fetcher" {
     module.core_layer.layer_arn
   ]
 
-  # IAM policies
+  # IAM policies - fetcher: S3 only (no Textract; no DynamoDB)
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
-    aws_iam_policy.lambda_politician_trades_textract_policy.arn,
     module.kms.kms_access_policy_arn
   ]
 
@@ -4792,11 +5001,11 @@ module "politician_trades_senate_matcher" {
     module.document_processing_layer.layer_arn
   ]
 
-  # IAM policies
+  # IAM policies - senate_matcher: S3, Textract AnalyzeDocument only, DynamoDB PutItem
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
-    aws_iam_policy.lambda_politician_trades_textract_policy.arn,
-    module.politician_trades_table.table_policy_arn,
+    aws_iam_policy.lambda_politician_trades_senate_matcher_textract_policy.arn,
+    aws_iam_policy.politician_trades_table_dynamodb_policy.arn,
     module.kms.kms_access_policy_arn
   ]
 
@@ -4830,11 +5039,10 @@ module "politician_trades_house_matcher" {
     module.docprocessing_layer.layer_arn
   ]
 
-  # IAM policies
+  # IAM policies - house_matcher: S3, DynamoDB Scan only (uses PyPDF, no Textract)
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
-    aws_iam_policy.lambda_politician_trades_textract_policy.arn,
-    module.politician_trades_table.table_policy_arn,
+    aws_iam_policy.politician_trades_table_dynamodb_policy.arn,
     module.kms.kms_access_policy_arn
   ]
 
@@ -4869,7 +5077,7 @@ module "politician_trades_saver" {
 
   # IAM policies
   additional_policy_arns = [
-    module.politician_trades_table.table_policy_arn,
+    aws_iam_policy.politician_trades_table_dynamodb_policy.arn,
     module.kms.kms_access_policy_arn,
     aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
