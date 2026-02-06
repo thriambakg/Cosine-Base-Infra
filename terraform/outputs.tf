@@ -222,11 +222,6 @@ output "stock_data_stream_arn" {
   value       = module.stock_data_table.stream_arn
 }
 
-output "stock_data_table_policy_arn" {
-  description = "ARN of the IAM policy for accessing stock_data table"
-  value       = module.stock_data_table.table_policy_arn
-}
-
 # SEC Filings Cache Table outputs
 output "sec_filings_table_name" {
   description = "Name of the SEC filings cache DynamoDB table"
@@ -238,11 +233,6 @@ output "sec_filings_table_arn" {
   value       = module.sec_filings_table.table_arn
 }
 
-output "sec_filings_table_policy_arn" {
-  description = "ARN of the IAM policy for accessing sec_filings_cache table"
-  value       = module.sec_filings_table.table_policy_arn
-}
-
 # SEC Search Query Cache Table outputs
 output "sec_search_query_cache_table_name" {
   description = "Name of the SEC search query cache table"
@@ -252,11 +242,6 @@ output "sec_search_query_cache_table_name" {
 output "sec_search_query_cache_table_arn" {
   description = "ARN of the SEC search query cache table"
   value       = module.sec_search_query_cache_table.table_arn
-}
-
-output "sec_search_query_cache_table_policy_arn" {
-  description = "ARN of the IAM policy for accessing the SEC search query cache table"
-  value       = module.sec_search_query_cache_table.table_policy_arn
 }
 
 # CloudWatch outputs
@@ -479,11 +464,6 @@ output "news_table_stream_arn" {
   value       = module.news_table.stream_arn
 }
 
-output "news_table_policy_arn" {
-  description = "ARN of the IAM policy for accessing news table"
-  value       = module.news_table.table_policy_arn
-}
-
 # Stock Data Infrastructure Outputs
 output "stock_data_historical_loader_function_name" {
   description = "Name of the stock data historical loader Lambda function"
@@ -586,11 +566,6 @@ output "usaspending_awards_table_id" {
   value       = module.usaspending_awards_index_table.table_id
 }
 
-output "usaspending_awards_table_policy_arn" {
-  description = "ARN of the IAM policy for accessing the USAspending awards index table"
-  value       = module.usaspending_awards_index_table.table_policy_arn
-}
-
 # USAspending Data S3 Bucket Outputs
 output "usaspending_data_s3_bucket_name" {
   description = "Name of the USAspending data S3 bucket"
@@ -623,11 +598,6 @@ output "congress_bills_table_id" {
   value       = module.congress_bills_table.table_id
 }
 
-output "congress_bills_table_policy_arn" {
-  description = "ARN of the IAM policy for accessing the congress bills table"
-  value       = module.congress_bills_table.table_policy_arn
-}
-
 # Congress Bills Data S3 Bucket Outputs
 output "congress_bills_data_s3_bucket_name" {
   description = "Name of the congress bills data S3 bucket"
@@ -653,11 +623,6 @@ output "lda_filings_table_arn" {
 output "lda_filings_table_id" {
   description = "ID of the LDA filings DynamoDB table"
   value       = module.lda_filings_table.table_id
-}
-
-output "lda_filings_table_policy_arn" {
-  description = "ARN of the IAM policy for accessing the LDA filings table"
-  value       = module.lda_filings_table.table_policy_arn
 }
 
 # LDA Disclosures S3 Bucket Outputs

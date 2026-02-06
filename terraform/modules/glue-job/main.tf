@@ -157,20 +157,13 @@ resource "aws_iam_role_policy" "dynamodb_access" {
 
   # Use try() to safely check if ARN is provided and non-empty
   # If ARN is null/empty/unknown, create empty policy (no-op)
+  # Use var.dynamodb_actions for least privilege (pass only actions the script uses)
   policy = try(var.dynamodb_table_arn != null && var.dynamodb_table_arn != "", false) ? jsonencode({
     Version = "2012-10-17"
     Statement = [
       {
         Effect = "Allow"
-        Action = [
-          "dynamodb:PutItem",
-          "dynamodb:GetItem",
-          "dynamodb:UpdateItem",
-          "dynamodb:DeleteItem",
-          "dynamodb:BatchWriteItem",
-          "dynamodb:Query",
-          "dynamodb:Scan"
-        ]
+        Action = var.dynamodb_actions
         Resource = [
           var.dynamodb_table_arn,
           "${var.dynamodb_table_arn}/index/*"

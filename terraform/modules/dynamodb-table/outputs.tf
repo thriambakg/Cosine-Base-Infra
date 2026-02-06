@@ -21,8 +21,3 @@ output "stream_arn" {
   value       = aws_dynamodb_table.this.stream_arn
 }
 
-output "table_policy_arn" {
-  description = "ARN of the IAM policy for accessing the table"
-  value       = aws_iam_policy.table_policy.arn
-}
-
