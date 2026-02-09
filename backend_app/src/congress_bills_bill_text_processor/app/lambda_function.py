@@ -189,7 +189,7 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
     """Download bill text file (HTML) from Congress.gov with exponential backoff for rate limiting."""
     for attempt in range(retries):
         try:
-            response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2)
+            response = requests.get(text_url, timeout=(10, REQUEST_TIMEOUT * 2))  # nosec B113 - timeout set
             
             # Handle 429 Too Many Requests with exponential backoff
             if response.status_code == 429:

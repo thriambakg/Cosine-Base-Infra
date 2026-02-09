@@ -234,7 +234,7 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
     
     for attempt in range(retries):
         try:
-            response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2, headers=headers)
+            response = requests.get(text_url, timeout=(10, REQUEST_TIMEOUT * 2), headers=headers)  # nosec B113 - timeout set
             
             # Handle 429 Too Many Requests with exponential backoff
             if response.status_code == 429:

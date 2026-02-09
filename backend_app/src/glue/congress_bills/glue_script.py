@@ -28,7 +28,8 @@ import re
 import gzip
 import zipfile
 import threading
-import xml.etree.ElementTree as ET
+import defusedxml
+import defusedxml.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from io import StringIO, BytesIO
@@ -636,7 +637,7 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
         for attempt in range(max_retries):
             try:
                 log_print(f"   Attempting: {zip_url} (attempt {attempt + 1}/{max_retries})")
-                response = requests.get(zip_url, timeout=REQUEST_TIMEOUT * 2, stream=True)
+                response = requests.get(zip_url, timeout=(10, REQUEST_TIMEOUT * 2), stream=True)  # nosec B113 - timeout set
                 
                 if response.status_code == 200:
                     content = response.content
@@ -1165,8 +1166,8 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         Bill record dict matching existing DynamoDB schema, or None if parsing fails
     """
     try:
-        # Parse XML
-        root = ET.fromstring(xml_content)
+        # Parse XML (defusedxml prevents XXE)
+        root = defusedxml.ElementTree.fromstring(xml_content)
         
         # Find <bill> element
         bill_elem = root.find('bill')
