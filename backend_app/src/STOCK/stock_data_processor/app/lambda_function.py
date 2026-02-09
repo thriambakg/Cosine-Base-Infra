@@ -153,9 +153,9 @@ def load_sec_company_tickers() -> Dict[str, Any]:
         response = requests.get(url, headers=headers, timeout=10)
         response.raise_for_status()
         _sec_company_tickers_cache = response.json()
-            logger.info(f"✅ Loaded SEC company tickers: {len(_sec_company_tickers_cache)} companies")
-            return _sec_company_tickers_cache
-    
+        logger.info(f"✅ Loaded SEC company tickers: {len(_sec_company_tickers_cache)} companies")
+        return _sec_company_tickers_cache
+
     except Exception as e:
         logger.error(f"Failed to load SEC company tickers: {e}")
         return {}
