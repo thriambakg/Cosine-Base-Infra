@@ -104,8 +104,13 @@ jobs:
       - name: pip-audit (SCA)
         run: |
           echo "🔍 Scanning dependencies for known vulnerabilities..."
+          REQ_FILES=$(find backend_app -name "requirements.txt" -type f 2>/dev/null || true)
+          if [ -z "$REQ_FILES" ]; then
+            echo "✅ No requirements.txt in backend_app (dependencies via Lambda layers). Skipping pip-audit."
+            exit 0
+          fi
           FAILED=0
-          for req in $(find backend_app -name "requirements.txt" -type f 2>/dev/null); do
+          for req in $REQ_FILES; do
             echo "--- $req ---"
             pip-audit -r "$req" || FAILED=1
           done
