@@ -20,6 +20,7 @@ on:
     paths:
       - 'terraform/**'
       - 'backend_app/**'
+      - '.github/workflows/**'
   workflow_dispatch:
     inputs:
       environment:
