@@ -115,6 +115,7 @@ jobs:
           fi
           echo "✅ No known vulnerabilities in scanned requirements."
 
+
       - name: Gitleaks (Secrets)
         uses: gitleaks/gitleaks-action@v2
         env:
