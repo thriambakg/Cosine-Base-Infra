@@ -11,6 +11,9 @@ Behavior:
    - For each bill: get_item from DynamoDB; compare recorded_votes_json (XML rolls) with roll_call_votes (existing).
    - If roll sets match -> skip (no API call). If different -> fetch only new rolls via API, merge into
      roll_call_votes, then update table (roll_call_number, roll_call_votes, has_roll_call).
+   - SEARCH#VOTE index: for each bill updated, updates per-politician vote index items (PK SEARCH#VOTE#<politician_id>,
+     SK VOTE). Attributes: display_name, yea, nea, abstained (each a list of bill_ids). Voters matched via
+     congress-legislators.csv (bioguide_id or name). Congress.gov "Not Voting" and "Present" map to abstained.
    - Uses same thread pool and per-key rate limiters as before.
 
 Bill text is filled by the fetcher pipeline (bulk XML + SQS -> Lambda); no separate backfill.
@@ -23,11 +26,13 @@ import logging
 import time
 import threading
 import re
+import csv
 import zipfile
-from io import BytesIO
+from io import BytesIO, StringIO
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
+from difflib import SequenceMatcher
 from typing import Dict, List, Any, Optional, Tuple, Set
 
 import requests
@@ -632,6 +637,238 @@ def _merge_roll_call_votes(
     return kept
 
 
+# ---------------------------------------------------------------------------
+# Legislators CSV and SEARCH#VOTE index (match voters to politicians; Congress.gov "Not Voting" = abstained)
+# ---------------------------------------------------------------------------
+
+def load_legislators_csv() -> List[Dict[str, Any]]:
+    """
+    Load congress-legislators CSV from S3 (bills data bucket root).
+    Returns list of politician dicts with name, bioguide_id, first_name, last_name, party, state, alternativeNames.
+    """
+    try:
+        if not S3_BUCKET_NAME:
+            log_print("⚠️ S3_BUCKET_NAME not set, skipping legislators CSV load")
+            return []
+        response = s3_client.get_object(
+            Bucket=S3_BUCKET_NAME,
+            Key="congress-legislators.csv",
+        )
+        csv_content = response["Body"].read().decode("utf-8")
+        reader = csv.DictReader(StringIO(csv_content))
+        politicians = []
+        for row in reader:
+            name_parts = []
+            if row.get("first_name"):
+                name_parts.append(row["first_name"])
+            if row.get("middle_name"):
+                name_parts.append(row["middle_name"])
+            if row.get("last_name"):
+                name_parts.append(row["last_name"])
+            if row.get("suffix"):
+                name_parts.append(row["suffix"])
+            primary_name = (row.get("full_name") or "").strip() or (" ".join(name_parts) if name_parts else "")
+            alt_names = []
+            if row.get("nickname"):
+                alt_names.append(row["nickname"])
+            if row.get("full_name") and row.get("full_name").strip() != primary_name:
+                alt_names.append(row["full_name"].strip())
+            leg_type = (row.get("type") or "").lower().strip()
+            position = "Senate" if leg_type == "sen" else ("House" if leg_type == "rep" else leg_type)
+            party_full = (row.get("party") or "").strip()
+            party = party_full[0].upper() if party_full else ""
+            politicians.append({
+                "name": primary_name,
+                "first_name": (row.get("first_name") or "").strip(),
+                "last_name": (row.get("last_name") or "").strip(),
+                "party": party,
+                "state": (row.get("state") or "").strip(),
+                "position": position,
+                "alternativeNames": alt_names,
+                "bioguide_id": (row.get("bioguide_id") or "").strip() or None,
+            })
+        return politicians
+    except Exception as e:
+        log_print(f"❌ Error loading congress-legislators CSV: {e}")
+        return []
+
+
+def _fuzzy_match_name(name: str, politician: Dict[str, Any]) -> float:
+    """Score 0..1 for name vs politician (handles Rep. Last, First [R-ST] style)."""
+    name_norm = re.sub(r"^(?:rep\.|sen\.|representative|senator)\s+", "", name.lower().strip(), flags=re.IGNORECASE)
+    name_norm = re.sub(r"\s*\[[^\]]+\]", "", name_norm).strip()
+    pol_norm = (politician.get("name") or "").lower().strip()
+    if name_norm == pol_norm:
+        return 1.0
+    for alt in politician.get("alternativeNames") or []:
+        if name_norm == (alt or "").lower().strip():
+            return 1.0
+    if "," in name_norm:
+        parts = [p.strip() for p in name_norm.split(",", 1)]
+        if len(parts) == 2:
+            rev = f"{parts[1]} {parts[0]}".strip()
+            if rev == pol_norm:
+                return 1.0
+            return max(SequenceMatcher(None, name_norm, pol_norm).ratio(), SequenceMatcher(None, rev, pol_norm).ratio())
+    return SequenceMatcher(None, name_norm, pol_norm).ratio()
+
+
+def _find_politician_by_bioguide(bioguide_id: str, politicians: List[Dict[str, Any]]) -> Optional[Dict[str, Any]]:
+    if not bioguide_id or not politicians:
+        return None
+    bid = str(bioguide_id).strip().upper()
+    for p in politicians:
+        pb = p.get("bioguide_id")
+        if pb and str(pb).strip().upper() == bid:
+            return p
+    return None
+
+
+def _find_matching_politician(
+    name: str,
+    politicians: List[Dict[str, Any]],
+    first_name: str = "",
+    last_name: str = "",
+    party: str = "",
+    state: str = "",
+) -> Optional[Dict[str, Any]]:
+    if not name or not politicians:
+        return None
+    first_n = first_name.strip().lower() if first_name else ""
+    last_n = last_name.strip().lower() if last_name else ""
+    party_n = (party.strip().upper() or " ")[0] if party else ""
+    state_n = state.strip().upper() if state else ""
+    best = None
+    best_score = 0.0
+    for p in politicians:
+        score = 0.0
+        n_match = _fuzzy_match_name(name, p)
+        if n_match > 0.7:
+            score += n_match * 0.5
+        if first_n:
+            pf = (p.get("first_name") or "").strip().lower()
+            if pf == first_n:
+                score += 0.2
+            elif pf and (first_n in pf or pf in first_n):
+                score += 0.15
+        if last_n:
+            pl = (p.get("last_name") or "").strip().lower()
+            if pl == last_n:
+                score += 0.2
+            elif pl and (last_n in pl or pl in last_n):
+                score += 0.15
+        if party_n and party_n != " ":
+            if (p.get("party") or "").strip().upper() and (p.get("party") or "").strip().upper()[0] == party_n:
+                score += 0.1
+        if state_n and (p.get("state") or "").strip().upper() == state_n:
+            score += 0.1
+        if score > best_score:
+            best_score = score
+            best = p
+    threshold = 0.6 if (first_n or last_n or party_n or state_n) else 0.7
+    return best if best and best_score >= threshold else None
+
+
+def _resolve_politician_id_and_name(member: Dict[str, Any], politicians: List[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+    """
+    Resolve API member to (politician_id, display_name) for SEARCH#VOTE PK and name.
+    Prefer bioguide_id; else match by name. politician_id is bioguide_id or 'NAME#normalized_name'.
+    """
+    bioguide = (member.get("bioguideID") or member.get("bioguide_id") or "").strip()
+    first = (member.get("firstName") or member.get("first_name") or "").strip()
+    last = (member.get("lastName") or member.get("last_name") or "").strip()
+    name = (member.get("name") or "").strip() or f"{first} {last}".strip()
+    party = (member.get("voteParty") or member.get("party") or "").strip()
+    state = (member.get("voteState") or member.get("state") or "").strip()
+    if bioguide:
+        pol = _find_politician_by_bioguide(bioguide, politicians)
+        if pol:
+            return (pol.get("bioguide_id") or bioguide, pol.get("name") or name or bioguide)
+        return (bioguide, name or bioguide)
+    if name or first or last:
+        pol = _find_matching_politician(name or f"{first} {last}", politicians, first_name=first, last_name=last, party=party, state=state)
+        if pol:
+            pid = pol.get("bioguide_id") or ("NAME#" + re.sub(r"[^A-Za-z0-9]", "_", (pol.get("name") or name).strip()))
+            return (pid, pol.get("name") or name)
+        fallback_id = "NAME#" + re.sub(r"[^A-Za-z0-9]", "_", (name or f"{first}_{last}").strip()) if (name or first or last) else None
+        return (fallback_id, name or f"{first} {last}".strip() or None)
+    return (None, None)
+
+
+def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
+    """
+    Map Congress.gov voteCast to index bucket. 'Not Voting' and 'Present' -> abstained; Yea/Yes -> yea; Nay/No -> nea.
+    """
+    if vote_cast is None:
+        return None
+    v = str(vote_cast).strip()
+    if not v:
+        return None
+    v_lower = v.lower()
+    if v_lower in ("yea", "yes"):
+        return "yea"
+    if v_lower in ("nay", "no"):
+        return "nea"
+    if v_lower in ("not voting", "present"):
+        return "abstained"
+    return None
+
+
+def update_search_vote_index_for_bill(
+    bill_id: str,
+    roll_call_votes: List[Dict[str, Any]],
+    politicians: List[Dict[str, Any]],
+    table: Any,
+) -> None:
+    """
+    For a bill's roll_call_votes, update each voter's SEARCH#VOTE item: PK = SEARCH#VOTE#<politician_id>, SK = VOTE;
+    attributes yea, nea, abstained (each a list of bill_ids). Merges with existing item; idempotent (no duplicate bill_ids).
+    """
+    # politician_id -> { yea: set(), nea: set(), abstained: set(), display_name: str }
+    updates: Dict[str, Dict[str, Any]] = {}
+    for entry in roll_call_votes or []:
+        if not isinstance(entry, dict):
+            continue
+        for member in entry.get("members") or []:
+            if not isinstance(member, dict):
+                continue
+            bucket = _vote_cast_to_bucket(member.get("voteCast"))
+            if not bucket:
+                continue
+            pid, display_name = _resolve_politician_id_and_name(member, politicians)
+            if not pid:
+                continue
+            if pid not in updates:
+                updates[pid] = {"yea": set(), "nea": set(), "abstained": set(), "display_name": display_name or ""}
+            updates[pid][bucket].add(bill_id)
+            if display_name and not updates[pid]["display_name"]:
+                updates[pid]["display_name"] = display_name
+    for pid, data in updates.items():
+        try:
+            pk = f"SEARCH#VOTE#{pid}"
+            sk = "VOTE"
+            resp = table.get_item(Key={"bill_id": pk, "search_index_sk": sk})
+            item = resp.get("Item") or {}
+            yea = list(set(item.get("yea") or []) | data["yea"])
+            nea = list(set(item.get("nea") or []) | data["nea"])
+            abstained = list(set(item.get("abstained") or []) | data["abstained"])
+            display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip()
+            put_item = {
+                "bill_id": pk,
+                "search_index_sk": sk,
+                "search_type": "VOTE",
+                "search_value": display_name or pid,
+                "display_name": display_name or pid,
+                "yea": yea,
+                "nea": nea,
+                "abstained": abstained,
+                "is_search_index": True,
+            }
+            table.put_item(Item=put_item)
+        except Exception as e:
+            log_print(f"      ⚠️ SEARCH#VOTE update failed for {pid}: {str(e)[:150]}")
+
+
 def _build_roll_call_data_for_bill(
     bill_id: str,
     api_key: str,
@@ -727,6 +964,7 @@ def process_bill_roll_call_delta(
         "search_index_sk": bill_id,
         "UpdateExpression": update_expr,
         "ExpressionAttributeValues": attr_vals,
+        "roll_call_votes": merged,
     }
 
 
@@ -817,6 +1055,9 @@ def main():
         raise
 
     bills_table = dynamodb.Table(BILLS_TABLE_NAME)
+    politicians = load_legislators_csv()
+    log_print(f"   Loaded {len(politicians)} legislators for SEARCH#VOTE index.")
+
     roll_ok = 0
     roll_skip = 0
     roll_err = 0
@@ -840,6 +1081,9 @@ def main():
                     UpdateExpression=payload["UpdateExpression"],
                     ExpressionAttributeValues=payload["ExpressionAttributeValues"],
                 )
+                roll_votes = payload.get("roll_call_votes")
+                if roll_votes and politicians:
+                    update_search_vote_index_for_bill(bid, roll_votes, politicians, bills_table)
                 return ("ok", None, payload)
             return ("skip", None, None)
         except Exception as e:
