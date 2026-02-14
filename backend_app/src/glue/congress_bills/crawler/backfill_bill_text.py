@@ -12,11 +12,13 @@ Behavior:
    - If roll sets match -> skip (no API call). If different -> fetch only new rolls via API, merge into
      roll_call_votes, then update table (roll_call_number, roll_call_votes, has_roll_call).
    - SEARCH#VOTE index: for each bill updated, updates per-politician vote index items (PK SEARCH#VOTE#<politician_id>,
-     SK VOTE). Attributes: display_name, yea, nea, abstained (each a list of bill_ids). Voters matched via
+     SK VOTE). Attributes: display_name, bill_yea, bill_nea, bill_abstained (lists of bill_ids), roll_yea, roll_nea,
+     roll_abstained (lists of roll ids "{congress}#{session}#{roll}" for standalone rolls). Voters matched via
      congress-legislators.csv (bioguide_id or name). Congress.gov "Not Voting" and "Present" map to abstained.
    - SEARCH#ROLL index: one item per roll call (PK SEARCH#ROLL, SK {congress}#{session}#{roll}) so roll calls can be
-     listed and sorted by congress/session/roll. Attributes: congress, session, roll, bill_id_associated, roll_display,
-     members or members_oversize_s3_key. Same vote data as bill rows; multiple rolls per bill each get one item.
+     listed and sorted by congress/session/roll. Filled from (1) bill pass (recordedVotes on bills) and (2) house-vote
+     list backfill: GET /house-vote/{congress}/{session} for any (congress, session, roll) not already written.
+     Attributes: congress, session, roll, bill_id_associated, roll_display, members or members_oversize_s3_key.
    - Oversize: when roll_call_votes or SEARCH#VOTE/SEARCH#ROLL data would exceed DynamoDB item size, store in S3 oversize/
      and set roll_call_votes_oversize_s3_key (bill item) or vote_data_oversize_s3_key (SEARCH#VOTE item). Search/API
      should resolve these keys when present (gzip JSON in same bucket).
@@ -596,6 +598,67 @@ def _fetch_house_vote_members(
     return all_members
 
 
+def _fetch_house_vote_list(
+    congress: int,
+    session: int,
+    api_key: str,
+    key_index: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """
+    GET /house-vote/{congress}/{session} - list all roll call votes for that Congress and session.
+    Returns list of vote summary dicts (rollCallNumber, sessionNumber, congress, legislationUrl, etc.). Paginated (limit 250).
+    """
+    out: List[Dict[str, Any]] = []
+    offset = 0
+    limit = 250
+    while True:
+        url = f"{API_BASE_URL}/house-vote/{congress}/{session}"
+        params = {"format": "json", "offset": offset, "limit": limit}
+        data = make_api_request(url, params, api_key, key_index=key_index)
+        if not data:
+            break
+        items = None
+        if isinstance(data, dict):
+            items = data.get("houseVotes") or data.get("votes") or data.get("results")
+            if isinstance(items, dict):
+                items = items.get("item", items.get("vote", []))
+        if isinstance(items, list):
+            out.extend(items)
+        elif isinstance(data, list):
+            out.extend(data)
+        if not isinstance(data, dict):
+            break
+        pagination = data.get("pagination") or {}
+        count = pagination.get("count", 0) if isinstance(pagination, dict) else 0
+        if count and offset + limit >= count:
+            break
+        if not (isinstance(items, list) and len(items) == limit):
+            break
+        offset += limit
+    return out
+
+
+def _bill_id_from_legislation(
+    congress: int,
+    legislation_type: Optional[Any],
+    legislation_number: Optional[Any],
+    legislation_url: Optional[str],
+) -> Optional[str]:
+    """Derive bill_id (e.g. 119-HR-30) from API vote list item. Uses legislationType+legislationNumber or parses legislationUrl."""
+    if legislation_type and legislation_number is not None:
+        lt = str(legislation_type).strip().upper()
+        if lt in ("HR", "S", "HJRES", "SJRES", "HCONRES", "SCONRES", "HRES", "SRES"):
+            return f"{congress}-{lt}-{legislation_number}"
+    if legislation_url:
+        m = re.search(r"/bill/(\d+)/([^/]+)/(\d+)", str(legislation_url))
+        if m:
+            c, kind, num = m.group(1), m.group(2), m.group(3)
+            type_map = {"house-bill": "HR", "senate-bill": "S", "house-joint-resolution": "HJRES", "senate-joint-resolution": "SJRES"}
+            bt = type_map.get(kind.lower(), kind.upper()[:2] if len(kind) >= 2 else "HR")
+            return f"{c}-{bt}-{num}"
+    return None
+
+
 def _fetch_new_rolls_only(
     bill_id: str,
     to_fetch: Set[Tuple[str, str]],
@@ -860,12 +923,26 @@ def _store_roll_call_votes_to_s3(bill_id: str, roll_call_votes: List[Dict[str, A
     return s3_key
 
 
-def _store_vote_data_to_s3(pk: str, yea: List[str], nea: List[str], abstained: List[str]) -> str:
-    """Store SEARCH#VOTE yea/nea/abstained to S3 oversize/. Returns S3 key. pk is SEARCH#VOTE#<pid>."""
-    # Use pk with # replaced so key is filesystem-safe: oversize/SEARCH-VOTE-B000123.json.gz
+def _store_vote_data_to_s3(
+    pk: str,
+    bill_yea: List[str],
+    bill_nea: List[str],
+    bill_abstained: List[str],
+    roll_yea: List[str],
+    roll_nea: List[str],
+    roll_abstained: List[str],
+) -> str:
+    """Store SEARCH#VOTE bill_/roll_ lists to S3 oversize/. Returns S3 key. pk is SEARCH#VOTE#<pid>."""
     safe_key = pk.replace("#", "-") + ".json.gz"
     s3_key = f"oversize/{safe_key}"
-    payload = {"yea": yea, "nea": nea, "abstained": abstained}
+    payload = {
+        "bill_yea": bill_yea,
+        "bill_nea": bill_nea,
+        "bill_abstained": bill_abstained,
+        "roll_yea": roll_yea,
+        "roll_nea": roll_nea,
+        "roll_abstained": roll_abstained,
+    }
     json_bytes = json.dumps(payload).encode("utf-8")
     compressed = gzip.compress(json_bytes)
     s3_client.put_object(
@@ -878,11 +955,21 @@ def _store_vote_data_to_s3(pk: str, yea: List[str], nea: List[str], abstained: L
     return s3_key
 
 
-def _load_vote_data_from_item(existing_item: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
-    """Get yea, nea, abstained from existing SEARCH#VOTE item (inline or from vote_data_oversize_s3_key)."""
-    yea = list(existing_item.get("yea") or [])
-    nea = list(existing_item.get("nea") or [])
-    abstained = list(existing_item.get("abstained") or [])
+def _load_vote_data_from_item(
+    existing_item: Dict[str, Any],
+) -> Tuple[List[str], List[str], List[str], List[str], List[str], List[str]]:
+    """Get bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained from existing SEARCH#VOTE item (inline or oversize). Supports legacy yea/nea/abstained as bill_*."""
+    def _list(key: str, legacy: Optional[str] = None) -> List[str]:
+        val = existing_item.get(key) or (existing_item.get(legacy) if legacy else [])
+        return list(val or [])
+
+    bill_yea = _list("bill_yea", "yea")
+    bill_nea = _list("bill_nea", "nea")
+    bill_abstained = _list("bill_abstained", "abstained")
+    roll_yea = _list("roll_yea")
+    roll_nea = _list("roll_nea")
+    roll_abstained = _list("roll_abstained")
+
     s3_key = (existing_item.get("vote_data_oversize_s3_key") or "").strip()
     if s3_key:
         try:
@@ -890,12 +977,15 @@ def _load_vote_data_from_item(existing_item: Dict[str, Any]) -> Tuple[List[str],
             body = resp.get("Body")
             raw = gzip.decompress(body.read()) if body else b""
             data = json.loads(raw.decode("utf-8"))
-            yea = list(data.get("yea") or [])
-            nea = list(data.get("nea") or [])
-            abstained = list(data.get("abstained") or [])
+            bill_yea = list(data.get("bill_yea") or data.get("yea") or [])
+            bill_nea = list(data.get("bill_nea") or data.get("nea") or [])
+            bill_abstained = list(data.get("bill_abstained") or data.get("abstained") or [])
+            roll_yea = list(data.get("roll_yea") or [])
+            roll_nea = list(data.get("roll_nea") or [])
+            roll_abstained = list(data.get("roll_abstained") or [])
         except Exception as e:
             log_print(f"      ⚠️ Failed to load vote data from {s3_key}: {str(e)[:120]}")
-    return yea, nea, abstained
+    return bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained
 
 
 def _store_roll_members_to_s3(congress: str, session: int, roll: int, members: List[Dict[str, Any]]) -> str:
@@ -913,16 +1003,61 @@ def _store_roll_members_to_s3(congress: str, session: int, roll: int, members: L
     return s3_key
 
 
+def _write_one_roll_item(
+    congress: str,
+    session_int: int,
+    roll_int: int,
+    members: List[Dict[str, Any]],
+    bill_id_associated: str,
+    table: Any,
+) -> None:
+    """Write a single SEARCH#ROLL item. Used by bill pass and by house-vote-list backfill."""
+    sk = f"{congress}#{session_int}#{roll_int}"
+    roll_display = f"Roll no. {roll_int}"
+    item = {
+        "bill_id": "SEARCH#ROLL",
+        "search_index_sk": sk,
+        "search_type": "ROLL",
+        "search_value": sk,
+        "congress": int(congress),
+        "session": session_int,
+        "roll": roll_int,
+        "bill_id_associated": bill_id_associated,
+        "roll_display": roll_display,
+        "members": members,
+        "is_search_index": True,
+    }
+    approx = len(json.dumps(item, default=str))
+    if approx > _OVERSIZE_SAFE_SIZE:
+        s3_key = _store_roll_members_to_s3(congress, session_int, roll_int, members)
+        item = {
+            "bill_id": "SEARCH#ROLL",
+            "search_index_sk": sk,
+            "search_type": "ROLL",
+            "search_value": sk,
+            "congress": int(congress),
+            "session": session_int,
+            "roll": roll_int,
+            "bill_id_associated": bill_id_associated,
+            "roll_display": roll_display,
+            "members_oversize_s3_key": s3_key,
+            "is_search_index": True,
+        }
+    try:
+        table.put_item(Item=item)
+    except Exception as e:
+        log_print(f"      ⚠️ SEARCH#ROLL put failed for {sk}: {str(e)[:150]}")
+
+
 def update_search_roll_index_for_bill(
     bill_id: str,
     roll_call_votes: List[Dict[str, Any]],
     table: Any,
+    rolls_written: Optional[Set[Tuple[str, int, int]]] = None,
 ) -> None:
     """
     Write one SEARCH#ROLL item per roll call so roll calls can be listed and sorted by roll number.
-    PK = SEARCH#ROLL, SK = {congress}#{session}#{roll} (lexicographic sort = by congress, session, roll).
-    Attributes: congress, session, roll, bill_id (source bill), roll_display, members or members_oversize_s3_key.
-    Same vote data as stored in bill rows (one roll = one item).
+    PK = SEARCH#ROLL, SK = {congress}#{session}#{roll}. If rolls_written is provided, add each (congress, session, roll) to it.
     """
     parsed = _parse_bill_id(bill_id)
     if not parsed:
@@ -940,46 +1075,89 @@ def update_search_roll_index_for_bill(
         roll_int = int(roll) if isinstance(roll, (int, float)) else (int(roll) if str(roll).isdigit() else None)
         if session_int is None or roll_int is None:
             continue
-        sk = f"{congress}#{session_int}#{roll_int}"
-        roll_display = f"Roll no. {roll_int}"
-        item = {
-            "bill_id": "SEARCH#ROLL",
-            "search_index_sk": sk,
-            "search_type": "ROLL",
-            "search_value": sk,
-            "congress": int(congress),
-            "session": session_int,
-            "roll": roll_int,
-            "bill_id_associated": bill_id,
-            "roll_display": roll_display,
-            "members": members,
-            "is_search_index": True,
-        }
-        approx = len(json.dumps(item, default=str))
-        if approx > _OVERSIZE_SAFE_SIZE:
-            s3_key = _store_roll_members_to_s3(congress, session_int, roll_int, members)
-            item = {
-                "bill_id": "SEARCH#ROLL",
-                "search_index_sk": sk,
-                "search_type": "ROLL",
-                "search_value": sk,
-                "congress": int(congress),
-                "session": session_int,
-                "roll": roll_int,
-                "bill_id_associated": bill_id,
-                "roll_display": roll_display,
-                "members_oversize_s3_key": s3_key,
-                "is_search_index": True,
-            }
-        try:
-            table.put_item(Item=item)
-        except Exception as e:
-            log_print(f"      ⚠️ SEARCH#ROLL put failed for {sk}: {str(e)[:150]}")
+        _write_one_roll_item(congress, session_int, roll_int, members, bill_id, table)
+        if rolls_written is not None:
+            rolls_written.add((congress, session_int, roll_int))
 
 
 # DynamoDB batch limits so SEARCH#VOTE updates don't become a bottleneck (only API should be).
 _BATCH_GET_MAX = 100
 _BATCH_WRITE_MAX = 25
+
+
+def ensure_search_vote_items_for_legislators(politicians: List[Dict[str, Any]], table: Any) -> None:
+    """
+    Ensure every legislator in the CSV has a SEARCH#VOTE item (PK = SEARCH#VOTE#<pid>, SK = VOTE).
+    Creates missing items with empty bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained
+    so the table count matches the legislators list. Idempotent; does not overwrite existing items.
+    """
+    if not politicians:
+        return
+    pids_with_names: List[Tuple[str, str]] = []
+    for p in politicians:
+        pid = (p.get("bioguide_id") or "").strip()
+        if not pid:
+            pid = "NAME#" + re.sub(r"[^A-Za-z0-9]", "_", (p.get("name") or "unknown").strip())
+        display_name = (p.get("name") or "").strip() or pid
+        pids_with_names.append((pid, display_name))
+    client = table.meta.client
+    table_name = table.name
+    keys = [{"bill_id": f"SEARCH#VOTE#{pid}", "search_index_sk": "VOTE"} for pid, _ in pids_with_names]
+    existing_pids: Set[str] = set()
+    for i in range(0, len(keys), _BATCH_GET_MAX):
+        chunk = keys[i : i + _BATCH_GET_MAX]
+        try:
+            resp = client.batch_get_item(RequestItems={table_name: {"Keys": chunk}})
+            for item in resp.get("Responses", {}).get(table_name, []):
+                pk = (item.get("bill_id") or "").strip()
+                if pk.startswith("SEARCH#VOTE#"):
+                    existing_pids.add(pk.replace("SEARCH#VOTE#", "", 1))
+            unprocessed = resp.get("UnprocessedKeys", {}).get(table_name, {}).get("Keys", [])
+            while unprocessed:
+                time.sleep(0.2)
+                resp = client.batch_get_item(RequestItems={table_name: {"Keys": unprocessed}})
+                for item in resp.get("Responses", {}).get(table_name, []):
+                    pk = (item.get("bill_id") or "").strip()
+                    if pk.startswith("SEARCH#VOTE#"):
+                        existing_pids.add(pk.replace("SEARCH#VOTE#", "", 1))
+                unprocessed = resp.get("UnprocessedKeys", {}).get(table_name, {}).get("Keys", [])
+        except Exception as e:
+            log_print(f"      ⚠️ SEARCH#VOTE seed batch get failed: {str(e)[:150]}")
+            return
+    to_create = [(pid, name) for pid, name in pids_with_names if pid not in existing_pids]
+    if not to_create:
+        log_print(f"   All {len(politicians)} legislators already have SEARCH#VOTE items.")
+        return
+    put_items: List[Dict[str, Any]] = []
+    for pid, display_name in to_create:
+        put_items.append({
+            "bill_id": f"SEARCH#VOTE#{pid}",
+            "search_index_sk": "VOTE",
+            "search_type": "VOTE",
+            "search_value": display_name,
+            "display_name": display_name,
+            "bill_yea": [],
+            "bill_nea": [],
+            "bill_abstained": [],
+            "roll_yea": [],
+            "roll_nea": [],
+            "roll_abstained": [],
+            "is_search_index": True,
+        })
+    for i in range(0, len(put_items), _BATCH_WRITE_MAX):
+        chunk = put_items[i : i + _BATCH_WRITE_MAX]
+        write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
+        try:
+            resp = client.batch_write_item(RequestItems={table_name: write_reqs})
+            unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+            while unprocessed:
+                time.sleep(0.2)
+                resp = client.batch_write_item(RequestItems={table_name: unprocessed})
+                unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+        except Exception as e:
+            log_print(f"      ⚠️ SEARCH#VOTE seed batch write failed: {str(e)[:150]}")
+            return
+    log_print(f"   Seeded {len(to_create)} SEARCH#VOTE item(s) for legislators (total legislators: {len(politicians)}).")
 
 
 def update_search_vote_index_for_bill(
@@ -991,8 +1169,8 @@ def update_search_vote_index_for_bill(
 ) -> None:
     """
     For a bill's roll_call_votes, update each voter's SEARCH#VOTE item: PK = SEARCH#VOTE#<politician_id>, SK = VOTE;
-    attributes yea, nea, abstained (each a list of bill_ids). Merges with existing item; idempotent (no duplicate bill_ids).
-    Uses BatchGetItem + BatchWriteItem so DynamoDB is not a bottleneck (only Congress API is).
+    attributes bill_yea, bill_nea, bill_abstained (lists of bill_ids). Merges with existing; idempotent.
+    Uses BatchGetItem + BatchWriteItem; overwrite PutItem (no DynamoDB merge).
     """
     updates: Dict[str, Dict[str, Any]] = {}
     for entry in roll_call_votes or []:
@@ -1010,8 +1188,8 @@ def update_search_vote_index_for_bill(
             if not pid:
                 continue
             if pid not in updates:
-                updates[pid] = {"yea": set(), "nea": set(), "abstained": set(), "display_name": display_name or ""}
-            updates[pid][bucket].add(bill_id)
+                updates[pid] = {"bill_yea": set(), "bill_nea": set(), "bill_abstained": set(), "display_name": display_name or ""}
+            updates[pid][f"bill_{bucket}"].add(bill_id)
             if display_name and not updates[pid]["display_name"]:
                 updates[pid]["display_name"] = display_name
     if not updates:
@@ -1046,10 +1224,14 @@ def update_search_vote_index_for_bill(
     for pid, data in updates.items():
         pk, sk = f"SEARCH#VOTE#{pid}", "VOTE"
         item = existing.get(pid) or {}
-        existing_yea, existing_nea, existing_abstained = _load_vote_data_from_item(item)
-        yea = list(set(existing_yea) | data["yea"])
-        nea = list(set(existing_nea) | data["nea"])
-        abstained = list(set(existing_abstained) | data["abstained"])
+        (existing_bill_yea, existing_bill_nea, existing_bill_abstained,
+         existing_roll_yea, existing_roll_nea, existing_roll_abstained) = _load_vote_data_from_item(item)
+        bill_yea = list(set(existing_bill_yea) | data["bill_yea"])
+        bill_nea = list(set(existing_bill_nea) | data["bill_nea"])
+        bill_abstained = list(set(existing_bill_abstained) | data["bill_abstained"])
+        roll_yea = list(existing_roll_yea)
+        roll_nea = list(existing_roll_nea)
+        roll_abstained = list(existing_roll_abstained)
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
         full_item = {
             "bill_id": pk,
@@ -1057,15 +1239,17 @@ def update_search_vote_index_for_bill(
             "search_type": "VOTE",
             "search_value": display_name,
             "display_name": display_name,
-            "yea": yea,
-            "nea": nea,
-            "abstained": abstained,
+            "bill_yea": bill_yea,
+            "bill_nea": bill_nea,
+            "bill_abstained": bill_abstained,
+            "roll_yea": roll_yea,
+            "roll_nea": roll_nea,
+            "roll_abstained": roll_abstained,
             "is_search_index": True,
         }
-        # If item would exceed DynamoDB limit, store yea/nea/abstained in oversize/ and set vote_data_oversize_s3_key
         approx_size = len(json.dumps(full_item))
         if approx_size > _OVERSIZE_SAFE_SIZE:
-            s3_key = _store_vote_data_to_s3(pk, yea, nea, abstained)
+            s3_key = _store_vote_data_to_s3(pk, bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained)
             full_item = {
                 "bill_id": pk,
                 "search_index_sk": sk,
@@ -1088,6 +1272,119 @@ def update_search_vote_index_for_bill(
                 unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
         except Exception as e:
             log_print(f"      ⚠️ SEARCH#VOTE batch write failed: {str(e)[:150]}")
+
+
+def update_search_vote_index_for_roll(
+    congress: int,
+    session: int,
+    roll: int,
+    members: List[Dict[str, Any]],
+    politicians: List[Dict[str, Any]],
+    table: Any,
+    politicians_by_bioguide: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> None:
+    """
+    For a standalone roll call (no bill), update each voter's SEARCH#VOTE item: add roll id to roll_yea, roll_nea, or roll_abstained.
+    Roll id format: "{congress}#{session}#{roll}". Read existing, merge in memory, overwrite (no DynamoDB merge).
+    """
+    roll_id = f"{congress}#{session}#{roll}"
+    updates: Dict[str, Dict[str, Any]] = {}
+    for member in members or []:
+        if not isinstance(member, dict):
+            continue
+        bucket = _vote_cast_to_bucket(member.get("voteCast"))
+        if not bucket:
+            continue
+        pid, display_name = _resolve_politician_id_and_name(
+            member, politicians, politicians_by_bioguide=politicians_by_bioguide
+        )
+        if not pid:
+            continue
+        if pid not in updates:
+            updates[pid] = {"roll_yea": set(), "roll_nea": set(), "roll_abstained": set(), "display_name": display_name or ""}
+        updates[pid][f"roll_{bucket}"].add(roll_id)
+        if display_name and not updates[pid]["display_name"]:
+            updates[pid]["display_name"] = display_name
+    if not updates:
+        return
+    client = table.meta.client
+    table_name = table.name
+    keys = [{"bill_id": f"SEARCH#VOTE#{pid}", "search_index_sk": "VOTE"} for pid in updates]
+    existing: Dict[str, Dict[str, Any]] = {}
+    for i in range(0, len(keys), _BATCH_GET_MAX):
+        chunk = keys[i : i + _BATCH_GET_MAX]
+        try:
+            resp = client.batch_get_item(RequestItems={table_name: {"Keys": chunk}})
+            items = resp.get("Responses", {}).get(table_name, [])
+            for item in items:
+                pk = item.get("bill_id") or ""
+                if pk.startswith("SEARCH#VOTE#"):
+                    pid = pk.replace("SEARCH#VOTE#", "", 1)
+                    existing[pid] = item
+            unprocessed = resp.get("UnprocessedKeys", {}).get(table_name, {}).get("Keys", [])
+            if unprocessed:
+                time.sleep(0.2)
+                resp2 = client.batch_get_item(RequestItems={table_name: {"Keys": unprocessed}})
+                for item in resp2.get("Responses", {}).get(table_name, []):
+                    pk = item.get("bill_id") or ""
+                    if pk.startswith("SEARCH#VOTE#"):
+                        pid = pk.replace("SEARCH#VOTE#", "", 1)
+                        existing[pid] = item
+        except Exception as e:
+            log_print(f"      ⚠️ SEARCH#VOTE batch get failed (roll): {str(e)[:150]}")
+            return
+    put_items = []
+    for pid, data in updates.items():
+        pk, sk = f"SEARCH#VOTE#{pid}", "VOTE"
+        item = existing.get(pid) or {}
+        (existing_bill_yea, existing_bill_nea, existing_bill_abstained,
+         existing_roll_yea, existing_roll_nea, existing_roll_abstained) = _load_vote_data_from_item(item)
+        bill_yea = list(existing_bill_yea)
+        bill_nea = list(existing_bill_nea)
+        bill_abstained = list(existing_bill_abstained)
+        roll_yea = list(set(existing_roll_yea) | data["roll_yea"])
+        roll_nea = list(set(existing_roll_nea) | data["roll_nea"])
+        roll_abstained = list(set(existing_roll_abstained) | data["roll_abstained"])
+        display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
+        full_item = {
+            "bill_id": pk,
+            "search_index_sk": sk,
+            "search_type": "VOTE",
+            "search_value": display_name,
+            "display_name": display_name,
+            "bill_yea": bill_yea,
+            "bill_nea": bill_nea,
+            "bill_abstained": bill_abstained,
+            "roll_yea": roll_yea,
+            "roll_nea": roll_nea,
+            "roll_abstained": roll_abstained,
+            "is_search_index": True,
+        }
+        approx_size = len(json.dumps(full_item))
+        if approx_size > _OVERSIZE_SAFE_SIZE:
+            s3_key = _store_vote_data_to_s3(pk, bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained)
+            full_item = {
+                "bill_id": pk,
+                "search_index_sk": sk,
+                "search_type": "VOTE",
+                "search_value": display_name,
+                "display_name": display_name,
+                "vote_data_oversize_s3_key": s3_key,
+                "is_search_index": True,
+            }
+        put_items.append(full_item)
+    for i in range(0, len(put_items), _BATCH_WRITE_MAX):
+        chunk = put_items[i : i + _BATCH_WRITE_MAX]
+        write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
+        try:
+            resp = client.batch_write_item(RequestItems={table_name: write_reqs})
+            unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+            while unprocessed:
+                time.sleep(0.2)
+                resp = client.batch_write_item(RequestItems={table_name: unprocessed})
+                unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+        except Exception as e:
+            log_print(f"      ⚠️ SEARCH#VOTE batch write failed (roll): {str(e)[:150]}")
 
 
 def _build_roll_call_data_for_bill(
@@ -1279,12 +1576,14 @@ def main():
     politicians = load_legislators_csv()
     politicians_by_bioguide = _build_politicians_by_bioguide(politicians)
     log_print(f"   Loaded {len(politicians)} legislators for SEARCH#VOTE index (O(1) lookup by bioguide).")
+    ensure_search_vote_items_for_legislators(politicians, bills_table)
 
     roll_ok = 0
     roll_skip = 0
     roll_err = 0
     progress_lock = threading.Lock()
     last_logged = 0
+    rolls_written_from_bills: Set[Tuple[str, int, int]] = set()
 
     def _process_one_bill(bid: str) -> Tuple[str, Optional[str], Optional[Dict]]:
         """Returns ('ok'|'skip'|'err', error_message_or_none, payload_or_none)."""
@@ -1327,7 +1626,7 @@ def main():
                         politicians_by_bioguide=politicians_by_bioguide,
                     )
                 if roll_votes:
-                    update_search_roll_index_for_bill(bid, roll_votes, bills_table)
+                    update_search_roll_index_for_bill(bid, roll_votes, bills_table, rolls_written=rolls_written_from_bills)
                 return ("ok", None, payload)
             return ("skip", None, None)
         except Exception as e:
@@ -1358,6 +1657,72 @@ def main():
                     last_logged = (done // 50) * 50
                     log_print(f"      Roll call: {done}/{total_bills} (updated: {roll_ok}, skipped: {roll_skip}, err: {roll_err})")
     log_print(f"✅ Roll call maintenance done. Updated {roll_ok}, skipped (no change) {roll_skip}, errors {roll_err}.")
+    log_print(f"   Rolls written from bills (this run): {len(rolls_written_from_bills)}")
+
+    # Second pass: GET /house-vote/{congress}/{session} for any votes not already in SEARCH#ROLL from the bill pass
+    congresses_from_bills = set()
+    for bid in bill_id_list:
+        parsed = _parse_bill_id(bid)
+        if parsed:
+            congresses_from_bills.add(int(parsed[0]))
+    if not congresses_from_bills:
+        current_year = datetime.now(timezone.utc).year
+        congresses_from_bills = {((current_year - 1789) // 2) + 1}
+        log_print(f"   No congress from bills; using current congress {list(congresses_from_bills)[0]} for house-vote list.")
+    if congresses_from_bills:
+        roll_backfill_added = 0
+        for congress in sorted(congresses_from_bills):
+            for session in (1, 2):
+                api_key, key_index = api_key_rotator.get_key_and_index()
+                vote_list = _fetch_house_vote_list(congress, session, api_key, key_index=key_index)
+                for v in vote_list:
+                    if not isinstance(v, dict):
+                        continue
+                    roll_num = v.get("rollCallNumber") or v.get("rollNumber")
+                    sess_num = v.get("sessionNumber") or session
+                    if roll_num is None:
+                        continue
+                    roll_int = int(roll_num) if isinstance(roll_num, (int, float)) else (int(roll_num) if str(roll_num).isdigit() else None)
+                    sess_int = int(sess_num) if isinstance(sess_num, (int, float)) else (int(sess_num) if str(sess_num).isdigit() else None)
+                    if roll_int is None or sess_int is None:
+                        continue
+                    key = (str(congress), sess_int, roll_int)
+                    if key in rolls_written_from_bills:
+                        continue
+                    api_key, key_index = api_key_rotator.get_key_and_index()
+                    members = _fetch_house_vote_members(str(congress), sess_int, roll_int, api_key, key_index=key_index)
+                    bill_id_associated = _bill_id_from_legislation(
+                        congress,
+                        v.get("legislationType"),
+                        v.get("legislationNumber"),
+                        v.get("legislationUrl"),
+                    ) or ""
+                    _write_one_roll_item(str(congress), sess_int, roll_int, members, bill_id_associated, bills_table)
+                    rolls_written_from_bills.add(key)
+                    roll_backfill_added += 1
+                    if politicians:
+                        if bill_id_associated:
+                            single_roll = [{"roll": roll_int, "session": sess_int, "members": members}]
+                            update_search_vote_index_for_bill(
+                                bill_id_associated,
+                                single_roll,
+                                politicians,
+                                bills_table,
+                                politicians_by_bioguide=politicians_by_bioguide,
+                            )
+                        else:
+                            update_search_vote_index_for_roll(
+                                int(congress),
+                                sess_int,
+                                roll_int,
+                                members,
+                                politicians,
+                                bills_table,
+                                politicians_by_bioguide=politicians_by_bioguide,
+                            )
+        if roll_backfill_added:
+            log_print(f"✅ House-vote list backfill: added {roll_backfill_added} roll call(s) not from bill pass.")
+
     log_print("")
     log_print("=" * 80)
     log_print("✅ Roll call maintenance job completed successfully!")
