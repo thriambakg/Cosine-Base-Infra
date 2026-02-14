@@ -15,6 +15,15 @@ For each item processed:
 
 This job should run daily after the regular bill fetching job to catch any bills
 that didn't get their bill text downloaded (e.g., SQS failures, API errors, etc.).
+
+Roll call maintenance (all bills, excluding search indices):
+   - Scans the table for all bill items (bill_id does NOT start with "SEARCH#")
+   - For each bill, fetches bill actions from Congress.gov API and extracts recordedVotes
+   - For each House roll call, fetches member-level vote data (house-vote/{congress}/{session}/{voteNumber}/members)
+   - Updates each item with three attributes:
+     - roll_call_number (N): first House roll call number, or omitted if none
+     - roll_call_votes (S): JSON string of roll call(s) with member votes
+     - has_roll_call (N): 1 if bill has at least one roll call, 0 otherwise (GSI key for HasRollCallIndex)
 """
 
 import sys
@@ -307,6 +316,178 @@ def store_bill_text_to_s3(bill_id: str, text_content: bytes) -> str:
     log_print(f"      💾 Stored HTML bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
     return s3_key
 
+
+# ---------------------------------------------------------------------------
+# Roll call helpers (Congress.gov: bill actions -> recordedVotes -> house-vote/.../members)
+# ---------------------------------------------------------------------------
+
+def _parse_bill_id(bill_id: str) -> Optional[Tuple[str, str, str]]:
+    """Parse bill_id (e.g. '119-HR-2189') into (congress, bill_type, bill_number). Returns None if invalid."""
+    if not bill_id or bill_id.startswith("SEARCH#"):
+        return None
+    parts = bill_id.split("-")
+    if len(parts) != 3:
+        return None
+    congress, bill_type, bill_number = parts[0], parts[1], parts[2]
+    if not congress.isdigit() or not bill_number.isdigit():
+        return None
+    return (congress, bill_type, bill_number)
+
+
+def _fetch_bill_actions(congress: str, bill_type: str, bill_number: str, api_key: str) -> List[Dict]:
+    """Fetch all bill actions (paginated) from /bill/{congress}/{billType}/{billNumber}/actions."""
+    actions = []
+    offset = 0
+    limit = 250
+    while True:
+        url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/actions"
+        params = {"format": "json", "offset": offset, "limit": limit}
+        data = make_api_request(url, params, api_key)
+        if not data or not isinstance(data, dict):
+            break
+        raw = data.get("actions")
+        if isinstance(raw, dict):
+            items = raw.get("item", [])
+        elif isinstance(raw, list):
+            items = raw
+        else:
+            items = []
+        if not items:
+            break
+        actions.extend(items if isinstance(items, list) else [])
+        pagination = (data.get("actions") or data or {}).get("pagination") if isinstance(data.get("actions"), dict) else data.get("pagination") or {}
+        count = pagination.get("count", 0) if isinstance(pagination, dict) else 0
+        if count and offset + limit >= count:
+            break
+        if len(items) < limit if isinstance(items, list) else True:
+            break
+        offset += limit
+    return actions
+
+
+def _extract_recorded_votes(actions: List[Dict]) -> List[Dict]:
+    """From bill actions extract recordedVotes; return list of { chamber, sessionNumber, rollNumber } (House only for member fetch)."""
+    seen = set()
+    out = []
+    for action in actions or []:
+        votes = (action.get("recordedVotes") or action.get("recordedvotes")) or []
+        if not isinstance(votes, list):
+            continue
+        for v in votes:
+            if not isinstance(v, dict):
+                continue
+            chamber = (v.get("chamber") or "").strip()
+            session = v.get("sessionNumber")
+            roll = v.get("rollNumber")
+            key = (chamber, session, roll)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append({"chamber": chamber, "sessionNumber": session, "rollNumber": roll})
+    return out
+
+
+def _fetch_house_vote_members(congress: str, session: int, roll_number: int, api_key: str) -> List[Dict]:
+    """Fetch house roll call member votes (paginated). Returns list of member vote dicts."""
+    all_members = []
+    offset = 0
+    limit = 250
+    while True:
+        url = f"{API_BASE_URL}/house-vote/{congress}/{session}/{roll_number}/members"
+        params = {"format": "json", "offset": offset, "limit": limit}
+        data = make_api_request(url, params, api_key)
+        if not data or not isinstance(data, dict):
+            break
+        raw = data.get("houseRollCallVoteMemberVotes")
+        if isinstance(raw, list):
+            results = raw
+        elif isinstance(raw, dict):
+            results = raw.get("item") or raw.get("memberVotes") or raw.get("houseRollCallVoteMemberVote")
+            if not isinstance(results, list):
+                results = [raw] if (raw.get("voteCast") or raw.get("bioguideID")) else []
+        else:
+            results = data.get("results") or data.get("members") or []
+        if isinstance(results, list):
+            all_members.extend(results)
+        pagination = data.get("pagination") or {}
+        count = pagination.get("count", 0) if isinstance(pagination, dict) else 0
+        if count and offset + limit >= count:
+            break
+        if not (isinstance(results, list) and len(results) == limit):
+            break
+        offset += limit
+    return all_members
+
+
+def _build_roll_call_data_for_bill(bill_id: str, api_key: str) -> Dict[str, Any]:
+    """
+    For a bill: fetch actions -> recordedVotes -> for each House vote fetch members.
+    Returns dict: roll_call_number (int or None), roll_call_votes (list of {roll, session, members}), has_roll_call (1 or 0).
+    """
+    parsed = _parse_bill_id(bill_id)
+    if not parsed:
+        return {"roll_call_number": None, "roll_call_votes": [], "has_roll_call": 0}
+    congress, bill_type, bill_number = parsed
+    actions = _fetch_bill_actions(congress, bill_type, bill_number, api_key)
+    recorded = _extract_recorded_votes(actions)
+    roll_call_number = None
+    roll_call_votes = []
+    for r in recorded:
+        chamber = (r.get("chamber") or "").strip().upper()
+        if chamber != "HOUSE":
+            continue
+        session = r.get("sessionNumber")
+        roll = r.get("rollNumber")
+        if session is None or roll is None:
+            continue
+        members = _fetch_house_vote_members(congress, session, roll, api_key)
+        roll_call_votes.append({"roll": roll, "session": session, "members": members})
+        if roll_call_number is None:
+            roll_call_number = roll
+    return {
+        "roll_call_number": roll_call_number,
+        "roll_call_votes": roll_call_votes,
+        "has_roll_call": 1 if roll_call_votes else 0,
+    }
+
+
+def process_bill_roll_call(
+    item: Dict[str, Any],
+    table_name: str,
+    api_key: str,
+) -> Tuple[bool, Optional[str], Optional[Dict]]:
+    """
+    For a bill item, fetch roll call data and return update payload for DynamoDB.
+    Returns (success, error_message, update_dict).
+    update_dict: DynamoDB UpdateExpression and ExpressionAttributeValues for roll_call_number, roll_call_votes, has_roll_call.
+    """
+    bill_id = (item.get("bill_id") or "").strip()
+    if not bill_id or bill_id.startswith("SEARCH#"):
+        return True, None, None
+    search_index_sk = (item.get("search_index_sk") or bill_id)
+    try:
+        data = _build_roll_call_data_for_bill(bill_id, api_key)
+    except Exception as e:
+        return False, str(e), None
+    has_roll = data["has_roll_call"]
+    if has_roll:
+        update_expr = "SET has_roll_call = :h, roll_call_number = :n, roll_call_votes = :v"
+        attr_vals = {
+            ":h": 1,
+            ":n": data["roll_call_number"],
+            ":v": json.dumps(data["roll_call_votes"]),
+        }
+    else:
+        update_expr = "SET has_roll_call = :h REMOVE roll_call_number, roll_call_votes"
+        attr_vals = {":h": 0}
+    return True, None, {
+        "bill_id": bill_id,
+        "search_index_sk": str(search_index_sk),
+        "UpdateExpression": update_expr,
+        "ExpressionAttributeValues": attr_vals,
+    }
+
+
 def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optional[str]]:
     """
     Process a single bill item to fetch and store bill text.
@@ -510,7 +691,7 @@ def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optiona
 def main():
     log_print("=" * 80)
     log_print("Congress Bills Bill Text Backfill Glue Job - Starting")
-    log_print("🔍 MODE: Only processing bills with empty or missing bill_text_html_s3_key")
+    log_print("🔍 MODE: Roll call maintenance (all bills) + bills with empty bill_text_html_s3_key")
     log_print("=" * 80)
     
     if not BILLS_TABLE_NAME:
@@ -525,6 +706,59 @@ def main():
         log_print(f"❌ Failed to retrieve API keys: {str(e)}")
         raise
     
+    # -------------------------------------------------------------------------
+    # Phase 1: Roll call maintenance (all bill rows, exclude search indices)
+    # -------------------------------------------------------------------------
+    log_print("")
+    log_print("📋 Phase 1: Roll call maintenance - scanning all bills (excluding SEARCH#)...")
+    log_print("-" * 80)
+    roll_call_items = []
+    last_key = None
+    while True:
+        scan_params = {}
+        if last_key:
+            scan_params["ExclusiveStartKey"] = last_key
+        scan_params["FilterExpression"] = (
+            Attr("bill_id").exists() & ~Attr("bill_id").begins_with("SEARCH#")
+        )
+        response = bills_table.scan(**scan_params)
+        roll_call_items.extend(response.get("Items", []))
+        last_key = response.get("LastEvaluatedKey")
+        if not last_key:
+            break
+    log_print(f"   Found {len(roll_call_items)} bill items for roll call maintenance.")
+    roll_ok = 0
+    roll_err = 0
+    for idx, bill_item in enumerate(roll_call_items, 1):
+        try:
+            api_key = api_key_rotator.get_key()
+            success, err, payload = process_bill_roll_call(bill_item, BILLS_TABLE_NAME, api_key)
+            if payload is None:
+                continue  # skipped (e.g. search index)
+            if not success:
+                roll_err += 1
+                if err:
+                    log_print(f"      ❌ Roll call {bill_item.get('bill_id', '?')}: {err}")
+                continue
+            bills_table.update_item(
+                Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
+                UpdateExpression=payload["UpdateExpression"],
+                ExpressionAttributeValues=payload["ExpressionAttributeValues"],
+            )
+            roll_ok += 1
+        except Exception as e:
+            roll_err += 1
+            log_print(f"      ❌ Roll call {bill_item.get('bill_id', '?')}: {e}")
+        if idx % 50 == 0:
+            log_print(f"      Roll call: {idx}/{len(roll_call_items)} (ok: {roll_ok}, err: {roll_err})")
+        if idx < len(roll_call_items):
+            time.sleep(0.5)
+    log_print(f"✅ Phase 1 done. Updated {roll_ok} bills with roll call data, {roll_err} errors.")
+    log_print("")
+    
+    # -------------------------------------------------------------------------
+    # Phase 2: Bill text backfill (empty or missing bill_text_html_s3_key)
+    # -------------------------------------------------------------------------
     # Scan DynamoDB table for bills missing bill text
     log_print("📋 Scanning DynamoDB table for bills with empty or missing bill_text_html_s3_key...")
     log_print("-" * 80)

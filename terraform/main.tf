@@ -2971,7 +2971,8 @@ module "congress_bills_table" {
     { name = "bill_title", type = "S" },
     { name = "bill_number", type = "N" },
     { name = "bipartisan", type = "N" },
-    { name = "policy_area", type = "S" }
+    { name = "policy_area", type = "S" },
+    { name = "has_roll_call", type = "N" }
   ]
 
   global_secondary_indexes = [
@@ -3044,6 +3045,14 @@ module "congress_bills_table" {
       hash_key        = "policy_area"
       range_key       = "introduced_date"
       projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "HasRollCallIndex"
+      hash_key        = "has_roll_call"
+      range_key       = "introduced_date"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
