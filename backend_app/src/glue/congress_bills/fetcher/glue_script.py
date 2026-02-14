@@ -1246,13 +1246,16 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         origin_chamber = _elem_text(bill_elem, 'originChamber')
         is_by_request = _elem_text(bill_elem, 'isByRequest')
         xml_version = _elem_text(bill_elem, 'version')
+        if not xml_version and root is not None:
+            xml_version = _elem_text(root, 'version')
+        xml_update_date_including_text = _elem_text(bill_elem, 'updateDateIncludingText')
         
-        # lastAction (dedicated snapshot: actionDate, links, text)
+        # lastAction / latestAction (dedicated snapshot: actionDate, text, actionTime, links)
         last_action_json = ""
-        last_action_elem = bill_elem.find('lastAction')
+        last_action_elem = bill_elem.find('lastAction') or bill_elem.find('latestAction')
         if last_action_elem is not None:
             la = {}
-            for tag in ('actionDate', 'text'):
+            for tag in ('actionDate', 'text', 'actionTime'):
                 child = last_action_elem.find(tag)
                 if child is not None and child.text is not None:
                     la[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
@@ -1675,7 +1678,7 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     if name_elem is not None and name_elem.text:
                         policy_area = name_elem.text
         
-        # Full subjects (otherSubjects + primarySubjects) for indexing
+        # Full subjects (billSubjects/otherSubjects + primarySubjects, or legislativeSubjects/item + policyArea)
         subjects_full = []
         subjects_elem = bill_elem.find('subjects')
         if subjects_elem is not None:
@@ -1704,6 +1707,23 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                             if pname is not None and pname.text:
                                 s['parentSubject'] = pname.text.strip()
                         subjects_full.append(s)
+            # Current format: subjects/legislativeSubjects/item (name, updateDate) and subjects/policyArea (name)
+            if not subjects_full:
+                for item in (subjects_elem.find('legislativeSubjects') or subjects_elem).findall('item') or []:
+                    s = {}
+                    v = _elem_text(item, 'name')
+                    if v:
+                        s['name'] = v
+                    v = _elem_text(item, 'updateDate')
+                    if v:
+                        s['updateDate'] = v
+                    if s:
+                        subjects_full.append(s)
+                pa = subjects_elem.find('policyArea')
+                if pa is not None:
+                    v = _elem_text(pa, 'name')
+                    if v and not any(x.get('name') == v and x.get('primary') for x in subjects_full):
+                        subjects_full.append({'name': v, 'primary': True})
         
         # Extract amendments (full: number, description, purpose, type, latestAction, amendedBill)
         amendments = []
@@ -1801,11 +1821,17 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 if c:
                     cbo_cost_estimates.append(c)
         
-        # Constitutional authority statement (can be long CDATA)
+        # Constitutional authority statement (direct or inside <cdata>)
         constitutional_authority_statement_text = ""
         cas_elem = bill_elem.find('constitutionalAuthorityStatementText')
         if cas_elem is not None and cas_elem.text:
             constitutional_authority_statement_text = (cas_elem.text or "").strip()[:50000]
+        if not constitutional_authority_statement_text:
+            cdata_elem = bill_elem.find('cdata')
+            if cdata_elem is not None:
+                cas_elem = cdata_elem.find('constitutionalAuthorityStatementText')
+                if cas_elem is not None and cas_elem.text:
+                    constitutional_authority_statement_text = (cas_elem.text or "").strip()[:50000]
         
         # Committee reports
         committee_reports = []
@@ -1816,13 +1842,17 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 if cit:
                     committee_reports.append({"citation": cit})
         
-        # Committees (billCommittees/item: chamber, name, systemCode, type, activities, subcommittees)
+        # Committees (billCommittees/item or committees/item: chamber, name, systemCode, type, activities, subcommittees)
         committees_list = []
         comm_elem = bill_elem.find('committees')
         if comm_elem is not None:
-            bc_elem = comm_elem.find('billCommittees')
-            if bc_elem is not None:
-                for item in bc_elem.findall('item') or []:
+            items_src = comm_elem.find('billCommittees')
+            if items_src is not None:
+                committee_items = items_src.findall('item') or []
+            else:
+                committee_items = comm_elem.findall('item') or []
+            if committee_items:
+                for item in committee_items:
                     c = {}
                     for tag in ('chamber', 'name', 'systemCode', 'type'):
                         v = _elem_text(item, tag)
@@ -1895,10 +1925,12 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         if rb_elem is not None:
             for item in rb_elem.findall('item') or []:
                 r = {}
-                for tag in ('congress', 'number', 'type', 'latestTitle'):
+                for tag in ('congress', 'number', 'type', 'latestTitle', 'title'):
                     v = _elem_text(item, tag)
                     if v:
                         r[tag] = v
+                if r.get('title') and not r.get('latestTitle'):
+                    r['latestTitle'] = r['title']
                 la_r = item.find('latestAction')
                 if la_r is not None:
                     r_la = {}
@@ -1948,7 +1980,7 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             "introduced_date": introduced_date,
             "latest_action_date": latest_action_date,
             "update_date": xml_update_date if xml_update_date else "",
-            "update_date_including_text": "",
+            "update_date_including_text": xml_update_date_including_text if xml_update_date_including_text else "",
             
             # Primary Sponsor
             "sponsor_bioguide_id": primary_sponsor.get("bioguideId", ""),
