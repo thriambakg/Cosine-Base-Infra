@@ -14,7 +14,10 @@ Behavior:
    - SEARCH#VOTE index: for each bill updated, updates per-politician vote index items (PK SEARCH#VOTE#<politician_id>,
      SK VOTE). Attributes: display_name, yea, nea, abstained (each a list of bill_ids). Voters matched via
      congress-legislators.csv (bioguide_id or name). Congress.gov "Not Voting" and "Present" map to abstained.
-   - Oversize: when roll_call_votes or SEARCH#VOTE data would exceed DynamoDB item size, store in S3 oversize/
+   - SEARCH#ROLL index: one item per roll call (PK SEARCH#ROLL, SK {congress}#{session}#{roll}) so roll calls can be
+     listed and sorted by congress/session/roll. Attributes: congress, session, roll, bill_id_associated, roll_display,
+     members or members_oversize_s3_key. Same vote data as bill rows; multiple rolls per bill each get one item.
+   - Oversize: when roll_call_votes or SEARCH#VOTE/SEARCH#ROLL data would exceed DynamoDB item size, store in S3 oversize/
      and set roll_call_votes_oversize_s3_key (bill item) or vote_data_oversize_s3_key (SEARCH#VOTE item). Search/API
      should resolve these keys when present (gzip JSON in same bucket).
    - Uses same thread pool and per-key rate limiters as before.
@@ -895,6 +898,85 @@ def _load_vote_data_from_item(existing_item: Dict[str, Any]) -> Tuple[List[str],
     return yea, nea, abstained
 
 
+def _store_roll_members_to_s3(congress: str, session: int, roll: int, members: List[Dict[str, Any]]) -> str:
+    """Store roll call members list to S3 oversize/. Returns S3 key."""
+    s3_key = f"oversize/SEARCH-ROLL-{congress}-{session}-{roll}.json.gz"
+    json_bytes = json.dumps(members, default=str).encode("utf-8")
+    compressed = gzip.compress(json_bytes)
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_key,
+        Body=compressed,
+        ContentType="application/json",
+        ContentEncoding="gzip",
+    )
+    return s3_key
+
+
+def update_search_roll_index_for_bill(
+    bill_id: str,
+    roll_call_votes: List[Dict[str, Any]],
+    table: Any,
+) -> None:
+    """
+    Write one SEARCH#ROLL item per roll call so roll calls can be listed and sorted by roll number.
+    PK = SEARCH#ROLL, SK = {congress}#{session}#{roll} (lexicographic sort = by congress, session, roll).
+    Attributes: congress, session, roll, bill_id (source bill), roll_display, members or members_oversize_s3_key.
+    Same vote data as stored in bill rows (one roll = one item).
+    """
+    parsed = _parse_bill_id(bill_id)
+    if not parsed:
+        return
+    congress, _bt, _bn = parsed
+    for entry in roll_call_votes or []:
+        if not isinstance(entry, dict):
+            continue
+        session = entry.get("session")
+        roll = entry.get("roll")
+        members = entry.get("members") or []
+        if session is None or roll is None:
+            continue
+        session_int = int(session) if isinstance(session, (int, float)) else (int(session) if str(session).isdigit() else None)
+        roll_int = int(roll) if isinstance(roll, (int, float)) else (int(roll) if str(roll).isdigit() else None)
+        if session_int is None or roll_int is None:
+            continue
+        sk = f"{congress}#{session_int}#{roll_int}"
+        roll_display = f"Roll no. {roll_int}"
+        item = {
+            "bill_id": "SEARCH#ROLL",
+            "search_index_sk": sk,
+            "search_type": "ROLL",
+            "search_value": sk,
+            "congress": int(congress),
+            "session": session_int,
+            "roll": roll_int,
+            "bill_id_associated": bill_id,
+            "roll_display": roll_display,
+            "members": members,
+            "is_search_index": True,
+        }
+        approx = len(json.dumps(item, default=str))
+        if approx > _OVERSIZE_SAFE_SIZE:
+            s3_key = _store_roll_members_to_s3(congress, session_int, roll_int, members)
+            item = {
+                "bill_id": "SEARCH#ROLL",
+                "search_index_sk": sk,
+                "search_type": "ROLL",
+                "search_value": sk,
+                "congress": int(congress),
+                "session": session_int,
+                "roll": roll_int,
+                "bill_id_associated": bill_id,
+                "roll_display": roll_display,
+                "members_oversize_s3_key": s3_key,
+                "is_search_index": True,
+            }
+        try:
+            table.put_item(Item=item)
+        except Exception as e:
+            log_print(f"      ⚠️ SEARCH#ROLL put failed for {sk}: {str(e)[:150]}")
+
+
 # DynamoDB batch limits so SEARCH#VOTE updates don't become a bottleneck (only API should be).
 _BATCH_GET_MAX = 100
 _BATCH_WRITE_MAX = 25
@@ -1244,6 +1326,8 @@ def main():
                         bid, roll_votes, politicians, bills_table,
                         politicians_by_bioguide=politicians_by_bioguide,
                     )
+                if roll_votes:
+                    update_search_roll_index_for_bill(bid, roll_votes, bills_table)
                 return ("ok", None, payload)
             return ("skip", None, None)
         except Exception as e:
