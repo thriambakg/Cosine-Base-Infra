@@ -724,6 +724,16 @@ def _find_politician_by_bioguide(bioguide_id: str, politicians: List[Dict[str, A
     return None
 
 
+def _build_politicians_by_bioguide(politicians: List[Dict[str, Any]]) -> Dict[str, Dict[str, Any]]:
+    """O(1) lookup by bioguide_id; built once so per-member resolution is not a bottleneck."""
+    out: Dict[str, Dict[str, Any]] = {}
+    for p in politicians or []:
+        bid = (p.get("bioguide_id") or "").strip()
+        if bid:
+            out[bid.upper()] = p
+    return out
+
+
 def _find_matching_politician(
     name: str,
     politicians: List[Dict[str, Any]],
@@ -769,10 +779,14 @@ def _find_matching_politician(
     return best if best and best_score >= threshold else None
 
 
-def _resolve_politician_id_and_name(member: Dict[str, Any], politicians: List[Dict[str, Any]]) -> Tuple[Optional[str], Optional[str]]:
+def _resolve_politician_id_and_name(
+    member: Dict[str, Any],
+    politicians: List[Dict[str, Any]],
+    politicians_by_bioguide: Optional[Dict[str, Dict[str, Any]]] = None,
+) -> Tuple[Optional[str], Optional[str]]:
     """
     Resolve API member to (politician_id, display_name) for SEARCH#VOTE PK and name.
-    Prefer bioguide_id; else match by name. politician_id is bioguide_id or 'NAME#normalized_name'.
+    Uses O(1) bioguide lookup when politicians_by_bioguide is provided; else list scan (fallback).
     """
     bioguide = (member.get("bioguideID") or member.get("bioguide_id") or "").strip()
     first = (member.get("firstName") or member.get("first_name") or "").strip()
@@ -781,7 +795,11 @@ def _resolve_politician_id_and_name(member: Dict[str, Any], politicians: List[Di
     party = (member.get("voteParty") or member.get("party") or "").strip()
     state = (member.get("voteState") or member.get("state") or "").strip()
     if bioguide:
-        pol = _find_politician_by_bioguide(bioguide, politicians)
+        pol = None
+        if politicians_by_bioguide:
+            pol = politicians_by_bioguide.get(bioguide.upper())
+        if pol is None and politicians:
+            pol = _find_politician_by_bioguide(bioguide, politicians)
         if pol:
             return (pol.get("bioguide_id") or bioguide, pol.get("name") or name or bioguide)
         return (bioguide, name or bioguide)
@@ -814,17 +832,23 @@ def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
     return None
 
 
+# DynamoDB batch limits so SEARCH#VOTE updates don't become a bottleneck (only API should be).
+_BATCH_GET_MAX = 100
+_BATCH_WRITE_MAX = 25
+
+
 def update_search_vote_index_for_bill(
     bill_id: str,
     roll_call_votes: List[Dict[str, Any]],
     politicians: List[Dict[str, Any]],
     table: Any,
+    politicians_by_bioguide: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """
     For a bill's roll_call_votes, update each voter's SEARCH#VOTE item: PK = SEARCH#VOTE#<politician_id>, SK = VOTE;
     attributes yea, nea, abstained (each a list of bill_ids). Merges with existing item; idempotent (no duplicate bill_ids).
+    Uses BatchGetItem + BatchWriteItem so DynamoDB is not a bottleneck (only Congress API is).
     """
-    # politician_id -> { yea: set(), nea: set(), abstained: set(), display_name: str }
     updates: Dict[str, Dict[str, Any]] = {}
     for entry in roll_call_votes or []:
         if not isinstance(entry, dict):
@@ -835,7 +859,9 @@ def update_search_vote_index_for_bill(
             bucket = _vote_cast_to_bucket(member.get("voteCast"))
             if not bucket:
                 continue
-            pid, display_name = _resolve_politician_id_and_name(member, politicians)
+            pid, display_name = _resolve_politician_id_and_name(
+                member, politicians, politicians_by_bioguide=politicians_by_bioguide
+            )
             if not pid:
                 continue
             if pid not in updates:
@@ -843,30 +869,65 @@ def update_search_vote_index_for_bill(
             updates[pid][bucket].add(bill_id)
             if display_name and not updates[pid]["display_name"]:
                 updates[pid]["display_name"] = display_name
-    for pid, data in updates.items():
+    if not updates:
+        return
+    client = table.meta.client
+    table_name = table.name
+    keys = [{"bill_id": f"SEARCH#VOTE#{pid}", "search_index_sk": "VOTE"} for pid in updates]
+    existing: Dict[str, Dict[str, Any]] = {}
+    for i in range(0, len(keys), _BATCH_GET_MAX):
+        chunk = keys[i : i + _BATCH_GET_MAX]
         try:
-            pk = f"SEARCH#VOTE#{pid}"
-            sk = "VOTE"
-            resp = table.get_item(Key={"bill_id": pk, "search_index_sk": sk})
-            item = resp.get("Item") or {}
-            yea = list(set(item.get("yea") or []) | data["yea"])
-            nea = list(set(item.get("nea") or []) | data["nea"])
-            abstained = list(set(item.get("abstained") or []) | data["abstained"])
-            display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip()
-            put_item = {
-                "bill_id": pk,
-                "search_index_sk": sk,
-                "search_type": "VOTE",
-                "search_value": display_name or pid,
-                "display_name": display_name or pid,
-                "yea": yea,
-                "nea": nea,
-                "abstained": abstained,
-                "is_search_index": True,
-            }
-            table.put_item(Item=put_item)
+            resp = client.batch_get_item(RequestItems={table_name: {"Keys": chunk}})
+            items = resp.get("Responses", {}).get(table_name, [])
+            for item in items:
+                pk = item.get("bill_id") or ""
+                if pk.startswith("SEARCH#VOTE#"):
+                    pid = pk.replace("SEARCH#VOTE#", "", 1)
+                    existing[pid] = item
+            unprocessed = resp.get("UnprocessedKeys", {}).get(table_name, {}).get("Keys", [])
+            if unprocessed:
+                time.sleep(0.2)
+                resp2 = client.batch_get_item(RequestItems={table_name: {"Keys": unprocessed}})
+                for item in resp2.get("Responses", {}).get(table_name, []):
+                    pk = item.get("bill_id") or ""
+                    if pk.startswith("SEARCH#VOTE#"):
+                        pid = pk.replace("SEARCH#VOTE#", "", 1)
+                        existing[pid] = item
         except Exception as e:
-            log_print(f"      ⚠️ SEARCH#VOTE update failed for {pid}: {str(e)[:150]}")
+            log_print(f"      ⚠️ SEARCH#VOTE batch get failed: {str(e)[:150]}")
+            return
+    put_items: List[Dict[str, Any]] = []
+    for pid, data in updates.items():
+        pk, sk = f"SEARCH#VOTE#{pid}", "VOTE"
+        item = existing.get(pid) or {}
+        yea = list(set(item.get("yea") or []) | data["yea"])
+        nea = list(set(item.get("nea") or []) | data["nea"])
+        abstained = list(set(item.get("abstained") or []) | data["abstained"])
+        display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
+        put_items.append({
+            "bill_id": pk,
+            "search_index_sk": sk,
+            "search_type": "VOTE",
+            "search_value": display_name,
+            "display_name": display_name,
+            "yea": yea,
+            "nea": nea,
+            "abstained": abstained,
+            "is_search_index": True,
+        })
+    for i in range(0, len(put_items), _BATCH_WRITE_MAX):
+        chunk = put_items[i : i + _BATCH_WRITE_MAX]
+        write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
+        try:
+            resp = client.batch_write_item(RequestItems={table_name: write_reqs})
+            unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+            while unprocessed:
+                time.sleep(0.2)
+                resp = client.batch_write_item(RequestItems={table_name: unprocessed})
+                unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+        except Exception as e:
+            log_print(f"      ⚠️ SEARCH#VOTE batch write failed: {str(e)[:150]}")
 
 
 def _build_roll_call_data_for_bill(
@@ -1056,7 +1117,8 @@ def main():
 
     bills_table = dynamodb.Table(BILLS_TABLE_NAME)
     politicians = load_legislators_csv()
-    log_print(f"   Loaded {len(politicians)} legislators for SEARCH#VOTE index.")
+    politicians_by_bioguide = _build_politicians_by_bioguide(politicians)
+    log_print(f"   Loaded {len(politicians)} legislators for SEARCH#VOTE index (O(1) lookup by bioguide).")
 
     roll_ok = 0
     roll_skip = 0
@@ -1083,7 +1145,10 @@ def main():
                 )
                 roll_votes = payload.get("roll_call_votes")
                 if roll_votes and politicians:
-                    update_search_vote_index_for_bill(bid, roll_votes, politicians, bills_table)
+                    update_search_vote_index_for_bill(
+                        bid, roll_votes, politicians, bills_table,
+                        politicians_by_bioguide=politicians_by_bioguide,
+                    )
                 return ("ok", None, payload)
             return ("skip", None, None)
         except Exception as e:
