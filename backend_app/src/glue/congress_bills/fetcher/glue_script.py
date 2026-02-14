@@ -1608,6 +1608,23 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 
                 actions.append(action)
         
+        # Deduplicate actions so we match Congress.gov (one row per logical event; XML has same event from multiple sources e.g. House floor + LoC)
+        seen_action_key = set()
+        deduped_actions = []
+        for a in actions:
+            text = (a.get("text") or "").strip()
+            key = (a.get("actionDate") or "", text)
+            if key in seen_action_key:
+                # Merge recordedVotes into the copy we already kept (recorded_votes dedupe below handles chamber+roll+session)
+                for d in deduped_actions:
+                    if (d.get("actionDate") or "", (d.get("text") or "").strip()) == key:
+                        d.setdefault("recordedVotes", []).extend(a.get("recordedVotes") or [])
+                        break
+                continue
+            seen_action_key.add(key)
+            deduped_actions.append(a)
+        actions = deduped_actions
+        
         # Recorded votes: bill-level (legacy) + from actions (current format); dedupe by chamber+roll+session
         def _norm_rv(r):
             return (r.get('chamber') or '', r.get('rollNumber') or '', r.get('sessionNumber') or '')
