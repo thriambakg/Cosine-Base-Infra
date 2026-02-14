@@ -389,7 +389,11 @@ def _extract_recorded_votes(actions: List[Dict]) -> List[Dict]:
 
 
 def _fetch_house_vote_members(congress: str, session: int, roll_number: int, api_key: str) -> List[Dict]:
-    """Fetch house roll call member votes (paginated). Returns list of member vote dicts."""
+    """
+    Fetch house roll call member votes (paginated). Returns list of member vote dicts.
+    Mirrors scripts/Bills/test_bill_roll_call.py fetch_house_vote_members so we handle
+    all Congress.gov API response shapes (houseRollCallVoteMemberVotes, results, members, etc.).
+    """
     all_members = []
     offset = 0
     limit = 250
@@ -397,22 +401,48 @@ def _fetch_house_vote_members(congress: str, session: int, roll_number: int, api
         url = f"{API_BASE_URL}/house-vote/{congress}/{session}/{roll_number}/members"
         params = {"format": "json", "offset": offset, "limit": limit}
         data = make_api_request(url, params, api_key)
-        if not data or not isinstance(data, dict):
+        if not data:
             break
-        raw = data.get("houseRollCallVoteMemberVotes")
-        if isinstance(raw, list):
-            results = raw
-        elif isinstance(raw, dict):
-            results = raw.get("item") or raw.get("memberVotes") or raw.get("houseRollCallVoteMemberVote")
+        results = None
+        if isinstance(data, dict):
+            raw = data.get("houseRollCallVoteMemberVotes")
+            if isinstance(raw, list):
+                results = raw
+            elif isinstance(raw, dict):
+                for key in ("item", "memberVote", "memberVotes", "houseRollCallVoteMemberVote"):
+                    val = raw.get(key)
+                    if isinstance(val, list):
+                        results = val
+                        break
+                    if isinstance(val, dict) and (val.get("voteCast") or val.get("bioguideID")):
+                        results = [val]
+                        break
+                if results is None and raw:
+                    for _k, val in raw.items():
+                        if isinstance(val, list) and val and isinstance(val[0], dict):
+                            if "voteCast" in val[0] or "bioguideID" in val[0]:
+                                results = val
+                                break
             if not isinstance(results, list):
-                results = [raw] if (raw.get("voteCast") or raw.get("bioguideID")) else []
-        else:
-            results = data.get("results") or data.get("members") or []
+                results = data.get("results") or data.get("members") or data.get("memberVotes")
+            if not isinstance(results, list) and isinstance(data.get("houseVote"), dict):
+                h = data["houseVote"]
+                results = h.get("results") or h.get("members")
+            if not isinstance(results, list):
+                for key in ("voteMembers", "items", "votes"):
+                    cand = data.get(key)
+                    if isinstance(cand, list) and cand and isinstance(cand[0], dict):
+                        if "voteCast" in cand[0] or "bioguideID" in cand[0]:
+                            results = cand
+                            break
+        elif isinstance(data, list) and data and isinstance(data[0], dict):
+            if "voteCast" in data[0] or "bioguideID" in data[0]:
+                results = data
         if isinstance(results, list):
             all_members.extend(results)
-        pagination = data.get("pagination") or {}
+        pagination = data.get("pagination") if isinstance(data, dict) else {}
         count = pagination.get("count", 0) if isinstance(pagination, dict) else 0
-        if count and offset + limit >= count:
+        if isinstance(data, dict) and count and offset + limit >= count:
             break
         if not (isinstance(results, list) and len(results) == limit):
             break
