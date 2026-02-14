@@ -1,17 +1,17 @@
 """
 AWS Glue Job: Congress Bills Roll Call Maintenance
-Daily job to refresh roll call (voter) data for all bills.
+Daily job to refresh roll call (voter) data for bills in the fetcher's date range (no full table scan).
 
-Roll call maintenance (all bills, excluding search indices):
-   - Scans the table for all bill items (bill_id does NOT start with "SEARCH#")
-   - For each bill, fetches bill actions from Congress.gov API and extracts recordedVotes
-   - For each House roll call, fetches member-level vote data (house-vote/{congress}/{session}/{voteNumber}/members)
-   - Updates each item with:
-     - roll_call_number (N): first House roll call number, or omitted if none
-     - roll_call_votes (S): JSON string of roll call(s) with member votes
-     - has_roll_call (N): 1 if bill has at least one roll call, 0 otherwise (GSI key for HasRollCallIndex)
-   - Runs with a thread pool (ROLL_CALL_MAX_WORKERS, default 8) and per-key rate limiters
-     (CONGRESS_API_MAX_REQUESTS_PER_HOUR, default 4800, per key) so total capacity = 4800 * n keys.
+Behavior:
+   - Accepts START_DATE, END_DATE, and optional SOURCE. Mirrors fetcher glue_script for date range and S3 path:
+     when source is "scheduler" or both dates are null/empty, uses previous day 11:00 AM UTC to current day
+     11:00 AM UTC (same window as fetcher) so the job finds the same downloads/{YYYYMMDD-YYYYMMDD}/ folder.
+   - Builds S3 prefix downloads/{YYYYMMDD-YYYYMMDD}/ (format_date_range_path) and lists ZIP files there.
+   - Derives bill_ids from ZIP contents (BILLSTATUS-*xml filenames); only these bills are processed.
+   - For each bill: get_item from DynamoDB; compare recorded_votes_json (XML rolls) with roll_call_votes (existing).
+   - If roll sets match -> skip (no API call). If different -> fetch only new rolls via API, merge into
+     roll_call_votes, then update table (roll_call_number, roll_call_votes, has_roll_call).
+   - Uses same thread pool and per-key rate limiters as before.
 
 Bill text is filled by the fetcher pipeline (bulk XML + SQS -> Lambda); no separate backfill.
 """
@@ -22,12 +22,15 @@ import json
 import logging
 import time
 import threading
-import requests
 import re
+import zipfile
+from io import BytesIO
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from datetime import datetime, timezone
-from typing import Dict, List, Any, Optional, Tuple
+from datetime import datetime, timedelta, timezone
+from typing import Dict, List, Any, Optional, Tuple, Set
+
+import requests
 
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
@@ -51,7 +54,7 @@ args = getResolvedOptions(sys.argv, [
     'S3_BUCKET_NAME',
     'REQUEST_TIMEOUT'
 ])
-# Optional: START_DATE, END_DATE (passed from consolidated Step Function for future ZIP-folder logic; may be null or empty)
+# Optional: START_DATE, END_DATE, SOURCE (passed from Step Function; mirror fetcher glue_script for S3 path)
 def _get_opt_arg(name: str) -> str:
     for i, a in enumerate(sys.argv):
         if a == f"--{name}" and i + 1 < len(sys.argv):
@@ -60,6 +63,7 @@ def _get_opt_arg(name: str) -> str:
     return ""
 START_DATE_ARG = _get_opt_arg("START_DATE")
 END_DATE_ARG = _get_opt_arg("END_DATE")
+SOURCE_ARG = _get_opt_arg("SOURCE")
 
 # Initialize Glue context
 sc = SparkContext()
@@ -309,6 +313,134 @@ def _parse_bill_id(bill_id: str) -> Optional[Tuple[str, str, str]]:
     return (congress, bill_type, bill_number)
 
 
+def _format_date_range_path(start_date: str, end_date: str) -> str:
+    """Format date range as YYYYMMDD-YYYYMMDD for S3 path. Mirror of fetcher format_date_range_path()."""
+    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    start_formatted = start_dt.strftime("%Y%m%d")
+    end_formatted = end_dt.strftime("%Y%m%d")
+    return f"{start_formatted}-{end_formatted}"
+
+
+def _get_start_end_dates() -> Tuple[str, str]:
+    """
+    Return (start_date, end_date) in YYYY-MM-DD for S3 path.
+    Mirrors fetcher glue_script: when source is 'scheduler' or both dates null/empty,
+    use previous day 11:00 AM UTC to current day 11:00 AM UTC so we point at the same
+    downloads/{YYYYMMDD-YYYYMMDD}/ folder the fetcher wrote to.
+    """
+    start_raw = (START_DATE_ARG or "").strip()
+    end_raw = (END_DATE_ARG or "").strip()
+    source = (SOURCE_ARG or "").strip().lower()
+    scheduler_mode = source == "scheduler" or (not start_raw and not end_raw)
+
+    if scheduler_mode:
+        # Same logic as fetcher: previous day 11:00 AM UTC to current day 11:00 AM UTC
+        now = datetime.now(timezone.utc)
+        previous_day_11am = now.replace(hour=11, minute=0, second=0, microsecond=0) - timedelta(days=1)
+        current_day_11am = now.replace(hour=11, minute=0, second=0, microsecond=0)
+        if now.hour < 11:
+            start_date = previous_day_11am
+            end_date = previous_day_11am
+        else:
+            start_date = previous_day_11am
+            end_date = current_day_11am
+        return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
+
+    # Explicit dates: normalize to YYYY-MM-DD (support ISO with T or plain date)
+    start_simple = start_raw.split("T")[0] if start_raw else ""
+    end_simple = end_raw.split("T")[0] if end_raw else ""
+    if not start_simple or not end_simple:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        return (start_simple or today), (end_simple or today)
+    return start_simple, end_simple
+
+
+def _list_zip_s3_keys(prefix: str) -> List[str]:
+    """List S3 keys under prefix that end with .zip."""
+    keys = []
+    paginator = s3_client.get_paginator("list_objects_v2")
+    for page in paginator.paginate(Bucket=S3_BUCKET_NAME, Prefix=prefix):
+        for obj in page.get("Contents") or []:
+            k = obj.get("Key") or ""
+            if k.endswith(".zip"):
+                keys.append(k)
+    return keys
+
+
+def _bill_id_from_zip_filename(filename: str) -> Optional[str]:
+    """Derive bill_id from ZIP member filename, e.g. BILLSTATUS-119hr123.xml -> 119-HR-123."""
+    base = filename.split("/")[-1] if "/" in filename else filename
+    m = re.match(r"BILLSTATUS-(\d+)([a-zA-Z]+)(\d+)\.xml", base, re.IGNORECASE)
+    if not m:
+        return None
+    congress, bill_type, number = m.group(1), m.group(2).upper(), m.group(3)
+    return f"{congress}-{bill_type}-{number}"
+
+
+def _get_bill_ids_from_zip_content(zip_content: bytes) -> Set[str]:
+    """Extract set of bill_ids from ZIP contents (XML filenames)."""
+    bill_ids = set()
+    with zipfile.ZipFile(BytesIO(zip_content), "r") as zf:
+        for name in zf.namelist():
+            if name.lower().endswith(".xml"):
+                bid = _bill_id_from_zip_filename(name)
+                if bid:
+                    bill_ids.add(bid)
+    return bill_ids
+
+
+def _house_rolls_from_recorded_votes_json(recorded_votes_json: Any) -> Set[Tuple[str, str]]:
+    """From table's recorded_votes_json (from bulk XML), return set of (sessionNumber, rollNumber) for House only. Normalized to (str, str)."""
+    out = set()
+    if not recorded_votes_json:
+        return out
+    raw = recorded_votes_json
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return out
+    if not isinstance(raw, list):
+        return out
+    for v in raw:
+        if not isinstance(v, dict):
+            continue
+        chamber = (v.get("chamber") or "").strip().upper()
+        if chamber != "HOUSE":
+            continue
+        s = v.get("sessionNumber")
+        r = v.get("rollNumber")
+        if s is None or r is None:
+            continue
+        out.add((str(s), str(r)))
+    return out
+
+
+def _existing_rolls_from_roll_call_votes(roll_call_votes: Any) -> Set[Tuple[str, str]]:
+    """From table's roll_call_votes, return set of (session, roll). Normalized to (str, str)."""
+    out = set()
+    if not roll_call_votes:
+        return out
+    raw = roll_call_votes
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return out
+    if not isinstance(raw, list):
+        return out
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        s = entry.get("session")
+        r = entry.get("roll")
+        if s is None or r is None:
+            continue
+        out.add((str(s), str(r)))
+    return out
+
+
 def _fetch_bill_actions(
     congress: str,
     bill_type: str,
@@ -436,6 +568,54 @@ def _fetch_house_vote_members(
     return all_members
 
 
+def _fetch_new_rolls_only(
+    bill_id: str,
+    to_fetch: Set[Tuple[str, str]],
+    api_key: str,
+    key_index: Optional[int] = None,
+) -> List[Dict[str, Any]]:
+    """Fetch member data for only the (session, roll) pairs in to_fetch. Returns list of {roll, session, members}."""
+    parsed = _parse_bill_id(bill_id)
+    if not parsed or not to_fetch:
+        return []
+    congress, _bt, _bn = parsed
+    result = []
+    for session_s, roll_s in sorted(to_fetch):
+        session = int(session_s) if session_s.isdigit() else 0
+        roll = int(roll_s) if roll_s.isdigit() else 0
+        if session <= 0 or roll <= 0:
+            continue
+        members = _fetch_house_vote_members(congress, session, roll, api_key, key_index=key_index)
+        result.append({"roll": roll, "session": session, "members": members})
+    return result
+
+
+def _merge_roll_call_votes(
+    existing_votes: List[Dict],
+    xml_rolls: Set[Tuple[str, str]],
+    new_rolls_data: List[Dict[str, Any]],
+) -> List[Dict[str, Any]]:
+    """Keep existing entries whose (session, roll) is in xml_rolls; drop others; append new_rolls_data. Returns merged list."""
+    kept = []
+    for entry in existing_votes or []:
+        if not isinstance(entry, dict):
+            continue
+        s, r = entry.get("session"), entry.get("roll")
+        if s is None or r is None:
+            continue
+        if (str(s), str(r)) in xml_rolls:
+            kept.append(entry)
+    # Append new rolls (no duplicates; new_rolls_data is for to_fetch only)
+    seen = {(str(e.get("session")), str(e.get("roll"))) for e in kept}
+    for e in new_rolls_data:
+        s, r = e.get("session"), e.get("roll")
+        if (str(s), str(r)) in seen:
+            continue
+        seen.add((str(s), str(r)))
+        kept.append(e)
+    return kept
+
+
 def _build_roll_call_data_for_bill(
     bill_id: str,
     api_key: str,
@@ -469,6 +649,68 @@ def _build_roll_call_data_for_bill(
         "roll_call_number": roll_call_number,
         "roll_call_votes": roll_call_votes,
         "has_roll_call": 1 if roll_call_votes else 0,
+    }
+
+
+def process_bill_roll_call_delta(
+    bill_id: str,
+    table_name: str,
+    api_key: str,
+    key_index: Optional[int] = None,
+) -> Tuple[bool, Optional[str], Optional[str], Optional[Dict]]:
+    """
+    Get bill item from table; compare XML roll set vs existing roll_call_votes.
+    If same -> return (True, 'skipped', None, None). If different -> fetch only new rolls, merge, return (True, None, None, update_payload) or (False, None, err, None).
+    Returns (success, 'skipped'|None, error_message, update_dict).
+    """
+    table = dynamodb.Table(table_name)
+    try:
+        resp = table.get_item(Key={"bill_id": bill_id, "search_index_sk": bill_id})
+    except Exception as e:
+        return False, None, str(e), None
+    item = resp.get("Item")
+    if not item:
+        return True, "skipped", None, None  # bill not in table, skip
+    recorded_votes_json = item.get("recorded_votes_json")
+    roll_call_votes_raw = item.get("roll_call_votes")
+    xml_rolls = _house_rolls_from_recorded_votes_json(recorded_votes_json)
+    existing_rolls = _existing_rolls_from_roll_call_votes(roll_call_votes_raw)
+    if xml_rolls == existing_rolls:
+        return True, "skipped", None, None
+    to_fetch = xml_rolls - existing_rolls
+    existing_list = roll_call_votes_raw
+    if isinstance(existing_list, str):
+        try:
+            existing_list = json.loads(existing_list)
+        except json.JSONDecodeError:
+            existing_list = []
+    if not isinstance(existing_list, list):
+        existing_list = []
+    try:
+        new_rolls_data = _fetch_new_rolls_only(bill_id, to_fetch, api_key, key_index=key_index)
+    except Exception as e:
+        return False, None, str(e), None
+    merged = _merge_roll_call_votes(existing_list, xml_rolls, new_rolls_data)
+    roll_call_number = None
+    if merged:
+        first_ent = merged[0]
+        roll_call_number = first_ent.get("roll")
+    has_roll_call = 1 if merged else 0
+    if has_roll_call:
+        update_expr = "SET has_roll_call = :h, roll_call_number = :n, roll_call_votes = :v"
+        attr_vals = {
+            ":h": 1,
+            ":n": roll_call_number,
+            ":v": json.dumps(merged),
+        }
+    else:
+        update_expr = "SET has_roll_call = :h REMOVE roll_call_number, roll_call_votes"
+        attr_vals = {":h": 0}
+    return True, None, None, {
+        "bill_id": bill_id,
+        "search_index_sk": bill_id,
+        "UpdateExpression": update_expr,
+        "ExpressionAttributeValues": attr_vals,
     }
 
 
@@ -517,96 +759,106 @@ def process_bill_roll_call(
 def main():
     log_print("=" * 80)
     log_print("Congress Bills Roll Call Maintenance Glue Job - Starting")
-    log_print("🔍 MODE: Roll call maintenance (all bills)")
     log_print("=" * 80)
-    
+
     if not BILLS_TABLE_NAME:
         raise ValueError("BILLS_TABLE_NAME job parameter not set")
-    
-    # Get API key rotator from Secrets Manager
+
+    start_date, end_date = _get_start_end_dates()
+    date_range_path = _format_date_range_path(start_date, end_date)
+    s3_prefix = f"downloads/{date_range_path}/"
+    log_print(f"📅 Date range: {start_date} to {end_date} (prefix: {s3_prefix})")
+
+    # List ZIP keys in that folder
+    zip_keys = _list_zip_s3_keys(s3_prefix)
+    log_print(f"📦 Found {len(zip_keys)} ZIP(s) under {s3_prefix}")
+
+    all_bill_ids = set()
+    for zk in zip_keys:
+        try:
+            resp = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=zk)
+            body = resp.get("Body")
+            zip_content = body.read() if body else b""
+            bill_ids = _get_bill_ids_from_zip_content(zip_content)
+            all_bill_ids.update(bill_ids)
+        except Exception as e:
+            log_print(f"   ⚠ Failed to read ZIP {zk}: {e}")
+    bill_id_list = sorted(all_bill_ids)
+    total_bills = len(bill_id_list)
+    log_print(f"📋 Bills to consider (from ZIPs): {total_bills}")
+
+    if total_bills == 0:
+        log_print("   No bills in date range; nothing to do.")
+        log_print("=" * 80)
+        job.commit()
+        return
+
     try:
         api_key_rotator = get_congress_api_keys()
-        log_print(f"✅ Retrieved {api_key_rotator.get_key_count()} Congress API key(s) from Secrets Manager")
-        log_print(f"   Will rotate through {api_key_rotator.get_key_count()} key(s) during processing")
+        log_print(f"✅ Retrieved {api_key_rotator.get_key_count()} Congress API key(s)")
     except Exception as e:
         log_print(f"❌ Failed to retrieve API keys: {str(e)}")
         raise
-    
-    # -------------------------------------------------------------------------
-    # Roll call maintenance (all bill rows, exclude search indices)
-    # -------------------------------------------------------------------------
-    log_print("")
-    log_print("📋 Roll call maintenance - scanning all bills (excluding SEARCH#)...")
-    log_print("-" * 80)
-    roll_call_items = []
-    last_key = None
-    while True:
-        scan_params = {}
-        if last_key:
-            scan_params["ExclusiveStartKey"] = last_key
-        scan_params["FilterExpression"] = (
-            Attr("bill_id").exists() & ~Attr("bill_id").begins_with("SEARCH#")
-        )
-        response = bills_table.scan(**scan_params)
-        roll_call_items.extend(response.get("Items", []))
-        last_key = response.get("LastEvaluatedKey")
-        if not last_key:
-            break
-    total_roll_call = len(roll_call_items)
-    num_keys = api_key_rotator.get_key_count()
-    log_print(f"   Found {total_roll_call} bill items for roll call maintenance.")
-    log_print(f"   Using {min(ROLL_CALL_MAX_WORKERS, total_roll_call)} workers, max {CONGRESS_API_MAX_REQUESTS_PER_HOUR} req/hour per key ({num_keys} key(s) = {num_keys * CONGRESS_API_MAX_REQUESTS_PER_HOUR} total/hour).")
+
+    bills_table = dynamodb.Table(BILLS_TABLE_NAME)
     roll_ok = 0
+    roll_skip = 0
     roll_err = 0
     progress_lock = threading.Lock()
     last_logged = 0
 
-    def _process_one_roll_call(bill_item: Dict[str, Any]) -> Tuple[str, Optional[str], Optional[Dict]]:
-        """Returns ('ok'|'err'|'skip', error_message_or_none, payload_or_none)."""
+    def _process_one_bill(bid: str) -> Tuple[str, Optional[str], Optional[Dict]]:
+        """Returns ('ok'|'skip'|'err', error_message_or_none, payload_or_none)."""
         try:
             api_key, key_index = api_key_rotator.get_key_and_index()
-            success, err, payload = process_bill_roll_call(
-                bill_item, BILLS_TABLE_NAME, api_key, key_index=key_index
+            success, skip, err, payload = process_bill_roll_call_delta(
+                bid, BILLS_TABLE_NAME, api_key, key_index=key_index
             )
-            if payload is None:
-                return ('skip', None, None)
+            if skip == "skipped":
+                return ("skip", None, None)
             if not success:
-                return ('err', err, None)
-            bills_table.update_item(
-                Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
-                UpdateExpression=payload["UpdateExpression"],
-                ExpressionAttributeValues=payload["ExpressionAttributeValues"],
-            )
-            return ('ok', None, payload)
+                return ("err", err, None)
+            if payload:
+                bills_table.update_item(
+                    Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
+                    UpdateExpression=payload["UpdateExpression"],
+                    ExpressionAttributeValues=payload["ExpressionAttributeValues"],
+                )
+                return ("ok", None, payload)
+            return ("skip", None, None)
         except Exception as e:
-            return ('err', str(e), None)
+            return ("err", str(e), None)
 
-    workers = min(ROLL_CALL_MAX_WORKERS, total_roll_call or 1)
+    workers = min(ROLL_CALL_MAX_WORKERS, total_bills or 1)
+    log_print(f"   Using {workers} workers; delta logic (no API call when roll set unchanged).")
+    log_print("-" * 80)
     with ThreadPoolExecutor(max_workers=workers) as executor:
-        futures = {executor.submit(_process_one_roll_call, item): item for item in roll_call_items}
+        futures = {executor.submit(_process_one_bill, bid): bid for bid in bill_id_list}
         for future in as_completed(futures):
-            bill_item = futures[future]
+            bid = futures[future]
             try:
                 status, err_msg, _ = future.result()
             except Exception as e:
-                status, err_msg = 'err', str(e)
+                status, err_msg = "err", str(e)
             with progress_lock:
-                if status == 'ok':
+                if status == "ok":
                     roll_ok += 1
-                elif status == 'err':
+                elif status == "skip":
+                    roll_skip += 1
+                else:
                     roll_err += 1
                     if err_msg:
-                        log_print(f"      ❌ Roll call {bill_item.get('bill_id', '?')}: {err_msg}")
-                done = roll_ok + roll_err
+                        log_print(f"      ❌ {bid}: {err_msg}")
+                done = roll_ok + roll_skip + roll_err
                 if done >= last_logged + 50:
                     last_logged = (done // 50) * 50
-                    log_print(f"      Roll call: {done}/{total_roll_call} (ok: {roll_ok}, err: {roll_err})")
-    log_print(f"✅ Roll call maintenance done. Updated {roll_ok} bills with roll call data, {roll_err} errors.")
+                    log_print(f"      Roll call: {done}/{total_bills} (updated: {roll_ok}, skipped: {roll_skip}, err: {roll_err})")
+    log_print(f"✅ Roll call maintenance done. Updated {roll_ok}, skipped (no change) {roll_skip}, errors {roll_err}.")
     log_print("")
     log_print("=" * 80)
     log_print("✅ Roll call maintenance job completed successfully!")
     log_print("=" * 80)
-    
+
     job.commit()
 
 if __name__ == "__main__":
