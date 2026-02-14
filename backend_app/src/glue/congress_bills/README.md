@@ -9,4 +9,4 @@ Terraform expects scripts at:
 
 - `s3://.../congress_bills/fetcher/glue_script.py`
 - `s3://.../congress_bills/crawler/backfill_bill_text.py`
-- `s3://.../glue_deps.zip` (archive of static-files/glue_deps/requirements.txt; single source of truth for Glue deps)
+- `s3://.../glue_deps/requirements.txt` (static-files/glue_deps/requirements.txt; single source of truth for Glue deps)

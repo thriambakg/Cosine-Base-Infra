@@ -2231,29 +2231,17 @@ module "glue_scripts_s3" {
       source_path  = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
       s3_key       = "lda_disclosures/glue_script.py"
       content_type = "text/x-python"
+    },
+    {
+      source_path  = "${path.module}/../static-files/glue_deps/requirements.txt"
+      s3_key       = "glue_deps/requirements.txt"
+      content_type = "text/plain"
     }
   ]
 
   tags = var.common_tags
 
   depends_on = [module.kms]
-}
-
-# Zip glue_deps (requirements.txt) and upload to Glue scripts bucket for job --additional-python-modules
-data "archive_file" "glue_deps" {
-  type        = "zip"
-  source_file = "${path.module}/../static-files/glue_deps/requirements.txt"
-  output_path = "${path.module}/glue_deps.zip"
-}
-
-resource "aws_s3_object" "glue_deps_zip" {
-  bucket       = module.glue_scripts_s3.bucket_id
-  key          = "glue_deps.zip"
-  source       = data.archive_file.glue_deps.output_path
-  content_type = "application/zip"
-  etag         = data.archive_file.glue_deps.output_md5
-
-  depends_on = [module.glue_scripts_s3]
 }
 
 # Glue Job for USAspending Daily Bulk Indexing
@@ -3143,8 +3131,8 @@ module "congress_bills_fetcher_glue_job" {
     aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
 
-  # Job arguments; fetcher installs deps from archive (glue_deps.zip from static-files/glue_deps)
-  # Glue 5.0: zip contains requirements.txt at root; -r requirements.txt installs from it
+  # Job arguments; fetcher installs deps from S3 requirements file (Glue 5.0: pip -r with S3 URL)
+  # Use flat requirements.txt so Glue can run pip -r; zip would require extraction Glue does not do.
   default_arguments = {
     "--PROJECT_NAME"                    = var.project_name
     "--ENVIRONMENT"                     = var.environment
@@ -3153,8 +3141,8 @@ module "congress_bills_fetcher_glue_job" {
     "--S3_BUCKET_NAME"                  = module.congress_bills_data_s3.bucket_id
     "--REQUEST_TIMEOUT"                 = "30"
     "--BILL_TEXT_SQS_URL"               = module.congress_bills_bill_text_queue.queue_url
-    "--additional-python-modules"       = "s3://${module.glue_scripts_s3.bucket_id}/glue_deps.zip"
-    "--python-modules-installer-option" = "-r requirements.txt"
+    "--additional-python-modules"       = "s3://${module.glue_scripts_s3.bucket_id}/glue_deps/requirements.txt"
+    "--python-modules-installer-option" = "-r"
   }
 
   job_bookmark_option = "job-bookmark-disable"
