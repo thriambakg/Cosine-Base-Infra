@@ -23,6 +23,7 @@ Usage:
 
 import argparse
 import json
+import os
 import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
@@ -34,8 +35,8 @@ import requests
 # ============================================================================
 
 API_BASE_URL = "https://api.congress.gov/v3"
-# Paste your Congress.gov API key below (or pass --api-key on the command line)
-API_KEY = "4ju6seBBsE2s3YfudxravIWoMJe0vtRKm4rTDyiX"
+# Set via CONGRESS_API_KEY env var or pass --api-key on the command line (do not commit keys)
+API_KEY = ""
 
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
@@ -418,9 +419,9 @@ def main() -> None:
     args = parser.parse_args()
 
     congress = args.congress or get_current_congress()
-    api_key = (args.api_key or API_KEY or "").strip()
+    api_key = (args.api_key or os.environ.get("CONGRESS_API_KEY") or API_KEY or "").strip()
     if not api_key:
-        print("Paste your Congress.gov API key into API_KEY at the top of this script, or pass --api-key", file=sys.stderr)
+        print("Set CONGRESS_API_KEY env var or pass --api-key (do not commit keys to the repo).", file=sys.stderr)
         sys.exit(1)
 
     print(f"Bill: Congress {congress}, {args.bill_type.upper()} {args.bill_number}")

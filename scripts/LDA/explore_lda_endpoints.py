@@ -2,6 +2,7 @@
 Explore LDA API endpoints to identify which ones can be used for autocomplete values.
 """
 
+import os
 import requests
 import json
 import time
@@ -12,7 +13,8 @@ from typing import Dict, Optional
 # ============================================================================
 
 API_BASE_URL = "https://lda.senate.gov/api/v1"
-API_KEY = "88f3f8febf11c8321d9c64d67b0b1367b740f435"
+# Set LDA_API_KEY env var (do not commit keys)
+API_KEY = ""
 
 REQUEST_TIMEOUT = 30
 RATE_LIMIT_DELAY = 0.5
@@ -21,11 +23,11 @@ RATE_LIMIT_DELAY = 0.5
 # Helper Functions
 # ============================================================================
 
-def create_session():
+def create_session(api_key: str):
     """Create a requests session with Authorization header"""
     session = requests.Session()
     session.headers.update({
-        'Authorization': f'Token {API_KEY}',
+        'Authorization': f'Token {api_key}',
         'Accept': 'application/json',
     })
     return session
@@ -116,11 +118,12 @@ def main():
     print("LDA API Endpoints Exploration")
     print("="*80)
     
-    if not API_KEY:
-        print("\n❌ ERROR: Please set API_KEY at the top of this script")
+    api_key = (os.environ.get("LDA_API_KEY") or API_KEY or "").strip()
+    if not api_key:
+        print("\n❌ ERROR: Set LDA_API_KEY env var (do not commit keys to the repo).")
         return
     
-    session = create_session()
+    session = create_session(api_key)
     
     # Get root endpoint to see all available endpoints
     print("\n" + "="*80)

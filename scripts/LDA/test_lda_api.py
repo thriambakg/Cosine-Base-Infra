@@ -3,6 +3,7 @@ Test script to fetch lobbying disclosures from LDA Senate API.
 Tests API calls with no query parameters to see if it returns all records by default.
 """
 
+import os
 import requests
 import json
 import time
@@ -13,7 +14,8 @@ from typing import Dict, Optional
 # ============================================================================
 
 API_BASE_URL = "https://lda.senate.gov/api/v1"
-API_KEY = "88f3f8febf11c8321d9c64d67b0b1367b740f435"
+# Set LDA_API_KEY env var (do not commit keys)
+API_KEY = ""
 RATE_LIMIT_DELAY = 0.5  # 120 calls per minute = 0.5 seconds between calls
 REQUEST_TIMEOUT = 30
 
@@ -68,7 +70,11 @@ def main():
     print("🧪 Testing LDA API with NO query parameters")
     print("=" * 80)
     
-    session = create_session(API_KEY)
+    api_key = (os.environ.get("LDA_API_KEY") or API_KEY or "").strip()
+    if not api_key:
+        print("❌ ERROR: Set LDA_API_KEY env var (do not commit keys to the repo).")
+        return
+    session = create_session(api_key)
     
     # Test 1: Filings endpoint with no params
     print("\n" + "=" * 80)
