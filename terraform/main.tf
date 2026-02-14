@@ -2205,7 +2205,7 @@ module "glue_scripts_s3" {
 
   kms_key_arn = module.kms.main_key_arn
 
-  # Upload Glue scripts to S3
+  # Upload Glue scripts and glue_deps (requirements) to S3
   static_files = [
     {
       source_path  = "${path.module}/../backend_app/src/glue/govt_contracts/glue_script.py"
@@ -2237,6 +2237,23 @@ module "glue_scripts_s3" {
   tags = var.common_tags
 
   depends_on = [module.kms]
+}
+
+# Zip glue_deps (requirements.txt) and upload to Glue scripts bucket for job --additional-python-modules
+data "archive_file" "glue_deps" {
+  type        = "zip"
+  source_file = "${path.module}/../static-files/glue_deps/requirements.txt"
+  output_path = "${path.module}/glue_deps.zip"
+}
+
+resource "aws_s3_object" "glue_deps_zip" {
+  bucket       = module.glue_scripts_s3.bucket_id
+  key          = "glue_deps.zip"
+  source       = data.archive_file.glue_deps.output_path
+  content_type = "application/zip"
+  etag         = data.archive_file.glue_deps.output_md5
+
+  depends_on = [module.glue_scripts_s3]
 }
 
 # Glue Job for USAspending Daily Bulk Indexing
@@ -3091,7 +3108,7 @@ module "congress_bills_fetcher_glue_job" {
   # Script location - uploaded to glue scripts bucket (congress_bills/fetcher/)
   script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/fetcher/glue_script.py"
   python_version  = "3"
-  glue_version    = "4.0"
+  glue_version    = "5.0" # 5.0 required for --additional-python-modules with S3 requirements file (-r)
 
   # Job configuration
   max_retries           = 1
@@ -3126,16 +3143,18 @@ module "congress_bills_fetcher_glue_job" {
     aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
 
-  # Job arguments; fetcher uses defusedxml via --extra-py-files (build from fetcher/requirements.txt)
+  # Job arguments; fetcher installs deps from archive (glue_deps.zip from static-files/glue_deps)
+  # Glue 5.0: zip contains requirements.txt at root; -r requirements.txt installs from it
   default_arguments = {
-    "--PROJECT_NAME"          = var.project_name
-    "--ENVIRONMENT"           = var.environment
-    "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
-    "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
-    "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
-    "--REQUEST_TIMEOUT"       = "30"
-    "--BILL_TEXT_SQS_URL"     = module.congress_bills_bill_text_queue.queue_url
-    "--extra-py-files"        = "s3://${module.glue_scripts_s3.bucket_id}/glue-libs.zip"
+    "--PROJECT_NAME"                    = var.project_name
+    "--ENVIRONMENT"                     = var.environment
+    "--CONGRESS_API_BASE_URL"           = "https://api.congress.gov/v3"
+    "--BILLS_TABLE_NAME"                = module.congress_bills_table.table_name
+    "--S3_BUCKET_NAME"                  = module.congress_bills_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"                 = "30"
+    "--BILL_TEXT_SQS_URL"               = module.congress_bills_bill_text_queue.queue_url
+    "--additional-python-modules"       = "s3://${module.glue_scripts_s3.bucket_id}/glue_deps.zip"
+    "--python-modules-installer-option" = "-r requirements.txt"
   }
 
   job_bookmark_option = "job-bookmark-disable"

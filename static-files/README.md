@@ -4,6 +4,12 @@ This directory contains static files that are uploaded to S3 buckets via Terrafo
 
 ## Files
 
+### `glue_deps/requirements.txt`
+
+**Purpose:** Single source of truth for Glue job Python dependencies (e.g. defusedxml). Terraform zips this file and uploads it to the Glue scripts bucket as `glue_deps.zip`; the congress_bills fetcher job (Glue 5.0) installs from it via `--additional-python-modules s3://.../glue_deps.zip` and `--python-modules-installer-option -r requirements.txt`. Add or remove packages here and run `terraform apply`.
+
+**Terraform:** Zipped via `archive_file` and uploaded as `glue_deps.zip` (aws_s3_object); not in static_files.
+
 ### `lists/congress-legislators.csv`
 
 **Source:** `congress-legislators` GitHub repository  

@@ -1,4 +1,0 @@
-# Shared Python dependencies for Glue jobs (fetcher, etc.).
-# Built once and uploaded to s3://<glue-scripts-bucket>/glue-libs.zip (--extra-py-files).
-# Pin versions for reproducible runs; Glue 4.0 uses Python 3.10 on Amazon Linux 2.
-defusedxml==0.7.1
