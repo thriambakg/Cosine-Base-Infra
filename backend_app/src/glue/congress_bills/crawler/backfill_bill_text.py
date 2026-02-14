@@ -24,8 +24,8 @@ Roll call maintenance (all bills, excluding search indices):
      - roll_call_number (N): first House roll call number, or omitted if none
      - roll_call_votes (S): JSON string of roll call(s) with member votes
      - has_roll_call (N): 1 if bill has at least one roll call, 0 otherwise (GSI key for HasRollCallIndex)
-   - Phase 1 runs with a thread pool (ROLL_CALL_MAX_WORKERS, default 8) and a global rate limiter
-     (CONGRESS_API_MAX_REQUESTS_PER_HOUR, default 4800) to stay under Congress.gov's 5,000 req/hour limit.
+   - Phase 1 runs with a thread pool (ROLL_CALL_MAX_WORKERS, default 8) and per-key rate limiters
+     (CONGRESS_API_MAX_REQUESTS_PER_HOUR, default 4800, per key) so total capacity = 4800 * n keys.
 """
 
 
@@ -106,11 +106,11 @@ secrets_client = boto3.client('secretsmanager')
 bills_table = dynamodb.Table(BILLS_TABLE_NAME) if BILLS_TABLE_NAME else None
 
 # ============================================================================
-# Rate limiter (Congress.gov: 5,000 req/hour per key; shared across threads)
+# Rate limiter (Congress.gov: 5,000 req/hour per key; one limiter per key)
 # ============================================================================
 
 class CongressApiRateLimiter:
-    """Thread-safe rate limiter: at most N requests per rolling hour."""
+    """Thread-safe rate limiter: at most N requests per rolling hour (per API key)."""
 
     def __init__(self, max_per_hour: int = 4800, window_seconds: int = 3600):
         self.max_per_hour = max_per_hour
@@ -136,7 +136,10 @@ class CongressApiRateLimiter:
             self._timestamps.append(time.time())
 
 
-# Global rate limiter (initialized on first use so job args are available)
+# One rate limiter per API key (4800 req/hour each). Initialized when keys are loaded.
+_congress_rate_limiters: Optional[List['CongressApiRateLimiter']] = None
+
+# Fallback single limiter for callers that don't pass key_index (e.g. Phase 2 single-key)
 _congress_rate_limiter = None
 
 def _get_rate_limiter() -> CongressApiRateLimiter:
@@ -147,6 +150,13 @@ def _get_rate_limiter() -> CongressApiRateLimiter:
             window_seconds=3600,
         )
     return _congress_rate_limiter
+
+def _get_rate_limiter_for_key(key_index: int) -> CongressApiRateLimiter:
+    """Per-key rate limiter: 4800 req/hour per key. Use when rotating keys."""
+    global _congress_rate_limiters
+    if _congress_rate_limiters is None or key_index < 0 or key_index >= len(_congress_rate_limiters):
+        return _get_rate_limiter()
+    return _congress_rate_limiters[key_index]
 
 
 # ============================================================================
@@ -192,6 +202,13 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
         if not api_keys:
             raise ValueError("No valid API keys found in secret")
         
+        # One rate limiter per key (4800 req/hour each) so total capacity = 4800 * n keys
+        global _congress_rate_limiters
+        _congress_rate_limiters = [
+            CongressApiRateLimiter(max_per_hour=CONGRESS_API_MAX_REQUESTS_PER_HOUR, window_seconds=3600)
+            for _ in api_keys
+        ]
+        
         # Thread-safe round-robin rotator for use with multithreaded roll call phase
         class SimpleApiKeyRotator:
             def __init__(self, keys):
@@ -199,12 +216,21 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
                 self.current_index = 0
                 self._lock = threading.Lock()
                 log_print(f"✅ Retrieved {len(keys)} Congress API key(s) from Secrets Manager")
+                log_print(f"   Rate limit: {CONGRESS_API_MAX_REQUESTS_PER_HOUR} req/hour per key ({len(keys) * CONGRESS_API_MAX_REQUESTS_PER_HOUR} total/hour)")
 
             def get_key(self):
                 with self._lock:
                     key = self.keys[self.current_index]
                     self.current_index = (self.current_index + 1) % len(self.keys)
                     return key
+
+            def get_key_and_index(self):
+                """Return (key, index) for per-key rate limiting. Index is used to acquire from the correct limiter."""
+                with self._lock:
+                    idx = self.current_index
+                    key = self.keys[idx]
+                    self.current_index = (self.current_index + 1) % len(self.keys)
+                    return key, idx
 
             def get_key_count(self):
                 return len(self.keys)
@@ -225,9 +251,18 @@ def get_congress_api_key() -> str:
     rotator = get_congress_api_keys()
     return rotator.get_key()
 
-def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
-    """Make API request with retry logic, global rate limit, and exponential backoff for 429."""
-    _get_rate_limiter().acquire()
+def make_api_request(
+    url: str,
+    params: Dict[str, Any],
+    api_key: str,
+    retries: int = MAX_RETRIES,
+    key_index: Optional[int] = None,
+) -> Optional[Dict]:
+    """Make API request with retry logic, rate limit (per-key when key_index set), and exponential backoff for 429."""
+    if key_index is not None:
+        _get_rate_limiter_for_key(key_index).acquire()
+    else:
+        _get_rate_limiter().acquire()
     if "api_key" not in params:
         params["api_key"] = api_key
     for attempt in range(retries):
@@ -392,7 +427,13 @@ def _parse_bill_id(bill_id: str) -> Optional[Tuple[str, str, str]]:
     return (congress, bill_type, bill_number)
 
 
-def _fetch_bill_actions(congress: str, bill_type: str, bill_number: str, api_key: str) -> List[Dict]:
+def _fetch_bill_actions(
+    congress: str,
+    bill_type: str,
+    bill_number: str,
+    api_key: str,
+    key_index: Optional[int] = None,
+) -> List[Dict]:
     """Fetch all bill actions (paginated) from /bill/{congress}/{billType}/{billNumber}/actions."""
     actions = []
     offset = 0
@@ -400,7 +441,7 @@ def _fetch_bill_actions(congress: str, bill_type: str, bill_number: str, api_key
     while True:
         url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/actions"
         params = {"format": "json", "offset": offset, "limit": limit}
-        data = make_api_request(url, params, api_key)
+        data = make_api_request(url, params, api_key, key_index=key_index)
         if not data or not isinstance(data, dict):
             break
         raw = data.get("actions")
@@ -445,7 +486,13 @@ def _extract_recorded_votes(actions: List[Dict]) -> List[Dict]:
     return out
 
 
-def _fetch_house_vote_members(congress: str, session: int, roll_number: int, api_key: str) -> List[Dict]:
+def _fetch_house_vote_members(
+    congress: str,
+    session: int,
+    roll_number: int,
+    api_key: str,
+    key_index: Optional[int] = None,
+) -> List[Dict]:
     """
     Fetch house roll call member votes (paginated). Returns list of member vote dicts.
     Mirrors scripts/Bills/test_bill_roll_call.py fetch_house_vote_members so we handle
@@ -457,7 +504,7 @@ def _fetch_house_vote_members(congress: str, session: int, roll_number: int, api
     while True:
         url = f"{API_BASE_URL}/house-vote/{congress}/{session}/{roll_number}/members"
         params = {"format": "json", "offset": offset, "limit": limit}
-        data = make_api_request(url, params, api_key)
+        data = make_api_request(url, params, api_key, key_index=key_index)
         if not data:
             break
         results = None
@@ -507,7 +554,11 @@ def _fetch_house_vote_members(congress: str, session: int, roll_number: int, api
     return all_members
 
 
-def _build_roll_call_data_for_bill(bill_id: str, api_key: str) -> Dict[str, Any]:
+def _build_roll_call_data_for_bill(
+    bill_id: str,
+    api_key: str,
+    key_index: Optional[int] = None,
+) -> Dict[str, Any]:
     """
     For a bill: fetch actions -> recordedVotes -> for each House vote fetch members.
     Returns dict: roll_call_number (int or None), roll_call_votes (list of {roll, session, members}), has_roll_call (1 or 0).
@@ -516,7 +567,7 @@ def _build_roll_call_data_for_bill(bill_id: str, api_key: str) -> Dict[str, Any]
     if not parsed:
         return {"roll_call_number": None, "roll_call_votes": [], "has_roll_call": 0}
     congress, bill_type, bill_number = parsed
-    actions = _fetch_bill_actions(congress, bill_type, bill_number, api_key)
+    actions = _fetch_bill_actions(congress, bill_type, bill_number, api_key, key_index=key_index)
     recorded = _extract_recorded_votes(actions)
     roll_call_number = None
     roll_call_votes = []
@@ -528,7 +579,7 @@ def _build_roll_call_data_for_bill(bill_id: str, api_key: str) -> Dict[str, Any]
         roll = r.get("rollNumber")
         if session is None or roll is None:
             continue
-        members = _fetch_house_vote_members(congress, session, roll, api_key)
+        members = _fetch_house_vote_members(congress, session, roll, api_key, key_index=key_index)
         roll_call_votes.append({"roll": roll, "session": session, "members": members})
         if roll_call_number is None:
             roll_call_number = roll
@@ -543,6 +594,7 @@ def process_bill_roll_call(
     item: Dict[str, Any],
     table_name: str,
     api_key: str,
+    key_index: Optional[int] = None,
 ) -> Tuple[bool, Optional[str], Optional[Dict]]:
     """
     For a bill item, fetch roll call data and return update payload for DynamoDB.
@@ -554,7 +606,7 @@ def process_bill_roll_call(
         return True, None, None
     search_index_sk = (item.get("search_index_sk") or bill_id)
     try:
-        data = _build_roll_call_data_for_bill(bill_id, api_key)
+        data = _build_roll_call_data_for_bill(bill_id, api_key, key_index=key_index)
     except Exception as e:
         return False, str(e), None
     has_roll = data["has_roll_call"]
@@ -815,8 +867,9 @@ def main():
         if not last_key:
             break
     total_roll_call = len(roll_call_items)
+    num_keys = api_key_rotator.get_key_count()
     log_print(f"   Found {total_roll_call} bill items for roll call maintenance.")
-    log_print(f"   Using {min(ROLL_CALL_MAX_WORKERS, total_roll_call)} workers, max {CONGRESS_API_MAX_REQUESTS_PER_HOUR} API requests/hour.")
+    log_print(f"   Using {min(ROLL_CALL_MAX_WORKERS, total_roll_call)} workers, max {CONGRESS_API_MAX_REQUESTS_PER_HOUR} req/hour per key ({num_keys} key(s) = {num_keys * CONGRESS_API_MAX_REQUESTS_PER_HOUR} total/hour).")
     roll_ok = 0
     roll_err = 0
     progress_lock = threading.Lock()
@@ -825,8 +878,10 @@ def main():
     def _process_one_roll_call(bill_item: Dict[str, Any]) -> Tuple[str, Optional[str], Optional[Dict]]:
         """Returns ('ok'|'err'|'skip', error_message_or_none, payload_or_none)."""
         try:
-            api_key = api_key_rotator.get_key()
-            success, err, payload = process_bill_roll_call(bill_item, BILLS_TABLE_NAME, api_key)
+            api_key, key_index = api_key_rotator.get_key_and_index()
+            success, err, payload = process_bill_roll_call(
+                bill_item, BILLS_TABLE_NAME, api_key, key_index=key_index
+            )
             if payload is None:
                 return ('skip', None, None)
             if not success:
