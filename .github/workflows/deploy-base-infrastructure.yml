@@ -249,6 +249,19 @@ jobs:
           path: terraform/modules/lambda-layer/layer-*.zip
           retention-days: 7
 
+      - name: Build Glue libs (shared requirements)
+        run: |
+          chmod +x scripts/build_glue_libs.sh
+          ./scripts/build_glue_libs.sh
+          echo "✅ Built backend_app/src/glue/glue-libs.zip"
+
+      - name: Upload Glue libs artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: glue-libs-${{ needs.determine-environment.outputs.environment }}
+          path: backend_app/src/glue/glue-libs.zip
+          retention-days: 7
+
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'
     needs: [determine-environment, build-lambda-layers]
@@ -264,6 +277,31 @@ jobs:
     secrets:
       AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
       AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+
+  upload-glue-libs:
+    name: 'Upload Glue libs to S3'
+    runs-on: ubuntu-latest
+    needs: [determine-environment, deploy-base-infrastructure, build-lambda-layers]
+    if: github.event.inputs.destroy != 'true'
+    env:
+      # Must match Terraform glue_scripts_s3 bucket_name: ${var.project_name}-glue-scripts-${var.environment}
+      GLUE_SCRIPTS_BUCKET: cosine-glue-scripts-${{ needs.determine-environment.outputs.environment }}
+    steps:
+      - name: Download Glue libs artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: glue-libs-${{ needs.determine-environment.outputs.environment }}
+
+      - name: Upload glue-libs.zip to S3
+        run: |
+          ZIP="backend_app/src/glue/glue-libs.zip"
+          if [ ! -f "$ZIP" ]; then ZIP="glue-libs.zip"; fi
+          aws s3 cp "$ZIP" "s3://${GLUE_SCRIPTS_BUCKET}/glue-libs.zip" --no-progress
+          echo "✅ Uploaded glue-libs.zip to s3://${GLUE_SCRIPTS_BUCKET}/glue-libs.zip"
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: ${{ vars.AWS_REGION || 'us-east-1' }}
 
   comment-pr:
     name: 'Comment on PR'

@@ -2218,13 +2218,13 @@ module "glue_scripts_s3" {
       content_type = "text/x-python"
     },
     {
-      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/glue_script.py"
-      s3_key       = "congress_bills/glue_script.py"
+      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/fetcher/glue_script.py"
+      s3_key       = "congress_bills/fetcher/glue_script.py"
       content_type = "text/x-python"
     },
     {
-      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/backfill_bill_text.py"
-      s3_key       = "congress_bills/backfill_bill_text.py"
+      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/crawler/backfill_bill_text.py"
+      s3_key       = "congress_bills/crawler/backfill_bill_text.py"
       content_type = "text/x-python"
     },
     {
@@ -3088,8 +3088,8 @@ module "congress_bills_fetcher_glue_job" {
 
   job_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
 
-  # Script location - uploaded to glue scripts bucket
-  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/glue_script.py"
+  # Script location - uploaded to glue scripts bucket (congress_bills/fetcher/)
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/fetcher/glue_script.py"
   python_version  = "3"
   glue_version    = "4.0"
 
@@ -3110,7 +3110,7 @@ module "congress_bills_fetcher_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access - least privilege: congress_bills/glue_script.py uses put_item only
+  # DynamoDB access - least privilege: congress_bills/fetcher/glue_script.py uses put_item only
   dynamodb_table_arn = module.congress_bills_table.table_arn
   dynamodb_actions   = ["dynamodb:PutItem"]
 
@@ -3126,7 +3126,7 @@ module "congress_bills_fetcher_glue_job" {
     aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
 
-  # Job arguments
+  # Job arguments; fetcher uses defusedxml via --extra-py-files (build from fetcher/requirements.txt)
   default_arguments = {
     "--PROJECT_NAME"          = var.project_name
     "--ENVIRONMENT"           = var.environment
@@ -3135,6 +3135,7 @@ module "congress_bills_fetcher_glue_job" {
     "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
     "--REQUEST_TIMEOUT"       = "30"
     "--BILL_TEXT_SQS_URL"     = module.congress_bills_bill_text_queue.queue_url
+    "--extra-py-files"        = "s3://${module.glue_scripts_s3.bucket_id}/glue-libs.zip"
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -3408,15 +3409,15 @@ module "congress_bills_fetcher_state_machine" {
   ]
 }
 
-# Temporary Glue Job for Congress Bills Bill Text Backfill
-# This job backfills bill_text_s3_key for existing bills in DynamoDB
+# Glue Job for Congress Bills Bill Text Backfill (prefill)
+# Backfills bill_text_s3_key and roll call fields for existing bills in DynamoDB
 module "congress_bills_bill_text_backfill_glue_job" {
   source = "./modules/glue-job"
 
   job_name = "${var.project_name}-congress-bills-bill-text-backfill-${var.environment}"
 
-  # Script location - uploaded to glue scripts bucket
-  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/backfill_bill_text.py"
+  # Script location - uploaded to glue scripts bucket (congress_bills/crawler/)
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/crawler/backfill_bill_text.py"
   python_version  = "3"
   glue_version    = "4.0"
 
@@ -3435,7 +3436,7 @@ module "congress_bills_bill_text_backfill_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access - least privilege: backfill_bill_text.py uses update_item, scan only
+  # DynamoDB access - least privilege: congress_bills/crawler/backfill_bill_text.py uses update_item, scan only
   dynamodb_table_arn = module.congress_bills_table.table_arn
   dynamodb_actions   = ["dynamodb:UpdateItem", "dynamodb:Scan"]
 

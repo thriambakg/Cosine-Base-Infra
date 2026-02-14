@@ -598,6 +598,12 @@ output "congress_bills_table_id" {
   value       = module.congress_bills_table.table_id
 }
 
+# Glue Scripts S3 Bucket (used by Glue jobs; shared glue-libs.zip is uploaded here)
+output "glue_scripts_bucket_id" {
+  description = "Name of the Glue scripts S3 bucket (upload glue-libs.zip here)"
+  value       = module.glue_scripts_s3.bucket_id
+}
+
 # Congress Bills Data S3 Bucket Outputs
 output "congress_bills_data_s3_bucket_name" {
   description = "Name of the congress bills data S3 bucket"
