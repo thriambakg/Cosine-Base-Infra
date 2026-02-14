@@ -313,10 +313,26 @@ def _parse_bill_id(bill_id: str) -> Optional[Tuple[str, str, str]]:
     return (congress, bill_type, bill_number)
 
 
+def _normalize_date_to_yyyy_mm_dd(date_str: str) -> str:
+    """Parse date in YYYY-MM-DD or MM/DD/YYYY and return YYYY-MM-DD."""
+    s = (date_str or "").strip().split("T")[0]
+    if not s:
+        return ""
+    for fmt in ("%Y-%m-%d", "%m/%d/%Y", "%d/%m/%Y"):
+        try:
+            dt = datetime.strptime(s, fmt)
+            return dt.strftime("%Y-%m-%d")
+        except ValueError:
+            continue
+    return s
+
+
 def _format_date_range_path(start_date: str, end_date: str) -> str:
-    """Format date range as YYYYMMDD-YYYYMMDD for S3 path. Mirror of fetcher format_date_range_path()."""
-    start_dt = datetime.strptime(start_date, "%Y-%m-%d")
-    end_dt = datetime.strptime(end_date, "%Y-%m-%d")
+    """Format date range as YYYYMMDD-YYYYMMDD for S3 path. Accepts YYYY-MM-DD or MM/DD/YYYY."""
+    start_norm = _normalize_date_to_yyyy_mm_dd(start_date)
+    end_norm = _normalize_date_to_yyyy_mm_dd(end_date)
+    start_dt = datetime.strptime(start_norm, "%Y-%m-%d")
+    end_dt = datetime.strptime(end_norm, "%Y-%m-%d")
     start_formatted = start_dt.strftime("%Y%m%d")
     end_formatted = end_dt.strftime("%Y%m%d")
     return f"{start_formatted}-{end_formatted}"
@@ -347,13 +363,13 @@ def _get_start_end_dates() -> Tuple[str, str]:
             end_date = current_day_11am
         return start_date.strftime("%Y-%m-%d"), end_date.strftime("%Y-%m-%d")
 
-    # Explicit dates: normalize to YYYY-MM-DD (support ISO with T or plain date)
+    # Explicit dates: normalize to YYYY-MM-DD (support ISO, YYYY-MM-DD, or MM/DD/YYYY)
     start_simple = start_raw.split("T")[0] if start_raw else ""
     end_simple = end_raw.split("T")[0] if end_raw else ""
     if not start_simple or not end_simple:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         return (start_simple or today), (end_simple or today)
-    return start_simple, end_simple
+    return _normalize_date_to_yyyy_mm_dd(start_simple), _normalize_date_to_yyyy_mm_dd(end_simple)
 
 
 def _list_zip_s3_keys(prefix: str) -> List[str]:

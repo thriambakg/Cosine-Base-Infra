@@ -223,26 +223,37 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
     return None
 
 
-def store_bill_text_to_s3(bill_id: str, text_content: bytes, file_index: int = 1) -> str:
+def store_bill_text_to_s3(
+    bill_id: str,
+    text_content: bytes,
+    file_index: int = 1,
+    file_extension: str = "html",
+    content_type: Optional[str] = None,
+) -> str:
     """
-    Store bill text HTML file to S3 in billtext/{bill_id}/ folder (e.g. 1.html).
+    Store bill text file to S3 in billtext/{bill_id}/ (e.g. 1.html or 1.xml).
 
     Args:
         bill_id: Bill ID (e.g., "119-HR-303")
-        text_content: Bill text HTML content as bytes
-        file_index: 1-based file number (default 1) for naming 1.html, 2.html, ...
+        text_content: Bill text content as bytes (HTML, XML, etc.)
+        file_index: 1-based file number for naming 1.html, 2.xml, ...
+        file_extension: Extension without dot (html, xml, htm).
+        content_type: S3 Content-Type (defaults: html -> text/html, xml -> application/xml).
 
     Returns:
         S3 key where the file was stored (e.g. billtext/119-HR-303/1.html)
     """
-    s3_key = f"billtext/{bill_id}/{file_index}.html"
+    ext = (file_extension or "html").lstrip(".")
+    if content_type is None:
+        content_type = "text/html" if ext in ("html", "htm") else "application/xml"
+    s3_key = f"billtext/{bill_id}/{file_index}.{ext}"
     s3_client.put_object(
         Bucket=S3_BUCKET_NAME,
         Key=s3_key,
         Body=text_content,
-        ContentType='text/html'
+        ContentType=content_type,
     )
-    logger.info(f"💾 Stored HTML bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
+    logger.info(f"💾 Stored bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes, {content_type})")
     return s3_key
 
 
@@ -262,15 +273,57 @@ def _get_format_items(version: Dict[str, Any]) -> list:
     return []
 
 
-def _find_html_url(format_items: list) -> Optional[str]:
-    """Find first 'Formatted Text' URL in format items."""
-    for fmt_item in format_items:
-        if isinstance(fmt_item, dict):
-            fmt_type = (fmt_item.get("type") or "").strip()
-            fmt_url = fmt_item.get("url")
-            if fmt_type == "Formatted Text" and fmt_url:
-                return fmt_url
-    return None
+def _derive_govinfo_html_url(xml_url: str) -> Optional[str]:
+    """
+    Derive govinfo HTML bill text URL from XML URL.
+    Bulk XML often only lists XML format; HTML exists at same package path with /html/ and .htm.
+    """
+    if not xml_url or "govinfo.gov" not in xml_url or "/xml/" not in xml_url or not xml_url.rstrip("/").endswith(".xml"):
+        return None
+    html_url = xml_url.replace("/xml/", "/html/", 1).rstrip("/")
+    if html_url.endswith(".xml"):
+        html_url = html_url[:-4] + ".htm"
+    return html_url if html_url != xml_url else None
+
+
+def _extension_and_content_type_for_format(format_type: str) -> tuple[str, str]:
+    """Map format type (from API/XML) to file extension and S3 Content-Type. Supports any type (Formatted Text, USLM, XML, etc.)."""
+    t = (format_type or "").strip().lower()
+    if t in ("formatted text", "html", "htm", "text/html"):
+        return "html", "text/html"
+    if t in ("uslm", "united states legislative markup", "xml", "text/xml", "application/xml"):
+        return "xml", "application/xml"
+    # URL-based hint
+    if ".xml" in t or "xml" in t:
+        return "xml", "application/xml"
+    return "html", "text/html"
+
+
+def _pick_best_format_url(format_items: list) -> tuple[Optional[str], Optional[str]]:
+    """
+    Pick best (url, format_type) from format items. Supports any type: Formatted Text, USLM, XML, etc.
+    Preference: Formatted Text -> govinfo derived HTML -> first available URL (use its type for extension).
+    Returns (url, format_type) or (None, None).
+    """
+    first_url: Optional[str] = None
+    first_type: Optional[str] = None
+    for fmt_item in format_items or []:
+        if not isinstance(fmt_item, dict):
+            continue
+        url = fmt_item.get("url")
+        if not url or not isinstance(url, str):
+            continue
+        fmt_type = (fmt_item.get("type") or "").strip() or None
+        if not first_url:
+            first_url, first_type = url, fmt_type
+        if fmt_type and "formatted text" in fmt_type.lower():
+            return url, fmt_type
+    if not first_url:
+        return None, None
+    derived = _derive_govinfo_html_url(first_url)
+    if derived:
+        return derived, "Formatted Text"
+    return first_url, first_type or "Unknown"
 
 
 def process_bill_text_download_from_versions(
@@ -294,22 +347,26 @@ def process_bill_text_download_from_versions(
             break
         version_type = (version.get("type") or "").strip() or f"Version {len(stored) + 1}"
         format_items = _get_format_items(version)
-        html_url = _find_html_url(format_items)
-        if not html_url:
+        url, chosen_fmt_type = _pick_best_format_url(format_items)
+        if not url:
             continue
         file_index = len(stored) + 1
+        ext, content_type = _extension_and_content_type_for_format(chosen_fmt_type or "")
         try:
-            logger.info(f"📄 Downloading bill text ({version_type}) for {bill_id}...")
-            content = download_bill_text_file(html_url)
+            logger.info(f"📄 Downloading bill text ({version_type}, {chosen_fmt_type or 'unknown'}) for {bill_id}...")
+            content = download_bill_text_file(url)
             if content:
-                s3_key = store_bill_text_to_s3(bill_id, content, file_index=file_index)
+                s3_key = store_bill_text_to_s3(
+                    bill_id, content, file_index=file_index,
+                    file_extension=ext, content_type=content_type,
+                )
                 stored.append({
-                    "name": f"{file_index}.html",
+                    "name": f"{file_index}.{ext}",
                     "s3_key": s3_key,
                     "type": version_type,
                 })
             else:
-                logger.warning(f"⚠️  Failed to download HTML for version: {version_type}")
+                logger.warning(f"⚠️  Failed to download for version: {version_type}")
         except Exception as e:
             logger.warning(f"⚠️  Error downloading version '{version_type}': {str(e)}")
 
