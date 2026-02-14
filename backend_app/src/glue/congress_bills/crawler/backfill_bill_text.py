@@ -553,26 +553,27 @@ def _fetch_house_vote_members(
             break
         results = None
         if isinstance(data, dict):
-            raw = data.get("houseRollCallVoteMemberVotes")
-            if isinstance(raw, list):
-                results = raw
-            elif isinstance(raw, dict):
-                for key in ("item", "memberVote", "memberVotes", "houseRollCallVoteMemberVote"):
-                    val = raw.get(key)
-                    if isinstance(val, list):
-                        results = val
-                        break
-                    if isinstance(val, dict) and (val.get("voteCast") or val.get("bioguideID")):
-                        results = [val]
-                        break
-                if results is None and raw:
-                    for _k, val in raw.items():
-                        if isinstance(val, list) and val and isinstance(val[0], dict):
-                            if "voteCast" in val[0] or "bioguideID" in val[0]:
-                                results = val
-                                break
+            # Congress.gov v3 /house-vote/.../members returns "results": [ { bioguideID, voteCast, ... } ]
+            results = data.get("results") or data.get("members") or data.get("memberVotes")
             if not isinstance(results, list):
-                results = data.get("results") or data.get("members") or data.get("memberVotes")
+                raw = data.get("houseRollCallVoteMemberVotes")
+                if isinstance(raw, list):
+                    results = raw
+                elif isinstance(raw, dict):
+                    for key in ("item", "memberVote", "memberVotes", "houseRollCallVoteMemberVote"):
+                        val = raw.get(key)
+                        if isinstance(val, list):
+                            results = val
+                            break
+                        if isinstance(val, dict) and (val.get("voteCast") or val.get("bioguideID")):
+                            results = [val]
+                            break
+                    if results is None and raw:
+                        for _k, val in raw.items():
+                            if isinstance(val, list) and val and isinstance(val[0], dict):
+                                if "voteCast" in val[0] or "bioguideID" in val[0]:
+                                    results = val
+                                    break
             if not isinstance(results, list) and isinstance(data.get("houseVote"), dict):
                 h = data["houseVote"]
                 results = h.get("results") or h.get("members")
@@ -607,10 +608,12 @@ def _fetch_house_vote_list(
     """
     GET /house-vote/{congress}/{session} - list all roll call votes for that Congress and session.
     Returns list of vote summary dicts (rollCallNumber, sessionNumber, congress, legislationUrl, etc.). Paginated (limit 250).
+    Congress.gov v3 may wrap the list in 'votes', 'houseVotes', 'results', or 'items'.
     """
     out: List[Dict[str, Any]] = []
     offset = 0
     limit = 250
+    _logged_keys = False
     while True:
         url = f"{API_BASE_URL}/house-vote/{congress}/{session}"
         params = {"format": "json", "offset": offset, "limit": limit}
@@ -619,17 +622,32 @@ def _fetch_house_vote_list(
             break
         items = None
         if isinstance(data, dict):
-            items = data.get("houseVotes") or data.get("votes") or data.get("results")
+            items = data.get("votes") or data.get("houseVotes") or data.get("results") or data.get("items")
             if isinstance(items, dict):
-                items = items.get("item", items.get("vote", []))
+                items = items.get("item", items.get("vote", items.get("votes", [])))
+            if not isinstance(items, list) and isinstance(data.get("houseVote"), dict):
+                items = data["houseVote"].get("votes") or data["houseVote"].get("item")
+            if not isinstance(items, list):
+                for key, val in data.items():
+                    if key in ("pagination", "request"):
+                        continue
+                    if isinstance(val, list) and val and isinstance(val[0], dict):
+                        if "rollCallNumber" in val[0] or "legislationNumber" in val[0] or "rollNumber" in val[0]:
+                            items = val
+                            break
+            if not isinstance(items, list) and offset == 0 and not _logged_keys:
+                log_print(f"      House-vote list response keys (Congress {congress} Session {session}): {list(data.keys())}")
+                _logged_keys = True
+            if not isinstance(items, list) and isinstance(data, dict) and "rollCallNumber" in data:
+                items = [data]
         if isinstance(items, list):
             out.extend(items)
         elif isinstance(data, list):
             out.extend(data)
+        elif isinstance(data, dict) and "rollCallNumber" in data:
+            out.append(data)
         if not isinstance(data, dict):
             break
-        # Fetch all pages: stop when we got fewer than limit (no more data). Do not stop on offset+limit>=count,
-        # since some APIs return count as current page size (250), which would wrongly stop after one page.
         num_items = len(items) if isinstance(items, list) else 0
         if num_items < limit:
             break
@@ -1676,6 +1694,8 @@ def main():
     log_print(f"   Rolls written from bills (this run): {len(rolls_written_from_bills)}")
 
     # Second pass: GET /house-vote/{congress}/{session} for any votes not already in SEARCH#ROLL from the bill pass
+    log_print("-" * 80)
+    log_print("Second pass: house-vote list API — fetch additional roll calls not already written from bills.")
     congresses_from_bills = set()
     for bid in bill_id_list:
         parsed = _parse_bill_id(bid)
@@ -1687,10 +1707,17 @@ def main():
         log_print(f"   No congress from bills; using current congress {list(congresses_from_bills)[0]} for house-vote list.")
     if congresses_from_bills:
         roll_backfill_added = 0
+        roll_skipped_already_from_bills = 0
+        house_vote_list_api_calls = 0
+        house_vote_members_api_calls = 0
         for congress in sorted(congresses_from_bills):
             for session in (1, 2):
                 api_key, key_index = api_key_rotator.get_key_and_index()
                 vote_list = _fetch_house_vote_list(congress, session, api_key, key_index=key_index)
+                house_vote_list_api_calls += 1
+                log_print(f"   Congress {congress} Session {session}: house-vote list API returned {len(vote_list)} roll(s).")
+                added_this_session = 0
+                skipped_this_session = 0
                 for v in vote_list:
                     if not isinstance(v, dict):
                         continue
@@ -1704,9 +1731,13 @@ def main():
                         continue
                     key = (str(congress), sess_int, roll_int)
                     if key in rolls_written_from_bills:
+                        skipped_this_session += 1
                         continue
                     api_key, key_index = api_key_rotator.get_key_and_index()
                     members = _fetch_house_vote_members(str(congress), sess_int, roll_int, api_key, key_index=key_index)
+                    house_vote_members_api_calls += 1
+                    if added_this_session < 5:
+                        log_print(f"      Fetching members for roll {congress}#{session}#{roll_int} (not from bill pass) — API call.")
                     bill_id_associated = _bill_id_from_legislation(
                         congress,
                         v.get("legislationType"),
@@ -1716,6 +1747,7 @@ def main():
                     _write_one_roll_item(str(congress), sess_int, roll_int, members, bill_id_associated, bills_table)
                     rolls_written_from_bills.add(key)
                     roll_backfill_added += 1
+                    added_this_session += 1
                     if politicians:
                         if bill_id_associated:
                             single_roll = [{"roll": roll_int, "session": sess_int, "members": members}]
@@ -1736,8 +1768,15 @@ def main():
                                 bills_table,
                                 politicians_by_bioguide=politicians_by_bioguide,
                             )
+                roll_skipped_already_from_bills += skipped_this_session
+                if skipped_this_session or added_this_session:
+                    log_print(f"   Congress {congress} Session {session}: {skipped_this_session} already from bills (skipped), {added_this_session} new (fetched members, wrote SEARCH#ROLL + SEARCH#VOTE).")
+        log_print(f"   House-vote list summary: {roll_skipped_already_from_bills} roll(s) already from bills (skipped), {roll_backfill_added} new (API calls made).")
+        log_print(f"   House-vote list API calls: {house_vote_list_api_calls} list call(s), {house_vote_members_api_calls} member call(s) for new rolls.")
         if roll_backfill_added:
             log_print(f"✅ House-vote list backfill: added {roll_backfill_added} roll call(s) not from bill pass.")
+        else:
+            log_print(f"   House-vote list backfill: no additional rolls (all rolls in list were already written from bill pass).")
 
     log_print("")
     log_print("=" * 80)

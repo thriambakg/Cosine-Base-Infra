@@ -19,6 +19,11 @@ Usage:
   python test_bill_roll_call.py 2189
   python test_bill_roll_call.py 2189 --congress 119 --type hr
   python test_bill_roll_call.py 2189 -o roll_call_2189.json
+
+  # Fetch all roll calls for a congress/session (matches Glue house-vote list logic)
+  python test_bill_roll_call.py --all-rolls --congress 119
+  python test_bill_roll_call.py --all-rolls --congress 119 --session 1
+  python test_bill_roll_call.py --all-rolls --congress 119 -o all_rolls_119.json
 """
 
 import argparse
@@ -36,7 +41,7 @@ import requests
 
 API_BASE_URL = "https://api.congress.gov/v3"
 # Set via CONGRESS_API_KEY env var or pass --api-key on the command line (do not commit keys)
-API_KEY = ""
+API_KEY = "jVFi0sHwg2iolTUws0lSj5r0tHqfh98bcXnTiEAX"
 
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
@@ -160,14 +165,17 @@ def extract_recorded_votes_from_actions(actions: List[Dict]) -> List[Dict]:
     return out
 
 
-def fetch_house_vote_list(congress: int, session: int, api_key: str) -> List[Dict]:
+def fetch_house_vote_list(congress: int, session: int, api_key: str, debug_keys: bool = False) -> List[Dict]:
     """
     GET /house-vote/{congress}/{session} - list all roll call votes for that Congress and session.
-    Returns list of votes (rollCallNumber, url, result, legislationUrl, etc.). Paginated (limit 250).
+    Returns list of votes (rollCallNumber, sessionNumber, congress, legislationUrl, etc.). Paginated (limit 250).
+    Matches Glue backfill_bill_text._fetch_house_vote_list: tries votes, houseVotes, results, items;
+    fallback scan for list of dicts with rollCallNumber/legislationNumber/rollNumber; single-object wrap; stop when page < limit.
     """
-    out = []
+    out: List[Dict] = []
     offset = 0
     limit = 250
+    logged_keys = False
     while True:
         url = f"{API_BASE_URL}/house-vote/{congress}/{session}"
         params = {**_params(api_key), "format": "json", "offset": offset, "limit": limit}
@@ -176,19 +184,34 @@ def fetch_house_vote_list(congress: int, session: int, api_key: str) -> List[Dic
             break
         items = None
         if isinstance(data, dict):
-            items = data.get("houseVotes") or data.get("votes") or data.get("results")
+            items = data.get("votes") or data.get("houseVotes") or data.get("results") or data.get("items")
             if isinstance(items, dict):
-                items = items.get("item", items.get("vote", []))
+                items = items.get("item", items.get("vote", items.get("votes", [])))
+            if not isinstance(items, list) and isinstance(data.get("houseVote"), dict):
+                items = data["houseVote"].get("votes") or data["houseVote"].get("item")
+            if not isinstance(items, list):
+                for key, val in data.items():
+                    if key in ("pagination", "request"):
+                        continue
+                    if isinstance(val, list) and val and isinstance(val[0], dict):
+                        if "rollCallNumber" in val[0] or "legislationNumber" in val[0] or "rollNumber" in val[0]:
+                            items = val
+                            break
+            if not isinstance(items, list) and offset == 0 and (debug_keys or not logged_keys):
+                print(f"      [debug] house-vote list response keys (Congress {congress} Session {session}): {list(data.keys())}", file=sys.stderr)
+                logged_keys = True
+            if not isinstance(items, list) and isinstance(data, dict) and "rollCallNumber" in data:
+                items = [data]
         if isinstance(items, list):
             out.extend(items)
         elif isinstance(data, list):
             out.extend(data)
+        elif isinstance(data, dict) and "rollCallNumber" in data:
+            out.append(data)
         if not isinstance(data, dict):
             break
-        pagination = data.get("pagination")
-        if isinstance(pagination, dict) and pagination.get("count") and offset + limit >= pagination.get("count", 0):
-            break
-        if not (isinstance(items, list) and len(items) == limit):
+        num_items = len(items) if isinstance(items, list) else 0
+        if num_items < limit:
             break
         offset += limit
     return out
@@ -204,43 +227,41 @@ def fetch_house_vote_detail(congress: int, session: int, roll_number: int, api_k
 def fetch_house_vote_members(congress: int, session: int, roll_number: int, api_key: str) -> List[Dict]:
     """
     GET /house-vote/{congress}/{session}/{voteNumber}/members
-    API returns JSON with top-level "results" array (bioguideID, firstName, lastName, voteCast, voteParty, voteState).
-    Supports offset/limit (max 250); default is 20 per page.
+    Matches Glue backfill_bill_text._fetch_house_vote_members: Congress.gov v3 returns "results" array
+    (bioguideID, firstName, lastName, voteCast, voteParty, voteState). Try results first, then members, then legacy wrappers.
+    Paginated (limit 250).
     """
     all_members = []
     offset = 0
-    limit = 250  # max per API docs
+    limit = 250
     while True:
         url = f"{API_BASE_URL}/house-vote/{congress}/{session}/{roll_number}/members"
         params = {**_params(api_key), "format": "json", "offset": offset, "limit": limit}
         data = make_request(url, params)
         if not data:
             break
-        # API returns houseRollCallVoteMemberVotes (wrapper; array may be under item or singular key)
         results = None
         if isinstance(data, dict):
-            raw = data.get("houseRollCallVoteMemberVotes")
-            if isinstance(raw, list):
-                results = raw
-            elif isinstance(raw, dict):
-                # Try common Congress.gov wrapper keys (plural and singular)
-                for key in ("item", "memberVote", "memberVotes", "houseRollCallVoteMemberVote"):
-                    val = raw.get(key)
-                    if isinstance(val, list):
-                        results = val
-                        break
-                    if isinstance(val, dict) and (val.get("voteCast") or val.get("bioguideID")):
-                        results = [val]
-                        break
-                if results is None and raw:
-                    # Any key whose value is a list of dicts with voteCast/bioguideID
-                    for key, val in raw.items():
-                        if isinstance(val, list) and val and isinstance(val[0], dict):
-                            if "voteCast" in val[0] or "bioguideID" in val[0]:
-                                results = val
-                                break
+            results = data.get("results") or data.get("members") or data.get("memberVotes")
             if not isinstance(results, list):
-                results = data.get("results") or data.get("members") or data.get("memberVotes")
+                raw = data.get("houseRollCallVoteMemberVotes")
+                if isinstance(raw, list):
+                    results = raw
+                elif isinstance(raw, dict):
+                    for key in ("item", "memberVote", "memberVotes", "houseRollCallVoteMemberVote"):
+                        val = raw.get(key)
+                        if isinstance(val, list):
+                            results = val
+                            break
+                        if isinstance(val, dict) and (val.get("voteCast") or val.get("bioguideID")):
+                            results = [val]
+                            break
+                    if results is None and raw:
+                        for _k, val in raw.items():
+                            if isinstance(val, list) and val and isinstance(val[0], dict):
+                                if "voteCast" in val[0] or "bioguideID" in val[0]:
+                                    results = val
+                                    break
             if not isinstance(results, list) and isinstance(data.get("houseVote"), dict):
                 h = data["houseVote"]
                 results = h.get("results") or h.get("members")
@@ -251,19 +272,17 @@ def fetch_house_vote_members(congress: int, session: int, roll_number: int, api_
                         if "voteCast" in cand[0] or "bioguideID" in cand[0]:
                             results = cand
                             break
-        if isinstance(results, list):
-            all_members.extend(results)
         elif isinstance(data, list) and data and isinstance(data[0], dict):
             if "voteCast" in data[0] or "bioguideID" in data[0]:
-                all_members.extend(data)
-        # Pagination: stop if no more results or we got a full page (need to fetch next)
+                results = data
+        if isinstance(results, list):
+            all_members.extend(results)
         if not isinstance(data, dict):
             break
-        pagination = data.get("pagination")
-        if isinstance(pagination, dict):
-            count = pagination.get("count", 0)
-            if count and offset + limit >= count:
-                break
+        pagination = data.get("pagination") or {}
+        count = pagination.get("count", 0) if isinstance(pagination, dict) else 0
+        if count and offset + limit >= count:
+            break
         if not (isinstance(results, list) and len(results) == limit):
             break
         offset += limit
@@ -371,14 +390,60 @@ def format_vote_list_table(member_votes: List[Dict]) -> List[str]:
     return [f"{name}\t{party}\t{state}\t{vote}" for name, party, state, vote in rows]
 
 
+def run_all_rolls(
+    congress: int,
+    session: Optional[int],
+    api_key: str,
+    debug: bool,
+    output_path: Optional[str],
+) -> None:
+    """
+    Fetch all roll calls for congress/session(s) using house-vote list API.
+    Matches Glue second-pass logic so you can test locally before running on AWS.
+    """
+    sessions = [session] if session is not None else [1, 2]
+    all_votes: List[Dict] = []
+    for sess in sessions:
+        vote_list = fetch_house_vote_list(congress, sess, api_key, debug_keys=debug)
+        print(f"Congress {congress} Session {sess}: house-vote list API returned {len(vote_list)} roll(s).")
+        for v in vote_list:
+            v_copy = dict(v)
+            v_copy.setdefault("sessionNumber", sess)
+            all_votes.append(v_copy)
+        if debug and len(vote_list) == 0:
+            print("      [debug] No rolls parsed; response keys were logged above.", file=sys.stderr)
+    roll_ids = [
+        (v.get("rollCallNumber") or v.get("rollNumber"), v.get("sessionNumber"))
+        for v in all_votes if isinstance(v, dict)
+    ]
+    print(f"Total roll calls: {len(all_votes)}")
+    if all_votes:
+        sample = roll_ids[:15]
+        print(f"Sample (rollNumber, session): {sample}{'...' if len(roll_ids) > 15 else ''}")
+        # Optionally fetch members for first roll to verify members API
+        first = all_votes[0]
+        rn = first.get("rollCallNumber") or first.get("rollNumber")
+        sn = first.get("sessionNumber") or sessions[0]
+        if rn is not None and sn is not None:
+            members = fetch_house_vote_members(congress, int(sn), int(rn), api_key)
+            print(f"First roll (Congress {congress} Session {sn} Roll {rn}): {len(members)} member votes")
+    if output_path:
+        out = {"congress": congress, "sessions": sessions, "rollCount": len(all_votes), "votes": all_votes}
+        with open(output_path, "w", encoding="utf-8") as f:
+            json.dump(out, f, indent=2, default=str)
+        print(f"Wrote {output_path}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(
-        description="Fetch roll call (vote) data for a bill from Congress.gov API."
+        description="Fetch roll call (vote) data for a bill from Congress.gov API, or all roll calls for a congress/session."
     )
     parser.add_argument(
         "bill_number",
         type=str,
-        help="Bill number (e.g. 2189 for H.R. 2189)",
+        nargs="?",
+        default=None,
+        help="Bill number (e.g. 2189 for H.R. 2189). Omit when using --all-rolls.",
     )
     parser.add_argument(
         "--congress",
@@ -414,7 +479,19 @@ def main() -> None:
     parser.add_argument(
         "--debug",
         action="store_true",
-        help="Print API response keys when member list is empty",
+        help="Print API response keys when member list is empty or when --all-rolls returns 0",
+    )
+    parser.add_argument(
+        "--all-rolls",
+        action="store_true",
+        help="Fetch all roll calls for congress/session (house-vote list API). No bill number needed.",
+    )
+    parser.add_argument(
+        "--session",
+        type=int,
+        default=None,
+        choices=[1, 2],
+        help="Session (1 or 2). For --all-rolls only; if omitted, fetches both sessions.",
     )
     args = parser.parse_args()
 
@@ -424,6 +501,12 @@ def main() -> None:
         print("Set CONGRESS_API_KEY env var or pass --api-key (do not commit keys to the repo).", file=sys.stderr)
         sys.exit(1)
 
+    if args.all_rolls:
+        run_all_rolls(congress, args.session, api_key, args.debug, args.output)
+        return
+
+    if not args.bill_number:
+        parser.error("bill_number required unless --all-rolls is used")
     print(f"Bill: Congress {congress}, {args.bill_type.upper()} {args.bill_number}")
     print("Fetching bill, actions, and roll call data...")
     result = build_roll_call_data_for_bill(
