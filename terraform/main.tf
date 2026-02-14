@@ -3468,9 +3468,9 @@ module "congress_bills_bill_text_backfill_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access - least privilege: congress_bills/crawler/backfill_bill_text.py uses update_item, scan only
+  # DynamoDB access - least privilege: backfill uses GetItem (per bill for delta) and UpdateItem only
   dynamodb_table_arn = module.congress_bills_table.table_arn
-  dynamodb_actions   = ["dynamodb:UpdateItem", "dynamodb:Scan"]
+  dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem"]
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
