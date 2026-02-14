@@ -1153,6 +1153,16 @@ def extract_zip_from_s3(zip_s3_key: str) -> Dict[str, bytes]:
     return xml_files
 
 
+def _elem_text(parent, tag: str) -> str:
+    """Get trimmed text of first child element with given tag, or empty string."""
+    if parent is None:
+        return ""
+    child = parent.find(tag)
+    if child is None or child.text is None:
+        return ""
+    return child.text.strip() if isinstance(child.text, str) else str(child.text)
+
+
 def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Optional[Dict]:
     """
     Parse BILLSTATUS XML file and convert to DynamoDB record format.
@@ -1218,6 +1228,48 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             if title_elem is not None and title_elem.text:
                 bill_title = title_elem.text
         
+        # Full titles list (all title types) for indexing/display
+        titles_full = []
+        if titles_elem is not None:
+            for title_item in titles_elem.findall('item') or []:
+                t = {}
+                for tag in ('chamberCode', 'chamberName', 'parentTitleType', 'titleType', 'title'):
+                    child = title_item.find(tag)
+                    if child is not None and child.text is not None:
+                        t[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
+                if t:
+                    titles_full.append(t)
+        
+        # Scalar bill-level fields from XML
+        xml_create_date = _elem_text(bill_elem, 'createDate')
+        xml_update_date = _elem_text(bill_elem, 'updateDate')
+        origin_chamber = _elem_text(bill_elem, 'originChamber')
+        is_by_request = _elem_text(bill_elem, 'isByRequest')
+        xml_version = _elem_text(bill_elem, 'version')
+        
+        # lastAction (dedicated snapshot: actionDate, links, text)
+        last_action_json = ""
+        last_action_elem = bill_elem.find('lastAction')
+        if last_action_elem is not None:
+            la = {}
+            for tag in ('actionDate', 'text'):
+                child = last_action_elem.find(tag)
+                if child is not None and child.text is not None:
+                    la[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
+            links_la = last_action_elem.find('links')
+            if links_la is not None:
+                la_links = []
+                for le in links_la.findall('link') or []:
+                    name_e, url_e = le.find('name'), le.find('url')
+                    n = name_e.text if name_e is not None and name_e.text else ""
+                    u = url_e.text if url_e is not None and url_e.text else ""
+                    if n or u:
+                        la_links.append({"name": n, "url": u})
+                if la_links:
+                    la['links'] = la_links
+            if la:
+                last_action_json = json.dumps(la)
+        
         # Extract introduced date
         introduced_date_elem = bill_elem.find('introducedDate')
         introduced_date = introduced_date_elem.text if introduced_date_elem is not None and introduced_date_elem.text else None
@@ -1225,6 +1277,23 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         
         # Find actions element (used for both latest action date and actions extraction)
         actions_elem = bill_elem.find('actions')
+        
+        # Actions container-level counts (facets: actionByCounts, actionTypeCounts)
+        actions_action_by_counts = {}
+        actions_action_type_counts = {}
+        if actions_elem is not None:
+            abc_elem = actions_elem.find('actionByCounts')
+            if abc_elem is not None:
+                for child in abc_elem or []:
+                    if child.tag is not None and child.text is not None:
+                        key = child.tag.split('}')[-1] if '}' in str(child.tag) else child.tag
+                        actions_action_by_counts[key] = child.text.strip()
+            atc_elem = actions_elem.find('actionTypeCounts')
+            if atc_elem is not None:
+                for child in atc_elem or []:
+                    if child.tag is not None and child.text is not None:
+                        key = child.tag.split('}')[-1] if '}' in str(child.tag) else child.tag
+                        actions_action_type_counts[key] = child.text.strip()
         
         # Extract latest action date (from <latestAction> or first action)
         latest_action_date = None
@@ -1256,11 +1325,19 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     bioguide_id_elem = identifiers_elem.find('bioguideId')
                     if bioguide_id_elem is not None and bioguide_id_elem.text:
                         primary_sponsor['bioguideId'] = bioguide_id_elem.text
+                    for id_tag in ('gpoId', 'lisID'):
+                        e = identifiers_elem.find(id_tag)
+                        if e is not None and e.text:
+                            primary_sponsor[id_tag] = e.text.strip()
                 else:
                     # Legacy format: bioguideId might be direct child
                     bioguide_id_elem = sponsor_item.find('bioguideId')
                     if bioguide_id_elem is not None and bioguide_id_elem.text:
                         primary_sponsor['bioguideId'] = bioguide_id_elem.text
+                
+                middle_name_elem = sponsor_item.find('middleName')
+                if middle_name_elem is not None and middle_name_elem.text:
+                    primary_sponsor['middleName'] = middle_name_elem.text.strip()
                 
                 # Extract name (current format has firstName/lastName/fullName)
                 first_name_elem = sponsor_item.find('firstName')
@@ -1343,6 +1420,13 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 last_name_elem = cosponsor_item.find('lastName')
                 full_name_elem = cosponsor_item.find('fullName')
                 name_elem = cosponsor_item.find('name')  # Legacy format
+                middle_name_elem = cosponsor_item.find('middleName')
+                if middle_name_elem is not None and middle_name_elem.text:
+                    cosponsor['middleName'] = middle_name_elem.text.strip()
+                for tag in ('isOriginalCosponsor', 'sponsorshipDate', 'sponsorshipWithdrawnDate'):
+                    e = cosponsor_item.find(tag)
+                    if e is not None and e.text is not None:
+                        cosponsor[tag] = e.text.strip() if isinstance(e.text, str) else str(e.text)
                 
                 if first_name_elem is not None and last_name_elem is not None:
                     cosponsor['firstName'] = first_name_elem.text if first_name_elem.text else ""
@@ -1371,6 +1455,10 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     bioguide_id_elem = identifiers_elem.find('bioguideId')
                     if bioguide_id_elem is not None and bioguide_id_elem.text:
                         cosponsor['bioguideId'] = bioguide_id_elem.text
+                    for id_tag in ('gpoId', 'lisID'):
+                        e = identifiers_elem.find(id_tag)
+                        if e is not None and e.text:
+                            cosponsor[id_tag] = e.text.strip()
                 else:
                     # Legacy format: bioguideId might be direct child
                     bioguide_id_elem = cosponsor_item.find('bioguideId')
@@ -1459,39 +1547,109 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 if action_code_elem is not None and action_code_elem.text:
                     action['actionCode'] = action_code_elem.text
                 
+                action_time_elem = action_item.find('actionTime')
+                if action_time_elem is not None and action_time_elem.text:
+                    action['actionTime'] = action_time_elem.text.strip() if isinstance(action_time_elem.text, str) else str(action_time_elem.text)
+                
+                committee_elem = action_item.find('committee')
+                if committee_elem is not None:
+                    c_name = _elem_text(committee_elem, 'name')
+                    c_code = _elem_text(committee_elem, 'systemCode')
+                    if c_name or c_code:
+                        action['committee'] = {'name': c_name, 'systemCode': c_code}
+                
+                source_elem = action_item.find('sourceSystem')
+                if source_elem is not None:
+                    s_code = _elem_text(source_elem, 'code')
+                    s_name = _elem_text(source_elem, 'name')
+                    if s_code or s_name:
+                        action['sourceSystem'] = {'code': s_code, 'name': s_name}
+                
+                # Links (e.g. roll call: name "Roll no. 60", url to clerk.house.gov/evs/... or senate)
+                links_elem = action_item.find('links')
+                if links_elem is not None:
+                    link_elems = links_elem.findall('link')
+                    action_links = []
+                    for le in link_elems or []:
+                        name_e = le.find('name') if le is not None else None
+                        url_e = le.find('url') if le is not None else None
+                        name = name_e.text if name_e is not None and name_e.text else ""
+                        url = url_e.text if url_e is not None and url_e.text else ""
+                        if name or url:
+                            action_links.append({"name": name, "url": url})
+                    if action_links:
+                        action['links'] = action_links
+                
+                # Per-action recordedVotes (format as of late 2022: votes live under actions/item)
+                rv_action_elem = action_item.find('recordedVotes')
+                if rv_action_elem is not None:
+                    for rv_item in rv_action_elem.findall('recordedVote') or []:
+                        rv = {}
+                        for tag in ('chamber', 'congress', 'date', 'fullActionName', 'rollNumber', 'sessionNumber', 'url'):
+                            child = rv_item.find(tag)
+                            if child is not None and child.text is not None:
+                                rv[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
+                        if rv:
+                            action.setdefault('recordedVotes', []).append(rv)
+                
                 actions.append(action)
         
-        # Extract summaries
+        # Recorded votes: bill-level (legacy) + from actions (current format); dedupe by chamber+roll+session
+        def _norm_rv(r):
+            return (r.get('chamber') or '', r.get('rollNumber') or '', r.get('sessionNumber') or '')
+        recorded_votes = []
+        seen_rv = set()
+        rv_elem = bill_elem.find('recordedVotes')
+        if rv_elem is not None:
+            for rv_item in rv_elem.findall('recordedVote') or []:
+                rv = {}
+                for tag in ('chamber', 'congress', 'date', 'fullActionName', 'rollNumber', 'sessionNumber', 'url'):
+                    child = rv_item.find(tag)
+                    if child is not None and child.text is not None:
+                        rv[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
+                if rv and _norm_rv(rv) not in seen_rv:
+                    seen_rv.add(_norm_rv(rv))
+                    recorded_votes.append(rv)
+        for a in actions:
+            for rv in a.get('recordedVotes') or []:
+                if _norm_rv(rv) not in seen_rv:
+                    seen_rv.add(_norm_rv(rv))
+                    recorded_votes.append(rv)
+        
+        # Extract summaries (support both billSummaries/item and summary elements)
         summaries = []
         summaries_elem = bill_elem.find('summaries')
         if summaries_elem is not None:
-            # Summaries use <summary> elements, not <item>
-            summary_items = summaries_elem.findall('summary')
-            for summary_item in summary_items:
+            bill_summaries_elem = summaries_elem.find('billSummaries')
+            if bill_summaries_elem is not None:
+                summary_items = bill_summaries_elem.findall('item')
+            else:
+                summary_items = summaries_elem.findall('summary')
+            for summary_item in summary_items or []:
                 summary = {}
-                
                 # Try to get text from <cdata><text> structure (current format)
                 cdata_elem = summary_item.find('cdata')
                 if cdata_elem is not None:
                     text_in_cdata = cdata_elem.find('text')
                     if text_in_cdata is not None and text_in_cdata.text:
                         summary['text'] = text_in_cdata.text
-                
-                # Fallback to direct <text> element
                 if not summary.get('text'):
                     text_elem = summary_item.find('text')
                     if text_elem is not None and text_elem.text:
                         summary['text'] = text_elem.text
-                
-                version_elem = summary_item.find('versionCode')
-                if version_elem is not None and version_elem.text:
-                    summary['versionCode'] = version_elem.text
-                
-                action_desc_elem = summary_item.find('actionDesc')
-                if action_desc_elem is not None and action_desc_elem.text:
-                    summary['actionDesc'] = action_desc_elem.text
-                
-                if summary.get('text'):  # Only add if we have text
+                for tag in ('actionDate', 'actionDesc', 'versionCode', 'name', 'updateDate', 'lastSummaryUpdateDate'):
+                    val = _elem_text(summary_item, tag)
+                    if val:
+                        summary[tag] = val
+                if not summary.get('versionCode'):
+                    version_elem = summary_item.find('versionCode')
+                    if version_elem is not None and version_elem.text:
+                        summary['versionCode'] = version_elem.text.strip()
+                if not summary.get('actionDesc'):
+                    action_desc_elem = summary_item.find('actionDesc')
+                    if action_desc_elem is not None and action_desc_elem.text:
+                        summary['actionDesc'] = action_desc_elem.text.strip()
+                if summary.get('text'):
                     summaries.append(summary)
         
         # Extract subjects/policy area
@@ -1517,25 +1675,69 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     if name_elem is not None and name_elem.text:
                         policy_area = name_elem.text
         
-        # Extract amendments
+        # Full subjects (otherSubjects + primarySubjects) for indexing
+        subjects_full = []
+        subjects_elem = bill_elem.find('subjects')
+        if subjects_elem is not None:
+            bill_subjects_elem = subjects_elem.find('billSubjects')
+            if bill_subjects_elem is not None:
+                for os_elem in bill_subjects_elem.findall('otherSubjects') or []:
+                    for item in os_elem.findall('item') or []:
+                        s = {}
+                        name_el = item.find('name')
+                        if name_el is not None and name_el.text:
+                            s['name'] = name_el.text.strip()
+                        parent = item.find('parentSubject')
+                        if parent is not None:
+                            pname = parent.find('name')
+                            if pname is not None and pname.text:
+                                s['parentSubject'] = pname.text.strip()
+                        if s:
+                            subjects_full.append(s)
+                for ps_elem in bill_subjects_elem.findall('primarySubjects') or []:
+                    name_el = ps_elem.find('name')
+                    if name_el is not None and name_el.text:
+                        s = {'name': name_el.text.strip(), 'primary': True}
+                        parent = ps_elem.find('parentSubject')
+                        if parent is not None:
+                            pname = parent.find('name')
+                            if pname is not None and pname.text:
+                                s['parentSubject'] = pname.text.strip()
+                        subjects_full.append(s)
+        
+        # Extract amendments (full: number, description, purpose, type, latestAction, amendedBill)
         amendments = []
         amendments_elem = bill_elem.find('amendments')
         if amendments_elem is not None:
             amendment_items = amendments_elem.findall('amendment')
-            for amendment_item in amendment_items:
+            for amendment_item in amendment_items or []:
                 amendment = {}
-                
-                number_elem = amendment_item.find('number')
-                if number_elem is not None and number_elem.text:
-                    amendment['number'] = number_elem.text
-                
-                description_elem = amendment_item.find('description')
-                if description_elem is not None and description_elem.text:
-                    amendment['description'] = description_elem.text
-                
-                amendments.append(amendment)
+                for tag in ('number', 'description', 'purpose', 'type'):
+                    val = _elem_text(amendment_item, tag)
+                    if val:
+                        amendment[tag] = val
+                la_am = amendment_item.find('latestAction')
+                if la_am is not None:
+                    la = {}
+                    for t in ('actionDate', 'text'):
+                        v = _elem_text(la_am, t)
+                        if v:
+                            la[t] = v
+                    if la:
+                        amendment['latestAction'] = la
+                ab_elem = amendment_item.find('amendedBill')
+                if ab_elem is not None:
+                    ab = {}
+                    for t in ('congress', 'number', 'originChamber', 'originChamberCode', 'title', 'type'):
+                        v = _elem_text(ab_elem, t)
+                        if v:
+                            ab[t] = v
+                    if ab:
+                        amendment['amendedBill'] = ab
+                if amendment:
+                    amendments.append(amendment)
         
-        # Extract text versions (for SQS processing)
+        # Extract text versions (for SQS processing; store all formats per version)
         text_versions = []
         text_versions_elem = bill_elem.find('textVersions')
         if text_versions_elem is not None:
@@ -1550,14 +1752,186 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 formats_elem = text_version_item.find('formats')
                 if formats_elem is not None:
                     format_items = formats_elem.findall('item')
+                    formats_list = []
                     for format_item in format_items:
+                        f = {}
                         url_elem = format_item.find('url')
                         if url_elem is not None and url_elem.text:
-                            text_version['url'] = url_elem.text
-                            break
+                            f['url'] = url_elem.text.strip()
+                        type_f = _elem_text(format_item, 'type')
+                        if type_f:
+                            f['type'] = type_f
+                        if f:
+                            formats_list.append(f)
+                    if formats_list:
+                        text_version['formats'] = formats_list
+                    # Keep first url at top level for backward compatibility / SQS
+                    if formats_list and formats_list[0].get('url'):
+                        text_version['url'] = formats_list[0]['url']
                 
+                date_elem = text_version_item.find('date')
+                if date_elem is not None and date_elem.text:
+                    text_version['date'] = date_elem.text.strip()
                 if text_version:
                     text_versions.append(text_version)
+        
+        # Calendar numbers
+        calendar_numbers = []
+        cal_elem = bill_elem.find('calendarNumbers')
+        if cal_elem is not None:
+            for item in cal_elem.findall('item') or []:
+                c = {}
+                for tag in ('calendar', 'number'):
+                    v = _elem_text(item, tag)
+                    if v:
+                        c[tag] = v
+                if c:
+                    calendar_numbers.append(c)
+        
+        # CBO cost estimates
+        cbo_cost_estimates = []
+        cbo_elem = bill_elem.find('cboCostEstimates')
+        if cbo_elem is not None:
+            for item in cbo_elem.findall('item') or []:
+                c = {}
+                for tag in ('rptPubDate', 'rptTitle', 'rptUrl'):
+                    v = _elem_text(item, tag)
+                    if v:
+                        c[tag] = v
+                if c:
+                    cbo_cost_estimates.append(c)
+        
+        # Constitutional authority statement (can be long CDATA)
+        constitutional_authority_statement_text = ""
+        cas_elem = bill_elem.find('constitutionalAuthorityStatementText')
+        if cas_elem is not None and cas_elem.text:
+            constitutional_authority_statement_text = (cas_elem.text or "").strip()[:50000]
+        
+        # Committee reports
+        committee_reports = []
+        cr_elem = bill_elem.find('committeeReports')
+        if cr_elem is not None:
+            for report in cr_elem.findall('committeeReport') or []:
+                cit = _elem_text(report, 'citation')
+                if cit:
+                    committee_reports.append({"citation": cit})
+        
+        # Committees (billCommittees/item: chamber, name, systemCode, type, activities, subcommittees)
+        committees_list = []
+        comm_elem = bill_elem.find('committees')
+        if comm_elem is not None:
+            bc_elem = comm_elem.find('billCommittees')
+            if bc_elem is not None:
+                for item in bc_elem.findall('item') or []:
+                    c = {}
+                    for tag in ('chamber', 'name', 'systemCode', 'type'):
+                        v = _elem_text(item, tag)
+                        if v:
+                            c[tag] = v
+                    activities = []
+                    act_container = item.find('activities')
+                    for act_item in (act_container.findall('item') if act_container is not None else []) or []:
+                        a = {}
+                        for t in ('date', 'name'):
+                            v = _elem_text(act_item, t)
+                            if v:
+                                a[t] = v
+                        if a:
+                            activities.append(a)
+                    if activities:
+                        c['activities'] = activities
+                    subcoms = []
+                    sub_container = item.find('subcommittees')
+                    for sc in (sub_container.findall('item') if sub_container is not None else []) or []:
+                        sc_d = {}
+                        for t in ('name', 'systemCode'):
+                            v = _elem_text(sc, t)
+                            if v:
+                                sc_d[t] = v
+                        if sc_d:
+                            subcoms.append(sc_d)
+                    if subcoms:
+                        c['subcommittees'] = subcoms
+                    if c:
+                        committees_list.append(c)
+        
+        # Laws (public/private law citations)
+        laws_list = []
+        laws_elem = bill_elem.find('laws')
+        if laws_elem is not None:
+            for item in laws_elem.findall('item') or []:
+                l = {}
+                for tag in ('number', 'type'):
+                    v = _elem_text(item, tag)
+                    if v:
+                        l[tag] = v
+                if l:
+                    laws_list.append(l)
+        
+        # Notes (links + text CDATA)
+        notes_list = []
+        notes_elem = bill_elem.find('notes')
+        if notes_elem is not None:
+            for item in notes_elem.findall('Item') or notes_elem.findall('item') or []:
+                n = {}
+                text_el = item.find('text')
+                if text_el is not None and text_el.text:
+                    n['text'] = (text_el.text or "")[:30000]
+                links_el = item.find('links')
+                if links_el is not None:
+                    link_list = []
+                    for le in links_el.findall('link') or []:
+                        na, u = _elem_text(le, 'name'), _elem_text(le, 'url')
+                        if na or u:
+                            link_list.append({"name": na, "url": u})
+                    if link_list:
+                        n['links'] = link_list
+                if n:
+                    notes_list.append(n)
+        
+        # Related bills
+        related_bills = []
+        rb_elem = bill_elem.find('relatedBills')
+        if rb_elem is not None:
+            for item in rb_elem.findall('item') or []:
+                r = {}
+                for tag in ('congress', 'number', 'type', 'latestTitle'):
+                    v = _elem_text(item, tag)
+                    if v:
+                        r[tag] = v
+                la_r = item.find('latestAction')
+                if la_r is not None:
+                    r_la = {}
+                    for t in ('actionDate', 'text'):
+                        v = _elem_text(la_r, t)
+                        if v:
+                            r_la[t] = v
+                    if r_la:
+                        r['latestAction'] = r_la
+                rd_el = item.find('relationshipDetails')
+                if rd_el is not None:
+                    rds = []
+                    for rd_item in rd_el.findall('item') or []:
+                        rd = {}
+                        for t in ('identifiedBy', 'type'):
+                            v = _elem_text(rd_item, t)
+                            if v:
+                                rd[t] = v
+                        if rd:
+                            rds.append(rd)
+                    if rds:
+                        r['relationshipDetails'] = rds
+                if r:
+                    related_bills.append(r)
+        
+        # Dublin Core metadata (under billStatus root; may use dc: namespace)
+        dublin_core = {}
+        dc_elem = root.find('dublinCore')
+        if dc_elem is not None:
+            for child in dc_elem:
+                if child.text is not None:
+                    key = child.tag.split('}')[-1] if '}' in str(child.tag) else child.tag
+                    dublin_core[key] = child.text.strip()
         
         # Build record matching existing DynamoDB schema
         record = {
@@ -1573,7 +1947,7 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             # Dates
             "introduced_date": introduced_date,
             "latest_action_date": latest_action_date,
-            "update_date": "",
+            "update_date": xml_update_date if xml_update_date else "",
             "update_date_including_text": "",
             
             # Primary Sponsor
@@ -1592,27 +1966,59 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             "cosponsor_parties": "|".join([c.get("party", "") for c in cosponsors if c.get("party")]),
             "cosponsors_json": json.dumps(cosponsors) if cosponsors else "",
             
-            # Actions
+            # Actions (including container-level counts)
             "action_count": len(actions),
             "actions_json": json.dumps(actions) if actions else "",
             "actions_summary": " | ".join([f"{a.get('actionDate', '')}: {a.get('text', '')[:100]}" for a in actions[:10]]) if actions else "",
+            "actions_action_by_counts_json": json.dumps(actions_action_by_counts) if actions_action_by_counts else "",
+            "actions_action_type_counts_json": json.dumps(actions_action_type_counts) if actions_action_type_counts else "",
             
             # Latest action
             "latest_action_text": actions[0].get('text', '') if actions else "",
             "latest_action_type": actions[0].get('type', '') if actions else "",
+            
+            # Recorded votes (from bulk XML; has_roll_call drives HasRollCallIndex; member-level data from backfill)
+            "has_roll_call": 1 if recorded_votes else 0,
+            "recorded_votes_json": json.dumps(recorded_votes) if recorded_votes else "",
             
             # Summaries
             "summary_count": len(summaries),
             "summaries_json": json.dumps(summaries) if summaries else "",
             "summary_text": " | ".join([s.get('text', '')[:200] for s in summaries[:3]]) if summaries else "",
             
-            # Subjects/Policy Area
+            # Subjects/Policy Area (full subject terms from XML)
             "policy_area": policy_area if policy_area else "Other",
-            "legislative_subjects": "",
+            "legislative_subjects": "|".join([s.get("name", "") for s in subjects_full if s.get("name")])[:4000] if subjects_full else "",
+            "subjects_json": json.dumps(subjects_full) if subjects_full else "",
             
             # Amendments
             "amendment_count": len(amendments),
             "amendments_json": json.dumps(amendments) if amendments else "",
+            
+            # Full titles, lastAction, XML metadata
+            "titles_json": json.dumps(titles_full) if titles_full else "",
+            "last_action_json": last_action_json,
+            "xml_create_date": xml_create_date,
+            "xml_update_date": xml_update_date,
+            "xml_version": xml_version,
+            "origin_chamber": origin_chamber,
+            "is_by_request": is_by_request,
+            
+            # Calendar, CBO, constitutional statement, committees, laws, notes, related bills
+            "calendar_numbers_json": json.dumps(calendar_numbers) if calendar_numbers else "",
+            "cbo_cost_estimates_json": json.dumps(cbo_cost_estimates) if cbo_cost_estimates else "",
+            "constitutional_authority_statement_text": constitutional_authority_statement_text[:50000] if constitutional_authority_statement_text else "",
+            "committee_reports_json": json.dumps(committee_reports) if committee_reports else "",
+            "committees_json": json.dumps(committees_list) if committees_list else "",
+            "laws_json": json.dumps(laws_list) if laws_list else "",
+            "notes_json": json.dumps(notes_list) if notes_list else "",
+            "related_bills_json": json.dumps(related_bills) if related_bills else "",
+            
+            # Text versions (persisted for indexing; also used for SQS)
+            "text_versions_json": json.dumps(text_versions) if text_versions else "",
+            
+            # Dublin Core (root-level metadata)
+            "dublin_core_json": json.dumps(dublin_core) if dublin_core else "",
             
             # Metadata
             "indexed_at": datetime.now(timezone.utc).isoformat(),
