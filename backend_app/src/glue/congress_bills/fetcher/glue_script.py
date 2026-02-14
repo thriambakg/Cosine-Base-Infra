@@ -2482,7 +2482,6 @@ def main():
     processed_count = 0
     error_count = 0
     total_bills_processed = 0
-    zip_s3_keys_used = []  # For roll call step: which ZIPs were used this run
     
     # Process each Congress and bill type separately (clear memory between each)
     for congress_num in congresses_to_query:
@@ -2533,7 +2532,6 @@ def main():
                     error_count += 1
                     continue
                 
-                zip_s3_keys_used.append(zip_s3_key)
                 if zip_content:
                     del zip_content
                 gc.collect()
@@ -2554,20 +2552,6 @@ def main():
     log_print(f"   ✅ Successfully Stored: {processed_count}")
     if error_count > 0:
         log_print(f"   ⚠️ Errors: {error_count}")
-    
-    # Write zip_s3_keys used this run for roll call step (reads ZIPs from S3, no manifest of bill_ids)
-    if zip_s3_keys_used and S3_BUCKET_NAME:
-        run_outputs_key = f"run-outputs/{start_date_simple}_{end_date_simple}/zip_s3_keys.json"
-        try:
-            s3_client.put_object(
-                Bucket=S3_BUCKET_NAME,
-                Key=run_outputs_key,
-                Body=json.dumps({"zip_s3_keys": zip_s3_keys_used}, default=str),
-                ContentType="application/json",
-            )
-            log_print(f"   📤 Wrote {len(zip_s3_keys_used)} ZIP key(s) to s3://{S3_BUCKET_NAME}/{run_outputs_key}")
-        except Exception as e:
-            log_print(f"   ⚠️ Failed to write zip_s3_keys to S3: {str(e)[:200]}")
     
     log_print("")  # Empty line for readability
     log_print("=" * 80)

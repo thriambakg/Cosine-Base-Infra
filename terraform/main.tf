@@ -3343,23 +3343,24 @@ resource "aws_iam_role_policy_attachment" "glue_congress_bills_bill_text_sqs" {
   ]
 }
 
-# Step Functions State Machine for Congress Bills Fetcher + Roll Call (consolidated)
-# Step 1: Fetcher Glue (download ZIPs, parse, store bills, write zip_s3_keys to S3)
-# Step 2: Roll call Glue (read zip_s3_keys from S3, process only those bills with delta logic)
+# Step Functions State Machine for Congress Bills Fetcher
+# Uses Glue job only (Lambda removed due to timeout limitations with large bill counts)
 module "congress_bills_fetcher_state_machine" {
   source = "./modules/step-functions"
 
   state_machine_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
   environment        = var.environment
 
+  # Step Functions definition - directly invokes Glue job
+  # Input should include: start_date, end_date, congress (optional)
   definition = jsonencode({
-    Comment = "Congress.gov Bill Data Fetcher then Roll Call (consolidated)"
-    StartAt = "RunFetcher"
+    Comment = "Congress.gov Bill Data Fetcher - Uses Glue job only"
+    StartAt = "StartGlueJob"
     States = {
-      RunFetcher = {
+      StartGlueJob = {
         Type     = "Task"
         Resource = "arn:aws:states:::glue:startJobRun.sync"
-        Comment  = "Run Congress bills fetcher Glue job"
+        Comment  = "Start Glue job for Congress bills fetching (2 day timeout)"
         Parameters = {
           "JobName" : module.congress_bills_fetcher_glue_job.job_name
           "Arguments" : {
@@ -3374,33 +3375,6 @@ module "congress_bills_fetcher_state_machine" {
             "--SOURCE.$" : "$.source"
           }
         }
-        ResultPath = "$.FetcherResult"
-        Catch = [
-          {
-            ErrorEquals = ["States.ALL"]
-            ResultPath  = "$.error"
-            Next        = "HandleError"
-          }
-        ]
-        Next = "RunRollCall"
-      }
-      RunRollCall = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::glue:startJobRun.sync"
-        Comment  = "Run roll call Glue job (reads zip_s3_keys from S3 run-outputs, delta only)"
-        Parameters = {
-          "JobName" : module.congress_bills_bill_text_backfill_glue_job.job_name
-          "Arguments" : {
-            "--PROJECT_NAME" : var.project_name
-            "--ENVIRONMENT" : var.environment
-            "--CONGRESS_API_BASE_URL" : "https://api.congress.gov/v3"
-            "--BILLS_TABLE_NAME" : module.congress_bills_table.table_name
-            "--S3_BUCKET_NAME" : module.congress_bills_data_s3.bucket_id
-            "--REQUEST_TIMEOUT" : "30"
-            "--START_DATE.$" : "$.start_date"
-            "--END_DATE.$" : "$.end_date"
-          }
-        }
         Catch = [
           {
             ErrorEquals = ["States.ALL"]
@@ -3412,21 +3386,22 @@ module "congress_bills_fetcher_state_machine" {
       }
       Success = {
         Type    = "Succeed"
-        Comment = "Congress bills fetched and roll call updated successfully"
+        Comment = "Congress bills fetched and stored successfully"
       }
       HandleError = {
         Type  = "Fail"
         Error = "CongressBillsFetchFailed"
-        Cause = "The Congress bills job failed. Check CloudWatch logs for details."
+        Cause = "The Congress.gov bill fetching job failed. Check CloudWatch logs for details."
       }
     }
   })
 
+  # Lambda function ARNs for IAM permissions (removed - no longer using Lambda)
   lambda_function_arns = []
 
+  # Glue job name for IAM permissions
   glue_job_names = [
-    module.congress_bills_fetcher_glue_job.job_name,
-    module.congress_bills_bill_text_backfill_glue_job.job_name
+    module.congress_bills_fetcher_glue_job.job_name
   ]
 
   # Logging configuration
@@ -3437,8 +3412,7 @@ module "congress_bills_fetcher_state_machine" {
   tags = var.common_tags
 
   depends_on = [
-    module.congress_bills_fetcher_glue_job,
-    module.congress_bills_bill_text_backfill_glue_job
+    module.congress_bills_fetcher_glue_job
   ]
 }
 
@@ -3469,9 +3443,9 @@ module "congress_bills_bill_text_backfill_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access - update_item, scan, get_item (get_item for zip-mode bill lookup)
+  # DynamoDB access - least privilege: congress_bills/crawler/backfill_bill_text.py uses update_item, scan only
   dynamodb_table_arn = module.congress_bills_table.table_arn
-  dynamodb_actions   = ["dynamodb:UpdateItem", "dynamodb:Scan", "dynamodb:GetItem"]
+  dynamodb_actions   = ["dynamodb:UpdateItem", "dynamodb:Scan"]
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
@@ -4382,12 +4356,12 @@ resource "aws_lambda_event_source_mapping" "lda_pac_autocomplete_sqs_trigger" {
 
 # IAM Policy for Glue Job to send PAC names to SQS
 
-# EventBridge Rule for Daily Bill Text Prefill (DISABLED - roll call now runs as Step 2 of fetcher state machine)
+# EventBridge Rule for Daily Bill Text Prefill
 resource "aws_cloudwatch_event_rule" "congress_bills_bill_text_prefill_scheduler" {
   name                = "${var.project_name}-congress-bill-text-prefill-daily-${var.environment}"
-  description         = "Legacy: roll call prefill. Now run as Step 2 of congress-bills-fetcher state machine."
-  schedule_expression = "cron(0 14 * * ? *)" # 2:00 PM UTC daily
-  state               = "DISABLED"           # Consolidated flow: fetcher state machine runs fetcher then roll call at 11:00 AM
+  description         = "Trigger Congress bills bill text prefill daily at 2:00 PM UTC (3 hours after bills fetcher) to crawl for bills with empty bill_text_html_s3_key"
+  schedule_expression = "cron(0 14 * * ? *)" # 2:00 PM UTC daily (9:00 AM EST / 10:00 AM EDT)
+  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
 
   tags = merge(var.common_tags, {
     Name        = "${var.project_name}-congress-bills-bill-text-prefill-daily-${var.environment}"
