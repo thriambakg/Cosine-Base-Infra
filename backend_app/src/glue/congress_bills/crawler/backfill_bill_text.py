@@ -14,6 +14,9 @@ Behavior:
    - SEARCH#VOTE index: for each bill updated, updates per-politician vote index items (PK SEARCH#VOTE#<politician_id>,
      SK VOTE). Attributes: display_name, yea, nea, abstained (each a list of bill_ids). Voters matched via
      congress-legislators.csv (bioguide_id or name). Congress.gov "Not Voting" and "Present" map to abstained.
+   - Oversize: when roll_call_votes or SEARCH#VOTE data would exceed DynamoDB item size, store in S3 oversize/
+     and set roll_call_votes_oversize_s3_key (bill item) or vote_data_oversize_s3_key (SEARCH#VOTE item). Search/API
+     should resolve these keys when present (gzip JSON in same bucket).
    - Uses same thread pool and per-key rate limiters as before.
 
 Bill text is filled by the fetcher pipeline (bulk XML + SQS -> Lambda); no separate backfill.
@@ -27,6 +30,7 @@ import time
 import threading
 import re
 import csv
+import gzip
 import zipfile
 from io import BytesIO, StringIO
 from collections import deque
@@ -832,6 +836,65 @@ def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
     return None
 
 
+# DynamoDB item size limit 400KB; use oversize/ folder for large roll_call_votes or SEARCH#VOTE data (mirror fetcher)
+_DYNAMODB_ITEM_SIZE_LIMIT = 400 * 1024
+_OVERSIZE_SAFE_SIZE = int(_DYNAMODB_ITEM_SIZE_LIMIT * 0.85)  # stay under limit with margin
+
+
+def _store_roll_call_votes_to_s3(bill_id: str, roll_call_votes: List[Dict[str, Any]]) -> str:
+    """Store roll_call_votes to S3 oversize/ folder. Returns S3 key (e.g. oversize/119-HR-1-roll_call_votes.json.gz)."""
+    s3_key = f"oversize/{bill_id}-roll_call_votes.json.gz"
+    json_bytes = json.dumps(roll_call_votes, default=str).encode("utf-8")
+    compressed = gzip.compress(json_bytes)
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_key,
+        Body=compressed,
+        ContentType="application/json",
+        ContentEncoding="gzip",
+    )
+    log_print(f"      💾 Stored oversized roll_call_votes for {bill_id} to S3: {s3_key} ({len(compressed):,} bytes compressed)")
+    return s3_key
+
+
+def _store_vote_data_to_s3(pk: str, yea: List[str], nea: List[str], abstained: List[str]) -> str:
+    """Store SEARCH#VOTE yea/nea/abstained to S3 oversize/. Returns S3 key. pk is SEARCH#VOTE#<pid>."""
+    # Use pk with # replaced so key is filesystem-safe: oversize/SEARCH-VOTE-B000123.json.gz
+    safe_key = pk.replace("#", "-") + ".json.gz"
+    s3_key = f"oversize/{safe_key}"
+    payload = {"yea": yea, "nea": nea, "abstained": abstained}
+    json_bytes = json.dumps(payload).encode("utf-8")
+    compressed = gzip.compress(json_bytes)
+    s3_client.put_object(
+        Bucket=S3_BUCKET_NAME,
+        Key=s3_key,
+        Body=compressed,
+        ContentType="application/json",
+        ContentEncoding="gzip",
+    )
+    return s3_key
+
+
+def _load_vote_data_from_item(existing_item: Dict[str, Any]) -> Tuple[List[str], List[str], List[str]]:
+    """Get yea, nea, abstained from existing SEARCH#VOTE item (inline or from vote_data_oversize_s3_key)."""
+    yea = list(existing_item.get("yea") or [])
+    nea = list(existing_item.get("nea") or [])
+    abstained = list(existing_item.get("abstained") or [])
+    s3_key = (existing_item.get("vote_data_oversize_s3_key") or "").strip()
+    if s3_key:
+        try:
+            resp = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+            body = resp.get("Body")
+            raw = gzip.decompress(body.read()) if body else b""
+            data = json.loads(raw.decode("utf-8"))
+            yea = list(data.get("yea") or [])
+            nea = list(data.get("nea") or [])
+            abstained = list(data.get("abstained") or [])
+        except Exception as e:
+            log_print(f"      ⚠️ Failed to load vote data from {s3_key}: {str(e)[:120]}")
+    return yea, nea, abstained
+
+
 # DynamoDB batch limits so SEARCH#VOTE updates don't become a bottleneck (only API should be).
 _BATCH_GET_MAX = 100
 _BATCH_WRITE_MAX = 25
@@ -901,11 +964,12 @@ def update_search_vote_index_for_bill(
     for pid, data in updates.items():
         pk, sk = f"SEARCH#VOTE#{pid}", "VOTE"
         item = existing.get(pid) or {}
-        yea = list(set(item.get("yea") or []) | data["yea"])
-        nea = list(set(item.get("nea") or []) | data["nea"])
-        abstained = list(set(item.get("abstained") or []) | data["abstained"])
+        existing_yea, existing_nea, existing_abstained = _load_vote_data_from_item(item)
+        yea = list(set(existing_yea) | data["yea"])
+        nea = list(set(existing_nea) | data["nea"])
+        abstained = list(set(existing_abstained) | data["abstained"])
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
-        put_items.append({
+        full_item = {
             "bill_id": pk,
             "search_index_sk": sk,
             "search_type": "VOTE",
@@ -915,7 +979,21 @@ def update_search_vote_index_for_bill(
             "nea": nea,
             "abstained": abstained,
             "is_search_index": True,
-        })
+        }
+        # If item would exceed DynamoDB limit, store yea/nea/abstained in oversize/ and set vote_data_oversize_s3_key
+        approx_size = len(json.dumps(full_item))
+        if approx_size > _OVERSIZE_SAFE_SIZE:
+            s3_key = _store_vote_data_to_s3(pk, yea, nea, abstained)
+            full_item = {
+                "bill_id": pk,
+                "search_index_sk": sk,
+                "search_type": "VOTE",
+                "search_value": display_name,
+                "display_name": display_name,
+                "vote_data_oversize_s3_key": s3_key,
+                "is_search_index": True,
+            }
+        put_items.append(full_item)
     for i in range(0, len(put_items), _BATCH_WRITE_MAX):
         chunk = put_items[i : i + _BATCH_WRITE_MAX]
         write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
@@ -1011,14 +1089,14 @@ def process_bill_roll_call_delta(
         roll_call_number = first_ent.get("roll")
     has_roll_call = 1 if merged else 0
     if has_roll_call:
-        update_expr = "SET has_roll_call = :h, roll_call_number = :n, roll_call_votes = :v"
+        update_expr = "SET has_roll_call = :h, roll_call_number = :n, roll_call_votes = :v REMOVE roll_call_votes_oversize_s3_key"
         attr_vals = {
             ":h": 1,
             ":n": roll_call_number,
             ":v": json.dumps(merged),
         }
     else:
-        update_expr = "SET has_roll_call = :h REMOVE roll_call_number, roll_call_votes"
+        update_expr = "SET has_roll_call = :h REMOVE roll_call_number, roll_call_votes, roll_call_votes_oversize_s3_key"
         attr_vals = {":h": 0}
     return True, None, None, {
         "bill_id": bill_id,
@@ -1138,11 +1216,28 @@ def main():
             if not success:
                 return ("err", err, None)
             if payload:
-                bills_table.update_item(
-                    Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
-                    UpdateExpression=payload["UpdateExpression"],
-                    ExpressionAttributeValues=payload["ExpressionAttributeValues"],
-                )
+                try:
+                    bills_table.update_item(
+                        Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
+                        UpdateExpression=payload["UpdateExpression"],
+                        ExpressionAttributeValues=payload["ExpressionAttributeValues"],
+                    )
+                except Exception as update_err:
+                    err_str = str(update_err)
+                    if "ValidationException" in err_str and "exceeded" in err_str.lower() and payload.get("roll_call_votes"):
+                        # Item size exceeded: store roll_call_votes in oversize/ and set key on item
+                        s3_key = _store_roll_call_votes_to_s3(bid, payload["roll_call_votes"])
+                        bills_table.update_item(
+                            Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
+                            UpdateExpression="SET has_roll_call = :h, roll_call_number = :n, roll_call_votes_oversize_s3_key = :k REMOVE roll_call_votes",
+                            ExpressionAttributeValues={
+                                ":h": 1,
+                                ":n": payload["ExpressionAttributeValues"][":n"],
+                                ":k": s3_key,
+                            },
+                        )
+                    else:
+                        raise
                 roll_votes = payload.get("roll_call_votes")
                 if roll_votes and politicians:
                     update_search_vote_index_for_bill(
