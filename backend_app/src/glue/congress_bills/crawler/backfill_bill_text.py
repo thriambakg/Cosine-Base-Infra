@@ -24,6 +24,8 @@ Roll call maintenance (all bills, excluding search indices):
      - roll_call_number (N): first House roll call number, or omitted if none
      - roll_call_votes (S): JSON string of roll call(s) with member votes
      - has_roll_call (N): 1 if bill has at least one roll call, 0 otherwise (GSI key for HasRollCallIndex)
+   - Phase 1 runs with a thread pool (ROLL_CALL_MAX_WORKERS, default 8) and a global rate limiter
+     (CONGRESS_API_MAX_REQUESTS_PER_HOUR, default 4800) to stay under Congress.gov's 5,000 req/hour limit.
 """
 
 
@@ -31,8 +33,11 @@ import sys
 import json
 import logging
 import time
+import threading
 import requests
 import re
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timezone
 from typing import Dict, List, Any, Optional, Tuple
 
@@ -89,11 +94,60 @@ REQUEST_TIMEOUT = int(args.get('REQUEST_TIMEOUT', '30'))
 MAX_RETRIES = int(args.get('MAX_RETRIES', '5'))
 RETRY_DELAY = int(args.get('RETRY_DELAY', '2'))
 
+# Congress.gov API: 5,000 requests/hour per key (https://github.com/LibraryOfCongress/api.congress.gov)
+# Use slightly under to avoid 429s when multiple keys share the same account or limits.
+CONGRESS_API_MAX_REQUESTS_PER_HOUR = int(args.get('CONGRESS_API_MAX_REQUESTS_PER_HOUR', '4800'))
+ROLL_CALL_MAX_WORKERS = int(args.get('ROLL_CALL_MAX_WORKERS', '8'))
+
 # AWS clients
 dynamodb = boto3.resource('dynamodb')
 s3_client = boto3.client('s3')
 secrets_client = boto3.client('secretsmanager')
 bills_table = dynamodb.Table(BILLS_TABLE_NAME) if BILLS_TABLE_NAME else None
+
+# ============================================================================
+# Rate limiter (Congress.gov: 5,000 req/hour per key; shared across threads)
+# ============================================================================
+
+class CongressApiRateLimiter:
+    """Thread-safe rate limiter: at most N requests per rolling hour."""
+
+    def __init__(self, max_per_hour: int = 4800, window_seconds: int = 3600):
+        self.max_per_hour = max_per_hour
+        self.window_seconds = window_seconds
+        self._timestamps = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.time()
+            # Drop timestamps outside the window
+            while self._timestamps and self._timestamps[0] < now - self.window_seconds:
+                self._timestamps.popleft()
+            while len(self._timestamps) >= self.max_per_hour:
+                # Wait until oldest request exits the window
+                wait_until = self._timestamps[0] + self.window_seconds
+                sleep_time = wait_until - time.time()
+                if sleep_time > 0:
+                    time.sleep(sleep_time)
+                now = time.time()
+                while self._timestamps and self._timestamps[0] < now - self.window_seconds:
+                    self._timestamps.popleft()
+            self._timestamps.append(time.time())
+
+
+# Global rate limiter (initialized on first use so job args are available)
+_congress_rate_limiter = None
+
+def _get_rate_limiter() -> CongressApiRateLimiter:
+    global _congress_rate_limiter
+    if _congress_rate_limiter is None:
+        _congress_rate_limiter = CongressApiRateLimiter(
+            max_per_hour=CONGRESS_API_MAX_REQUESTS_PER_HOUR,
+            window_seconds=3600,
+        )
+    return _congress_rate_limiter
+
 
 # ============================================================================
 # Helper Functions
@@ -138,18 +192,20 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
         if not api_keys:
             raise ValueError("No valid API keys found in secret")
         
-        # Initialize the rotator (simple round-robin, no threading needed for sequential processing)
+        # Thread-safe round-robin rotator for use with multithreaded roll call phase
         class SimpleApiKeyRotator:
             def __init__(self, keys):
                 self.keys = keys
                 self.current_index = 0
+                self._lock = threading.Lock()
                 log_print(f"✅ Retrieved {len(keys)} Congress API key(s) from Secrets Manager")
-            
+
             def get_key(self):
-                key = self.keys[self.current_index]
-                self.current_index = (self.current_index + 1) % len(self.keys)
-                return key
-            
+                with self._lock:
+                    key = self.keys[self.current_index]
+                    self.current_index = (self.current_index + 1) % len(self.keys)
+                    return key
+
             def get_key_count(self):
                 return len(self.keys)
         
@@ -170,7 +226,8 @@ def get_congress_api_key() -> str:
     return rotator.get_key()
 
 def make_api_request(url: str, params: Dict[str, Any], api_key: str, retries: int = MAX_RETRIES) -> Optional[Dict]:
-    """Make API request with retry logic and exponential backoff for rate limiting."""
+    """Make API request with retry logic, global rate limit, and exponential backoff for 429."""
+    _get_rate_limiter().acquire()
     if "api_key" not in params:
         params["api_key"] = api_key
     for attempt in range(retries):
@@ -757,33 +814,52 @@ def main():
         last_key = response.get("LastEvaluatedKey")
         if not last_key:
             break
-    log_print(f"   Found {len(roll_call_items)} bill items for roll call maintenance.")
+    total_roll_call = len(roll_call_items)
+    log_print(f"   Found {total_roll_call} bill items for roll call maintenance.")
+    log_print(f"   Using {min(ROLL_CALL_MAX_WORKERS, total_roll_call)} workers, max {CONGRESS_API_MAX_REQUESTS_PER_HOUR} API requests/hour.")
     roll_ok = 0
     roll_err = 0
-    for idx, bill_item in enumerate(roll_call_items, 1):
+    progress_lock = threading.Lock()
+    last_logged = 0
+
+    def _process_one_roll_call(bill_item: Dict[str, Any]) -> Tuple[str, Optional[str], Optional[Dict]]:
+        """Returns ('ok'|'err'|'skip', error_message_or_none, payload_or_none)."""
         try:
             api_key = api_key_rotator.get_key()
             success, err, payload = process_bill_roll_call(bill_item, BILLS_TABLE_NAME, api_key)
             if payload is None:
-                continue  # skipped (e.g. search index)
+                return ('skip', None, None)
             if not success:
-                roll_err += 1
-                if err:
-                    log_print(f"      ❌ Roll call {bill_item.get('bill_id', '?')}: {err}")
-                continue
+                return ('err', err, None)
             bills_table.update_item(
                 Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
                 UpdateExpression=payload["UpdateExpression"],
                 ExpressionAttributeValues=payload["ExpressionAttributeValues"],
             )
-            roll_ok += 1
+            return ('ok', None, payload)
         except Exception as e:
-            roll_err += 1
-            log_print(f"      ❌ Roll call {bill_item.get('bill_id', '?')}: {e}")
-        if idx % 50 == 0:
-            log_print(f"      Roll call: {idx}/{len(roll_call_items)} (ok: {roll_ok}, err: {roll_err})")
-        if idx < len(roll_call_items):
-            time.sleep(0.5)
+            return ('err', str(e), None)
+
+    workers = min(ROLL_CALL_MAX_WORKERS, total_roll_call or 1)
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {executor.submit(_process_one_roll_call, item): item for item in roll_call_items}
+        for future in as_completed(futures):
+            bill_item = futures[future]
+            try:
+                status, err_msg, _ = future.result()
+            except Exception as e:
+                status, err_msg = 'err', str(e)
+            with progress_lock:
+                if status == 'ok':
+                    roll_ok += 1
+                elif status == 'err':
+                    roll_err += 1
+                    if err_msg:
+                        log_print(f"      ❌ Roll call {bill_item.get('bill_id', '?')}: {err_msg}")
+                done = roll_ok + roll_err
+                if done >= last_logged + 50:
+                    last_logged = (done // 50) * 50
+                    log_print(f"      Roll call: {done}/{total_roll_call} (ok: {roll_ok}, err: {roll_err})")
     log_print(f"✅ Phase 1 done. Updated {roll_ok} bills with roll call data, {roll_err} errors.")
     log_print("")
     
