@@ -628,11 +628,10 @@ def _fetch_house_vote_list(
             out.extend(data)
         if not isinstance(data, dict):
             break
-        pagination = data.get("pagination") or {}
-        count = pagination.get("count", 0) if isinstance(pagination, dict) else 0
-        if count and offset + limit >= count:
-            break
-        if not (isinstance(items, list) and len(items) == limit):
+        # Fetch all pages: stop when we got fewer than limit (no more data). Do not stop on offset+limit>=count,
+        # since some APIs return count as current page size (250), which would wrongly stop after one page.
+        num_items = len(items) if isinstance(items, list) else 0
+        if num_items < limit:
             break
         offset += limit
     return out
@@ -1169,13 +1168,24 @@ def update_search_vote_index_for_bill(
 ) -> None:
     """
     For a bill's roll_call_votes, update each voter's SEARCH#VOTE item: PK = SEARCH#VOTE#<politician_id>, SK = VOTE;
-    attributes bill_yea, bill_nea, bill_abstained (lists of bill_ids). Merges with existing; idempotent.
+    attributes bill_yea, bill_nea, bill_abstained (lists of bill_ids) and roll_yea, roll_nea, roll_abstained
+    (lists of roll ids "{congress}#{session}#{roll}") so roll_* shows all rolls they voted on. Merges with existing; idempotent.
     Uses BatchGetItem + BatchWriteItem; overwrite PutItem (no DynamoDB merge).
     """
+    parsed = _parse_bill_id(bill_id)
+    congress = int(parsed[0]) if parsed and parsed[0].isdigit() else None
     updates: Dict[str, Dict[str, Any]] = {}
     for entry in roll_call_votes or []:
         if not isinstance(entry, dict):
             continue
+        session_raw = entry.get("session")
+        roll_raw = entry.get("roll")
+        sess_int = int(session_raw) if session_raw is not None and str(session_raw).isdigit() else (int(session_raw) if isinstance(session_raw, (int, float)) else None)
+        roll_int = int(roll_raw) if roll_raw is not None and str(roll_raw).isdigit() else (int(roll_raw) if isinstance(roll_raw, (int, float)) else None)
+        if congress is None or sess_int is None or roll_int is None:
+            roll_id = None
+        else:
+            roll_id = f"{congress}#{sess_int}#{roll_int}"
         for member in entry.get("members") or []:
             if not isinstance(member, dict):
                 continue
@@ -1188,8 +1198,14 @@ def update_search_vote_index_for_bill(
             if not pid:
                 continue
             if pid not in updates:
-                updates[pid] = {"bill_yea": set(), "bill_nea": set(), "bill_abstained": set(), "display_name": display_name or ""}
+                updates[pid] = {
+                    "bill_yea": set(), "bill_nea": set(), "bill_abstained": set(),
+                    "roll_yea": set(), "roll_nea": set(), "roll_abstained": set(),
+                    "display_name": display_name or "",
+                }
             updates[pid][f"bill_{bucket}"].add(bill_id)
+            if roll_id:
+                updates[pid][f"roll_{bucket}"].add(roll_id)
             if display_name and not updates[pid]["display_name"]:
                 updates[pid]["display_name"] = display_name
     if not updates:
@@ -1229,9 +1245,9 @@ def update_search_vote_index_for_bill(
         bill_yea = list(set(existing_bill_yea) | data["bill_yea"])
         bill_nea = list(set(existing_bill_nea) | data["bill_nea"])
         bill_abstained = list(set(existing_bill_abstained) | data["bill_abstained"])
-        roll_yea = list(existing_roll_yea)
-        roll_nea = list(existing_roll_nea)
-        roll_abstained = list(existing_roll_abstained)
+        roll_yea = list(set(existing_roll_yea) | data.get("roll_yea", set()))
+        roll_nea = list(set(existing_roll_nea) | data.get("roll_nea", set()))
+        roll_abstained = list(set(existing_roll_abstained) | data.get("roll_abstained", set()))
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
         full_item = {
             "bill_id": pk,
