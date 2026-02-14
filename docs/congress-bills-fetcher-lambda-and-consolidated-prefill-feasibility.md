@@ -1,5 +1,7 @@
 # Feasibility: Fetcher as Lambda + Consolidated Step Function with Roll Call Delta
 
+**Status: Not pursued.** Left as reference only. Current design (Glue fetcher + separate prefill Step Function, roll call scan-all) remains in place.
+
 ## 1. Switching Fetcher from Glue to Lambda
 
 ### Current (Glue)

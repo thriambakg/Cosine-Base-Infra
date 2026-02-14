@@ -51,6 +51,15 @@ args = getResolvedOptions(sys.argv, [
     'S3_BUCKET_NAME',
     'REQUEST_TIMEOUT'
 ])
+# Optional: START_DATE, END_DATE (passed from consolidated Step Function for future ZIP-folder logic; may be null or empty)
+def _get_opt_arg(name: str) -> str:
+    for i, a in enumerate(sys.argv):
+        if a == f"--{name}" and i + 1 < len(sys.argv):
+            v = sys.argv[i + 1] or ""
+            return "" if v in ("null", "None") else str(v).strip()
+    return ""
+START_DATE_ARG = _get_opt_arg("START_DATE")
+END_DATE_ARG = _get_opt_arg("END_DATE")
 
 # Initialize Glue context
 sc = SparkContext()
