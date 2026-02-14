@@ -941,6 +941,17 @@ def store_bill_to_dynamodb(record: Dict):
     # Remove temporary _text_versions field before storing (store it separately for SQS)
     text_versions = record.pop('_text_versions', [])
     
+    # Preserve existing bill_texts (filled by Lambda) so we don't overwrite when re-processing the bill
+    try:
+        existing = bills_table.get_item(
+            Key={'bill_id': record['bill_id'], 'search_index_sk': record['search_index_sk']}
+        ).get('Item') or {}
+        existing_bt = existing.get('bill_texts')
+        if isinstance(existing_bt, list) and len(existing_bt) > 0:
+            record['bill_texts'] = existing_bt
+    except Exception:
+        pass  # keep record['bill_texts'] = [] on any error
+    
     for put_attempt in range(max_put_retries):
         try:
             bills_table.put_item(Item=record)
@@ -967,17 +978,17 @@ def store_bill_to_dynamodb(record: Dict):
                 except (json.JSONDecodeError, TypeError) as e:
                     log_print(f"      ⚠️ Failed to parse cosponsors_json for {bill_id}: {str(e)[:200]}")
             
-            # Send bill text download request to SQS AFTER bill is stored (maintain existing functionality)
+            # Send bill text download request to SQS with full text_versions (Lambda downloads all, no API call)
             if text_versions and BILL_TEXT_SQS_URL:
                 try:
-                    message_body = {'bill_id': bill_id}
+                    search_index_sk = record.get('search_index_sk') or bill_id
+                    message_body = {'bill_id': bill_id, 'search_index_sk': search_index_sk, 'text_versions': text_versions}
                     message_json = json.dumps(message_body, default=str)
-                    
                     sqs_client.send_message(
                         QueueUrl=BILL_TEXT_SQS_URL,
                         MessageBody=message_json
                     )
-                    log_print(f"      📤 Sent bill text download request for {bill_id} to SQS")
+                    log_print(f"      📤 Sent bill text download request for {bill_id} to SQS ({len(text_versions)} version(s))")
                 except Exception as e:
                     log_print(f"      ⚠️ Error sending bill text download to SQS: {str(e)[:200]}")
             
@@ -1020,17 +1031,17 @@ def store_bill_to_dynamodb(record: Dict):
                         except (json.JSONDecodeError, TypeError) as e:
                             log_print(f"      ⚠️ Failed to parse cosponsors_json for {bill_id}: {str(e)[:200]}")
                     
-                    # Send bill text download request to SQS AFTER bill is stored
+                    # Send bill text download request to SQS with full text_versions
                     if text_versions and BILL_TEXT_SQS_URL:
                         try:
-                            message_body = {'bill_id': bill_id}
+                            search_index_sk = record.get('search_index_sk') or bill_id
+                            message_body = {'bill_id': bill_id, 'search_index_sk': search_index_sk, 'text_versions': text_versions}
                             message_json = json.dumps(message_body, default=str)
-                            
                             sqs_client.send_message(
                                 QueueUrl=BILL_TEXT_SQS_URL,
                                 MessageBody=message_json
                             )
-                            log_print(f"      📤 Sent bill text download request for {bill_id} to SQS")
+                            log_print(f"      📤 Sent bill text download request for {bill_id} to SQS ({len(text_versions)} version(s))")
                         except Exception as e:
                             log_print(f"      ⚠️ Error sending bill text download to SQS: {str(e)[:200]}")
                     
@@ -2048,6 +2059,8 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             
             # Text versions (persisted for indexing; also used for SQS)
             "text_versions_json": json.dumps(text_versions) if text_versions else "",
+            # Bill texts: array of {name, s3_key, type} filled by backfill; fetcher sets [] (we own files in S3)
+            "bill_texts": [],
             
             # Dublin Core (root-level metadata)
             "dublin_core_json": json.dumps(dublin_core) if dublin_core else "",

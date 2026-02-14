@@ -107,6 +107,7 @@ Reference: BILLSTATUS XML User Guide (govinfo bulk data). This doc lists **all X
 | XML | Description | Table |
 |-----|-------------|--------|
 | `<textVersions>` / item | date, type, formats/item (url, type) | `text_versions_json` (each item: type, date, formats[] with url and optional type; first url also at top level for SQS) |
+| (backfill / Lambda) | Stored HTML in S3 | `bill_texts` (L): array of `{ name, s3_key, type }`; empty `[]` when none. Fetcher sets `[]`; backfill/Lambda fill from API. Legacy: `bill_text_html_s3_key` (removed on write). |
 
 ---
 

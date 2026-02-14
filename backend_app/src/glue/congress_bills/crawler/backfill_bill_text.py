@@ -1,31 +1,19 @@
 """
-AWS Glue Job: Congress Bills Bill Text Backfill
-Daily job to fetch bill text for bills that weren't processed during regular bill fetching.
-
-This job:
-   - Scans the table and filters for items where bill_text_html_s3_key is empty or doesn't exist
-   - Only processes bills that need bill text
-   - Uses FilterExpression to find items with empty bill_text_html_s3_key
-
-For each item processed:
-   - Fetches bill text versions from Congress.gov API
-   - Downloads HTML version of the bill text
-   - Stores it in S3 under billtext/{bill_id}.html
-   - Updates the DynamoDB item with bill_text_html_s3_key
-
-This job should run daily after the regular bill fetching job to catch any bills
-that didn't get their bill text downloaded (e.g., SQS failures, API errors, etc.).
+AWS Glue Job: Congress Bills Roll Call Maintenance
+Daily job to refresh roll call (voter) data for all bills.
 
 Roll call maintenance (all bills, excluding search indices):
    - Scans the table for all bill items (bill_id does NOT start with "SEARCH#")
    - For each bill, fetches bill actions from Congress.gov API and extracts recordedVotes
    - For each House roll call, fetches member-level vote data (house-vote/{congress}/{session}/{voteNumber}/members)
-   - Updates each item with three attributes:
+   - Updates each item with:
      - roll_call_number (N): first House roll call number, or omitted if none
      - roll_call_votes (S): JSON string of roll call(s) with member votes
      - has_roll_call (N): 1 if bill has at least one roll call, 0 otherwise (GSI key for HasRollCallIndex)
-   - Phase 1 runs with a thread pool (ROLL_CALL_MAX_WORKERS, default 8) and per-key rate limiters
+   - Runs with a thread pool (ROLL_CALL_MAX_WORKERS, default 8) and per-key rate limiters
      (CONGRESS_API_MAX_REQUESTS_PER_HOUR, default 4800, per key) so total capacity = 4800 * n keys.
+
+Bill text is filled by the fetcher pipeline (bulk XML + SQS -> Lambda); no separate backfill.
 """
 
 
@@ -81,7 +69,7 @@ def log_print(message):
     print(message, file=sys.stdout, flush=True)
 
 log_print("=" * 80)
-log_print("✅ Congress Bills Bill Text Backfill Glue Job - Script Loaded Successfully")
+log_print("✅ Congress Bills Roll Call Maintenance Glue Job - Script Loaded Successfully")
 log_print("=" * 80)
 
 # Environment variables
@@ -139,7 +127,7 @@ class CongressApiRateLimiter:
 # One rate limiter per API key (4800 req/hour each). Initialized when keys are loaded.
 _congress_rate_limiters: Optional[List['CongressApiRateLimiter']] = None
 
-# Fallback single limiter for callers that don't pass key_index (e.g. Phase 2 single-key)
+# Fallback single limiter when key_index not provided
 _congress_rate_limiter = None
 
 def _get_rate_limiter() -> CongressApiRateLimiter:
@@ -243,14 +231,6 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
         raise ValueError(f"Failed to retrieve Congress API keys from Secrets Manager: {str(e)}")
 
 
-def get_congress_api_key() -> str:
-    """
-    Get a single Congress.gov API key using round-robin rotation.
-    This function maintains backward compatibility while using the rotator.
-    """
-    rotator = get_congress_api_keys()
-    return rotator.get_key()
-
 def make_api_request(
     url: str,
     params: Dict[str, Any],
@@ -301,113 +281,6 @@ def make_api_request(
                 log_print(f"      ❌ Request failed after {retries} attempts: {str(e)[:100]}")
                 return None
     return None
-
-def fetch_bill_text_versions(congress: int, bill_type: str, bill_number: int, api_key: str) -> List[Dict]:
-    """Fetch all text versions available for a bill."""
-    url = f"{API_BASE_URL}/bill/{congress}/{bill_type.lower()}/{bill_number}/text"
-    params = {"format": "json"}
-    
-    data = make_api_request(url, params, api_key)
-    if not data:
-        return []
-    
-    # Handle different response structures
-    text_versions = []
-    if isinstance(data, list):
-        text_versions = data
-    elif "textVersions" in data:
-        versions_data = data["textVersions"]
-        if isinstance(versions_data, dict):
-            text_versions = versions_data.get("item", [])
-        elif isinstance(versions_data, list):
-            text_versions = versions_data
-    
-    return text_versions if isinstance(text_versions, list) else []
-
-def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Optional[bytes]:
-    """Download bill text file (XML/HTML) from Congress.gov with exponential backoff for rate limiting."""
-    # Add headers to mimic browser request (may help with 403 errors)
-    headers = {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36',
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Connection': 'keep-alive',
-    }
-    
-    for attempt in range(retries):
-        try:
-            response = requests.get(text_url, timeout=(10, REQUEST_TIMEOUT * 2), headers=headers)  # nosec B113 - timeout set
-            
-            # Handle 429 Too Many Requests with exponential backoff
-            if response.status_code == 429:
-                if attempt < retries - 1:
-                    # Exponential backoff: 2^attempt seconds, with a minimum of 10 seconds for 429
-                    wait_time = max(10, (2 ** attempt) * RETRY_DELAY * 2)
-                    log_print(f"      ⚠️ Rate limited (429) - waiting {wait_time}s before retry {attempt + 1}/{retries}")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    log_print(f"      ❌ Rate limited (429) after {retries} attempts")
-                    return None
-            
-            # Handle 403 Forbidden specifically
-            if response.status_code == 403:
-                log_print(f"      ❌ 403 Forbidden - Access denied for {text_url}")
-                log_print(f"      Response body (first 200 chars): {response.text[:200]}")
-                if attempt < retries - 1:
-                    wait_time = RETRY_DELAY * (attempt + 1)
-                    log_print(f"      Waiting {wait_time}s before retry...")
-                    time.sleep(wait_time)
-                    continue
-                else:
-                    log_print(f"      ❌ 403 Forbidden after {retries} attempts")
-                    return None
-            
-            response.raise_for_status()
-            return response.content
-        except requests.exceptions.HTTPError as e:
-            if attempt < retries - 1:
-                # For other HTTP errors, use linear backoff
-                wait_time = RETRY_DELAY * (attempt + 1)
-                log_print(f"      ⚠️ Download failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
-                time.sleep(wait_time)
-            else:
-                log_print(f"      ❌ Download failed after {retries} attempts: {str(e)[:100]}")
-                return None
-        except requests.exceptions.RequestException as e:
-            if attempt < retries - 1:
-                wait_time = RETRY_DELAY * (attempt + 1)
-                log_print(f"      ⚠️ Download failed (attempt {attempt + 1}/{retries}): {str(e)[:100]}")
-                time.sleep(wait_time)
-            else:
-                log_print(f"      ❌ Download failed after {retries} attempts: {str(e)[:100]}")
-                return None
-    return None
-
-def store_bill_text_to_s3(bill_id: str, text_content: bytes) -> str:
-    """
-    Store bill text HTML file to S3 in billtext/ folder.
-    
-    Args:
-        bill_id: Bill ID (e.g., "119-HR-303")
-        text_content: Bill text HTML content as bytes
-        
-    Returns:
-        S3 key where the file was stored
-    """
-    # Create S3 key: billtext/{bill_id}.html
-    s3_key = f"billtext/{bill_id}.html"
-    
-    # Upload to S3
-    s3_client.put_object(
-        Bucket=S3_BUCKET_NAME,
-        Key=s3_key,
-        Body=text_content,
-        ContentType='text/html'
-    )
-    
-    log_print(f"      💾 Stored HTML bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
-    return s3_key
 
 
 # ---------------------------------------------------------------------------
@@ -628,210 +501,14 @@ def process_bill_roll_call(
     }
 
 
-def process_bill_item(item: Dict[str, Any], api_key: str) -> Tuple[bool, Optional[str]]:
-    """
-    Process a single bill item to fetch and store bill text.
-    
-    Returns:
-        (success: bool, error_message: Optional[str])
-    """
-    bill_id = item.get('bill_id', 'unknown')
-    
-    # Skip search index items (cosponsor search indices, etc.)
-    if bill_id.startswith('SEARCH#'):
-        log_print(f"      ⏭️  Skipping search index item: {bill_id}")
-        return True, None  # Return success to not count as error, but skip processing
-    
-    try:
-        # Extract congress, bill_type, bill_number from bill_id (format: "119-HR-303")
-        parts = bill_id.split('-')
-        if len(parts) != 3:
-            return False, f"Invalid bill_id format: {bill_id}"
-        
-        # Get search_index_sk - for regular bills, it equals bill_id
-        # Ensure we have the search_index_sk from the item (it's part of the composite key)
-        search_index_sk = item.get('search_index_sk')
-        if not search_index_sk:
-            # If search_index_sk is missing, use bill_id as fallback (for regular bills, they should be equal)
-            search_index_sk = bill_id
-            log_print(f"      ⚠️  search_index_sk not found in item for {bill_id}, using bill_id as fallback")
-        
-        # Ensure both keys are strings (DynamoDB requires string type for keys)
-        bill_id = str(bill_id)
-        search_index_sk = str(search_index_sk)
-        
-        congress = int(parts[0])
-        bill_type = parts[1]
-        bill_number = int(parts[2])
-        
-        log_print(f"      📋 Processing {bill_id} (search_index_sk: {search_index_sk})...")
-        
-        # Fetch text versions
-        text_versions = fetch_bill_text_versions(congress, bill_type, bill_number, api_key)
-        if not text_versions:
-            log_print(f"      ⚠️  No text versions found for {bill_id}, setting key to empty")
-            # Update DynamoDB with empty key (overwrite existing) - must include both keys
-            try:
-                bills_table.update_item(
-                    Key={
-                        'bill_id': bill_id,
-                        'search_index_sk': search_index_sk
-                    },
-                    UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                    ExpressionAttributeValues={':html_key': ""}
-                )
-                log_print(f"      ✅ Updated {bill_id} with empty bill text S3 key")
-                return True, None
-            except Exception as update_error:
-                log_print(f"      ❌ Error updating DynamoDB (no text versions): {str(update_error)}")
-                log_print(f"      🔍 Debug - bill_id: {bill_id} (type: {type(bill_id).__name__}), search_index_sk: {search_index_sk} (type: {type(search_index_sk).__name__})")
-                log_print(f"      🔍 Debug - item has search_index_sk: {'search_index_sk' in item}")
-                if 'search_index_sk' in item:
-                    log_print(f"      🔍 Debug - item search_index_sk value: {item['search_index_sk']} (type: {type(item['search_index_sk']).__name__})")
-                raise
-        
-        # Find the "Introduced" version first, fallback to first available
-        introduced_version = None
-        for version in text_versions:
-            version_type = version.get("type", "").lower()
-            if "introduced" in version_type:
-                introduced_version = version
-                break
-        
-        selected_version = introduced_version if introduced_version else text_versions[0]
-        
-        # Get the formats
-        formats = selected_version.get("formats", {})
-        format_items = []
-        
-        # Handle different formats structures
-        if isinstance(formats, list):
-            # formats is already a list
-            format_items = formats
-        elif isinstance(formats, dict):
-            # formats is a dict, might have "item" key or be the list itself
-            if "item" in formats:
-                item_data = formats["item"]
-                if isinstance(item_data, list):
-                    format_items = item_data
-                elif isinstance(item_data, dict):
-                    # Single item wrapped in dict
-                    format_items = [item_data]
-            else:
-                # Check if dict values are format items
-                format_items = list(formats.values()) if formats else []
-        
-        if format_items:
-            html_url = None
-            
-            # Find HTML URL (Formatted Text)
-            for fmt_item in format_items:
-                if isinstance(fmt_item, dict):
-                    fmt_type = fmt_item.get("type", "")
-                    fmt_url = fmt_item.get("url")
-                    
-                    if fmt_type == "Formatted Text" and fmt_url and not html_url:
-                        html_url = fmt_url
-            
-            # Download and store HTML (with error handling) - always overwrite
-            if html_url:
-                try:
-                    log_print(f"      📄 Downloading HTML bill text from {html_url}...")
-                    html_content = download_bill_text_file(html_url)
-                    if html_content:
-                        bill_text_html_s3_key = store_bill_text_to_s3(bill_id, html_content)
-                        try:
-                            bills_table.update_item(
-                                Key={
-                                    'bill_id': bill_id,
-                                    'search_index_sk': search_index_sk
-                                },
-                                UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                                ExpressionAttributeValues={':html_key': bill_text_html_s3_key}
-                            )
-                            log_print(f"      ✅ Stored HTML bill text to S3: {bill_text_html_s3_key}")
-                            return True, None
-                        except Exception as update_error:
-                            log_print(f"      ❌ Error updating DynamoDB item: {str(update_error)}")
-                            log_print(f"      🔍 Debug - bill_id: {bill_id} (type: {type(bill_id).__name__}), search_index_sk: {search_index_sk} (type: {type(search_index_sk).__name__})")
-                            log_print(f"      🔍 Debug - item keys present: {list(item.keys())[:10]}...")
-                            raise  # Re-raise to be caught by outer exception handler
-                    else:
-                        log_print(f"      ⚠️  Failed to download HTML bill text, setting key to empty")
-                        try:
-                            bills_table.update_item(
-                                Key={
-                                    'bill_id': bill_id,
-                                    'search_index_sk': search_index_sk
-                                },
-                                UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                                ExpressionAttributeValues={':html_key': ""}
-                            )
-                            return True, None
-                        except Exception as update_error:
-                            log_print(f"      ❌ Error updating DynamoDB (download failed): {str(update_error)}")
-                            raise
-                except Exception as e:
-                    log_print(f"      ⚠️  Error downloading HTML bill text: {str(e)}, setting key to empty")
-                    try:
-                        bills_table.update_item(
-                            Key={
-                                'bill_id': bill_id,
-                                'search_index_sk': search_index_sk
-                            },
-                            UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                            ExpressionAttributeValues={':html_key': ""}
-                        )
-                        return True, None
-                    except Exception as update_error:
-                        log_print(f"      ❌ Error updating DynamoDB (download error): {str(update_error)}")
-                        raise
-            else:
-                log_print(f"      ⚠️  No HTML URL found, setting key to empty")
-                try:
-                    bills_table.update_item(
-                        Key={
-                            'bill_id': bill_id,
-                            'search_index_sk': search_index_sk
-                        },
-                        UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                        ExpressionAttributeValues={':html_key': ""}
-                    )
-                    return True, None
-                except Exception as update_error:
-                    log_print(f"      ❌ Error updating DynamoDB (no HTML URL): {str(update_error)}")
-                    raise
-        else:
-            # No format items found, set key to empty
-            log_print(f"      ⚠️  No format items found, setting key to empty")
-            try:
-                bills_table.update_item(
-                    Key={
-                        'bill_id': bill_id,
-                        'search_index_sk': search_index_sk
-                    },
-                    UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                    ExpressionAttributeValues={':html_key': ""}
-                )
-                log_print(f"      ✅ Updated {bill_id} with empty bill text S3 key")
-                return True, None
-            except Exception as update_error:
-                log_print(f"      ❌ Error updating DynamoDB (no format items): {str(update_error)}")
-                raise
-        
-    except Exception as e:
-        error_msg = f"Error processing {bill_id}: {str(e)}"
-        log_print(f"      ❌ {error_msg}")
-        return False, error_msg
-
 # ============================================================================
 # Main Execution
 # ============================================================================
 
 def main():
     log_print("=" * 80)
-    log_print("Congress Bills Bill Text Backfill Glue Job - Starting")
-    log_print("🔍 MODE: Roll call maintenance (all bills) + bills with empty bill_text_html_s3_key")
+    log_print("Congress Bills Roll Call Maintenance Glue Job - Starting")
+    log_print("🔍 MODE: Roll call maintenance (all bills)")
     log_print("=" * 80)
     
     if not BILLS_TABLE_NAME:
@@ -847,10 +524,10 @@ def main():
         raise
     
     # -------------------------------------------------------------------------
-    # Phase 1: Roll call maintenance (all bill rows, exclude search indices)
+    # Roll call maintenance (all bill rows, exclude search indices)
     # -------------------------------------------------------------------------
     log_print("")
-    log_print("📋 Phase 1: Roll call maintenance - scanning all bills (excluding SEARCH#)...")
+    log_print("📋 Roll call maintenance - scanning all bills (excluding SEARCH#)...")
     log_print("-" * 80)
     roll_call_items = []
     last_key = None
@@ -915,98 +592,10 @@ def main():
                 if done >= last_logged + 50:
                     last_logged = (done // 50) * 50
                     log_print(f"      Roll call: {done}/{total_roll_call} (ok: {roll_ok}, err: {roll_err})")
-    log_print(f"✅ Phase 1 done. Updated {roll_ok} bills with roll call data, {roll_err} errors.")
-    log_print("")
-    
-    # -------------------------------------------------------------------------
-    # Phase 2: Bill text backfill (empty or missing bill_text_html_s3_key)
-    # -------------------------------------------------------------------------
-    # Scan DynamoDB table for bills missing bill text
-    log_print("📋 Scanning DynamoDB table for bills with empty or missing bill_text_html_s3_key...")
-    log_print("-" * 80)
-    
-    items_to_process = []
-    last_evaluated_key = None
-    scan_count = 0
-    filtered_count = 0
-    
-    while True:
-        scan_params = {}
-        if last_evaluated_key:
-            scan_params['ExclusiveStartKey'] = last_evaluated_key
-        
-        # Filter for items where:
-        # 1. bill_id exists (to ensure we have a valid bill)
-        # 2. bill_id does NOT start with "SEARCH#" (exclude search index items)
-        # 3. bill_text_html_s3_key is empty or doesn't exist
-        scan_params['FilterExpression'] = (
-            Attr('bill_id').exists() &
-            ~Attr('bill_id').begins_with('SEARCH#') &
-            (Attr('bill_text_html_s3_key').not_exists() | 
-             Attr('bill_text_html_s3_key').eq(''))
-        )
-        
-        response = bills_table.scan(**scan_params)
-        items = response.get('Items', [])
-        
-        items_to_process.extend(items)
-        filtered_count += len(items)
-        scan_count += response.get('ScannedCount', len(items))
-        
-        log_print(f"   📊 Scanned {scan_count} items, found {filtered_count} items with empty bill_text_html_s3_key")
-        
-        last_evaluated_key = response.get('LastEvaluatedKey')
-        if not last_evaluated_key:
-            break
-    
-    log_print(f"\n✅ Total items to process (with empty or missing bill_text_html_s3_key): {len(items_to_process)}")
-    log_print("")
-    
-    if len(items_to_process) == 0:
-        log_print("✅ No items to process.")
-        job.commit()
-        return
-    
-    # Process items sequentially with backoff
-    log_print("🔍 Processing bills and fetching bill text...")
-    log_print("-" * 80)
-    log_print(f"   📋 Processing {len(items_to_process)} bills sequentially with backoff...")
-    
-    processed_count = 0
-    error_count = 0
-    
-    # Process bills sequentially
-    for idx, bill_item in enumerate(items_to_process, 1):
-        try:
-            # Get API key for this bill (rotates through all available keys)
-            api_key = api_key_rotator.get_key()
-            success, error_msg = process_bill_item(bill_item, api_key)
-            
-            if success:
-                processed_count += 1
-            else:
-                error_count += 1
-                if error_msg:
-                    log_print(f"      ❌ {error_msg}")
-        except Exception as e:
-            error_count += 1
-            log_print(f"      ❌ Exception processing bill {bill_item.get('bill_id', 'unknown')}: {str(e)}")
-        
-        if idx % 10 == 0:
-            log_print(f"      ✅ Processed {idx}/{len(items_to_process)} bills... (success: {processed_count}, errors: {error_count})")
-        
-        # Rate limiting - be respectful to Congress.gov API
-        # Delay between requests to avoid rate limiting
-        if idx < len(items_to_process):  # Don't sleep after the last item
-            time.sleep(1.0)  # 1 second delay between items
-    
-    log_print(f"\n✅ Processed {processed_count} bills successfully")
-    if error_count > 0:
-        log_print(f"⚠️ {error_count} bills had errors")
-    
+    log_print(f"✅ Roll call maintenance done. Updated {roll_ok} bills with roll call data, {roll_err} errors.")
     log_print("")
     log_print("=" * 80)
-    log_print("✅ Backfill job completed successfully!")
+    log_print("✅ Roll call maintenance job completed successfully!")
     log_print("=" * 80)
     
     job.commit()
@@ -1016,7 +605,7 @@ if __name__ == "__main__":
         main()
     except Exception as e:
         import traceback
-        error_msg = f"CRITICAL ERROR in Congress bills bill text backfill job: {str(e)}"
+        error_msg = f"CRITICAL ERROR in Congress bills roll call maintenance job: {str(e)}"
         error_traceback = traceback.format_exc()
         log_print(f"❌ {error_msg}")
         log_print(f"❌ Traceback:\n{error_traceback}")
