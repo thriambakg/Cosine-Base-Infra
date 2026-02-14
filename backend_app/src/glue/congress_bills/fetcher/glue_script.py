@@ -941,17 +941,7 @@ def store_bill_to_dynamodb(record: Dict):
     # Remove temporary _text_versions field before storing (store it separately for SQS)
     text_versions = record.pop('_text_versions', [])
     
-    # Preserve existing bill_texts (filled by Lambda) so we don't overwrite when re-processing the bill
-    try:
-        existing = bills_table.get_item(
-            Key={'bill_id': record['bill_id'], 'search_index_sk': record['search_index_sk']}
-        ).get('Item') or {}
-        existing_bt = existing.get('bill_texts')
-        if isinstance(existing_bt, list) and len(existing_bt) > 0:
-            record['bill_texts'] = existing_bt
-    except Exception:
-        pass  # keep record['bill_texts'] = [] on any error
-    
+    # Full overwrite: bulk gives us full bill data, no merge with existing item (bill_texts stay [] until Lambda/backfill run)
     for put_attempt in range(max_put_retries):
         try:
             bills_table.put_item(Item=record)
