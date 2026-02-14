@@ -26,6 +26,7 @@ Roll call maintenance (all bills, excluding search indices):
      - has_roll_call (N): 1 if bill has at least one roll call, 0 otherwise (GSI key for HasRollCallIndex)
 """
 
+
 import sys
 import json
 import logging
