@@ -233,13 +233,13 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
                 self._lock = threading.Lock()
                 log_print(f"✅ Retrieved {len(keys)} Congress API key(s) from Secrets Manager")
                 log_print(f"   Rate limit: {CONGRESS_API_MAX_REQUESTS_PER_HOUR} req/hour per key ({len(keys) * CONGRESS_API_MAX_REQUESTS_PER_HOUR} total/hour)")
-
+            
             def get_key(self):
                 with self._lock:
-                    key = self.keys[self.current_index]
-                    self.current_index = (self.current_index + 1) % len(self.keys)
-                    return key
-
+                key = self.keys[self.current_index]
+                self.current_index = (self.current_index + 1) % len(self.keys)
+                return key
+            
             def get_key_and_index(self):
                 """Return (key, index) for per-key rate limiting. Index is used to acquire from the correct limiter."""
                 with self._lock:
@@ -338,7 +338,7 @@ def _normalize_date_to_yyyy_mm_dd(date_str: str) -> str:
             dt = datetime.strptime(s, fmt)
             return dt.strftime("%Y-%m-%d")
         except ValueError:
-            continue
+                    continue
     return s
 
 
@@ -1521,7 +1521,10 @@ def process_bill_roll_call_delta(
     """
     table = dynamodb.Table(table_name)
     try:
-        resp = table.get_item(Key={"bill_id": bill_id, "search_index_sk": bill_id})
+        resp = table.get_item(
+            Key={"bill_id": bill_id, "search_index_sk": bill_id},
+            ProjectionExpression="recorded_votes_json, roll_call_votes",
+        )
     except Exception as e:
         return False, None, str(e), None
     item = resp.get("Item")
@@ -1655,8 +1658,8 @@ def main():
         log_print(f"✅ Retrieved {api_key_rotator.get_key_count()} Congress API key(s)")
     except Exception as e:
         log_print(f"❌ Failed to retrieve API keys: {str(e)}")
-        raise
-
+                raise
+        
     bills_table = dynamodb.Table(BILLS_TABLE_NAME)
     politicians = load_legislators_csv()
     politicians_by_bioguide = _build_politicians_by_bioguide(politicians)
@@ -1682,8 +1685,8 @@ def main():
             if not success:
                 return ("err", err, None)
             if payload:
-                try:
-                    bills_table.update_item(
+                        try:
+                            bills_table.update_item(
                         Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
                         UpdateExpression=payload["UpdateExpression"],
                         ExpressionAttributeValues=payload["ExpressionAttributeValues"],
@@ -1702,8 +1705,8 @@ def main():
                                 ":k": s3_key,
                             },
                         )
-                    else:
-                        raise
+            else:
+                    raise
                 roll_votes = payload.get("roll_call_votes")
                 if roll_votes and politicians:
                     update_search_vote_index_for_bill(
@@ -1714,7 +1717,7 @@ def main():
                     update_search_roll_index_for_bill(bid, roll_votes, bills_table, rolls_written=rolls_written_from_bills)
                 return ("ok", None, payload)
             return ("skip", None, None)
-        except Exception as e:
+    except Exception as e:
             return ("err", str(e), None)
 
     workers = min(ROLL_CALL_MAX_WORKERS, total_bills or 1)
@@ -1726,7 +1729,7 @@ def main():
             bid = futures[future]
             try:
                 status, err_msg, _ = future.result()
-            except Exception as e:
+        except Exception as e:
                 status, err_msg = "err", str(e)
             with progress_lock:
                 if status == "ok":
@@ -1734,7 +1737,7 @@ def main():
                 elif status == "skip":
                     roll_skip += 1
                 else:
-                    roll_err += 1
+            roll_err += 1
                     if err_msg:
                         log_print(f"      ❌ {bid}: {err_msg}")
                 done = roll_ok + roll_skip + roll_err
@@ -1816,7 +1819,7 @@ def main():
                                 bills_table,
                                 politicians_by_bioguide=politicians_by_bioguide,
                             )
-                        else:
+            else:
                             update_search_vote_index_for_roll(
                                 int(congress),
                                 sess_int,
@@ -1835,12 +1838,12 @@ def main():
             log_print(f"✅ House-vote list backfill: added {roll_backfill_added} roll call(s) not from bill pass.")
         else:
             log_print(f"   House-vote list backfill: no additional rolls (all rolls in list were already written from bill pass).")
-
+    
     log_print("")
     log_print("=" * 80)
     log_print("✅ Roll call maintenance job completed successfully!")
     log_print("=" * 80)
-
+    
     job.commit()
 
 if __name__ == "__main__":
