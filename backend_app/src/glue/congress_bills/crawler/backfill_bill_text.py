@@ -234,12 +234,12 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
                 log_print(f"✅ Retrieved {len(keys)} Congress API key(s) from Secrets Manager")
                 log_print(f"   Rate limit: {CONGRESS_API_MAX_REQUESTS_PER_HOUR} req/hour per key ({len(keys) * CONGRESS_API_MAX_REQUESTS_PER_HOUR} total/hour)")
             
-
+            
             def get_key(self):
                 with self._lock:
-                    key = self.keys[self.current_index]
-                    self.current_index = (self.current_index + 1) % len(self.keys)
-                    return key
+                key = self.keys[self.current_index]
+                self.current_index = (self.current_index + 1) % len(self.keys)
+                return key
             
             def get_key_and_index(self):
                 """Return (key, index) for per-key rate limiting. Index is used to acquire from the correct limiter."""
@@ -248,7 +248,7 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
                     key = self.keys[idx]
                     self.current_index = (self.current_index + 1) % len(self.keys)
                     return key, idx
-
+            
             def get_key_count(self):
                 return len(self.keys)
         
@@ -1111,10 +1111,14 @@ def update_search_roll_index_for_bill(
     roll_call_votes: List[Dict[str, Any]],
     table: Any,
     rolls_written: Optional[Set[Tuple[str, int, int]]] = None,
+    roll_write_lock: Optional[threading.Lock] = None,
 ) -> None:
     """
     Write one SEARCH#ROLL item per roll call. SK = {congress}#{date}#{session}#{roll}
-    so begins_with("119#") + ScanIndexForward=False returns newest first. Assumes fresh backfill.
+    so begins_with("119#") + ScanIndexForward=False returns newest first.
+    If rolls_written is provided, skips (congress, session, roll) already in the set to avoid
+    duplicate SEARCH#ROLL items when the same roll appears on multiple bills. Use roll_write_lock
+    when called from multiple threads so only one thread writes each (c, s, r).
     """
     parsed = _parse_bill_id(bill_id)
     if not parsed:
@@ -1142,10 +1146,19 @@ def update_search_roll_index_for_bill(
         roll_int = int(roll) if isinstance(roll, (int, float)) else (int(roll) if str(roll).isdigit() else None)
         if session_int is None or roll_int is None:
             continue
+        key = (congress, session_int, roll_int)
+        if rolls_written is not None:
+            if roll_write_lock is not None:
+                with roll_write_lock:
+                    if key in rolls_written:
+                        continue
+                    rolls_written.add(key)
+            else:
+                if key in rolls_written:
+                    continue
+                rolls_written.add(key)
         vote_date = entry.get("vote_date") or bill_latest_date
         _write_one_roll_item(congress, session_int, roll_int, members, bill_id, table, latest_action_date=vote_date)
-        if rolls_written is not None:
-            rolls_written.add((congress, session_int, roll_int))
 
 
 # DynamoDB batch limits so SEARCH#VOTE updates don't become a bottleneck (only API should be).
@@ -1661,8 +1674,8 @@ def main():
         log_print(f"✅ Retrieved {api_key_rotator.get_key_count()} Congress API key(s)")
     except Exception as e:
         log_print(f"❌ Failed to retrieve API keys: {str(e)}")
-        raise
-
+                raise
+        
     bills_table = dynamodb.Table(BILLS_TABLE_NAME)
     politicians = load_legislators_csv()
     politicians_by_bioguide = _build_politicians_by_bioguide(politicians)
@@ -1673,6 +1686,7 @@ def main():
     roll_skip = 0
     roll_err = 0
     progress_lock = threading.Lock()
+    roll_write_lock = threading.Lock()
     last_logged = 0
     rolls_written_from_bills: Set[Tuple[str, int, int]] = set()
 
@@ -1688,8 +1702,8 @@ def main():
             if not success:
                 return ("err", err, None)
             if payload:
-                try:
-                    bills_table.update_item(
+                        try:
+                            bills_table.update_item(
                         Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
                         UpdateExpression=payload["UpdateExpression"],
                         ExpressionAttributeValues=payload["ExpressionAttributeValues"],
@@ -1708,8 +1722,8 @@ def main():
                                 ":k": s3_key,
                             },
                         )
-                    else:
-                        raise
+            else:
+                    raise
                 roll_votes = payload.get("roll_call_votes")
                 if roll_votes and politicians:
                     update_search_vote_index_for_bill(
@@ -1717,10 +1731,10 @@ def main():
                         politicians_by_bioguide=politicians_by_bioguide,
                     )
                 if roll_votes:
-                    update_search_roll_index_for_bill(bid, roll_votes, bills_table, rolls_written=rolls_written_from_bills)
+                    update_search_roll_index_for_bill(bid, roll_votes, bills_table, rolls_written=rolls_written_from_bills, roll_write_lock=roll_write_lock)
                 return ("ok", None, payload)
             return ("skip", None, None)
-        except Exception as e:
+    except Exception as e:
             return ("err", str(e), None)
 
     workers = min(ROLL_CALL_MAX_WORKERS, total_bills or 1)
@@ -1732,7 +1746,7 @@ def main():
             bid = futures[future]
             try:
                 status, err_msg, _ = future.result()
-            except Exception as e:
+        except Exception as e:
                 status, err_msg = "err", str(e)
             with progress_lock:
                 if status == "ok":
@@ -1740,7 +1754,7 @@ def main():
                 elif status == "skip":
                     roll_skip += 1
                 else:
-                    roll_err += 1
+            roll_err += 1
                     if err_msg:
                         log_print(f"      ❌ {bid}: {err_msg}")
                 done = roll_ok + roll_skip + roll_err
@@ -1822,7 +1836,7 @@ def main():
                                 bills_table,
                                 politicians_by_bioguide=politicians_by_bioguide,
                             )
-                        else:
+            else:
                             update_search_vote_index_for_roll(
                                 int(congress),
                                 sess_int,
