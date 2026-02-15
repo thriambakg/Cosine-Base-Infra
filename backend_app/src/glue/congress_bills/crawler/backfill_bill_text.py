@@ -1056,15 +1056,15 @@ def _write_one_roll_item(
     latest_action_date: Optional[str] = None,
 ) -> None:
     """Write a single SEARCH#ROLL item. Used by bill pass and by house-vote-list backfill.
-    SK is {congress}#{session}#{latest_action_date}#{roll} so DynamoDB can return results in date order
-    (query with ScanIndexForward=False for newest first). Assumes empty table / fresh backfill (no cleanup).
+    SK is {congress}#{date}#{session}#{roll} so begins_with("119#") + ScanIndexForward=False
+    returns items in true date-descending order (newest first). Assumes empty table / fresh backfill.
     """
     date_part = "0000-00-00"
     if latest_action_date and str(latest_action_date).strip():
         d = str(latest_action_date).strip()[:10]
         if len(d) >= 10 and d.replace("-", "").isdigit():
             date_part = d
-    sk = f"{congress}#{session_int}#{date_part}#{roll_int}"
+    sk = f"{congress}#{date_part}#{session_int}#{roll_int}"
     date_attr = date_part if date_part != "0000-00-00" else None
     roll_display = f"Roll no. {roll_int}"
     item = {
@@ -1113,8 +1113,8 @@ def update_search_roll_index_for_bill(
     rolls_written: Optional[Set[Tuple[str, int, int]]] = None,
 ) -> None:
     """
-    Write one SEARCH#ROLL item per roll call. SK = {congress}#{session}#{latest_action_date}#{roll}
-    so listing can use DynamoDB descending order (newest first). Assumes fresh backfill (empty table).
+    Write one SEARCH#ROLL item per roll call. SK = {congress}#{date}#{session}#{roll}
+    so begins_with("119#") + ScanIndexForward=False returns newest first. Assumes fresh backfill.
     """
     parsed = _parse_bill_id(bill_id)
     if not parsed:
