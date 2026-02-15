@@ -3468,7 +3468,7 @@ module "congress_bills_bill_text_backfill_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access - backfill uses GetItem, UpdateItem (bills), BatchGetItem/BatchWriteItem and PutItem (SEARCH#VOTE index)
+  # DynamoDB access - backfill uses GetItem, UpdateItem (bills), BatchGetItem/BatchWriteItem and PutItem (SEARCH#VOTE/SEARCH#ROLL)
   dynamodb_table_arn = module.congress_bills_table.table_arn
   dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem"]
 
