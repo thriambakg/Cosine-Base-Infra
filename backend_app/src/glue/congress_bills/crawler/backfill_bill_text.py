@@ -1836,7 +1836,7 @@ def main():
                                 bills_table,
                                 politicians_by_bioguide=politicians_by_bioguide,
                             )
-            else:
+                        else:
                             update_search_vote_index_for_roll(
                                 int(congress),
                                 sess_int,
@@ -1846,9 +1846,9 @@ def main():
                                 bills_table,
                                 politicians_by_bioguide=politicians_by_bioguide,
                             )
-                roll_skipped_already_from_bills += skipped_this_session
-                if skipped_this_session or added_this_session:
-                    log_print(f"   Congress {congress} Session {session}: {skipped_this_session} already from bills (skipped), {added_this_session} new (fetched members, wrote SEARCH#ROLL + SEARCH#VOTE).")
+            roll_skipped_already_from_bills += skipped_this_session
+            if skipped_this_session or added_this_session:
+                log_print(f"   Congress {congress} Session {session}: {skipped_this_session} already from bills (skipped), {added_this_session} new (fetched members, wrote SEARCH#ROLL + SEARCH#VOTE).")
         log_print(f"   House-vote list summary: {roll_skipped_already_from_bills} roll(s) already from bills (skipped), {roll_backfill_added} new (API calls made).")
         log_print(f"   House-vote list API calls: {house_vote_list_api_calls} list call(s), {house_vote_members_api_calls} member call(s) for new rolls.")
         if roll_backfill_added:
