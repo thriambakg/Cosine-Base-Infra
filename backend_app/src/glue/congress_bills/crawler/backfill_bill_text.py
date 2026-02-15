@@ -12,9 +12,10 @@ Behavior:
    - If roll sets match -> skip (no API call). If different -> fetch only new rolls via API, merge into
      roll_call_votes, then update table (roll_call_number, roll_call_votes, has_roll_call).
    - SEARCH#VOTE index: for each bill updated, updates per-politician vote index items (PK SEARCH#VOTE#<politician_id>,
-     SK VOTE). Attributes: display_name, bill_yea, bill_nea, bill_abstained (lists of bill_ids), roll_yea, roll_nea,
-     roll_abstained (lists of roll ids "{congress}#{session}#{roll}" for standalone rolls). Voters matched via
-     congress-legislators.csv (bioguide_id or name). Congress.gov "Not Voting" and "Present" map to abstained.
+     SK VOTE). Attributes: display_name, bill_yea, bill_nea, bill_present, bill_not_voting (lists of bill_ids),
+     roll_yea, roll_nea, roll_present, roll_not_voting (lists of roll ids "{congress}#{session}#{roll}").
+     Voters matched via congress-legislators.csv. Congress.gov "Present" -> bill_present/roll_present,
+     "Not Voting" -> bill_not_voting/roll_not_voting.
    - SEARCH#ROLL index: one item per roll call (PK SEARCH#ROLL, SK {congress}#{session}#{latest_action_date}#{roll}
      or legacy {congress}#{session}#{roll}) so roll calls can be listed and sorted by latest action date. Filled from
      (1) bill pass (recordedVotes on bills) and (2) house-vote
@@ -751,7 +752,7 @@ def _merge_roll_call_votes(
 
 
 # ---------------------------------------------------------------------------
-# Legislators CSV and SEARCH#VOTE index (match voters to politicians; Congress.gov "Not Voting" = abstained)
+# Legislators CSV and SEARCH#VOTE index (match voters to politicians; Congress.gov Present/Not Voting -> separate columns)
 # ---------------------------------------------------------------------------
 
 def load_legislators_csv() -> List[Dict[str, Any]]:
@@ -928,7 +929,8 @@ def _resolve_politician_id_and_name(
 
 def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
     """
-    Map Congress.gov voteCast to index bucket. 'Not Voting' and 'Present' -> abstained; Yea/Yes -> yea; Nay/No -> nea.
+    Map Congress.gov voteCast to index bucket. Yea/Yes -> yea; Nay/No -> nea;
+    Present -> present; Not Voting -> not_voting (separate columns for proper display).
     """
     if vote_cast is None:
         return None
@@ -940,8 +942,10 @@ def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
         return "yea"
     if v_lower in ("nay", "no"):
         return "nea"
-    if v_lower in ("not voting", "present"):
-        return "abstained"
+    if v_lower == "present":
+        return "present"
+    if v_lower == "not voting":
+        return "not_voting"
     return None
 
 
@@ -970,10 +974,12 @@ def _store_vote_data_to_s3(
     pk: str,
     bill_yea: List[str],
     bill_nea: List[str],
-    bill_abstained: List[str],
+    bill_present: List[str],
+    bill_not_voting: List[str],
     roll_yea: List[str],
     roll_nea: List[str],
-    roll_abstained: List[str],
+    roll_present: List[str],
+    roll_not_voting: List[str],
 ) -> str:
     """Store SEARCH#VOTE bill_/roll_ lists to S3 oversize/. Returns S3 key. pk is SEARCH#VOTE#<pid>."""
     safe_key = pk.replace("#", "-") + ".json.gz"
@@ -981,10 +987,12 @@ def _store_vote_data_to_s3(
     payload = {
         "bill_yea": bill_yea,
         "bill_nea": bill_nea,
-        "bill_abstained": bill_abstained,
+        "bill_present": bill_present,
+        "bill_not_voting": bill_not_voting,
         "roll_yea": roll_yea,
         "roll_nea": roll_nea,
-        "roll_abstained": roll_abstained,
+        "roll_present": roll_present,
+        "roll_not_voting": roll_not_voting,
     }
     json_bytes = json.dumps(payload).encode("utf-8")
     compressed = gzip.compress(json_bytes)
@@ -1000,18 +1008,24 @@ def _store_vote_data_to_s3(
 
 def _load_vote_data_from_item(
     existing_item: Dict[str, Any],
-) -> Tuple[List[str], List[str], List[str], List[str], List[str], List[str]]:
-    """Get bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained from existing SEARCH#VOTE item (inline or oversize). Supports legacy yea/nea/abstained as bill_*."""
+) -> Tuple[List[str], List[str], List[str], List[str], List[str], List[str], List[str], List[str]]:
+    """Get bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting.
+    Supports legacy bill_abstained/roll_abstained (merged into bill_not_voting/roll_not_voting)."""
     def _list(key: str, legacy: Optional[str] = None) -> List[str]:
         val = existing_item.get(key) or (existing_item.get(legacy) if legacy else [])
         return list(val or [])
 
     bill_yea = _list("bill_yea", "yea")
     bill_nea = _list("bill_nea", "nea")
-    bill_abstained = _list("bill_abstained", "abstained")
+    bill_present = _list("bill_present")
+    bill_not_voting = _list("bill_not_voting")
+    # Legacy: abstained -> not_voting so we don't lose data on re-backfill
+    bill_not_voting = list(set(bill_not_voting) | set(_list("bill_abstained", "abstained")))
     roll_yea = _list("roll_yea")
     roll_nea = _list("roll_nea")
-    roll_abstained = _list("roll_abstained")
+    roll_present = _list("roll_present")
+    roll_not_voting = _list("roll_not_voting")
+    roll_not_voting = list(set(roll_not_voting) | set(_list("roll_abstained")))
 
     s3_key = (existing_item.get("vote_data_oversize_s3_key") or "").strip()
     if s3_key:
@@ -1022,13 +1036,17 @@ def _load_vote_data_from_item(
             data = json.loads(raw.decode("utf-8"))
             bill_yea = list(data.get("bill_yea") or data.get("yea") or [])
             bill_nea = list(data.get("bill_nea") or data.get("nea") or [])
-            bill_abstained = list(data.get("bill_abstained") or data.get("abstained") or [])
+            bill_present = list(data.get("bill_present") or [])
+            bill_not_voting = list(data.get("bill_not_voting") or [])
+            bill_not_voting = list(set(bill_not_voting) | set(data.get("bill_abstained") or data.get("abstained") or []))
             roll_yea = list(data.get("roll_yea") or [])
             roll_nea = list(data.get("roll_nea") or [])
-            roll_abstained = list(data.get("roll_abstained") or [])
+            roll_present = list(data.get("roll_present") or [])
+            roll_not_voting = list(data.get("roll_not_voting") or [])
+            roll_not_voting = list(set(roll_not_voting) | set(data.get("roll_abstained") or []))
         except Exception as e:
             log_print(f"      ⚠️ Failed to load vote data from {s3_key}: {str(e)[:120]}")
-    return bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained
+    return bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting
 
 
 def _store_roll_members_to_s3(congress: str, session: int, roll: int, members: List[Dict[str, Any]]) -> str:
@@ -1169,8 +1187,8 @@ _BATCH_WRITE_MAX = 25
 def ensure_search_vote_items_for_legislators(politicians: List[Dict[str, Any]], table: Any) -> None:
     """
     Ensure every legislator in the CSV has a SEARCH#VOTE item (PK = SEARCH#VOTE#<pid>, SK = VOTE).
-    Creates missing items with empty bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained
-    so the table count matches the legislators list. Idempotent; does not overwrite existing items.
+    Creates missing items with empty bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting.
+    Idempotent; does not overwrite existing items.
     """
     if not politicians:
         return
@@ -1219,10 +1237,12 @@ def ensure_search_vote_items_for_legislators(politicians: List[Dict[str, Any]], 
             "display_name": display_name,
             "bill_yea": [],
             "bill_nea": [],
-            "bill_abstained": [],
+            "bill_present": [],
+            "bill_not_voting": [],
             "roll_yea": [],
             "roll_nea": [],
-            "roll_abstained": [],
+            "roll_present": [],
+            "roll_not_voting": [],
             "is_search_index": True,
         })
     for i in range(0, len(put_items), _BATCH_WRITE_MAX):
@@ -1250,9 +1270,8 @@ def update_search_vote_index_for_bill(
 ) -> None:
     """
     For a bill's roll_call_votes, update each voter's SEARCH#VOTE item: PK = SEARCH#VOTE#<politician_id>, SK = VOTE;
-    attributes bill_yea, bill_nea, bill_abstained (lists of bill_ids) and roll_yea, roll_nea, roll_abstained
-    (lists of roll ids "{congress}#{session}#{roll}") so roll_* shows all rolls they voted on. Merges with existing; idempotent.
-    Uses BatchGetItem + BatchWriteItem; overwrite PutItem (no DynamoDB merge).
+    attributes bill_yea, bill_nea, bill_present, bill_not_voting and roll_yea, roll_nea, roll_present, roll_not_voting
+    (lists of bill/roll ids). Merges with existing; idempotent. Uses BatchGetItem + BatchWriteItem.
     """
     parsed = _parse_bill_id(bill_id)
     congress = int(parsed[0]) if parsed and parsed[0].isdigit() else None
@@ -1281,8 +1300,8 @@ def update_search_vote_index_for_bill(
                 continue
             if pid not in updates:
                 updates[pid] = {
-                    "bill_yea": set(), "bill_nea": set(), "bill_abstained": set(),
-                    "roll_yea": set(), "roll_nea": set(), "roll_abstained": set(),
+                    "bill_yea": set(), "bill_nea": set(), "bill_present": set(), "bill_not_voting": set(),
+                    "roll_yea": set(), "roll_nea": set(), "roll_present": set(), "roll_not_voting": set(),
                     "display_name": display_name or "",
                 }
             updates[pid][f"bill_{bucket}"].add(bill_id)
@@ -1322,14 +1341,16 @@ def update_search_vote_index_for_bill(
     for pid, data in updates.items():
         pk, sk = f"SEARCH#VOTE#{pid}", "VOTE"
         item = existing.get(pid) or {}
-        (existing_bill_yea, existing_bill_nea, existing_bill_abstained,
-         existing_roll_yea, existing_roll_nea, existing_roll_abstained) = _load_vote_data_from_item(item)
+        (existing_bill_yea, existing_bill_nea, existing_bill_present, existing_bill_not_voting,
+         existing_roll_yea, existing_roll_nea, existing_roll_present, existing_roll_not_voting) = _load_vote_data_from_item(item)
         bill_yea = list(set(existing_bill_yea) | data["bill_yea"])
         bill_nea = list(set(existing_bill_nea) | data["bill_nea"])
-        bill_abstained = list(set(existing_bill_abstained) | data["bill_abstained"])
+        bill_present = list(set(existing_bill_present) | data.get("bill_present", set()))
+        bill_not_voting = list(set(existing_bill_not_voting) | data.get("bill_not_voting", set()))
         roll_yea = list(set(existing_roll_yea) | data.get("roll_yea", set()))
         roll_nea = list(set(existing_roll_nea) | data.get("roll_nea", set()))
-        roll_abstained = list(set(existing_roll_abstained) | data.get("roll_abstained", set()))
+        roll_present = list(set(existing_roll_present) | data.get("roll_present", set()))
+        roll_not_voting = list(set(existing_roll_not_voting) | data.get("roll_not_voting", set()))
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
         full_item = {
             "bill_id": pk,
@@ -1339,15 +1360,17 @@ def update_search_vote_index_for_bill(
             "display_name": display_name,
             "bill_yea": bill_yea,
             "bill_nea": bill_nea,
-            "bill_abstained": bill_abstained,
+            "bill_present": bill_present,
+            "bill_not_voting": bill_not_voting,
             "roll_yea": roll_yea,
             "roll_nea": roll_nea,
-            "roll_abstained": roll_abstained,
+            "roll_present": roll_present,
+            "roll_not_voting": roll_not_voting,
             "is_search_index": True,
         }
         approx_size = len(json.dumps(full_item))
         if approx_size > _OVERSIZE_SAFE_SIZE:
-            s3_key = _store_vote_data_to_s3(pk, bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained)
+            s3_key = _store_vote_data_to_s3(pk, bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting)
             full_item = {
                 "bill_id": pk,
                 "search_index_sk": sk,
@@ -1382,8 +1405,8 @@ def update_search_vote_index_for_roll(
     politicians_by_bioguide: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """
-    For a standalone roll call (no bill), update each voter's SEARCH#VOTE item: add roll id to roll_yea, roll_nea, or roll_abstained.
-    Roll id format: "{congress}#{session}#{roll}". Read existing, merge in memory, overwrite (no DynamoDB merge).
+    For a standalone roll call (no bill), update each voter's SEARCH#VOTE item: add roll id to roll_yea, roll_nea, roll_present, or roll_not_voting.
+    Roll id format: "{congress}#{session}#{roll}". Read existing, merge in memory, overwrite.
     """
     roll_id = f"{congress}#{session}#{roll}"
     updates: Dict[str, Dict[str, Any]] = {}
@@ -1399,7 +1422,7 @@ def update_search_vote_index_for_roll(
         if not pid:
             continue
         if pid not in updates:
-            updates[pid] = {"roll_yea": set(), "roll_nea": set(), "roll_abstained": set(), "display_name": display_name or ""}
+            updates[pid] = {"roll_yea": set(), "roll_nea": set(), "roll_present": set(), "roll_not_voting": set(), "display_name": display_name or ""}
         updates[pid][f"roll_{bucket}"].add(roll_id)
         if display_name and not updates[pid]["display_name"]:
             updates[pid]["display_name"] = display_name
@@ -1435,14 +1458,16 @@ def update_search_vote_index_for_roll(
     for pid, data in updates.items():
         pk, sk = f"SEARCH#VOTE#{pid}", "VOTE"
         item = existing.get(pid) or {}
-        (existing_bill_yea, existing_bill_nea, existing_bill_abstained,
-         existing_roll_yea, existing_roll_nea, existing_roll_abstained) = _load_vote_data_from_item(item)
+        (existing_bill_yea, existing_bill_nea, existing_bill_present, existing_bill_not_voting,
+         existing_roll_yea, existing_roll_nea, existing_roll_present, existing_roll_not_voting) = _load_vote_data_from_item(item)
         bill_yea = list(existing_bill_yea)
         bill_nea = list(existing_bill_nea)
-        bill_abstained = list(existing_bill_abstained)
+        bill_present = list(existing_bill_present)
+        bill_not_voting = list(existing_bill_not_voting)
         roll_yea = list(set(existing_roll_yea) | data["roll_yea"])
         roll_nea = list(set(existing_roll_nea) | data["roll_nea"])
-        roll_abstained = list(set(existing_roll_abstained) | data["roll_abstained"])
+        roll_present = list(set(existing_roll_present) | data.get("roll_present", set()))
+        roll_not_voting = list(set(existing_roll_not_voting) | data.get("roll_not_voting", set()))
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
         full_item = {
             "bill_id": pk,
@@ -1452,15 +1477,17 @@ def update_search_vote_index_for_roll(
             "display_name": display_name,
             "bill_yea": bill_yea,
             "bill_nea": bill_nea,
-            "bill_abstained": bill_abstained,
+            "bill_present": bill_present,
+            "bill_not_voting": bill_not_voting,
             "roll_yea": roll_yea,
             "roll_nea": roll_nea,
-            "roll_abstained": roll_abstained,
+            "roll_present": roll_present,
+            "roll_not_voting": roll_not_voting,
             "is_search_index": True,
         }
         approx_size = len(json.dumps(full_item))
         if approx_size > _OVERSIZE_SAFE_SIZE:
-            s3_key = _store_vote_data_to_s3(pk, bill_yea, bill_nea, bill_abstained, roll_yea, roll_nea, roll_abstained)
+            s3_key = _store_vote_data_to_s3(pk, bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting)
             full_item = {
                 "bill_id": pk,
                 "search_index_sk": sk,
