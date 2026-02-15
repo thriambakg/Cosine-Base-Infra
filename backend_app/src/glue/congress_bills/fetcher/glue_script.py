@@ -1743,17 +1743,25 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     if v and not any(x.get('name') == v and x.get('primary') for x in subjects_full):
                         subjects_full.append({'name': v, 'primary': True})
         
-        # Extract amendments (full: number, description, purpose, type, latestAction, amendedBill)
+        # Extract amendments (full: number, description, purpose, type, latestAction, amendedBill, sponsors, actions, Congress.gov URL)
         amendments = []
         amendments_elem = bill_elem.find('amendments')
         if amendments_elem is not None:
             amendment_items = amendments_elem.findall('amendment')
             for amendment_item in amendment_items or []:
                 amendment = {}
-                for tag in ('number', 'description', 'purpose', 'type'):
+                for tag in ('number', 'description', 'purpose', 'type', 'submittedDate', 'chamber', 'updateDate'):
                     val = _elem_text(amendment_item, tag)
                     if val:
                         amendment[tag] = val
+                # Amendment congress (for URL); fallback to bill congress
+                amdt_congress = congress
+                c_el = amendment_item.find('congress')
+                if c_el is not None and c_el.text:
+                    try:
+                        amdt_congress = int(c_el.text.strip())
+                    except ValueError:
+                        pass
                 la_am = amendment_item.find('latestAction')
                 if la_am is not None:
                     la = {}
@@ -1766,12 +1774,55 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 ab_elem = amendment_item.find('amendedBill')
                 if ab_elem is not None:
                     ab = {}
-                    for t in ('congress', 'number', 'originChamber', 'originChamberCode', 'title', 'type'):
+                    for t in ('congress', 'number', 'originChamber', 'originChamberCode', 'title', 'type', 'updateDateIncludingText'):
                         v = _elem_text(ab_elem, t)
                         if v:
                             ab[t] = v
                     if ab:
                         amendment['amendedBill'] = ab
+                # Sponsors (e.g. Rules Committee)
+                sponsors_am = amendment_item.find('sponsors')
+                if sponsors_am is not None:
+                    sponsor_items = sponsors_am.findall('item')
+                    if not sponsor_items:
+                        name_el = sponsors_am.find('name')
+                        if name_el is not None and name_el.text:
+                            amendment['sponsors'] = [{'name': name_el.text.strip()}]
+                    else:
+                        amendment['sponsors'] = []
+                        for si in sponsor_items:
+                            n = _elem_text(si, 'name')
+                            if n:
+                                amendment['sponsors'].append({'name': n})
+                # Actions (count + list of action items)
+                actions_am_elem = amendment_item.find('actions')
+                if actions_am_elem is not None:
+                    count_el = actions_am_elem.find('count')
+                    if count_el is not None and count_el.text is not None:
+                        try:
+                            amendment['actionsCount'] = int(count_el.text.strip())
+                        except ValueError:
+                            pass
+                    actions_container = actions_am_elem.find('actions')
+                    if actions_container is not None:
+                        action_items = actions_container.findall('item')
+                        amdt_actions = []
+                        for act_item in action_items or []:
+                            act = {}
+                            for t in ('actionDate', 'actionTime', 'text', 'type', 'actionCode'):
+                                v = _elem_text(act_item, t)
+                                if v:
+                                    act[t] = v
+                            if act:
+                                amdt_actions.append(act)
+                        if amdt_actions:
+                            amendment['actions'] = amdt_actions
+                # Congress.gov amendment URL (house-amendment / senate-amendment + number)
+                amdt_type = (amendment.get('type') or '').upper()
+                amdt_number = amendment.get('number') or ''
+                if amdt_number and amdt_congress:
+                    path_part = 'house-amendment' if amdt_type == 'HAMDT' else 'senate-amendment' if amdt_type == 'SAMDT' else 'house-amendment'
+                    amendment['congress_gov_url'] = f"https://www.congress.gov/amendment/{amdt_congress}th-congress/{path_part}/{amdt_number}"
                 if amendment:
                     amendments.append(amendment)
         

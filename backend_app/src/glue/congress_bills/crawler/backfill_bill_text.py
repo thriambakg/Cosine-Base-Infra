@@ -238,9 +238,9 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
             
             def get_key(self):
                 with self._lock:
-                    key = self.keys[self.current_index]
-                    self.current_index = (self.current_index + 1) % len(self.keys)
-                    return key
+                key = self.keys[self.current_index]
+                self.current_index = (self.current_index + 1) % len(self.keys)
+                return key
             
             def get_key_and_index(self):
                 """Return (key, index) for per-key rate limiting. Index is used to acquire from the correct limiter."""
@@ -1009,8 +1009,7 @@ def _store_vote_data_to_s3(
 def _load_vote_data_from_item(
     existing_item: Dict[str, Any],
 ) -> Tuple[List[str], List[str], List[str], List[str], List[str], List[str], List[str], List[str]]:
-    """Get bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting.
-    Supports legacy bill_abstained/roll_abstained (merged into bill_not_voting/roll_not_voting)."""
+    """Get bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting."""
     def _list(key: str, legacy: Optional[str] = None) -> List[str]:
         val = existing_item.get(key) or (existing_item.get(legacy) if legacy else [])
         return list(val or [])
@@ -1019,13 +1018,10 @@ def _load_vote_data_from_item(
     bill_nea = _list("bill_nea", "nea")
     bill_present = _list("bill_present")
     bill_not_voting = _list("bill_not_voting")
-    # Legacy: abstained -> not_voting so we don't lose data on re-backfill
-    bill_not_voting = list(set(bill_not_voting) | set(_list("bill_abstained", "abstained")))
     roll_yea = _list("roll_yea")
     roll_nea = _list("roll_nea")
     roll_present = _list("roll_present")
     roll_not_voting = _list("roll_not_voting")
-    roll_not_voting = list(set(roll_not_voting) | set(_list("roll_abstained")))
 
     s3_key = (existing_item.get("vote_data_oversize_s3_key") or "").strip()
     if s3_key:
@@ -1038,12 +1034,10 @@ def _load_vote_data_from_item(
             bill_nea = list(data.get("bill_nea") or data.get("nea") or [])
             bill_present = list(data.get("bill_present") or [])
             bill_not_voting = list(data.get("bill_not_voting") or [])
-            bill_not_voting = list(set(bill_not_voting) | set(data.get("bill_abstained") or data.get("abstained") or []))
             roll_yea = list(data.get("roll_yea") or [])
             roll_nea = list(data.get("roll_nea") or [])
             roll_present = list(data.get("roll_present") or [])
             roll_not_voting = list(data.get("roll_not_voting") or [])
-            roll_not_voting = list(set(roll_not_voting) | set(data.get("roll_abstained") or []))
         except Exception as e:
             log_print(f"      ⚠️ Failed to load vote data from {s3_key}: {str(e)[:120]}")
     return bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting
@@ -1701,8 +1695,8 @@ def main():
         log_print(f"✅ Retrieved {api_key_rotator.get_key_count()} Congress API key(s)")
     except Exception as e:
         log_print(f"❌ Failed to retrieve API keys: {str(e)}")
-        raise
-
+                raise
+        
     bills_table = dynamodb.Table(BILLS_TABLE_NAME)
     politicians = load_legislators_csv()
     politicians_by_bioguide = _build_politicians_by_bioguide(politicians)
@@ -1729,8 +1723,8 @@ def main():
             if not success:
                 return ("err", err, None)
             if payload:
-                try:
-                    bills_table.update_item(
+                        try:
+                            bills_table.update_item(
                         Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
                         UpdateExpression=payload["UpdateExpression"],
                         ExpressionAttributeValues=payload["ExpressionAttributeValues"],
@@ -1749,8 +1743,8 @@ def main():
                                 ":k": s3_key,
                             },
                         )
-                    else:
-                        raise
+            else:
+                    raise
                 roll_votes = payload.get("roll_call_votes")
                 if roll_votes and politicians:
                     update_search_vote_index_for_bill(
@@ -1761,7 +1755,7 @@ def main():
                     update_search_roll_index_for_bill(bid, roll_votes, bills_table, rolls_written=rolls_written_from_bills, roll_write_lock=roll_write_lock)
                 return ("ok", None, payload)
             return ("skip", None, None)
-        except Exception as e:
+    except Exception as e:
             return ("err", str(e), None)
 
     workers = min(ROLL_CALL_MAX_WORKERS, total_bills or 1)
@@ -1773,7 +1767,7 @@ def main():
             bid = futures[future]
             try:
                 status, err_msg, _ = future.result()
-            except Exception as e:
+        except Exception as e:
                 status, err_msg = "err", str(e)
             with progress_lock:
                 if status == "ok":
@@ -1781,7 +1775,7 @@ def main():
                 elif status == "skip":
                     roll_skip += 1
                 else:
-                    roll_err += 1
+            roll_err += 1
                     if err_msg:
                         log_print(f"      ❌ {bid}: {err_msg}")
                 done = roll_ok + roll_skip + roll_err
@@ -1863,7 +1857,7 @@ def main():
                                 bills_table,
                                 politicians_by_bioguide=politicians_by_bioguide,
                             )
-                        else:
+            else:
                             update_search_vote_index_for_roll(
                                 int(congress),
                                 sess_int,
