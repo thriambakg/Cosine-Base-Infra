@@ -237,9 +237,9 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
             
             def get_key(self):
                 with self._lock:
-                key = self.keys[self.current_index]
-                self.current_index = (self.current_index + 1) % len(self.keys)
-                return key
+                    key = self.keys[self.current_index]
+                    self.current_index = (self.current_index + 1) % len(self.keys)
+                    return key
             
             def get_key_and_index(self):
                 """Return (key, index) for per-key rate limiting. Index is used to acquire from the correct limiter."""
