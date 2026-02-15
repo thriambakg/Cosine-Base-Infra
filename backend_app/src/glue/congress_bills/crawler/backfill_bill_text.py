@@ -1009,8 +1009,7 @@ def _store_vote_data_to_s3(
 def _load_vote_data_from_item(
     existing_item: Dict[str, Any],
 ) -> Tuple[List[str], List[str], List[str], List[str], List[str], List[str], List[str], List[str]]:
-    """Get bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting.
-    Supports legacy bill_abstained/roll_abstained (merged into bill_not_voting/roll_not_voting)."""
+    """Get bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting."""
     def _list(key: str, legacy: Optional[str] = None) -> List[str]:
         val = existing_item.get(key) or (existing_item.get(legacy) if legacy else [])
         return list(val or [])
@@ -1019,13 +1018,10 @@ def _load_vote_data_from_item(
     bill_nea = _list("bill_nea", "nea")
     bill_present = _list("bill_present")
     bill_not_voting = _list("bill_not_voting")
-    # Legacy: abstained -> not_voting so we don't lose data on re-backfill
-    bill_not_voting = list(set(bill_not_voting) | set(_list("bill_abstained", "abstained")))
     roll_yea = _list("roll_yea")
     roll_nea = _list("roll_nea")
     roll_present = _list("roll_present")
     roll_not_voting = _list("roll_not_voting")
-    roll_not_voting = list(set(roll_not_voting) | set(_list("roll_abstained")))
 
     s3_key = (existing_item.get("vote_data_oversize_s3_key") or "").strip()
     if s3_key:
@@ -1038,12 +1034,10 @@ def _load_vote_data_from_item(
             bill_nea = list(data.get("bill_nea") or data.get("nea") or [])
             bill_present = list(data.get("bill_present") or [])
             bill_not_voting = list(data.get("bill_not_voting") or [])
-            bill_not_voting = list(set(bill_not_voting) | set(data.get("bill_abstained") or data.get("abstained") or []))
             roll_yea = list(data.get("roll_yea") or [])
             roll_nea = list(data.get("roll_nea") or [])
             roll_present = list(data.get("roll_present") or [])
             roll_not_voting = list(data.get("roll_not_voting") or [])
-            roll_not_voting = list(set(roll_not_voting) | set(data.get("roll_abstained") or []))
         except Exception as e:
             log_print(f"      ⚠️ Failed to load vote data from {s3_key}: {str(e)[:120]}")
     return bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting
