@@ -1820,7 +1820,7 @@ def main():
                                 bills_table,
                                 politicians_by_bioguide=politicians_by_bioguide,
                             )
-            else:
+                        else:
                             update_search_vote_index_for_roll(
                                 int(congress),
                                 sess_int,
