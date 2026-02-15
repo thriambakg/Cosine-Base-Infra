@@ -1730,7 +1730,7 @@ def main():
             bid = futures[future]
             try:
                 status, err_msg, _ = future.result()
-        except Exception as e:
+            except Exception as e:
                 status, err_msg = "err", str(e)
             with progress_lock:
                 if status == "ok":
@@ -1738,7 +1738,7 @@ def main():
                 elif status == "skip":
                     roll_skip += 1
                 else:
-            roll_err += 1
+                    roll_err += 1
                     if err_msg:
                         log_print(f"      ❌ {bid}: {err_msg}")
                 done = roll_ok + roll_skip + roll_err
