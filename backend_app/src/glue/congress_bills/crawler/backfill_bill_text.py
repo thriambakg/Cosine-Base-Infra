@@ -234,7 +234,7 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
                 log_print(f"✅ Retrieved {len(keys)} Congress API key(s) from Secrets Manager")
                 log_print(f"   Rate limit: {CONGRESS_API_MAX_REQUESTS_PER_HOUR} req/hour per key ({len(keys) * CONGRESS_API_MAX_REQUESTS_PER_HOUR} total/hour)")
             
-            
+
             def get_key(self):
                 with self._lock:
                     key = self.keys[self.current_index]
@@ -1659,8 +1659,8 @@ def main():
         log_print(f"✅ Retrieved {api_key_rotator.get_key_count()} Congress API key(s)")
     except Exception as e:
         log_print(f"❌ Failed to retrieve API keys: {str(e)}")
-                raise
-        
+        raise
+
     bills_table = dynamodb.Table(BILLS_TABLE_NAME)
     politicians = load_legislators_csv()
     politicians_by_bioguide = _build_politicians_by_bioguide(politicians)
