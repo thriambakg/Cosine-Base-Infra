@@ -1686,8 +1686,8 @@ def main():
             if not success:
                 return ("err", err, None)
             if payload:
-                        try:
-                            bills_table.update_item(
+                try:
+                    bills_table.update_item(
                         Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
                         UpdateExpression=payload["UpdateExpression"],
                         ExpressionAttributeValues=payload["ExpressionAttributeValues"],
@@ -1706,8 +1706,8 @@ def main():
                                 ":k": s3_key,
                             },
                         )
-            else:
-                    raise
+                    else:
+                        raise
                 roll_votes = payload.get("roll_call_votes")
                 if roll_votes and politicians:
                     update_search_vote_index_for_bill(
@@ -1718,7 +1718,7 @@ def main():
                     update_search_roll_index_for_bill(bid, roll_votes, bills_table, rolls_written=rolls_written_from_bills)
                 return ("ok", None, payload)
             return ("skip", None, None)
-    except Exception as e:
+        except Exception as e:
             return ("err", str(e), None)
 
     workers = min(ROLL_CALL_MAX_WORKERS, total_bills or 1)
