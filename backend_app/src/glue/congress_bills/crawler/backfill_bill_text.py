@@ -15,8 +15,9 @@ Behavior:
      SK VOTE). Attributes: display_name, bill_yea, bill_nea, bill_abstained (lists of bill_ids), roll_yea, roll_nea,
      roll_abstained (lists of roll ids "{congress}#{session}#{roll}" for standalone rolls). Voters matched via
      congress-legislators.csv (bioguide_id or name). Congress.gov "Not Voting" and "Present" map to abstained.
-   - SEARCH#ROLL index: one item per roll call (PK SEARCH#ROLL, SK {congress}#{session}#{roll}) so roll calls can be
-     listed and sorted by congress/session/roll. Filled from (1) bill pass (recordedVotes on bills) and (2) house-vote
+   - SEARCH#ROLL index: one item per roll call (PK SEARCH#ROLL, SK {congress}#{session}#{latest_action_date}#{roll}
+     or legacy {congress}#{session}#{roll}) so roll calls can be listed and sorted by latest action date. Filled from
+     (1) bill pass (recordedVotes on bills) and (2) house-vote
      list backfill: GET /house-vote/{congress}/{session} for any (congress, session, roll) not already written.
      Attributes: congress, session, roll, bill_id_associated, roll_display, members or members_oversize_s3_key.
    - Oversize: when roll_call_votes or SEARCH#VOTE/SEARCH#ROLL data would exceed DynamoDB item size, store in S3 oversize/
@@ -530,19 +531,73 @@ def _extract_recorded_votes(actions: List[Dict]) -> List[Dict]:
     return out
 
 
+def _parse_vote_date(data: Dict[str, Any]) -> Optional[str]:
+    """Extract vote date from API response: prefer updateDate, then startDate. Return YYYY-MM-DD or None."""
+    if not isinstance(data, dict):
+        return None
+    for key in ("updateDate", "startDate", "date", "actionDate", "voteDate"):
+        val = data.get(key)
+        if not val:
+            continue
+        s = str(val).strip()
+        if len(s) >= 10 and s[:10].replace("-", "").isdigit():
+            return s[:10]
+        if "T" in s:
+            return s.split("T")[0][:10]
+    return None
+
+
+def _extract_members_from_vote_response(data: Any) -> List[Dict]:
+    """Parse member list from house-vote API response (same shapes as _fetch_house_vote_members)."""
+    results = None
+    if isinstance(data, dict):
+        results = data.get("results") or data.get("members") or data.get("memberVotes")
+        if not isinstance(results, list):
+            raw = data.get("houseRollCallVoteMemberVotes")
+            if isinstance(raw, list):
+                results = raw
+            elif isinstance(raw, dict):
+                for k in ("item", "memberVote", "memberVotes", "houseRollCallVoteMemberVote"):
+                    val = raw.get(k)
+                    if isinstance(val, list):
+                        results = val
+                        break
+                    if isinstance(val, dict) and (val.get("voteCast") or val.get("bioguideID")):
+                        results = [val]
+                        break
+            if results is None and raw:
+                for _k, val in (raw or {}).items():
+                    if isinstance(val, list) and val and isinstance(val[0], dict) and ("voteCast" in val[0] or "bioguideID" in val[0]):
+                        results = val
+                        break
+        if not isinstance(results, list) and isinstance(data.get("houseVote"), dict):
+            h = data["houseVote"]
+            results = h.get("results") or h.get("members")
+        if not isinstance(results, list):
+            for key in ("voteMembers", "items", "votes"):
+                cand = data.get(key)
+                if isinstance(cand, list) and cand and isinstance(cand[0], dict) and ("voteCast" in cand[0] or "bioguideID" in cand[0]):
+                    results = cand
+                    break
+    elif isinstance(data, list) and data and isinstance(data[0], dict) and ("voteCast" in data[0] or "bioguideID" in data[0]):
+        results = data
+    return results if isinstance(results, list) else []
+
+
 def _fetch_house_vote_members(
     congress: str,
     session: int,
     roll_number: int,
     api_key: str,
     key_index: Optional[int] = None,
-) -> List[Dict]:
+) -> Tuple[List[Dict], Optional[str]]:
     """
-    Fetch house roll call member votes (paginated). Returns list of member vote dicts.
-    Mirrors scripts/Bills/test_bill_roll_call.py fetch_house_vote_members so we handle
-    all Congress.gov API response shapes (houseRollCallVoteMemberVotes, results, members, etc.).
+    Fetch house roll call member votes (paginated). Returns (members, vote_date_yyyy_mm_dd).
+    Vote date is parsed from the same API response we use for members (updateDate/startDate on first page).
+    No extra API call - we get the date from the existing /members response when the API includes it.
     """
     all_members = []
+    vote_date = None
     offset = 0
     limit = 250
     while True:
@@ -551,43 +606,10 @@ def _fetch_house_vote_members(
         data = make_api_request(url, params, api_key, key_index=key_index)
         if not data:
             break
-        results = None
-        if isinstance(data, dict):
-            # Congress.gov v3 /house-vote/.../members returns "results": [ { bioguideID, voteCast, ... } ]
-            results = data.get("results") or data.get("members") or data.get("memberVotes")
-            if not isinstance(results, list):
-                raw = data.get("houseRollCallVoteMemberVotes")
-                if isinstance(raw, list):
-                    results = raw
-                elif isinstance(raw, dict):
-                    for key in ("item", "memberVote", "memberVotes", "houseRollCallVoteMemberVote"):
-                        val = raw.get(key)
-                        if isinstance(val, list):
-                            results = val
-                            break
-                        if isinstance(val, dict) and (val.get("voteCast") or val.get("bioguideID")):
-                            results = [val]
-                            break
-                    if results is None and raw:
-                        for _k, val in raw.items():
-                            if isinstance(val, list) and val and isinstance(val[0], dict):
-                                if "voteCast" in val[0] or "bioguideID" in val[0]:
-                                    results = val
-                                    break
-            if not isinstance(results, list) and isinstance(data.get("houseVote"), dict):
-                h = data["houseVote"]
-                results = h.get("results") or h.get("members")
-            if not isinstance(results, list):
-                for key in ("voteMembers", "items", "votes"):
-                    cand = data.get(key)
-                    if isinstance(cand, list) and cand and isinstance(cand[0], dict):
-                        if "voteCast" in cand[0] or "bioguideID" in cand[0]:
-                            results = cand
-                            break
-        elif isinstance(data, list) and data and isinstance(data[0], dict):
-            if "voteCast" in data[0] or "bioguideID" in data[0]:
-                results = data
-        if isinstance(results, list):
+        if offset == 0 and isinstance(data, dict):
+            vote_date = _parse_vote_date(data)
+        results = _extract_members_from_vote_response(data)
+        if results:
             all_members.extend(results)
         pagination = data.get("pagination") if isinstance(data, dict) else {}
         count = pagination.get("count", 0) if isinstance(pagination, dict) else 0
@@ -596,7 +618,7 @@ def _fetch_house_vote_members(
         if not (isinstance(results, list) and len(results) == limit):
             break
         offset += limit
-    return all_members
+    return all_members, vote_date
 
 
 def _fetch_house_vote_list(
@@ -693,8 +715,11 @@ def _fetch_new_rolls_only(
         roll = int(roll_s) if roll_s.isdigit() else 0
         if session <= 0 or roll <= 0:
             continue
-        members = _fetch_house_vote_members(congress, session, roll, api_key, key_index=key_index)
-        result.append({"roll": roll, "session": session, "members": members})
+        members, vote_date = _fetch_house_vote_members(congress, session, roll, api_key, key_index=key_index)
+        entry = {"roll": roll, "session": session, "members": members}
+        if vote_date:
+            entry["vote_date"] = vote_date
+        result.append(entry)
     return result
 
 
@@ -1027,9 +1052,20 @@ def _write_one_roll_item(
     members: List[Dict[str, Any]],
     bill_id_associated: str,
     table: Any,
+    latest_action_date: Optional[str] = None,
 ) -> None:
-    """Write a single SEARCH#ROLL item. Used by bill pass and by house-vote-list backfill."""
-    sk = f"{congress}#{session_int}#{roll_int}"
+    """Write a single SEARCH#ROLL item. Used by bill pass and by house-vote-list backfill.
+    SK uses latest_action_date when provided so roll calls sort by date: {congress}#{session}#{date}#{roll}.
+    If latest_action_date is missing, SK = {congress}#{session}#{roll} for backward compatibility.
+    """
+    if latest_action_date and str(latest_action_date).strip():
+        date_part = str(latest_action_date).strip()[:10]  # YYYY-MM-DD
+        if len(date_part) >= 10 and date_part.replace("-", "").isdigit():
+            sk = f"{congress}#{session_int}#{date_part}#{roll_int}"
+        else:
+            sk = f"{congress}#{session_int}#{roll_int}"
+    else:
+        sk = f"{congress}#{session_int}#{roll_int}"
     roll_display = f"Roll no. {roll_int}"
     item = {
         "bill_id": "SEARCH#ROLL",
@@ -1073,13 +1109,24 @@ def update_search_roll_index_for_bill(
     rolls_written: Optional[Set[Tuple[str, int, int]]] = None,
 ) -> None:
     """
-    Write one SEARCH#ROLL item per roll call so roll calls can be listed and sorted by roll number.
-    PK = SEARCH#ROLL, SK = {congress}#{session}#{roll}. If rolls_written is provided, add each (congress, session, roll) to it.
+    Write one SEARCH#ROLL item per roll call so roll calls can be listed and sorted by latest action date.
+    PK = SEARCH#ROLL, SK = {congress}#{session}#{latest_action_date}#{roll}. Uses vote_date from API (updateDate/startDate)
+    when present in each roll entry; otherwise falls back to bill's latest_action_date from table.
     """
     parsed = _parse_bill_id(bill_id)
     if not parsed:
         return
     congress, _bt, _bn = parsed
+    bill_latest_date = None
+    try:
+        resp = table.get_item(Key={"bill_id": bill_id, "search_index_sk": bill_id})
+        item = resp.get("Item")
+        if item and not (str(item.get("bill_id") or "").startswith("SEARCH#")):
+            d = item.get("latest_action_date")
+            if d is not None:
+                bill_latest_date = str(d).strip()[:10] if hasattr(d, "strip") else str(d)[:10]
+    except Exception:
+        pass
     for entry in roll_call_votes or []:
         if not isinstance(entry, dict):
             continue
@@ -1092,7 +1139,8 @@ def update_search_roll_index_for_bill(
         roll_int = int(roll) if isinstance(roll, (int, float)) else (int(roll) if str(roll).isdigit() else None)
         if session_int is None or roll_int is None:
             continue
-        _write_one_roll_item(congress, session_int, roll_int, members, bill_id, table)
+        vote_date = entry.get("vote_date") or bill_latest_date
+        _write_one_roll_item(congress, session_int, roll_int, members, bill_id, table, latest_action_date=vote_date)
         if rolls_written is not None:
             rolls_written.add((congress, session_int, roll_int))
 
@@ -1446,8 +1494,11 @@ def _build_roll_call_data_for_bill(
         roll = r.get("rollNumber")
         if session is None or roll is None:
             continue
-        members = _fetch_house_vote_members(congress, session, roll, api_key, key_index=key_index)
-        roll_call_votes.append({"roll": roll, "session": session, "members": members})
+        members, vote_date = _fetch_house_vote_members(congress, session, roll, api_key, key_index=key_index)
+        entry = {"roll": roll, "session": session, "members": members}
+        if vote_date:
+            entry["vote_date"] = vote_date
+        roll_call_votes.append(entry)
         if roll_call_number is None:
             roll_call_number = roll
     return {
@@ -1744,7 +1795,14 @@ def main():
                         v.get("legislationNumber"),
                         v.get("legislationUrl"),
                     ) or ""
-                    _write_one_roll_item(str(congress), sess_int, roll_int, members, bill_id_associated, bills_table)
+                    vote_date = v.get("updateDate") or v.get("startDate") or v.get("date") or v.get("actionDate") or v.get("voteDate")
+                    if vote_date and len(str(vote_date).strip()) >= 10:
+                        vote_date = str(vote_date).strip()[:10]
+                        if "T" in vote_date:
+                            vote_date = vote_date.split("T")[0][:10]
+                    else:
+                        vote_date = "0000-00-00"
+                    _write_one_roll_item(str(congress), sess_int, roll_int, members, bill_id_associated, bills_table, latest_action_date=vote_date)
                     rolls_written_from_bills.add(key)
                     roll_backfill_added += 1
                     added_this_session += 1
