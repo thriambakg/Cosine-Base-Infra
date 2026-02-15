@@ -1046,6 +1046,45 @@ def _store_roll_members_to_s3(congress: str, session: int, roll: int, members: L
     return s3_key
 
 
+def _delete_existing_roll_item(
+    table: Any,
+    congress: str,
+    session_int: int,
+    roll_int: int,
+) -> None:
+    """Remove any existing SEARCH#ROLL item for (congress, session, roll) so we keep one item per roll.
+    Handles legacy SK {congress}#{session}#{roll} and 4-part SK {congress}#{session}#{date}#{roll}.
+    """
+    from boto3.dynamodb.conditions import Key, Attr
+    legacy_sk = f"{congress}#{session_int}#{roll_int}"
+    try:
+        resp = table.get_item(Key={"bill_id": "SEARCH#ROLL", "search_index_sk": legacy_sk})
+        if resp.get("Item"):
+            table.delete_item(Key={"bill_id": "SEARCH#ROLL", "search_index_sk": legacy_sk})
+    except Exception:
+        pass
+    sk_prefix = f"{congress}#{session_int}#"
+    next_key = None
+    for _ in range(10):
+        params = {
+            "KeyConditionExpression": Key("bill_id").eq("SEARCH#ROLL") & Key("search_index_sk").begins_with(sk_prefix),
+            "FilterExpression": Attr("roll").eq(roll_int),
+            "ProjectionExpression": "search_index_sk",
+            "Limit": 50,
+        }
+        if next_key:
+            params["ExclusiveStartKey"] = next_key
+        resp = table.query(**params)
+        for it in resp.get("Items", []):
+            try:
+                table.delete_item(Key={"bill_id": "SEARCH#ROLL", "search_index_sk": it["search_index_sk"]})
+            except Exception:
+                pass
+        next_key = resp.get("LastEvaluatedKey")
+        if not next_key or not resp.get("Items"):
+            break
+
+
 def _write_one_roll_item(
     congress: str,
     session_int: int,
@@ -1056,16 +1095,18 @@ def _write_one_roll_item(
     latest_action_date: Optional[str] = None,
 ) -> None:
     """Write a single SEARCH#ROLL item. Used by bill pass and by house-vote-list backfill.
-    SK is always {congress}#{session}#{roll} (one item per roll) so we don't create duplicates
-    or overwrite when the same roll is written from multiple bills. latest_action_date is stored
-    on the item for display/sorting in the API.
+    SK is {congress}#{session}#{latest_action_date}#{roll} so DynamoDB can return results in date order
+    (query with ScanIndexForward=False for newest first). One item per roll: we delete any existing
+    item for (congress, session, roll) before putting.
     """
-    sk = f"{congress}#{session_int}#{roll_int}"
-    date_attr = None
+    date_part = "0000-00-00"
     if latest_action_date and str(latest_action_date).strip():
-        date_part = str(latest_action_date).strip()[:10]  # YYYY-MM-DD
-        if len(date_part) >= 10 and date_part.replace("-", "").isdigit():
-            date_attr = date_part
+        d = str(latest_action_date).strip()[:10]
+        if len(d) >= 10 and d.replace("-", "").isdigit():
+            date_part = d
+    sk = f"{congress}#{session_int}#{date_part}#{roll_int}"
+    date_attr = date_part if date_part != "0000-00-00" else None
+    _delete_existing_roll_item(table, congress, session_int, roll_int)
     roll_display = f"Roll no. {roll_int}"
     item = {
         "bill_id": "SEARCH#ROLL",
@@ -1113,8 +1154,9 @@ def update_search_roll_index_for_bill(
     rolls_written: Optional[Set[Tuple[str, int, int]]] = None,
 ) -> None:
     """
-    Write one SEARCH#ROLL item per roll call (SK = {congress}#{session}#{roll}, one item per roll).
-    latest_action_date is stored on the item from vote_date (API updateDate/startDate) or bill's latest_action_date.
+    Write one SEARCH#ROLL item per roll call. SK = {congress}#{session}#{latest_action_date}#{roll}
+    so listing can use DynamoDB descending order (newest first). One item per roll: existing item
+    for (congress, session, roll) is deleted before put. latest_action_date also stored on the item.
     """
     parsed = _parse_bill_id(bill_id)
     if not parsed:
