@@ -234,6 +234,7 @@ def get_congress_api_keys() -> 'ApiKeyRotator':
                 log_print(f"✅ Retrieved {len(keys)} Congress API key(s) from Secrets Manager")
                 log_print(f"   Rate limit: {CONGRESS_API_MAX_REQUESTS_PER_HOUR} req/hour per key ({len(keys) * CONGRESS_API_MAX_REQUESTS_PER_HOUR} total/hour)")
             
+            
             def get_key(self):
                 with self._lock:
                 key = self.keys[self.current_index]
