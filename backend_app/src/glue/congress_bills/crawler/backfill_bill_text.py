@@ -1674,8 +1674,8 @@ def main():
         log_print(f"✅ Retrieved {api_key_rotator.get_key_count()} Congress API key(s)")
     except Exception as e:
         log_print(f"❌ Failed to retrieve API keys: {str(e)}")
-                raise
-        
+        raise
+
     bills_table = dynamodb.Table(BILLS_TABLE_NAME)
     politicians = load_legislators_csv()
     politicians_by_bioguide = _build_politicians_by_bioguide(politicians)
@@ -1702,8 +1702,8 @@ def main():
             if not success:
                 return ("err", err, None)
             if payload:
-                        try:
-                            bills_table.update_item(
+                try:
+                    bills_table.update_item(
                         Key={"bill_id": payload["bill_id"], "search_index_sk": payload["search_index_sk"]},
                         UpdateExpression=payload["UpdateExpression"],
                         ExpressionAttributeValues=payload["ExpressionAttributeValues"],
@@ -1722,8 +1722,8 @@ def main():
                                 ":k": s3_key,
                             },
                         )
-            else:
-                    raise
+                    else:
+                        raise
                 roll_votes = payload.get("roll_call_votes")
                 if roll_votes and politicians:
                     update_search_vote_index_for_bill(
@@ -1734,7 +1734,7 @@ def main():
                     update_search_roll_index_for_bill(bid, roll_votes, bills_table, rolls_written=rolls_written_from_bills, roll_write_lock=roll_write_lock)
                 return ("ok", None, payload)
             return ("skip", None, None)
-    except Exception as e:
+        except Exception as e:
             return ("err", str(e), None)
 
     workers = min(ROLL_CALL_MAX_WORKERS, total_bills or 1)
@@ -1746,7 +1746,7 @@ def main():
             bid = futures[future]
             try:
                 status, err_msg, _ = future.result()
-        except Exception as e:
+            except Exception as e:
                 status, err_msg = "err", str(e)
             with progress_lock:
                 if status == "ok":
@@ -1754,7 +1754,7 @@ def main():
                 elif status == "skip":
                     roll_skip += 1
                 else:
-            roll_err += 1
+                    roll_err += 1
                     if err_msg:
                         log_print(f"      ❌ {bid}: {err_msg}")
                 done = roll_ok + roll_skip + roll_err
