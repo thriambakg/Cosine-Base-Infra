@@ -1056,17 +1056,16 @@ def _write_one_roll_item(
     latest_action_date: Optional[str] = None,
 ) -> None:
     """Write a single SEARCH#ROLL item. Used by bill pass and by house-vote-list backfill.
-    SK uses latest_action_date when provided so roll calls sort by date: {congress}#{session}#{date}#{roll}.
-    If latest_action_date is missing, SK = {congress}#{session}#{roll} for backward compatibility.
+    SK is always {congress}#{session}#{roll} (one item per roll) so we don't create duplicates
+    or overwrite when the same roll is written from multiple bills. latest_action_date is stored
+    on the item for display/sorting in the API.
     """
+    sk = f"{congress}#{session_int}#{roll_int}"
+    date_attr = None
     if latest_action_date and str(latest_action_date).strip():
         date_part = str(latest_action_date).strip()[:10]  # YYYY-MM-DD
         if len(date_part) >= 10 and date_part.replace("-", "").isdigit():
-            sk = f"{congress}#{session_int}#{date_part}#{roll_int}"
-        else:
-            sk = f"{congress}#{session_int}#{roll_int}"
-    else:
-        sk = f"{congress}#{session_int}#{roll_int}"
+            date_attr = date_part
     roll_display = f"Roll no. {roll_int}"
     item = {
         "bill_id": "SEARCH#ROLL",
@@ -1081,6 +1080,8 @@ def _write_one_roll_item(
         "members": members,
         "is_search_index": True,
     }
+    if date_attr:
+        item["latest_action_date"] = date_attr
     approx = len(json.dumps(item, default=str))
     if approx > _OVERSIZE_SAFE_SIZE:
         s3_key = _store_roll_members_to_s3(congress, session_int, roll_int, members)
@@ -1097,6 +1098,8 @@ def _write_one_roll_item(
             "members_oversize_s3_key": s3_key,
             "is_search_index": True,
         }
+        if date_attr:
+            item["latest_action_date"] = date_attr
     try:
         table.put_item(Item=item)
     except Exception as e:
@@ -1110,9 +1113,8 @@ def update_search_roll_index_for_bill(
     rolls_written: Optional[Set[Tuple[str, int, int]]] = None,
 ) -> None:
     """
-    Write one SEARCH#ROLL item per roll call so roll calls can be listed and sorted by latest action date.
-    PK = SEARCH#ROLL, SK = {congress}#{session}#{latest_action_date}#{roll}. Uses vote_date from API (updateDate/startDate)
-    when present in each roll entry; otherwise falls back to bill's latest_action_date from table.
+    Write one SEARCH#ROLL item per roll call (SK = {congress}#{session}#{roll}, one item per roll).
+    latest_action_date is stored on the item from vote_date (API updateDate/startDate) or bill's latest_action_date.
     """
     parsed = _parse_bill_id(bill_id)
     if not parsed:
