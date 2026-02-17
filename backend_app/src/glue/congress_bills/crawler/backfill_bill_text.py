@@ -39,6 +39,7 @@ import re
 import csv
 import gzip
 import zipfile
+import xml.etree.ElementTree as ET
 from io import BytesIO, StringIO
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -411,15 +412,86 @@ def _bill_id_from_zip_filename(filename: str) -> Optional[str]:
     return f"{congress}-{bill_type}-{number}"
 
 
-def _get_bill_ids_from_zip_content(zip_content: bytes) -> Set[str]:
-    """Extract set of bill_ids from ZIP contents (XML filenames)."""
+def _elem_text(elem: Optional[Any], tag: str) -> Optional[str]:
+    """Get text of first child element with given tag (strip namespace from tag)."""
+    if elem is None:
+        return None
+    for child in elem:
+        local = child.tag.split("}")[-1] if "}" in str(child.tag) else child.tag
+        if local == tag and child.text is not None:
+            return child.text.strip() if isinstance(child.text, str) else str(child.text)
+    return None
+
+
+def _parse_bill_filter_date_from_xml(xml_bytes: bytes) -> Optional[datetime]:
+    """
+    Parse bill XML and return the date used for date-range filtering (same logic as fetcher):
+    latest_action_date or introduced_date. Only bills with this date within the job's date range
+    are processed. Returns datetime at start of day UTC, or None if no date or parse error.
+    """
+    try:
+        root = ET.fromstring(xml_bytes)
+    except ET.ParseError:
+        return None
+    # GovInfo BILLSTATUS: root is billStatus, bill is under it
+    bill_elem = root.find(".//{*}bill") if root is not None else None
+    if bill_elem is None:
+        bill_elem = root
+    introduced_date = _elem_text(bill_elem, "introducedDate")
+    latest_action_date = None
+    latest_elem = bill_elem.find(".//{*}latestAction") if bill_elem is not None else None
+    if latest_elem is not None:
+        latest_action_date = _elem_text(latest_elem, "actionDate")
+    if not latest_action_date and bill_elem is not None:
+        actions_elem = bill_elem.find("{*}actions")
+        if actions_elem is not None:
+            items = actions_elem.findall("{*}item")
+            if items:
+                latest_action_date = _elem_text(items[0], "actionDate")
+    filter_date_str = latest_action_date or introduced_date
+    if not filter_date_str:
+        return None
+    try:
+        if "T" in filter_date_str:
+            bill_date = datetime.fromisoformat(filter_date_str.replace("Z", "+00:00"))
+        else:
+            bill_date = datetime.strptime(filter_date_str[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        return bill_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    except (ValueError, AttributeError):
+        return None
+
+
+def _get_bill_ids_from_zip_content(
+    zip_content: bytes,
+    start_date_dt: Optional[datetime] = None,
+    end_date_dt: Optional[datetime] = None,
+) -> Set[str]:
+    """
+    Extract set of bill_ids from ZIP contents. If start_date_dt and end_date_dt are provided,
+    only include bills whose filter date (latest_action_date or introduced_date from XML)
+    falls within [start_date_dt, end_date_dt], matching the fetcher's date filtering so we
+    only check roll calls for bills the fetcher would have written for this run.
+    """
     bill_ids = set()
     with zipfile.ZipFile(BytesIO(zip_content), "r") as zf:
         for name in zf.namelist():
-            if name.lower().endswith(".xml"):
-                bid = _bill_id_from_zip_filename(name)
-                if bid:
-                    bill_ids.add(bid)
+            if not name.lower().endswith(".xml"):
+                continue
+            bid = _bill_id_from_zip_filename(name)
+            if not bid:
+                continue
+            if start_date_dt is not None and end_date_dt is not None:
+                try:
+                    with zf.open(name) as f:
+                        xml_bytes = f.read()
+                except Exception:
+                    continue
+                filter_date = _parse_bill_filter_date_from_xml(xml_bytes)
+                if filter_date is None:
+                    continue
+                if not (start_date_dt <= filter_date <= end_date_dt):
+                    continue
+            bill_ids.add(bid)
     return bill_ids
 
 
@@ -1666,6 +1738,19 @@ def main():
     s3_prefix = f"downloads/{date_range_path}/"
     log_print(f"📅 Date range: {start_date} to {end_date} (prefix: {s3_prefix})")
 
+    # Parse to datetime for XML date filtering: only bills updated within this range (same as fetcher)
+    start_date_dt = None
+    end_date_dt = None
+    try:
+        start_date_dt = datetime.strptime(start_date[:10], "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        end_date_dt = (
+            datetime.strptime(end_date[:10], "%Y-%m-%d")
+            .replace(hour=23, minute=59, second=59, microsecond=999999)
+            .replace(tzinfo=timezone.utc)
+        )
+    except (ValueError, AttributeError):
+        pass
+
     # List ZIP keys in that folder
     zip_keys = _list_zip_s3_keys(s3_prefix)
     log_print(f"📦 Found {len(zip_keys)} ZIP(s) under {s3_prefix}")
@@ -1676,13 +1761,13 @@ def main():
             resp = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=zk)
             body = resp.get("Body")
             zip_content = body.read() if body else b""
-            bill_ids = _get_bill_ids_from_zip_content(zip_content)
+            bill_ids = _get_bill_ids_from_zip_content(zip_content, start_date_dt, end_date_dt)
             all_bill_ids.update(bill_ids)
         except Exception as e:
             log_print(f"   ⚠ Failed to read ZIP {zk}: {e}")
     bill_id_list = sorted(all_bill_ids)
     total_bills = len(bill_id_list)
-    log_print(f"📋 Bills to consider (from ZIPs): {total_bills}")
+    log_print(f"📋 Bills to consider (from ZIPs, within date range): {total_bills}")
 
     if total_bills == 0:
         log_print("   No bills in date range; nothing to do.")
