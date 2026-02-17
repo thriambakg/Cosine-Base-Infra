@@ -941,6 +941,20 @@ def store_bill_to_dynamodb(record: Dict):
     # Remove temporary _text_versions field before storing (store it separately for SQS)
     text_versions = record.pop('_text_versions', [])
     
+    # Preserve attributes written by backfill/Lambda that the fetcher does not set. Fetcher does a full put_item;
+    # without this we would wipe roll_call_votes (backfill) and bill_texts (Lambda).
+    try:
+        existing = bills_table.get_item(
+            Key={"bill_id": bill_id, "search_index_sk": record.get("search_index_sk", bill_id)},
+            ProjectionExpression="roll_call_votes, roll_call_number, roll_call_votes_oversize_s3_key, bill_texts",
+        )
+        item = existing.get("Item") or {}
+        for key in ("roll_call_votes", "roll_call_number", "roll_call_votes_oversize_s3_key", "bill_texts"):
+            if key in item and item[key] is not None:
+                record[key] = item[key]
+    except Exception as e:
+        log_print(f"      ⚠️ Could not preserve roll-call/bill_texts for {bill_id}: {str(e)[:120]}")
+    
     # Full overwrite: bulk gives us full bill data, no merge with existing item (bill_texts stay [] until Lambda/backfill run)
     for put_attempt in range(max_put_retries):
         try:
