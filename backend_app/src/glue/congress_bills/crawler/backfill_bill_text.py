@@ -55,7 +55,7 @@ from awsglue.job import Job
 from pyspark.context import SparkContext
 
 import boto3
-from boto3.dynamodb.conditions import Attr
+from boto3.dynamodb.conditions import Attr, Key
 
 # ============================================================================
 # Configuration
@@ -1130,6 +1130,40 @@ def _store_roll_members_to_s3(congress: str, session: int, roll: int, members: L
     return s3_key
 
 
+def _load_existing_roll_keys_for_congress(table: Any, congress: int) -> Set[Tuple[str, int, int]]:
+    """
+    Query SEARCH#ROLL for all items with PK=SEARCH#ROLL and SK begins_with "{congress}#".
+    Returns set of (str(congress), session, roll) so the second pass can skip rolls we already have.
+    """
+    out: Set[Tuple[str, int, int]] = set()
+    pk = "SEARCH#ROLL"
+    sk_prefix = f"{congress}#"
+    try:
+        pagination_kwargs = {}
+        while True:
+            resp = table.query(
+                KeyConditionExpression=Key("bill_id").eq(pk) & Key("search_index_sk").begins_with(sk_prefix),
+                ProjectionExpression="search_index_sk, #s, #r",
+                ExpressionAttributeNames={"#s": "session", "#r": "roll"},
+                **pagination_kwargs,
+            )
+            for item in resp.get("Items") or []:
+                sk = item.get("search_index_sk") or ""
+                session_val = item.get("session")
+                roll_val = item.get("roll")
+                if session_val is not None and roll_val is not None:
+                    sess_int = int(session_val) if not isinstance(session_val, int) else session_val
+                    roll_int = int(roll_val) if not isinstance(roll_val, int) else roll_val
+                    out.add((str(congress), sess_int, roll_int))
+            next_key = resp.get("LastEvaluatedKey")
+            if not next_key:
+                break
+            pagination_kwargs = {"ExclusiveStartKey": next_key}
+    except Exception as e:
+        log_print(f"      ⚠️ Query existing SEARCH#ROLL for congress {congress}: {str(e)[:120]}")
+    return out
+
+
 def _write_one_roll_item(
     congress: str,
     session_int: int,
@@ -1885,9 +1919,12 @@ def main():
     if congresses_from_bills:
         roll_backfill_added = 0
         roll_skipped_already_from_bills = 0
+        roll_skipped_already_in_table = 0
         house_vote_list_api_calls = 0
         house_vote_members_api_calls = 0
         for congress in sorted(congresses_from_bills):
+            existing_roll_keys = _load_existing_roll_keys_for_congress(bills_table, congress)
+            log_print(f"   Congress {congress}: {len(existing_roll_keys)} roll(s) already in SEARCH#ROLL (will skip API call).")
             for session in (1, 2):
                 api_key, key_index = api_key_rotator.get_key_and_index()
                 vote_list = _fetch_house_vote_list(congress, session, api_key, key_index=key_index)
@@ -1895,6 +1932,7 @@ def main():
                 log_print(f"   Congress {congress} Session {session}: house-vote list API returned {len(vote_list)} roll(s).")
                 added_this_session = 0
                 skipped_this_session = 0
+                skipped_already_in_table_this_session = 0
                 for v in vote_list:
                     if not isinstance(v, dict):
                         continue
@@ -1909,6 +1947,9 @@ def main():
                     key = (str(congress), sess_int, roll_int)
                     if key in rolls_written_from_bills:
                         skipped_this_session += 1
+                        continue
+                    if key in existing_roll_keys:
+                        skipped_already_in_table_this_session += 1
                         continue
                     api_key, key_index = api_key_rotator.get_key_and_index()
                     members = _fetch_house_vote_members(str(congress), sess_int, roll_int, api_key, key_index=key_index)
@@ -1930,6 +1971,7 @@ def main():
                         vote_date = "0000-00-00"
                     _write_one_roll_item(str(congress), sess_int, roll_int, members, bill_id_associated, bills_table, latest_action_date=vote_date)
                     rolls_written_from_bills.add(key)
+                    existing_roll_keys.add(key)
                     roll_backfill_added += 1
                     added_this_session += 1
                     if politicians:
@@ -1953,9 +1995,16 @@ def main():
                                 politicians_by_bioguide=politicians_by_bioguide,
                             )
             roll_skipped_already_from_bills += skipped_this_session
-            if skipped_this_session or added_this_session:
-                log_print(f"   Congress {congress} Session {session}: {skipped_this_session} already from bills (skipped), {added_this_session} new (fetched members, wrote SEARCH#ROLL + SEARCH#VOTE).")
-        log_print(f"   House-vote list summary: {roll_skipped_already_from_bills} roll(s) already from bills (skipped), {roll_backfill_added} new (API calls made).")
+            roll_skipped_already_in_table += skipped_already_in_table_this_session
+            if skipped_this_session or skipped_already_in_table_this_session or added_this_session:
+                log_print(
+                    f"   Congress {congress} Session {session}: {skipped_this_session} already from bills (skipped), "
+                    f"{skipped_already_in_table_this_session} already in table (skipped), {added_this_session} new (fetched members, wrote SEARCH#ROLL + SEARCH#VOTE)."
+                )
+        log_print(
+            f"   House-vote list summary: {roll_skipped_already_from_bills} from bills (skipped), "
+            f"{roll_skipped_already_in_table} already in table (skipped), {roll_backfill_added} new (API calls made)."
+        )
         log_print(f"   House-vote list API calls: {house_vote_list_api_calls} list call(s), {house_vote_members_api_calls} member call(s) for new rolls.")
         if roll_backfill_added:
             log_print(f"✅ House-vote list backfill: added {roll_backfill_added} roll call(s) not from bill pass.")
