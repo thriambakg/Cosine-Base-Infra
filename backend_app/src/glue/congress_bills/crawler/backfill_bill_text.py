@@ -1677,6 +1677,11 @@ def process_bill_roll_call_delta(
     roll_call_votes_raw = item.get("roll_call_votes")
     xml_rolls = _house_rolls_from_recorded_votes_json(recorded_votes_json)
     existing_rolls = _existing_rolls_from_roll_call_votes(roll_call_votes_raw)
+    # Never overwrite or clear roll_call_votes when the bill has no XML roll list (e.g. fetcher
+    # wrote the item without recorded_votes_json). Otherwise we would merge with empty xml_rolls,
+    # drop all existing entries, and write REMOVE roll_call_votes, wiping data that was there.
+    if not xml_rolls:
+        return True, "skipped", None, None
     if xml_rolls == existing_rolls:
         return True, "skipped", None, None
     to_fetch = xml_rolls - existing_rolls
