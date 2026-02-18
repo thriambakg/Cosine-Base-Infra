@@ -212,6 +212,32 @@ def _looks_like_member(obj: Any) -> bool:
     return False
 
 
+def _normalize_member(member: Any) -> Optional[Dict]:
+    """Return a plain dict for a member; unwrap DynamoDB-style {'M': {...}} or {'S'}/{'N'} values."""
+    if not isinstance(member, dict):
+        return None
+    # Unwrap DynamoDB Map: {"M": {"firstName": {"S": "Jake"}, ...}}
+    if "M" in member and isinstance(member["M"], dict):
+        member = member["M"]
+    out = {}
+    for k, v in member.items():
+        if isinstance(v, dict):
+            if "S" in v:
+                out[k] = str(v["S"])
+            elif "N" in v:
+                try:
+                    out[k] = int(v["N"]) if "." not in str(v["N"]) else float(v["N"])
+                except (ValueError, TypeError):
+                    out[k] = v["N"]
+            elif "M" in v:
+                out[k] = _normalize_member(v["M"])  # nested map
+            else:
+                out[k] = v
+        else:
+            out[k] = v
+    return out
+
+
 def _extract_members_from_vote_response(data: Any) -> List[Dict]:
     """Extract list of member-vote dicts from Congress API v3 house-vote members response.
     API returns camelCase; may be top-level (results/memberVotes) or nested under a wrapper."""
@@ -527,7 +553,8 @@ def update_search_vote_index_for_bill(
         roll_int = int(roll_raw) if roll_raw is not None and str(roll_raw).isdigit() else (int(roll_raw) if isinstance(roll_raw, (int, float)) else None)
         roll_id = f"{congress}#{sess_int}#{roll_int}" if (congress and sess_int is not None and roll_int is not None) else ""
         for member in entry.get("members") or []:
-            if not isinstance(member, dict):
+            member = _normalize_member(member) if member else None
+            if not member:
                 continue
             vote_type = _member_vote_type(member)
             if not vote_type:
@@ -658,6 +685,8 @@ def update_search_roll_index_for_bill(
     roll_call_votes: List[Dict],
     rolls_written: Optional[Set[Tuple[str, int, int]]] = None,
     roll_write_lock: Optional[threading.Lock] = None,
+    politicians: Optional[List[Dict]] = None,
+    politicians_by_bioguide: Optional[Dict[str, Dict]] = None,
 ) -> None:
     table = _table()
     if not table:
@@ -699,6 +728,15 @@ def update_search_roll_index_for_bill(
                     continue
                 rolls_written.add(key)
         vote_date = entry.get("vote_date") or bill_latest_date
+        # Get roll → write votes → write roll (no read of roll row)
+        if members and politicians is not None:
+            members_plain = [_normalize_member(m) for m in members if _normalize_member(m)]
+            if members_plain:
+                congress_int = int(congress) if isinstance(congress, str) and congress.isdigit() else int(congress) if isinstance(congress, (int, float)) else None
+                if congress_int is not None:
+                    update_search_vote_index_for_roll(
+                        congress_int, session_int, roll_int, members_plain, politicians, politicians_by_bioguide,
+                    )
         _write_one_roll_item(congress, session_int, roll_int, members, bill_id, latest_action_date=vote_date)
 
 
@@ -841,7 +879,11 @@ def run_roll_call_delta_for_bill(
     if merged and politicians:
         update_search_vote_index_for_bill(bill_id, merged, politicians, politicians_by_bioguide)
     if merged:
-        update_search_roll_index_for_bill(bill_id, merged, rolls_written=rolls_written, roll_write_lock=roll_write_lock)
+        update_search_roll_index_for_bill(
+            bill_id, merged,
+            rolls_written=rolls_written, roll_write_lock=roll_write_lock,
+            politicians=politicians, politicians_by_bioguide=politicians_by_bioguide,
+        )
     return True
 
 
@@ -903,7 +945,8 @@ def update_search_vote_index_for_roll(
     roll_id = f"{congress}#{session}#{roll}"
     updates: Dict[str, Dict] = {}
     for member in members or []:
-        if not isinstance(member, dict):
+        member = _normalize_member(member) if member else None
+        if not member:
             continue
         vote_type = _member_vote_type(member)
         if not vote_type:
