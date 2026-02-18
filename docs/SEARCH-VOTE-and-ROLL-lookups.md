@@ -2,6 +2,8 @@
 
 This doc describes how to let users **search a congress member**, get their **bills and roll calls** they voted on, and **resolve bill IDs and roll call IDs** to the underlying data via primary key and search index lookups. All data lives in the **same DynamoDB table** (congress bills table).
 
+**See also:** [roll-call-vote-index-flow.md](roll-call-vote-index-flow.md) — validates backfill flow (API only for new rolls; in-memory vote-index update) and why we store vote type per bill/roll (single-call fetch + client-side filter).
+
 ---
 
 ## 1. Table key schema (same for all item types)

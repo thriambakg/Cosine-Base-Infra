@@ -12,10 +12,8 @@ Behavior:
    - If roll sets match -> skip (no API call). If different -> fetch only new rolls via API, merge into
      roll_call_votes, then update table (roll_call_number, roll_call_votes, has_roll_call).
    - SEARCH#VOTE index: for each bill updated, updates per-politician vote index items (PK SEARCH#VOTE#<politician_id>,
-     SK VOTE). Attributes: display_name, bill_yea, bill_nea, bill_present, bill_not_voting (lists of bill_ids),
-     roll_yea, roll_nea, roll_present, roll_not_voting (lists of roll ids "{congress}#{session}#{roll}").
-     Voters matched via congress-legislators.csv. Congress.gov "Present" -> bill_present/roll_present,
-     "Not Voting" -> bill_not_voting/roll_not_voting.
+     SK VOTE). Attribute vote_entries: list of { bill_id, roll_id, vote_type } (vote_type = API voteCast as-is, no normalization).
+     Voters matched via congress-legislators.csv.
    - SEARCH#ROLL index: one item per roll call (PK SEARCH#ROLL, SK {congress}#{session}#{latest_action_date}#{roll}
      or legacy {congress}#{session}#{roll}) so roll calls can be listed and sorted by latest action date. Filled from
      (1) bill pass (recordedVotes on bills) and (2) house-vote
@@ -999,35 +997,6 @@ def _resolve_politician_id_and_name(
     return (None, None)
 
 
-def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
-    """
-    Map Congress.gov voteCast to index bucket. Yea/Yes/Aye -> yea; Nay/No -> nea;
-    Present -> present; Not Voting -> not_voting. House uses 'Aye'/'No'; Senate may use 'Yea'/'Nay'.
-    Unknown values are mapped to not_voting so no member is dropped; first occurrence is logged.
-    """
-    global _logged_unknown_vote_cast
-    if vote_cast is None:
-        return None
-    v = str(vote_cast).strip()
-    if not v:
-        return None
-    v_lower = v.lower()
-    if v_lower in ("yea", "yes", "aye"):
-        return "yea"
-    if v_lower in ("nay", "no"):
-        return "nea"
-    if v_lower == "present":
-        return "present"
-    # Any variant containing "not voting" -> not_voting (do not map to present)
-    if v_lower in ("not voting", "not voting (present)", "not voting, present", "present (not voting)", "present, not voting"):
-        return "not_voting"
-    # Fallback: treat unknown voteCast as not_voting so we still index the member; log once per run
-    if v_lower not in _logged_unknown_vote_cast:
-        _logged_unknown_vote_cast.add(v_lower)
-        log_print(f"      [SEARCH#VOTE] Unmapped voteCast (treated as not_voting): {repr(vote_cast)}")
-    return "not_voting"
-
-
 # DynamoDB item size limit 400KB; use oversize/ folder for large roll_call_votes or SEARCH#VOTE data (mirror fetcher)
 _DYNAMODB_ITEM_SIZE_LIMIT = 400 * 1024
 _OVERSIZE_SAFE_SIZE = int(_DYNAMODB_ITEM_SIZE_LIMIT * 0.85)  # stay under limit with margin
@@ -1049,31 +1018,12 @@ def _store_roll_call_votes_to_s3(bill_id: str, roll_call_votes: List[Dict[str, A
     return s3_key
 
 
-def _store_vote_data_to_s3(
-    pk: str,
-    bill_yea: List[str],
-    bill_nea: List[str],
-    bill_present: List[str],
-    bill_not_voting: List[str],
-    roll_yea: List[str],
-    roll_nea: List[str],
-    roll_present: List[str],
-    roll_not_voting: List[str],
-) -> str:
-    """Store SEARCH#VOTE bill_/roll_ lists to S3 oversize/. Returns S3 key. pk is SEARCH#VOTE#<pid>."""
+def _store_vote_data_to_s3(pk: str, vote_entries: List[Dict[str, Any]]) -> str:
+    """Store SEARCH#VOTE vote_entries to S3 oversize/. Returns S3 key. pk is SEARCH#VOTE#<pid>."""
     safe_key = pk.replace("#", "-") + ".json.gz"
     s3_key = f"oversize/{safe_key}"
-    payload = {
-        "bill_yea": bill_yea,
-        "bill_nea": bill_nea,
-        "bill_present": bill_present,
-        "bill_not_voting": bill_not_voting,
-        "roll_yea": roll_yea,
-        "roll_nea": roll_nea,
-        "roll_present": roll_present,
-        "roll_not_voting": roll_not_voting,
-    }
-    json_bytes = json.dumps(payload).encode("utf-8")
+    payload = {"vote_entries": vote_entries}
+    json_bytes = json.dumps(payload, default=str).encode("utf-8")
     compressed = gzip.compress(json_bytes)
     s3_client.put_object(
         Bucket=S3_BUCKET_NAME,
@@ -1085,14 +1035,46 @@ def _store_vote_data_to_s3(
     return s3_key
 
 
-def _load_vote_data_from_item(
-    existing_item: Dict[str, Any],
-) -> Tuple[List[str], List[str], List[str], List[str], List[str], List[str], List[str], List[str]]:
-    """Get bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting."""
+def _load_vote_entries_from_item(existing_item: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """
+    Get vote_entries from a SEARCH#VOTE item (in-item or from S3 oversize).
+    Each entry is { bill_id, roll_id, vote_type }. Supports legacy 8-list shape: if only
+    bill_yea/roll_yea etc. exist, convert to vote_entries so merge logic is uniform.
+    """
     def _list(key: str, legacy: Optional[str] = None) -> List[str]:
         val = existing_item.get(key) or (existing_item.get(legacy) if legacy else [])
         return list(val or [])
 
+    vote_entries = list(existing_item.get("vote_entries") or [])
+    s3_key = (existing_item.get("vote_data_oversize_s3_key") or "").strip()
+    if s3_key:
+        try:
+            resp = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
+            body = resp.get("Body")
+            raw = gzip.decompress(body.read()) if body else b""
+            data = json.loads(raw.decode("utf-8"))
+            if data.get("vote_entries") is not None:
+                vote_entries = list(data["vote_entries"])
+            else:
+                # Legacy: 8 lists in S3
+                bill_yea = list(data.get("bill_yea") or data.get("yea") or [])
+                bill_nea = list(data.get("bill_nea") or data.get("nea") or [])
+                bill_present = list(data.get("bill_present") or [])
+                bill_not_voting = list(data.get("bill_not_voting") or [])
+                roll_yea = list(data.get("roll_yea") or [])
+                roll_nea = list(data.get("roll_nea") or [])
+                roll_present = list(data.get("roll_present") or [])
+                roll_not_voting = list(data.get("roll_not_voting") or [])
+                vote_entries = _legacy_8_lists_to_vote_entries(
+                    bill_yea, bill_nea, bill_present, bill_not_voting,
+                    roll_yea, roll_nea, roll_present, roll_not_voting,
+                )
+        except Exception as e:
+            log_print(f"      ⚠️ Failed to load vote data from {s3_key}: {str(e)[:120]}")
+            raise
+    if vote_entries:
+        return vote_entries
+    # In-item legacy 8 lists (no S3)
     bill_yea = _list("bill_yea", "yea")
     bill_nea = _list("bill_nea", "nea")
     bill_present = _list("bill_present")
@@ -1101,27 +1083,36 @@ def _load_vote_data_from_item(
     roll_nea = _list("roll_nea")
     roll_present = _list("roll_present")
     roll_not_voting = _list("roll_not_voting")
+    return _legacy_8_lists_to_vote_entries(
+        bill_yea, bill_nea, bill_present, bill_not_voting,
+        roll_yea, roll_nea, roll_present, roll_not_voting,
+    )
 
-    s3_key = (existing_item.get("vote_data_oversize_s3_key") or "").strip()
-    if s3_key:
-        try:
-            resp = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=s3_key)
-            body = resp.get("Body")
-            raw = gzip.decompress(body.read()) if body else b""
-            data = json.loads(raw.decode("utf-8"))
-            bill_yea = list(data.get("bill_yea") or data.get("yea") or [])
-            bill_nea = list(data.get("bill_nea") or data.get("nea") or [])
-            bill_present = list(data.get("bill_present") or [])
-            bill_not_voting = list(data.get("bill_not_voting") or [])
-            roll_yea = list(data.get("roll_yea") or [])
-            roll_nea = list(data.get("roll_nea") or [])
-            roll_present = list(data.get("roll_present") or [])
-            roll_not_voting = list(data.get("roll_not_voting") or [])
-        except Exception as e:
-            log_print(f"      ⚠️ Failed to load vote data from {s3_key}: {str(e)[:120]}")
-            # Do not return in-item lists (empty for oversize items): re-raise so caller does not overwrite with partial data.
-            raise
-    return bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting
+
+def _legacy_8_lists_to_vote_entries(
+    bill_yea: List[str],
+    bill_nea: List[str],
+    bill_present: List[str],
+    bill_not_voting: List[str],
+    roll_yea: List[str],
+    roll_nea: List[str],
+    roll_present: List[str],
+    roll_not_voting: List[str],
+) -> List[Dict[str, Any]]:
+    """Convert legacy 8-list shape to vote_entries. vote_type from bucket name (yea->Yea, nea->Nay, etc.)."""
+    out: List[Dict[str, Any]] = []
+    bucket_to_type = {"yea": "Yea", "nea": "Nay", "present": "Present", "not_voting": "Not Voting"}
+    for bucket, bill_list, roll_list in [
+        ("yea", bill_yea, roll_yea),
+        ("nea", bill_nea, roll_nea),
+        ("present", bill_present, roll_present),
+        ("not_voting", bill_not_voting, roll_not_voting),
+    ]:
+        vote_type = bucket_to_type.get(bucket, bucket)
+        for i, roll_id in enumerate(roll_list):
+            bill_id = bill_list[i] if i < len(bill_list) else ""
+            out.append({"bill_id": bill_id or "", "roll_id": roll_id, "vote_type": vote_type})
+    return out
 
 
 def _store_roll_members_to_s3(congress: str, session: int, roll: int, members: List[Dict[str, Any]]) -> str:
@@ -1295,15 +1286,10 @@ def update_search_roll_index_for_bill(
 _BATCH_GET_MAX = 100
 _BATCH_WRITE_MAX = 25
 
-# Track unknown voteCast values logged once per run (avoid log spam).
-_logged_unknown_vote_cast: Set[str] = set()
-
-
 def ensure_search_vote_items_for_legislators(politicians: List[Dict[str, Any]], table: Any) -> None:
     """
     Ensure every legislator in the CSV has a SEARCH#VOTE item (PK = SEARCH#VOTE#<pid>, SK = VOTE).
-    Creates missing items with empty bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting.
-    Idempotent; does not overwrite existing items.
+    Creates missing items with empty vote_entries. Idempotent; does not overwrite existing items.
     """
     if not politicians:
         return
@@ -1350,14 +1336,7 @@ def ensure_search_vote_items_for_legislators(politicians: List[Dict[str, Any]], 
             "search_type": "VOTE",
             "search_value": display_name,
             "display_name": display_name,
-            "bill_yea": [],
-            "bill_nea": [],
-            "bill_present": [],
-            "bill_not_voting": [],
-            "roll_yea": [],
-            "roll_nea": [],
-            "roll_present": [],
-            "roll_not_voting": [],
+            "vote_entries": [],
             "is_search_index": True,
         })
     for i in range(0, len(put_items), _BATCH_WRITE_MAX):
@@ -1384,9 +1363,9 @@ def update_search_vote_index_for_bill(
     politicians_by_bioguide: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """
-    For a bill's roll_call_votes, update each voter's SEARCH#VOTE item: PK = SEARCH#VOTE#<politician_id>, SK = VOTE;
-    attributes bill_yea, bill_nea, bill_present, bill_not_voting and roll_yea, roll_nea, roll_present, roll_not_voting
-    (lists of bill/roll ids). Merges with existing; idempotent. Uses BatchGetItem + BatchWriteItem.
+    For a bill's roll_call_votes, update each voter's SEARCH#VOTE item: PK = SEARCH#VOTE#<politician_id>, SK = VOTE.
+    Stores vote_entries: [ { bill_id, roll_id, vote_type } ]. vote_type is API voteCast as-is (no normalization).
+    Merges with existing; idempotent. Uses BatchGetItem + BatchWriteItem.
     """
     parsed = _parse_bill_id(bill_id)
     congress = int(parsed[0]) if parsed and parsed[0].isdigit() else None
@@ -1394,7 +1373,6 @@ def update_search_vote_index_for_bill(
         log_print(f"      [SEARCH#VOTE] bill_id unparseable (roll_ids will be missing): {repr(bill_id)}")
     updates: Dict[str, Dict[str, Any]] = {}
     n_members_total = 0
-    n_skipped_no_bucket = 0
     n_skipped_no_pid = 0
     for entry in roll_call_votes or []:
         if not isinstance(entry, dict):
@@ -1404,16 +1382,17 @@ def update_search_vote_index_for_bill(
         sess_int = int(session_raw) if session_raw is not None and str(session_raw).isdigit() else (int(session_raw) if isinstance(session_raw, (int, float)) else None)
         roll_int = int(roll_raw) if roll_raw is not None and str(roll_raw).isdigit() else (int(roll_raw) if isinstance(roll_raw, (int, float)) else None)
         if congress is None or sess_int is None or roll_int is None:
-            roll_id = None
+            roll_id = ""
         else:
             roll_id = f"{congress}#{sess_int}#{roll_int}"
         for member in entry.get("members") or []:
             if not isinstance(member, dict):
                 continue
             n_members_total += 1
-            bucket = _vote_cast_to_bucket(member.get("voteCast"))
-            if not bucket:
-                n_skipped_no_bucket += 1
+            vote_type = member.get("voteCast")
+            if vote_type is not None:
+                vote_type = str(vote_type).strip()
+            if not vote_type:
                 continue
             pid, display_name = _resolve_politician_id_and_name(
                 member, politicians, politicians_by_bioguide=politicians_by_bioguide
@@ -1422,18 +1401,16 @@ def update_search_vote_index_for_bill(
                 n_skipped_no_pid += 1
                 continue
             if pid not in updates:
-                updates[pid] = {
-                    "bill_yea": set(), "bill_nea": set(), "bill_present": set(), "bill_not_voting": set(),
-                    "roll_yea": set(), "roll_nea": set(), "roll_present": set(), "roll_not_voting": set(),
-                    "display_name": display_name or "",
-                }
-            updates[pid][f"bill_{bucket}"].add(bill_id)
-            if roll_id:
-                updates[pid][f"roll_{bucket}"].add(roll_id)
+                updates[pid] = {"vote_entries": [], "display_name": display_name or ""}
+            updates[pid]["vote_entries"].append({
+                "bill_id": bill_id,
+                "roll_id": roll_id,
+                "vote_type": vote_type,
+            })
             if display_name and not updates[pid]["display_name"]:
                 updates[pid]["display_name"] = display_name
-    if n_skipped_no_bucket or n_skipped_no_pid:
-        log_print(f"      [SEARCH#VOTE] bill {bill_id}: members={n_members_total}, indexed={len(updates)}, skipped_no_vote_bucket={n_skipped_no_bucket}, skipped_no_pid={n_skipped_no_pid}")
+    if n_skipped_no_pid and updates:
+        log_print(f"      [SEARCH#VOTE] bill {bill_id}: members={n_members_total}, indexed={len(updates)}, skipped_no_pid={n_skipped_no_pid}")
     elif updates:
         log_print(f"      [SEARCH#VOTE] bill {bill_id}: indexing {len(updates)} politicians ({n_members_total} members)")
     if not updates:
@@ -1468,16 +1445,13 @@ def update_search_vote_index_for_bill(
     for pid, data in updates.items():
         pk, sk = f"SEARCH#VOTE#{pid}", "VOTE"
         item = existing.get(pid) or {}
-        (existing_bill_yea, existing_bill_nea, existing_bill_present, existing_bill_not_voting,
-         existing_roll_yea, existing_roll_nea, existing_roll_present, existing_roll_not_voting) = _load_vote_data_from_item(item)
-        bill_yea = list(set(existing_bill_yea) | data["bill_yea"])
-        bill_nea = list(set(existing_bill_nea) | data["bill_nea"])
-        bill_present = list(set(existing_bill_present) | data.get("bill_present", set()))
-        bill_not_voting = list(set(existing_bill_not_voting) | data.get("bill_not_voting", set()))
-        roll_yea = list(set(existing_roll_yea) | data.get("roll_yea", set()))
-        roll_nea = list(set(existing_roll_nea) | data.get("roll_nea", set()))
-        roll_present = list(set(existing_roll_present) | data.get("roll_present", set()))
-        roll_not_voting = list(set(existing_roll_not_voting) | data.get("roll_not_voting", set()))
+        existing_entries = _load_vote_entries_from_item(item)
+        # Merge: existing + new; dedupe by (bill_id, roll_id) keeping last (new overwrites)
+        by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for e in existing_entries + data["vote_entries"]:
+            key = (e.get("bill_id") or "", e.get("roll_id") or "")
+            by_key[key] = e
+        vote_entries = list(by_key.values())
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
         full_item = {
             "bill_id": pk,
@@ -1485,19 +1459,12 @@ def update_search_vote_index_for_bill(
             "search_type": "VOTE",
             "search_value": display_name,
             "display_name": display_name,
-            "bill_yea": bill_yea,
-            "bill_nea": bill_nea,
-            "bill_present": bill_present,
-            "bill_not_voting": bill_not_voting,
-            "roll_yea": roll_yea,
-            "roll_nea": roll_nea,
-            "roll_present": roll_present,
-            "roll_not_voting": roll_not_voting,
+            "vote_entries": vote_entries,
             "is_search_index": True,
         }
-        approx_size = len(json.dumps(full_item))
+        approx_size = len(json.dumps(full_item, default=str))
         if approx_size > _OVERSIZE_SAFE_SIZE:
-            s3_key = _store_vote_data_to_s3(pk, bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting)
+            s3_key = _store_vote_data_to_s3(pk, vote_entries)
             full_item = {
                 "bill_id": pk,
                 "search_index_sk": sk,
@@ -1532,21 +1499,21 @@ def update_search_vote_index_for_roll(
     politicians_by_bioguide: Optional[Dict[str, Dict[str, Any]]] = None,
 ) -> None:
     """
-    For a standalone roll call (no bill), update each voter's SEARCH#VOTE item: add roll id to roll_yea, roll_nea, roll_present, or roll_not_voting.
-    Roll id format: "{congress}#{session}#{roll}". Read existing, merge in memory, overwrite.
+    For a standalone roll call (no bill), update each voter's SEARCH#VOTE item with vote_entries.
+    Each entry: { bill_id: "", roll_id: "{congress}#{session}#{roll}", vote_type } (vote_type = API voteCast as-is).
     """
     roll_id = f"{congress}#{session}#{roll}"
     updates: Dict[str, Dict[str, Any]] = {}
     n_members_total = 0
-    n_skipped_no_bucket = 0
     n_skipped_no_pid = 0
     for member in members or []:
         if not isinstance(member, dict):
             continue
         n_members_total += 1
-        bucket = _vote_cast_to_bucket(member.get("voteCast"))
-        if not bucket:
-            n_skipped_no_bucket += 1
+        vote_type = member.get("voteCast")
+        if vote_type is not None:
+            vote_type = str(vote_type).strip()
+        if not vote_type:
             continue
         pid, display_name = _resolve_politician_id_and_name(
             member, politicians, politicians_by_bioguide=politicians_by_bioguide
@@ -1555,12 +1522,16 @@ def update_search_vote_index_for_roll(
             n_skipped_no_pid += 1
             continue
         if pid not in updates:
-            updates[pid] = {"roll_yea": set(), "roll_nea": set(), "roll_present": set(), "roll_not_voting": set(), "display_name": display_name or ""}
-        updates[pid][f"roll_{bucket}"].add(roll_id)
+            updates[pid] = {"vote_entries": [], "display_name": display_name or ""}
+        updates[pid]["vote_entries"].append({
+            "bill_id": "",
+            "roll_id": roll_id,
+            "vote_type": vote_type,
+        })
         if display_name and not updates[pid]["display_name"]:
             updates[pid]["display_name"] = display_name
-    if n_skipped_no_bucket or n_skipped_no_pid:
-        log_print(f"      [SEARCH#VOTE] roll {roll_id}: members={n_members_total}, indexed={len(updates)}, skipped_no_vote_bucket={n_skipped_no_bucket}, skipped_no_pid={n_skipped_no_pid}")
+    if n_skipped_no_pid and updates:
+        log_print(f"      [SEARCH#VOTE] roll {roll_id}: members={n_members_total}, indexed={len(updates)}, skipped_no_pid={n_skipped_no_pid}")
     elif updates:
         log_print(f"      [SEARCH#VOTE] roll {roll_id}: indexing {len(updates)} politicians ({n_members_total} members)")
     if not updates:
@@ -1595,16 +1566,12 @@ def update_search_vote_index_for_roll(
     for pid, data in updates.items():
         pk, sk = f"SEARCH#VOTE#{pid}", "VOTE"
         item = existing.get(pid) or {}
-        (existing_bill_yea, existing_bill_nea, existing_bill_present, existing_bill_not_voting,
-         existing_roll_yea, existing_roll_nea, existing_roll_present, existing_roll_not_voting) = _load_vote_data_from_item(item)
-        bill_yea = list(existing_bill_yea)
-        bill_nea = list(existing_bill_nea)
-        bill_present = list(existing_bill_present)
-        bill_not_voting = list(existing_bill_not_voting)
-        roll_yea = list(set(existing_roll_yea) | data["roll_yea"])
-        roll_nea = list(set(existing_roll_nea) | data["roll_nea"])
-        roll_present = list(set(existing_roll_present) | data.get("roll_present", set()))
-        roll_not_voting = list(set(existing_roll_not_voting) | data.get("roll_not_voting", set()))
+        existing_entries = _load_vote_entries_from_item(item)
+        by_key: Dict[Tuple[str, str], Dict[str, Any]] = {}
+        for e in existing_entries + data["vote_entries"]:
+            key = (e.get("bill_id") or "", e.get("roll_id") or "")
+            by_key[key] = e
+        vote_entries = list(by_key.values())
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
         full_item = {
             "bill_id": pk,
@@ -1612,19 +1579,12 @@ def update_search_vote_index_for_roll(
             "search_type": "VOTE",
             "search_value": display_name,
             "display_name": display_name,
-            "bill_yea": bill_yea,
-            "bill_nea": bill_nea,
-            "bill_present": bill_present,
-            "bill_not_voting": bill_not_voting,
-            "roll_yea": roll_yea,
-            "roll_nea": roll_nea,
-            "roll_present": roll_present,
-            "roll_not_voting": roll_not_voting,
+            "vote_entries": vote_entries,
             "is_search_index": True,
         }
-        approx_size = len(json.dumps(full_item))
+        approx_size = len(json.dumps(full_item, default=str))
         if approx_size > _OVERSIZE_SAFE_SIZE:
-            s3_key = _store_vote_data_to_s3(pk, bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting)
+            s3_key = _store_vote_data_to_s3(pk, vote_entries)
             full_item = {
                 "bill_id": pk,
                 "search_index_sk": sk,
