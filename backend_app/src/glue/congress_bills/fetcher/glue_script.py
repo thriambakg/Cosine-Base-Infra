@@ -34,8 +34,6 @@ from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from io import StringIO, BytesIO
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
@@ -2216,8 +2214,8 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
                           rolls_written_from_bills: Optional[set] = None,
                           roll_write_lock: Optional[threading.Lock] = None) -> Tuple[int, int]:
     """
-    Process a bulk ZIP file: extract XML files, parse them, and store each batch immediately.
-    Follows govt_contracts pattern: download, parse, store, clear memory.
+    Process a bulk ZIP file: extract XML files one at a time, parse, store, then index roll calls.
+    Linear (single-threaded) to avoid write conflicts on SEARCH#ROLL and SEARCH#VOTE.
     When politicians_by_bioguide and rolls_written_from_bills are provided, runs roll call delta
     after each stored bill (SEARCH#ROLL + SEARCH#VOTE updates).
 
@@ -2233,26 +2231,23 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         end_date_dt: End date as datetime object for filtering
         politicians_by_bioguide: Optional bioguide_id -> politician map for roll call indexing
         rolls_written_from_bills: Optional set of (congress_str, session, roll) written this run
-        roll_write_lock: Optional lock when updating rolls_written_from_bills from multiple threads
+        roll_write_lock: Unused (kept for API compatibility; linear flow uses no lock)
 
     Returns:
         (number of XML files processed, number of bills stored)
     """
     bill_type_lower = bill_type.lower()
-    log_print(f"📦 Processing bulk ZIP for Congress {congress}, Bill Type {bill_type}")
+    log_print(f"📦 Processing bulk ZIP for Congress {congress}, Bill Type {bill_type} (linear)")
     
-    # Get ZIP content once (needed for all batches)
     if zip_s3_key:
-        # Download ZIP from S3 to memory
         zip_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
         zip_content = zip_obj['Body'].read()
     elif zip_content:
-        pass  # Already have content
+        pass
     else:
         log_print(f"   ❌ No ZIP content or S3 key provided")
         return 0, 0
     
-    # Extract file list first (ZIP is not thread-safe for concurrent reads)
     zip_file = BytesIO(zip_content)
     with zipfile.ZipFile(zip_file, 'r') as zip_ref:
         file_list = zip_ref.namelist()
@@ -2260,164 +2255,68 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         total_files = len(xml_file_list)
         log_print(f"📄 Found {total_files} XML file(s) to process")
     
-    # Process in batches: extract batch sequentially, then parse batch in parallel
-    batch_size = 100
-    parse_workers = min(20, batch_size)
-    log_print(f"🔄 Starting parallel parsing with {parse_workers} worker(s), processing in batches of {batch_size}...")
-    
     total_stored = 0
-    
-    def parse_xml_file(filename: str, content: bytes):
+    for idx, filename in enumerate(xml_file_list):
         try:
-            bill_record = parse_bill_xml(content, politicians)
-            if bill_record:
-                return bill_record.get('bill_id'), bill_record
-            return None, None
+            zip_file_single = BytesIO(zip_content)
+            with zipfile.ZipFile(zip_file_single, 'r') as zf:
+                xml_content = zf.read(filename)
         except Exception as e:
-            log_print(f"   ⚠️ Error parsing {filename}: {str(e)[:200]}")
-            return None, None
-    
-    # Process batches: extract sequentially, parse in parallel
-    for batch_start in range(0, total_files, batch_size):
-        batch_end = min(batch_start + batch_size, total_files)
-        batch_files = xml_file_list[batch_start:batch_end]
-        batch_num = (batch_start // batch_size) + 1
-        total_batches = (total_files + batch_size - 1) // batch_size
+            log_print(f"   ⚠️ Failed to extract {filename}: {str(e)[:200]}")
+            continue
         
-        log_print(f"   📦 Processing batch {batch_num}/{total_batches} (files {batch_start+1}-{batch_end} of {total_files})...")
+        bill_record = parse_bill_xml(xml_content, politicians)
+        if not bill_record:
+            continue
         
-        # Initialize bills dict for this batch
-        bills = {}
+        bill_id = bill_record.get('bill_id')
+        if not bill_id:
+            continue
         
-        # Extract batch from ZIP sequentially (ZIP not thread-safe)
-        log_print(f"      📥 Extracting {len(batch_files)} files from ZIP...")
-        batch_xml_data = {}
-        zip_file_batch = BytesIO(zip_content)
-        with zipfile.ZipFile(zip_file_batch, 'r') as zip_ref:
-            for idx, filename in enumerate(batch_files):
-                try:
-                    xml_content = zip_ref.read(filename)
-                    batch_xml_data[filename] = xml_content
-                    if (idx + 1) % 20 == 0:
-                        log_print(f"      📥 Extracted {idx + 1}/{len(batch_files)} files...")
-                except Exception as e:
-                    log_print(f"   ⚠️ Failed to extract {filename}: {str(e)[:200]}")
-        
-        log_print(f"      ✅ Extracted {len(batch_xml_data)} files, starting parallel parsing...")
-        
-        # Parse batch in parallel (now we have the data in memory)
-        with ThreadPoolExecutor(max_workers=parse_workers) as executor:
-            future_to_file = {
-                executor.submit(parse_xml_file, filename, content): filename
-                for filename, content in batch_xml_data.items()
-            }
-            
-            processed_in_batch = 0
-            for future in as_completed(future_to_file):
-                filename = future_to_file[future]
-                processed_in_batch += 1
-                
-                try:
-                    bill_id, bill_record = future.result()
-                    if bill_id and bill_record:
-                        bills[bill_id] = bill_record
-                except Exception as e:
-                    log_print(f"   ⚠️ Error processing {filename}: {str(e)[:200]}")
-                
-                # Log progress every 10 files
-                if processed_in_batch % 10 == 0:
-                    log_print(f"      🔄 Parsed {processed_in_batch}/{len(batch_xml_data)} files in batch {batch_num}...")
-        
-        log_print(f"   ✅ Batch {batch_num} complete: {processed_in_batch} files processed, {len(bills)} bills parsed")
-        
-        # Filter batch by date if needed
-        # For daily runs, filter by latest_action_date to catch bills with new actions
-        # For historical runs, filter by introduced_date
+        # Date filter
         if start_date_dt and end_date_dt:
-            filtered_batch = {}
-            for bill_id, bill_record in bills.items():
-                # Prefer latest_action_date for daily updates (catches bills with new actions)
-                # Fall back to introduced_date if latest_action_date not available
-                filter_date_str = bill_record.get('latest_action_date') or bill_record.get('introduced_date')
-                if filter_date_str:
-                    try:
-                        # Parse date (handle both YYYY-MM-DD and ISO format)
-                        if 'T' in filter_date_str:
-                            bill_date = datetime.fromisoformat(filter_date_str.replace('Z', '+00:00'))
-                        else:
-                            bill_date = datetime.strptime(filter_date_str, '%Y-%m-%d')
-                            bill_date = bill_date.replace(tzinfo=timezone.utc)
-                        
-                        if start_date_dt <= bill_date <= end_date_dt:
-                            filtered_batch[bill_id] = bill_record
-                    except (ValueError, AttributeError):
-                        # If date parsing fails, include bill if it has no date filter
-                        # (for backwards compatibility)
-                        pass
-                else:
-                    # No date available - include in batch (for backwards compatibility)
-                    filtered_batch[bill_id] = bill_record
-            bills = filtered_batch
-        
-        # Store batch to DynamoDB immediately
-        if bills and len(bills) > 0:
-            log_print(f"   💾 Storing {len(bills)} bill(s) from batch {batch_num} to DynamoDB...")
-            store_workers = min(20, len(bills))
-            
-            def store_bill(bill_id: str, bill_record: Dict):
+            filter_date_str = bill_record.get('latest_action_date') or bill_record.get('introduced_date')
+            if filter_date_str:
                 try:
-                    store_bill_to_dynamodb(bill_record)
-                    if roll_call_indexing and bill_record.get("recorded_votes_json") and politicians_by_bioguide is not None and rolls_written_from_bills is not None:
-                        try:
-                            roll_call_indexing.run_roll_call_delta_for_bill(
-                                bill_id, bill_record, politicians, politicians_by_bioguide,
-                                rolls_written_from_bills, roll_write_lock
-                            )
-                        except roll_call_indexing.RollCallIndexError as rc_err:
-                            log_print(f"      [FAIL] Roll call vote index not created for {bill_id}: {rc_err}")
-                            raise
-                        except Exception as rc_err:
-                            log_print(f"      ⚠️ Roll call delta for {bill_id}: {str(rc_err)[:200]}")
-                    return True, None
-                except Exception as e:
-                    error_msg = f"Error storing {bill_id}: {str(e)[:200]}"
-                    return False, error_msg
-            
-            stored_count = 0
-            with ThreadPoolExecutor(max_workers=store_workers) as executor:
-                future_to_bill = {
-                    executor.submit(store_bill, bill_id, bill_record): bill_id
-                    for bill_id, bill_record in bills.items()
-                }
-                
-                for future in as_completed(future_to_bill):
-                    bill_id = future_to_bill[future]
-                    try:
-                        success, error_msg = future.result()
-                        if success:
-                            stored_count += 1
-                        else:
-                            if error_msg:
-                                log_print(f"      ❌ {error_msg}")
-                    except Exception as e:
-                        if roll_call_indexing and isinstance(e, roll_call_indexing.RollCallIndexError):
-                            log_print(f"      ❌ [FAIL] Roll call vote index not created: {e}")
-                            raise
-                        log_print(f"      ❌ Exception storing {bill_id}: {str(e)[:200]}")
-            
-            log_print(f"   ✅ Stored {stored_count}/{len(bills)} bill(s) from batch {batch_num} to DynamoDB")
-            total_stored += stored_count
+                    if 'T' in filter_date_str:
+                        bill_date = datetime.fromisoformat(filter_date_str.replace('Z', '+00:00'))
+                    else:
+                        bill_date = datetime.strptime(filter_date_str, '%Y-%m-%d')
+                        bill_date = bill_date.replace(tzinfo=timezone.utc)
+                    if not (start_date_dt <= bill_date <= end_date_dt):
+                        continue
+                except (ValueError, AttributeError):
+                    pass
         
-        # Clear batch data from memory before next batch
-        del bills
-        del batch_xml_data
-        del zip_file_batch
-        import gc
-        gc.collect()
-        log_print(f"   🧹 Memory cleared after batch {batch_num}")
+        bill_display = bill_id.replace("-", "") if bill_id else ""
+        log_print(f"reading bill {bill_display}")
+        
+        try:
+            store_bill_to_dynamodb(bill_record)
+            total_stored += 1
+        except Exception as e:
+            log_print(f"   ❌ Error storing {bill_id}: {str(e)[:200]}")
+            continue
+        
+        if roll_call_indexing and bill_record.get("recorded_votes_json") and politicians_by_bioguide is not None and rolls_written_from_bills is not None:
+            try:
+                roll_call_indexing.run_roll_call_delta_for_bill(
+                    bill_id, bill_record, politicians, politicians_by_bioguide,
+                    rolls_written_from_bills, roll_write_lock=None,
+                )
+            except roll_call_indexing.RollCallIndexError as rc_err:
+                log_print(f"   [FAIL] Roll call vote index not created for {bill_id}: {rc_err}")
+                raise
+            except Exception as rc_err:
+                log_print(f"   ⚠️ Roll call delta for {bill_id}: {str(rc_err)[:200]}")
+        
+        if (idx + 1) % 50 == 0:
+            log_print(f"   Progress: {idx + 1}/{total_files} files, {total_stored} bills stored")
+        del xml_content
+        del bill_record
     
+    gc.collect()
     log_print(f"✅ Completed processing {total_files} XML file(s), stored {total_stored} bill(s)")
-    
     return total_files, total_stored
 
 

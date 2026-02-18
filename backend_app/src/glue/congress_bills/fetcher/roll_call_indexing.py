@@ -769,6 +769,7 @@ def update_search_roll_index_for_bill(
                     _log(f"      [FAIL] {msg}")
                     raise RollCallIndexError(msg)
         _write_one_roll_item(congress, session_int, roll_int, members, bill_id, latest_action_date=vote_date)
+        _log("roll call indexed")
 
 
 def ensure_search_vote_items_for_legislators(politicians: List[Dict]) -> None:
@@ -858,6 +859,8 @@ def run_roll_call_delta_for_bill(
     to_fetch = (xml_rolls - existing_rolls) | rolls_missing_members
     if not to_fetch:
         return False
+    bill_display = (bill_id or "").replace("-", "")
+    _log(f"bill {bill_display} has {len(to_fetch)} roll call(s), calling API")
     api_key, key_index = _get_api_key()
     if not api_key:
         _log("      No API key for roll call fetch; skipping.")
@@ -875,6 +878,9 @@ def run_roll_call_delta_for_bill(
     except Exception as e:
         _log(f"      Roll call fetch failed for {bill_id}: {str(e)[:150]}")
         return False
+    for entry in new_rolls_data:
+        num_members = len(entry.get("members") or [])
+        _log(f"api call successful, with {num_members} member votes")
     merged = _merge_roll_call_votes(existing_list, xml_rolls, new_rolls_data)
     roll_call_number = merged[0].get("roll") if merged else None
     has_roll_call = 1 if merged else 0
@@ -903,6 +909,7 @@ def run_roll_call_delta_for_bill(
             raise
     if merged and politicians:
         update_search_vote_index_for_bill(bill_id, merged, politicians, politicians_by_bioguide)
+        _log("Member votes parsed successfully and indexed")
     if merged:
         update_search_roll_index_for_bill(
             bill_id, merged,
