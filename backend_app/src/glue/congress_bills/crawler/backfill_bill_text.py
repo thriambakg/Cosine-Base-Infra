@@ -1169,7 +1169,10 @@ def _load_existing_roll_keys_for_congress(table: Any, congress: int) -> Set[Tupl
                 break
             pagination_kwargs = {"ExclusiveStartKey": next_key}
     except Exception as e:
-        log_print(f"      ⚠️ Query existing SEARCH#ROLL for congress {congress}: {str(e)[:120]}")
+        err_msg = str(e)
+        log_print(f"      ⚠️ Query existing SEARCH#ROLL for congress {congress}: {err_msg[:200]}")
+        if "AccessDeniedException" in err_msg or "Query" in err_msg:
+            log_print(f"      → Add dynamodb:Query to the Glue job IAM role for this table so the second pass can skip rolls already in SEARCH#ROLL.")
     return out
 
 
@@ -1431,6 +1434,8 @@ def update_search_vote_index_for_bill(
                 updates[pid]["display_name"] = display_name
     if n_skipped_no_bucket or n_skipped_no_pid:
         log_print(f"      [SEARCH#VOTE] bill {bill_id}: members={n_members_total}, indexed={len(updates)}, skipped_no_vote_bucket={n_skipped_no_bucket}, skipped_no_pid={n_skipped_no_pid}")
+    elif updates:
+        log_print(f"      [SEARCH#VOTE] bill {bill_id}: indexing {len(updates)} politicians ({n_members_total} members)")
     if not updates:
         return
     client = table.meta.client
@@ -1556,6 +1561,8 @@ def update_search_vote_index_for_roll(
             updates[pid]["display_name"] = display_name
     if n_skipped_no_bucket or n_skipped_no_pid:
         log_print(f"      [SEARCH#VOTE] roll {roll_id}: members={n_members_total}, indexed={len(updates)}, skipped_no_vote_bucket={n_skipped_no_bucket}, skipped_no_pid={n_skipped_no_pid}")
+    elif updates:
+        log_print(f"      [SEARCH#VOTE] roll {roll_id}: indexing {len(updates)} politicians ({n_members_total} members)")
     if not updates:
         return
     client = table.meta.client

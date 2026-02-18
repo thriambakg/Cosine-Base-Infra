@@ -3468,9 +3468,9 @@ module "congress_bills_bill_text_backfill_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access - backfill uses GetItem, UpdateItem (bills), BatchGetItem/BatchWriteItem and PutItem (SEARCH#VOTE/SEARCH#ROLL)
+  # DynamoDB access - backfill uses GetItem, UpdateItem (bills), BatchGetItem/BatchWriteItem, PutItem (SEARCH#VOTE/SEARCH#ROLL), Query (existing SEARCH#ROLL keys)
   dynamodb_table_arn = module.congress_bills_table.table_arn
-  dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem"]
+  dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem", "dynamodb:Query"]
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
