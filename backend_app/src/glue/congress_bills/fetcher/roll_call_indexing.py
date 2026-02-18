@@ -524,6 +524,25 @@ def _load_vote_entries_from_item(existing_item: Dict) -> List[Dict]:
     )
 
 
+def _merge_vote_entries_one_per_roll(entries: List[Dict]) -> List[Dict]:
+    """Merge vote entries so there is exactly one per roll_id; prefer entry with non-empty bill_id."""
+    by_roll: Dict[str, Dict] = {}
+    for e in entries or []:
+        if not isinstance(e, dict):
+            continue
+        roll_id = (e.get("roll_id") or "").strip()
+        if not roll_id:
+            continue
+        bill = (e.get("bill_id") or "").strip()
+        if roll_id not in by_roll:
+            by_roll[roll_id] = e
+        else:
+            existing_bill = (by_roll[roll_id].get("bill_id") or "").strip()
+            if bill and not existing_bill:
+                by_roll[roll_id] = e
+    return [by_roll[k] for k in sorted(by_roll.keys())]
+
+
 def _store_roll_call_votes_to_s3(bill_id: str, roll_call_votes: List[Dict]) -> str:
     s3_key = f"oversize/{bill_id}-roll_call_votes.json.gz"
     compressed = gzip.compress(json.dumps(roll_call_votes, default=str).encode("utf-8"))
@@ -599,10 +618,8 @@ def update_search_vote_index_for_bill(
     for pid, data in updates.items():
         item = existing.get(pid) or {}
         existing_entries = _load_vote_entries_from_item(item)
-        by_key: Dict[Tuple[str, str], Dict] = {}
-        for e in existing_entries + data["vote_entries"]:
-            by_key[(e.get("bill_id") or "", e.get("roll_id") or "")] = e
-        vote_entries = list(by_key.values())
+        combined = existing_entries + data["vote_entries"]
+        vote_entries = _merge_vote_entries_one_per_roll(combined)
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
         full_item = {
             "bill_id": f"SEARCH#VOTE#{pid}",
@@ -924,7 +941,20 @@ def _load_existing_roll_keys_for_congress(congress: int) -> Set[Tuple[str, int, 
     return out
 
 
+def _bill_id_from_house_vote_item(v: Dict) -> str:
+    """Build bill_id from Congress API v3 house-vote list item (legislationType, legislationNumber, congress)."""
+    if not isinstance(v, dict):
+        return ""
+    congress = v.get("congress")
+    leg_type = (v.get("legislationType") or "").strip().upper()
+    leg_num = (v.get("legislationNumber") or "").strip()
+    if congress is not None and leg_type and leg_num:
+        return f"{congress}-{leg_type}-{leg_num}"
+    return ""
+
+
 def _fetch_house_vote_list(congress: int, session: int, api_key: str, key_index: Optional[int] = None) -> List[Dict]:
+    """Fetch all house-vote list items for congress/session; API uses offset/limit (max 250) pagination."""
     out = []
     offset, limit = 0, 250
     base = _api_base()
@@ -934,12 +964,22 @@ def _fetch_house_vote_list(congress: int, session: int, api_key: str, key_index:
         data = _make_api_request(url, params, api_key, key_index)
         if not data:
             break
-        items = data.get("votes") or data.get("houseVotes") or data.get("results") or data.get("items")
+        items = None
+        if isinstance(data, list):
+            items = data
+        if items is None:
+            items = data.get("votes") or data.get("houseVotes") or data.get("results") or data.get("items")
         if isinstance(items, dict):
             items = items.get("item", items.get("vote", []))
-        if isinstance(items, list):
+        if not isinstance(items, list):
+            # Single vote object returned (e.g. limit=1 or API quirk)
+            if isinstance(data, dict) and data.get("rollCallNumber") is not None:
+                items = [data]
+            else:
+                items = []
+        if items:
             out.extend(items)
-        if not isinstance(items, list) or len(items) < limit:
+        if len(items) < limit:
             break
         offset += limit
     return out
@@ -948,8 +988,10 @@ def _fetch_house_vote_list(congress: int, session: int, api_key: str, key_index:
 def update_search_vote_index_for_roll(
     congress: int, session: int, roll: int, members: List[Dict],
     politicians: List[Dict], politicians_by_bioguide: Optional[Dict[str, Dict]] = None,
+    bill_id_override: Optional[str] = None,
 ) -> bool:
     roll_id = f"{congress}#{session}#{roll}"
+    bill_for_entry = (bill_id_override or "").strip()
     updates: Dict[str, Dict] = {}
     for member in members or []:
         member = _normalize_member(member) if member else None
@@ -963,7 +1005,7 @@ def update_search_vote_index_for_roll(
             continue
         if pid not in updates:
             updates[pid] = {"vote_entries": [], "display_name": display_name or ""}
-        updates[pid]["vote_entries"].append({"bill_id": "", "roll_id": roll_id, "vote_type": vote_type})
+        updates[pid]["vote_entries"].append({"bill_id": bill_for_entry, "roll_id": roll_id, "vote_type": vote_type})
         if display_name and not updates[pid]["display_name"]:
             updates[pid]["display_name"] = display_name
     if not updates:
@@ -996,10 +1038,8 @@ def update_search_vote_index_for_roll(
     for pid, data in updates.items():
         item = existing.get(pid) or {}
         existing_entries = _load_vote_entries_from_item(item)
-        by_key = {}
-        for e in existing_entries + data["vote_entries"]:
-            by_key[(e.get("bill_id") or "", e.get("roll_id") or "")] = e
-        vote_entries = list(by_key.values())
+        combined = existing_entries + data["vote_entries"]
+        vote_entries = _merge_vote_entries_one_per_roll(combined)
         display_name = (data.get("display_name") or item.get("display_name") or item.get("search_value") or "").strip() or pid
         full_item = {
             "bill_id": f"SEARCH#VOTE#{pid}",
@@ -1071,6 +1111,8 @@ def run_house_vote_second_pass(
                     continue
                 if rolls_written_from_bills and (str(congress), sess_int, roll_int) in rolls_written_from_bills:
                     continue
+                bill_id_associated = _bill_id_from_house_vote_item(v)
+                latest_action_date = (v.get("startDate") or v.get("updateDate") or "").strip()[:10] or None
                 api_key2, key_index2 = _get_api_key()
                 if not api_key2:
                     continue
@@ -1088,6 +1130,7 @@ def run_house_vote_second_pass(
                     wrote = update_search_vote_index_for_roll(
                         congress, sess_int, roll_int, members_plain,
                         politicians or [], politicians_by_bioguide or {},
+                        bill_id_override=bill_id_associated or None,
                     )
                     if not wrote:
                         msg = (
@@ -1096,5 +1139,8 @@ def run_house_vote_second_pass(
                         )
                         _log(f"      [FAIL] {msg}")
                         raise RollCallIndexError(msg)
-                _write_one_roll_item(str(congress), sess_int, roll_int, members, "", latest_action_date=None)
+                _write_one_roll_item(
+                    str(congress), sess_int, roll_int, members,
+                    bill_id_associated or "", latest_action_date=latest_action_date,
+                )
                 existing_roll_keys.add(key)
