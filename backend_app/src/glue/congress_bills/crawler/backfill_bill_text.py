@@ -1002,9 +1002,10 @@ def _resolve_politician_id_and_name(
 def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
     """
     Map Congress.gov voteCast to index bucket. Yea/Yes/Aye -> yea; Nay/No -> nea;
-    Present -> present; Not Voting -> not_voting (separate columns for proper display).
-    House API returns 'Aye'/'No', Senate may use 'Yea'/'Nay'.
+    Present -> present; Not Voting -> not_voting. House uses 'Aye'/'No'; Senate may use 'Yea'/'Nay'.
+    Unknown values are mapped to not_voting so no member is dropped; first occurrence is logged.
     """
+    global _logged_unknown_vote_cast
     if vote_cast is None:
         return None
     v = str(vote_cast).strip()
@@ -1015,11 +1016,15 @@ def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
         return "yea"
     if v_lower in ("nay", "no"):
         return "nea"
-    if v_lower in ("present", "present (not voting)"):
+    if v_lower in ("present", "present (not voting)", "present, not voting"):
         return "present"
-    if v_lower in ("not voting", "not voting (present)"):
+    if v_lower in ("not voting", "not voting (present)", "not voting, present"):
         return "not_voting"
-    return None
+    # Fallback: treat unknown voteCast as not_voting so we still index the member; log once per run
+    if v_lower not in _logged_unknown_vote_cast:
+        _logged_unknown_vote_cast.add(v_lower)
+        log_print(f"      [SEARCH#VOTE] Unmapped voteCast (treated as not_voting): {repr(vote_cast)}")
+    return "not_voting"
 
 
 # DynamoDB item size limit 400KB; use oversize/ folder for large roll_call_votes or SEARCH#VOTE data (mirror fetcher)
@@ -1286,6 +1291,9 @@ def update_search_roll_index_for_bill(
 _BATCH_GET_MAX = 100
 _BATCH_WRITE_MAX = 25
 
+# Track unknown voteCast values logged once per run (avoid log spam).
+_logged_unknown_vote_cast: Set[str] = set()
+
 
 def ensure_search_vote_items_for_legislators(politicians: List[Dict[str, Any]], table: Any) -> None:
     """
@@ -1378,7 +1386,12 @@ def update_search_vote_index_for_bill(
     """
     parsed = _parse_bill_id(bill_id)
     congress = int(parsed[0]) if parsed and parsed[0].isdigit() else None
+    if congress is None and (roll_call_votes or []):
+        log_print(f"      [SEARCH#VOTE] bill_id unparseable (roll_ids will be missing): {repr(bill_id)}")
     updates: Dict[str, Dict[str, Any]] = {}
+    n_members_total = 0
+    n_skipped_no_bucket = 0
+    n_skipped_no_pid = 0
     for entry in roll_call_votes or []:
         if not isinstance(entry, dict):
             continue
@@ -1393,13 +1406,16 @@ def update_search_vote_index_for_bill(
         for member in entry.get("members") or []:
             if not isinstance(member, dict):
                 continue
+            n_members_total += 1
             bucket = _vote_cast_to_bucket(member.get("voteCast"))
             if not bucket:
+                n_skipped_no_bucket += 1
                 continue
             pid, display_name = _resolve_politician_id_and_name(
                 member, politicians, politicians_by_bioguide=politicians_by_bioguide
             )
             if not pid:
+                n_skipped_no_pid += 1
                 continue
             if pid not in updates:
                 updates[pid] = {
@@ -1412,6 +1428,8 @@ def update_search_vote_index_for_bill(
                 updates[pid][f"roll_{bucket}"].add(roll_id)
             if display_name and not updates[pid]["display_name"]:
                 updates[pid]["display_name"] = display_name
+    if n_skipped_no_bucket or n_skipped_no_pid:
+        log_print(f"      [SEARCH#VOTE] bill {bill_id}: members={n_members_total}, indexed={len(updates)}, skipped_no_vote_bucket={n_skipped_no_bucket}, skipped_no_pid={n_skipped_no_pid}")
     if not updates:
         return
     client = table.meta.client
@@ -1513,22 +1531,30 @@ def update_search_vote_index_for_roll(
     """
     roll_id = f"{congress}#{session}#{roll}"
     updates: Dict[str, Dict[str, Any]] = {}
+    n_members_total = 0
+    n_skipped_no_bucket = 0
+    n_skipped_no_pid = 0
     for member in members or []:
         if not isinstance(member, dict):
             continue
+        n_members_total += 1
         bucket = _vote_cast_to_bucket(member.get("voteCast"))
         if not bucket:
+            n_skipped_no_bucket += 1
             continue
         pid, display_name = _resolve_politician_id_and_name(
             member, politicians, politicians_by_bioguide=politicians_by_bioguide
         )
         if not pid:
+            n_skipped_no_pid += 1
             continue
         if pid not in updates:
             updates[pid] = {"roll_yea": set(), "roll_nea": set(), "roll_present": set(), "roll_not_voting": set(), "display_name": display_name or ""}
         updates[pid][f"roll_{bucket}"].add(roll_id)
         if display_name and not updates[pid]["display_name"]:
             updates[pid]["display_name"] = display_name
+    if n_skipped_no_bucket or n_skipped_no_pid:
+        log_print(f"      [SEARCH#VOTE] roll {roll_id}: members={n_members_total}, indexed={len(updates)}, skipped_no_vote_bucket={n_skipped_no_bucket}, skipped_no_pid={n_skipped_no_pid}")
     if not updates:
         return
     client = table.meta.client
