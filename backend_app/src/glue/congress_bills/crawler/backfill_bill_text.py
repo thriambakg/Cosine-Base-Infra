@@ -1016,9 +1016,10 @@ def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
         return "yea"
     if v_lower in ("nay", "no"):
         return "nea"
-    if v_lower in ("present", "present (not voting)", "present, not voting"):
+    if v_lower == "present":
         return "present"
-    if v_lower in ("not voting", "not voting (present)", "not voting, present"):
+    # Any variant containing "not voting" -> not_voting (do not map to present)
+    if v_lower in ("not voting", "not voting (present)", "not voting, present", "present (not voting)", "present, not voting"):
         return "not_voting"
     # Fallback: treat unknown voteCast as not_voting so we still index the member; log once per run
     if v_lower not in _logged_unknown_vote_cast:
