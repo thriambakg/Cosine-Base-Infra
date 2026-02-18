@@ -202,24 +202,68 @@ def _member_vote_type(member: Dict) -> Optional[str]:
     return None
 
 
+def _looks_like_member(obj: Any) -> bool:
+    """True if obj looks like a member vote (has vote or bioguide)."""
+    if not isinstance(obj, dict):
+        return False
+    for key in ("voteCast", "vote_cast", "vote", "value", "bioguideID", "bioguideId", "bioguide_id"):
+        if obj.get(key) is not None:
+            return True
+    return False
+
+
 def _extract_members_from_vote_response(data: Any) -> List[Dict]:
+    """Extract list of member-vote dicts from Congress API v3 house-vote members response.
+    API returns camelCase; may be top-level (results/memberVotes) or nested under a wrapper."""
     if not isinstance(data, dict):
         return []
-    results = data.get("results") or data.get("members") or data.get("memberVotes")
-    if isinstance(results, list):
-        return results
+    # Top-level keys (Congress API v3 may use these)
+    for key in (
+        "results",
+        "members",
+        "memberVotes",
+        "houseRollCallVoteMembers",
+        "houseRollCallVoteMemberVotes",
+        "memberVoteList",
+    ):
+        val = data.get(key)
+        if isinstance(val, list):
+            if val and _looks_like_member(val[0]):
+                return val
+            # Unwrap: list of { "memberVote": {...} } or { "member": {...} }
+            out = []
+            for item in val:
+                if _looks_like_member(item):
+                    out.append(item)
+                elif isinstance(item, dict):
+                    for sub in ("memberVote", "member", "memberVoteDetails"):
+                        if _looks_like_member(item.get(sub)):
+                            out.append(item.get(sub))
+                            break
+            if out:
+                return out
+        if isinstance(val, dict):
+            for sub in ("item", "memberVote", "memberVotes", "members", "results"):
+                v = val.get(sub)
+                if isinstance(v, list) and v and _looks_like_member(v[0]):
+                    return v
+    # Nested: houseRollCallVoteMemberVotes.item etc.
     raw = data.get("houseRollCallVoteMemberVotes")
-    if isinstance(raw, list):
+    if isinstance(raw, list) and raw and _looks_like_member(raw[0]):
         return raw
     if isinstance(raw, dict):
         for k in ("item", "memberVote", "memberVotes", "houseRollCallVoteMemberVote"):
             v = raw.get(k)
-            if isinstance(v, list):
+            if isinstance(v, list) and v:
                 return v
-            if isinstance(v, dict) and (
-                v.get("voteCast") or v.get("vote_cast") or v.get("vote") or v.get("bioguideID") or v.get("bioguideId")
-            ):
+            if isinstance(v, dict) and _looks_like_member(v):
                 return [v]
+    # Fallback: find any list of member-like dicts one level deep
+    for key, val in data.items():
+        if isinstance(val, list) and len(val) > 0:
+            first = val[0]
+            if isinstance(first, dict) and _looks_like_member(first):
+                return val
     return []
 
 
@@ -255,6 +299,10 @@ def _fetch_house_vote_members(
         results = _extract_members_from_vote_response(data)
         if results:
             all_members.extend(results)
+        elif offset == 0 and isinstance(data, dict):
+            # Log once per roll when API returned data but we parsed 0 members (helps debug response shape)
+            top_keys = list(data.keys())[:12]
+            _log(f"      House-vote members response had 0 members (top-level keys: {top_keys})")
         pagination = data.get("pagination") or {} if isinstance(data, dict) else {}
         count = pagination.get("count", 0) if isinstance(pagination, dict) else 0
         if count and offset + limit >= count:
