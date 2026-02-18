@@ -168,6 +168,15 @@ def _existing_rolls_from_roll_call_votes(roll_call_votes: Any) -> Set[Tuple[str,
     return out
 
 
+def _member_vote_type(member: Dict) -> Optional[str]:
+    """Vote value from member dict; Congress API v3 may use voteCast, vote_cast, vote, or value."""
+    for key in ("voteCast", "vote_cast", "vote", "value"):
+        v = member.get(key)
+        if v is not None and str(v).strip():
+            return str(v).strip()
+    return None
+
+
 def _extract_members_from_vote_response(data: Any) -> List[Dict]:
     if not isinstance(data, dict):
         return []
@@ -182,7 +191,9 @@ def _extract_members_from_vote_response(data: Any) -> List[Dict]:
             v = raw.get(k)
             if isinstance(v, list):
                 return v
-            if isinstance(v, dict) and (v.get("voteCast") or v.get("bioguideID")):
+            if isinstance(v, dict) and (
+                v.get("voteCast") or v.get("vote_cast") or v.get("vote") or v.get("bioguideID") or v.get("bioguideId")
+            ):
                 return [v]
     return []
 
@@ -314,10 +325,21 @@ def _find_matching_politician(
     return best if best and best_score >= 0.6 else None
 
 
+def _normalize_vote_pid(pid: str) -> str:
+    """Use uppercase for bioguide-style IDs so SEARCH#VOTE#<pid> matches seed items from CSV."""
+    if not pid or pid.startswith("NAME#"):
+        return pid
+    if pid.replace("-", "").isalnum() and len(pid) <= 20:
+        return pid.upper()
+    return pid
+
+
 def _resolve_politician_id_and_name(
     member: Dict, politicians: List[Dict], politicians_by_bioguide: Optional[Dict[str, Dict]] = None
 ) -> Tuple[Optional[str], Optional[str]]:
-    bioguide = (member.get("bioguideID") or member.get("bioguide_id") or "").strip()
+    bioguide = (
+        (member.get("bioguideID") or member.get("bioguideId") or member.get("bioguide_id") or "").strip()
+    )
     first = (member.get("firstName") or member.get("first_name") or "").strip()
     last = (member.get("lastName") or member.get("last_name") or "").strip()
     name = (member.get("name") or "").strip() or f"{first} {last}".strip()
@@ -326,14 +348,16 @@ def _resolve_politician_id_and_name(
     if bioguide:
         pol = (politicians_by_bioguide or {}).get(bioguide.upper()) or _find_politician_by_bioguide(bioguide, politicians)
         if pol:
-            return (pol.get("bioguide_id") or bioguide, pol.get("name") or name or bioguide)
-        return (bioguide, name or bioguide)
+            pid = pol.get("bioguide_id") or bioguide
+            return (_normalize_vote_pid(pid), pol.get("name") or name or bioguide)
+        return (_normalize_vote_pid(bioguide), name or bioguide)
     if name or first or last:
         pol = _find_matching_politician(name or f"{first} {last}", politicians, first_name=first, last_name=last, party=party, state=state)
         if pol:
             pid = pol.get("bioguide_id") or ("NAME#" + re.sub(r"[^A-Za-z0-9]", "_", (pol.get("name") or name).strip()))
-            return (pid, pol.get("name") or name)
-        return ("NAME#" + re.sub(r"[^A-Za-z0-9]", "_", (name or f"{first}_{last}").strip()), name or f"{first} {last}".strip())
+            return (_normalize_vote_pid(pid) if not pid.startswith("NAME#") else pid, pol.get("name") or name)
+        pid = "NAME#" + re.sub(r"[^A-Za-z0-9]", "_", (name or f"{first}_{last}").strip())
+        return (pid, name or f"{first} {last}".strip())
     return (None, None)
 
 
@@ -434,9 +458,7 @@ def update_search_vote_index_for_bill(
         for member in entry.get("members") or []:
             if not isinstance(member, dict):
                 continue
-            vote_type = member.get("voteCast")
-            if vote_type is not None:
-                vote_type = str(vote_type).strip()
+            vote_type = _member_vote_type(member)
             if not vote_type:
                 continue
             pid, display_name = _resolve_politician_id_and_name(member, politicians, politicians_by_bioguide)
@@ -448,6 +470,7 @@ def update_search_vote_index_for_bill(
             if display_name and not updates[pid]["display_name"]:
                 updates[pid]["display_name"] = display_name
     if not updates:
+        _log(f"      SEARCH#VOTE: no members with vote/resolved pid for bill {bill_id} (roll_call_votes has {sum(len(e.get('members') or []) for e in (roll_call_votes or []))} members)")
         return
     client = table.meta.client
     table_name = table.name
@@ -617,6 +640,8 @@ def ensure_search_vote_items_for_legislators(politicians: List[Dict]) -> None:
         pid = (p.get("bioguide_id") or "").strip()
         if not pid:
             pid = "NAME#" + re.sub(r"[^A-Za-z0-9]", "_", (p.get("name") or "unknown").strip())
+        else:
+            pid = _normalize_vote_pid(pid)
         display_name = (p.get("name") or "").strip() or pid
         pids_with_names.append((pid, display_name))
     client = table.meta.client
@@ -807,9 +832,7 @@ def update_search_vote_index_for_roll(
     for member in members or []:
         if not isinstance(member, dict):
             continue
-        vote_type = member.get("voteCast")
-        if vote_type is not None:
-            vote_type = str(vote_type).strip()
+        vote_type = _member_vote_type(member)
         if not vote_type:
             continue
         pid, display_name = _resolve_politician_id_and_name(member, politicians, politicians_by_bioguide)
