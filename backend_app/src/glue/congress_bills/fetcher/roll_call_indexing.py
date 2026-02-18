@@ -168,6 +168,31 @@ def _existing_rolls_from_roll_call_votes(roll_call_votes: Any) -> Set[Tuple[str,
     return out
 
 
+def _rolls_with_empty_members(roll_call_votes: Any) -> Set[Tuple[str, str]]:
+    """Return (session, roll) for entries that have no members (need re-fetch to populate SEARCH#VOTE)."""
+    out: Set[Tuple[str, str]] = set()
+    if not roll_call_votes:
+        return out
+    raw = roll_call_votes
+    if isinstance(raw, str):
+        try:
+            raw = json.loads(raw)
+        except json.JSONDecodeError:
+            return out
+    if not isinstance(raw, list):
+        return out
+    for entry in raw:
+        if not isinstance(entry, dict):
+            continue
+        s, r = entry.get("session"), entry.get("roll")
+        if s is None or r is None:
+            continue
+        members = entry.get("members")
+        if not members or (isinstance(members, list) and len(members) == 0):
+            out.add((str(s), str(r)))
+    return out
+
+
 def _member_vote_type(member: Dict) -> Optional[str]:
     """Vote value from member dict; Congress API v3 may use voteCast, vote_cast, vote, or value."""
     for key in ("voteCast", "vote_cast", "vote", "value"):
@@ -264,7 +289,8 @@ def _fetch_new_rolls_only(
 def _merge_roll_call_votes(
     existing_votes: List[Dict], xml_rolls: Set[Tuple[str, str]], new_rolls_data: List[Dict]
 ) -> List[Dict]:
-    kept = []
+    # Prefer new_rolls_data (has members from API) over existing entries (may have empty members)
+    by_key: Dict[Tuple[str, str], Dict] = {}
     for entry in existing_votes or []:
         if not isinstance(entry, dict):
             continue
@@ -272,15 +298,12 @@ def _merge_roll_call_votes(
         if s is None or r is None:
             continue
         if (str(s), str(r)) in xml_rolls:
-            kept.append(entry)
-    seen = {(str(e.get("session")), str(e.get("roll"))) for e in kept}
+            by_key[(str(s), str(r))] = entry
     for e in new_rolls_data:
         s, r = e.get("session"), e.get("roll")
-        if (str(s), str(r)) in seen:
-            continue
-        seen.add((str(s), str(r)))
-        kept.append(e)
-    return kept
+        if s is not None and r is not None:
+            by_key[(str(s), str(r))] = e
+    return [by_key[k] for k in sorted(by_key.keys())]
 
 
 def _find_politician_by_bioguide(bioguide_id: str, politicians: List[Dict]) -> Optional[Dict]:
@@ -717,11 +740,13 @@ def run_roll_call_delta_for_bill(
     roll_call_votes_raw = record.get("roll_call_votes")
     xml_rolls = _house_rolls_from_recorded_votes_json(recorded_votes_json)
     existing_rolls = _existing_rolls_from_roll_call_votes(roll_call_votes_raw)
+    rolls_missing_members = _rolls_with_empty_members(roll_call_votes_raw)
     if not xml_rolls:
         return False
-    if xml_rolls == existing_rolls:
+    # Fetch rolls we don't have OR rolls we have but with empty members (so we can populate SEARCH#VOTE)
+    to_fetch = (xml_rolls - existing_rolls) | rolls_missing_members
+    if not to_fetch:
         return False
-    to_fetch = xml_rolls - existing_rolls
     api_key, key_index = _get_api_key()
     if not api_key:
         _log("      No API key for roll call fetch; skipping.")
