@@ -74,3 +74,13 @@ So **roll IDs from SEARCH#VOTE map directly to a single GetItem** on the same ta
 | Click roll call ID       | e.g. `119#2#9`        | GetItem PK=`SEARCH#ROLL`, SK=`119#2#9`                                          |
 
 So **yes**: searching a member and then resolving bill IDs and roll call IDs to the underlying data is done via **primary key GetItem** on the same table in both cases; no separate search index is needed beyond the PK/SK design above.
+
+---
+
+## 6. Scheduled runs and SEARCH#VOTE updates
+
+**Do subsequent scheduled runs overwrite the SEARCH#VOTE index?**
+
+- **No.** Each run only updates SEARCH#VOTE items for politicians who voted on the bills/rolls processed in that run. Other politicians’ items are never touched.
+- For each politician updated, the backfill **merges** with existing data: it BatchGets the current item (or loads from S3 when `vote_data_oversize_s3_key` is set), unions the new bill/roll IDs with existing lists, then Puts the merged item. So runs are additive and idempotent for the same bill/roll.
+- **Causes of discrepancies:** (1) S3 load failure for an oversize item used to fall back to empty lists and could overwrite that politician’s data with only the current run’s votes — the backfill now re-raises on S3 failure so it does not overwrite. (2) Concurrent runs updating the same politician can cause a lost update (one run’s write overwrites the other’s). (3) Politician ID mismatch (e.g. bioguide_id vs `NAME#...` when not in CSV) can split one member’s history across two SEARCH#VOTE items.

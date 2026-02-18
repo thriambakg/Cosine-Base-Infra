@@ -1001,8 +1001,9 @@ def _resolve_politician_id_and_name(
 
 def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
     """
-    Map Congress.gov voteCast to index bucket. Yea/Yes -> yea; Nay/No -> nea;
+    Map Congress.gov voteCast to index bucket. Yea/Yes/Aye -> yea; Nay/No -> nea;
     Present -> present; Not Voting -> not_voting (separate columns for proper display).
+    House API returns 'Aye'/'No', Senate may use 'Yea'/'Nay'.
     """
     if vote_cast is None:
         return None
@@ -1010,13 +1011,13 @@ def _vote_cast_to_bucket(vote_cast: Any) -> Optional[str]:
     if not v:
         return None
     v_lower = v.lower()
-    if v_lower in ("yea", "yes"):
+    if v_lower in ("yea", "yes", "aye"):
         return "yea"
     if v_lower in ("nay", "no"):
         return "nea"
-    if v_lower == "present":
+    if v_lower in ("present", "present (not voting)"):
         return "present"
-    if v_lower == "not voting":
+    if v_lower in ("not voting", "not voting (present)"):
         return "not_voting"
     return None
 
@@ -1112,6 +1113,8 @@ def _load_vote_data_from_item(
             roll_not_voting = list(data.get("roll_not_voting") or [])
         except Exception as e:
             log_print(f"      ⚠️ Failed to load vote data from {s3_key}: {str(e)[:120]}")
+            # Do not return in-item lists (empty for oversize items): re-raise so caller does not overwrite with partial data.
+            raise
     return bill_yea, bill_nea, bill_present, bill_not_voting, roll_yea, roll_nea, roll_present, roll_not_voting
 
 
