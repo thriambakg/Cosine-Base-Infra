@@ -19,6 +19,11 @@ import requests
 # Context set by fetcher: table, s3_client, bucket_name, api_base_url, get_api_key, log_print, request_timeout
 _ctx: Optional[Dict[str, Any]] = None
 
+
+class RollCallIndexError(Exception):
+    """Raised when a roll call exists but the vote index (SEARCH#VOTE) was not created; job should fail."""
+    pass
+
 _BATCH_GET_MAX = 100
 _BATCH_WRITE_MAX = 25
 _OVERSIZE_SAFE_SIZE = int(400 * 1024 * 0.85)
@@ -729,14 +734,28 @@ def update_search_roll_index_for_bill(
                 rolls_written.add(key)
         vote_date = entry.get("vote_date") or bill_latest_date
         # Get roll → write votes → write roll (no read of roll row)
-        if members and politicians is not None:
-            members_plain = [_normalize_member(m) for m in members if _normalize_member(m)]
-            if members_plain:
-                congress_int = int(congress) if isinstance(congress, str) and congress.isdigit() else int(congress) if isinstance(congress, (int, float)) else None
-                if congress_int is not None:
-                    update_search_vote_index_for_roll(
-                        congress_int, session_int, roll_int, members_plain, politicians, politicians_by_bioguide,
+        members_plain = [_normalize_member(m) for m in members if _normalize_member(m)]
+        if members and not members_plain:
+            msg = (
+                f"Roll call found but vote index not created: congress={congress} session={session_int} roll={roll_int} "
+                f"bill_id={bill_id}: 0 members after normalize (had {len(members)} raw members)"
+            )
+            _log(f"      [FAIL] {msg}")
+            raise RollCallIndexError(msg)
+        if members_plain:
+            congress_int = int(congress) if isinstance(congress, str) and congress.isdigit() else int(congress) if isinstance(congress, (int, float)) else None
+            if congress_int is not None:
+                wrote = update_search_vote_index_for_roll(
+                    congress_int, session_int, roll_int, members_plain,
+                    politicians or [], politicians_by_bioguide or {},
+                )
+                if not wrote:
+                    msg = (
+                        f"Roll call found but vote index not created: congress={congress} session={session_int} roll={roll_int} "
+                        f"bill_id={bill_id}: no SEARCH#VOTE items produced ({len(members_plain)} members)"
                     )
+                    _log(f"      [FAIL] {msg}")
+                    raise RollCallIndexError(msg)
         _write_one_roll_item(congress, session_int, roll_int, members, bill_id, latest_action_date=vote_date)
 
 
@@ -941,7 +960,7 @@ def _fetch_house_vote_list(congress: int, session: int, api_key: str, key_index:
 def update_search_vote_index_for_roll(
     congress: int, session: int, roll: int, members: List[Dict],
     politicians: List[Dict], politicians_by_bioguide: Optional[Dict[str, Dict]] = None,
-) -> None:
+) -> bool:
     roll_id = f"{congress}#{session}#{roll}"
     updates: Dict[str, Dict] = {}
     for member in members or []:
@@ -960,10 +979,11 @@ def update_search_vote_index_for_roll(
         if display_name and not updates[pid]["display_name"]:
             updates[pid]["display_name"] = display_name
     if not updates:
-        return
+        _log(f"      SEARCH#VOTE: no pids/votes for roll {congress}/{session}/{roll} ({len(members or [])} members)")
+        return False
     table = _table()
     if not table:
-        return
+        return False
     client = table.meta.client
     table_name = table.name
     keys = [{"bill_id": f"SEARCH#VOTE#{pid}", "search_index_sk": "VOTE"} for pid in updates]
@@ -1014,15 +1034,22 @@ def update_search_vote_index_for_roll(
                 "is_search_index": True,
             }
         put_items.append(full_item)
-    for i in range(0, len(put_items), _BATCH_WRITE_MAX):
-        chunk = put_items[i : i + _BATCH_WRITE_MAX]
-        write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
-        resp = client.batch_write_item(RequestItems={table_name: write_reqs})
-        unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
-        while unprocessed:
-            time.sleep(0.2)
-            resp = client.batch_write_item(RequestItems={table_name: unprocessed})
+    try:
+        for i in range(0, len(put_items), _BATCH_WRITE_MAX):
+            chunk = put_items[i : i + _BATCH_WRITE_MAX]
+            write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
+            resp = client.batch_write_item(RequestItems={table_name: write_reqs})
             unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+            while unprocessed:
+                time.sleep(0.2)
+                resp = client.batch_write_item(RequestItems={table_name: unprocessed})
+                unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+        _log(f"      SEARCH#VOTE: wrote {len(put_items)} items for roll {congress}/{session}/{roll}")
+        return True
+    except Exception as e:
+        msg = f"SEARCH#VOTE: batch write failed for roll {congress}/{session}/{roll}: {e}"
+        _log(f"      {msg}")
+        raise RollCallIndexError(msg) from e
 
 
 def run_house_vote_second_pass(
@@ -1062,6 +1089,26 @@ def run_house_vote_second_pass(
                 if not api_key2:
                     continue
                 members, _ = _fetch_house_vote_members(str(congress), sess_int, roll_int, api_key2, key_index2)
+                # Get roll → write votes → write roll; fail job if roll has members but vote index not created
+                members_plain = [_normalize_member(m) for m in members if _normalize_member(m)]
+                if members and not members_plain:
+                    msg = (
+                        f"Roll call found but vote index not created: congress={congress} session={sess_int} roll={roll_int} "
+                        f"(second pass): 0 members after normalize (had {len(members)} raw members)"
+                    )
+                    _log(f"      [FAIL] {msg}")
+                    raise RollCallIndexError(msg)
+                if members_plain:
+                    wrote = update_search_vote_index_for_roll(
+                        congress, sess_int, roll_int, members_plain,
+                        politicians or [], politicians_by_bioguide or {},
+                    )
+                    if not wrote:
+                        msg = (
+                            f"Roll call found but vote index not created: congress={congress} session={sess_int} roll={roll_int} "
+                            f"(second pass): no SEARCH#VOTE items produced ({len(members_plain)} members)"
+                        )
+                        _log(f"      [FAIL] {msg}")
+                        raise RollCallIndexError(msg)
                 _write_one_roll_item(str(congress), sess_int, roll_int, members, "", latest_action_date=None)
-                update_search_vote_index_for_roll(congress, sess_int, roll_int, members, politicians, politicians_by_bioguide)
                 existing_roll_keys.add(key)

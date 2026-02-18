@@ -2366,6 +2366,9 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
                                 bill_id, bill_record, politicians, politicians_by_bioguide,
                                 rolls_written_from_bills, roll_write_lock
                             )
+                        except roll_call_indexing.RollCallIndexError as rc_err:
+                            log_print(f"      [FAIL] Roll call vote index not created for {bill_id}: {rc_err}")
+                            raise
                         except Exception as rc_err:
                             log_print(f"      ⚠️ Roll call delta for {bill_id}: {str(rc_err)[:200]}")
                     return True, None
@@ -2390,6 +2393,9 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
                             if error_msg:
                                 log_print(f"      ❌ {error_msg}")
                     except Exception as e:
+                        if roll_call_indexing and isinstance(e, roll_call_indexing.RollCallIndexError):
+                            log_print(f"      ❌ [FAIL] Roll call vote index not created: {e}")
+                            raise
                         log_print(f"      ❌ Exception storing {bill_id}: {str(e)[:200]}")
             
             log_print(f"   ✅ Stored {stored_count}/{len(bills)} bill(s) from batch {batch_num} to DynamoDB")
@@ -2683,6 +2689,10 @@ def main():
                 set(congresses_to_query), politicians, politicians_by_bioguide, rolls_written_from_bills
             )
             log_print("✅ House-vote second pass complete")
+        except roll_call_indexing.RollCallIndexError as e:
+            log_print(f"❌ [FAIL] Roll call vote index not created (second pass): {e}")
+            logger.error(f"Roll call vote index not created: {e}", exc_info=True)
+            raise
         except Exception as e:
             log_print(f"⚠️ House-vote second pass error: {str(e)[:300]}")
             logger.exception("House-vote second pass failed")
