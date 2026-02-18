@@ -46,7 +46,7 @@ API_BASE_URL = "https://api.congress.gov/v3"
 
 # Paste your Congress.gov API key here, or set CONGRESS_API_KEY env var.
 # Get a key at: https://api.congress.gov/sign-up/
-CONGRESS_API_KEY = "aOn7FSXXtOZuk0aeum5pQK0N1VfWo81hmdeQpBI3"  # <-- paste key here
+CONGRESS_API_KEY = ""  # <-- paste key here
 API_KEY = CONGRESS_API_KEY or os.environ.get("CONGRESS_API_KEY", "")
 
 REQUEST_TIMEOUT = 30
