@@ -1183,6 +1183,13 @@ def _elem_text(parent, tag: str) -> str:
     return child.text.strip() if isinstance(child.text, str) else str(child.text)
 
 
+def _truncate_summary_text(s: str, max_chars: int = 30000) -> str:
+    """Return s truncated to max_chars to stay within DynamoDB item size limits."""
+    if not s or len(s) <= max_chars:
+        return s or ""
+    return s[:max_chars].rstrip()
+
+
 def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Optional[Dict]:
     """
     Parse BILLSTATUS XML file and convert to DynamoDB record format.
@@ -1667,16 +1674,16 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 summary_items = summaries_elem.findall('summary')
             for summary_item in summary_items or []:
                 summary = {}
-                # Try to get text from <cdata><text> structure (current format)
+                # Try to get text from <cdata><text> structure (current format; text may be in child elements e.g. <p>)
                 cdata_elem = summary_item.find('cdata')
                 if cdata_elem is not None:
                     text_in_cdata = cdata_elem.find('text')
-                    if text_in_cdata is not None and text_in_cdata.text:
-                        summary['text'] = text_in_cdata.text
+                    if text_in_cdata is not None:
+                        summary['text'] = text_in_cdata.text if text_in_cdata.text else (''.join(text_in_cdata.itertext()) if hasattr(text_in_cdata, 'itertext') else '')
                 if not summary.get('text'):
                     text_elem = summary_item.find('text')
-                    if text_elem is not None and text_elem.text:
-                        summary['text'] = text_elem.text
+                    if text_elem is not None:
+                        summary['text'] = text_elem.text if text_elem.text else (''.join(text_elem.itertext()) if hasattr(text_elem, 'itertext') else '')
                 for tag in ('actionDate', 'actionDesc', 'versionCode', 'name', 'updateDate', 'lastSummaryUpdateDate'):
                     val = _elem_text(summary_item, tag)
                     if val:
@@ -2101,10 +2108,10 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             "has_roll_call": 1 if recorded_votes else 0,
             "recorded_votes_json": json.dumps(recorded_votes) if recorded_votes else "",
             
-            # Summaries
+            # Summaries (full text for search/display; cap total to avoid DynamoDB item size)
             "summary_count": len(summaries),
             "summaries_json": json.dumps(summaries) if summaries else "",
-            "summary_text": " | ".join([s.get('text', '')[:200] for s in summaries[:3]]) if summaries else "",
+            "summary_text": _truncate_summary_text(" | ".join([s.get('text', '') for s in summaries[:5]]), max_chars=30000) if summaries else "",
             
             # Subjects/Policy Area (full subject terms from XML)
             "policy_area": policy_area if policy_area else "Other",

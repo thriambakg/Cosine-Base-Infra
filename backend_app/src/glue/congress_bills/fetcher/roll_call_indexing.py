@@ -759,6 +759,7 @@ def update_search_roll_index_for_bill(
                 wrote = update_search_vote_index_for_roll(
                     congress_int, session_int, roll_int, members_plain,
                     politicians or [], politicians_by_bioguide or {},
+                    bill_id_override=bill_id.strip() or None,
                 )
                 if not wrote:
                     msg = (
