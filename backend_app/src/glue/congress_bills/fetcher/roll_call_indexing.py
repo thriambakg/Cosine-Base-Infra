@@ -1028,7 +1028,9 @@ def update_search_vote_index_for_roll(
         with table.batch_writer() as batch:
             for item in put_items:
                 batch.put_item(Item=item)
-        _log(f"      SEARCH#VOTE: wrote {len(put_items)} items for roll {congress}/{session}/{roll} -> table={table.name}")
+        # Each row has PK bill_id="SEARCH#VOTE#<bioguide>", SK search_index_sk="VOTE" (no single "SEARCH#VOTE" row)
+        sample_pks = [it["bill_id"] for it in put_items[:2]]
+        _log(f"      SEARCH#VOTE: wrote {len(put_items)} items for roll {congress}/{session}/{roll} -> table={table.name} (e.g. query bill_id={sample_pks[0] if sample_pks else 'N/A'} search_index_sk=VOTE)")
         return True
     except Exception as e:
         msg = f"SEARCH#VOTE: batch write failed for roll {congress}/{session}/{roll}: {e}"
