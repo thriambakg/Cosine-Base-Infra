@@ -625,15 +625,9 @@ def update_search_vote_index_for_bill(
                 "is_search_index": True,
             }
         put_items.append(full_item)
-    for i in range(0, len(put_items), _BATCH_WRITE_MAX):
-        chunk = put_items[i : i + _BATCH_WRITE_MAX]
-        write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
-        resp = client.batch_write_item(RequestItems={table_name: write_reqs})
-        unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
-        while unprocessed:
-            time.sleep(0.2)
-            resp = client.batch_write_item(RequestItems={table_name: unprocessed})
-            unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
+    with table.batch_writer() as batch:
+        for item in put_items:
+            batch.put_item(Item=item)
 
 
 def _write_one_roll_item(
@@ -810,20 +804,14 @@ def ensure_search_vote_items_for_legislators(politicians: List[Dict]) -> None:
             "vote_entries": [],
             "is_search_index": True,
         })
-    for i in range(0, len(put_items), _BATCH_WRITE_MAX):
-        chunk = put_items[i : i + _BATCH_WRITE_MAX]
-        write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
-        try:
-            resp = client.batch_write_item(RequestItems={table_name: write_reqs})
-            unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
-            while unprocessed:
-                time.sleep(0.2)
-                resp = client.batch_write_item(RequestItems={table_name: unprocessed})
-                unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
-        except Exception as e:
-            _log(f"      SEARCH#VOTE seed batch write failed: {str(e)[:150]}")
-            return
-    _log(f"   Seeded {len(to_create)} SEARCH#VOTE item(s) for legislators.")
+    try:
+        with table.batch_writer() as batch:
+            for item in put_items:
+                batch.put_item(Item=item)
+    except Exception as e:
+        _log(f"      SEARCH#VOTE seed batch write failed: {str(e)[:150]}")
+        return
+    _log(f"   Seeded {len(to_create)} SEARCH#VOTE item(s) for legislators -> table={table.name}")
 
 
 def run_roll_call_delta_for_bill(
@@ -1035,16 +1023,12 @@ def update_search_vote_index_for_roll(
             }
         put_items.append(full_item)
     try:
-        for i in range(0, len(put_items), _BATCH_WRITE_MAX):
-            chunk = put_items[i : i + _BATCH_WRITE_MAX]
-            write_reqs = [{"PutRequest": {"Item": item}} for item in chunk]
-            resp = client.batch_write_item(RequestItems={table_name: write_reqs})
-            unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
-            while unprocessed:
-                time.sleep(0.2)
-                resp = client.batch_write_item(RequestItems={table_name: unprocessed})
-                unprocessed = resp.get("UnprocessedItems", {}).get(table_name, [])
-        _log(f"      SEARCH#VOTE: wrote {len(put_items)} items for roll {congress}/{session}/{roll}")
+        # Use Table resource batch_writer (same serialization as table.put_item / SEARCH#ROLL)
+        # so items are written correctly; low-level client.batch_write_item expects AttributeValue format.
+        with table.batch_writer() as batch:
+            for item in put_items:
+                batch.put_item(Item=item)
+        _log(f"      SEARCH#VOTE: wrote {len(put_items)} items for roll {congress}/{session}/{roll} -> table={table.name}")
         return True
     except Exception as e:
         msg = f"SEARCH#VOTE: batch write failed for roll {congress}/{session}/{roll}: {e}"
