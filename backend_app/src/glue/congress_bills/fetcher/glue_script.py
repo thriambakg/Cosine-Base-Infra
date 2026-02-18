@@ -43,6 +43,11 @@ from pyspark.context import SparkContext
 
 import boto3
 
+try:
+    import roll_call_indexing
+except ImportError:
+    roll_call_indexing = None
+
 # ============================================================================
 # Configuration
 # ============================================================================
@@ -2196,14 +2201,19 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         return None
 
 
-def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_date: str, 
-                          politicians: List[Dict[str, Any]], zip_content: Optional[bytes] = None, 
+def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_date: str,
+                          politicians: List[Dict[str, Any]], zip_content: Optional[bytes] = None,
                           zip_s3_key: Optional[str] = None, start_date_dt: Optional[datetime] = None,
-                          end_date_dt: Optional[datetime] = None) -> Tuple[int, int]:
+                          end_date_dt: Optional[datetime] = None,
+                          politicians_by_bioguide: Optional[Dict[str, Dict[str, Any]]] = None,
+                          rolls_written_from_bills: Optional[set] = None,
+                          roll_write_lock: Optional[threading.Lock] = None) -> Tuple[int, int]:
     """
     Process a bulk ZIP file: extract XML files, parse them, and store each batch immediately.
     Follows govt_contracts pattern: download, parse, store, clear memory.
-    
+    When politicians_by_bioguide and rolls_written_from_bills are provided, runs roll call delta
+    after each stored bill (SEARCH#ROLL + SEARCH#VOTE updates).
+
     Args:
         congress: Congress number
         bill_type: Bill type (e.g., "HR", "S")
@@ -2214,9 +2224,12 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         zip_s3_key: S3 key of ZIP file (if exists in S3)
         start_date_dt: Start date as datetime object for filtering
         end_date_dt: End date as datetime object for filtering
-    
+        politicians_by_bioguide: Optional bioguide_id -> politician map for roll call indexing
+        rolls_written_from_bills: Optional set of (congress_str, session, roll) written this run
+        roll_write_lock: Optional lock when updating rolls_written_from_bills from multiple threads
+
     Returns:
-        Number of XML files processed
+        (number of XML files processed, number of bills stored)
     """
     bill_type_lower = bill_type.lower()
     log_print(f"📦 Processing bulk ZIP for Congress {congress}, Bill Type {bill_type}")
@@ -2347,6 +2360,14 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
             def store_bill(bill_id: str, bill_record: Dict):
                 try:
                     store_bill_to_dynamodb(bill_record)
+                    if roll_call_indexing and bill_record.get("recorded_votes_json") and politicians_by_bioguide is not None and rolls_written_from_bills is not None:
+                        try:
+                            roll_call_indexing.run_roll_call_delta_for_bill(
+                                bill_id, bill_record, politicians, politicians_by_bioguide,
+                                rolls_written_from_bills, roll_write_lock
+                            )
+                        except Exception as rc_err:
+                            log_print(f"      ⚠️ Roll call delta for {bill_id}: {str(rc_err)[:200]}")
                     return True, None
                 except Exception as e:
                     error_msg = f"Error storing {bill_id}: {str(e)[:200]}"
@@ -2534,8 +2555,42 @@ def main():
     log_print("📋 Loading politician CSV data for name matching...")
     politicians = load_legislators_csv()
     log_print(f"✅ Loaded {len(politicians)} politician records")
+    politicians_by_bioguide = {}
+    for p in politicians or []:
+        bid = (p.get("bioguide_id") or "").strip()
+        if bid:
+            politicians_by_bioguide[bid.upper()] = p
     log_print("")  # Empty line for readability
-    
+
+    # API keys for roll call indexing (house-vote members API)
+    api_key_rotator = None
+    try:
+        api_key_rotator = get_congress_api_keys()
+        log_print(f"✅ Initialized API key rotator with {api_key_rotator.get_key_count()} key(s) (for roll call indexing)")
+    except Exception as e:
+        log_print(f"ℹ️ API keys not available (roll call indexing will be skipped): {str(e)}")
+
+    if roll_call_indexing and bills_table and api_key_rotator:
+        roll_call_indexing.set_context({
+            "table": bills_table,
+            "s3_client": s3_client,
+            "bucket_name": S3_BUCKET_NAME or "",
+            "api_base_url": API_BASE_URL or "https://api.congress.gov/v3",
+            "get_api_key": lambda: (api_key_rotator.get_key(), 0),
+            "log_print": log_print,
+            "request_timeout": REQUEST_TIMEOUT,
+        })
+        roll_call_indexing.ensure_search_vote_items_for_legislators(politicians)
+        log_print("✅ Roll call indexing context set and SEARCH#VOTE items ensured")
+    else:
+        if not roll_call_indexing:
+            log_print("ℹ️ roll_call_indexing module not available; skipping roll call indexing")
+        elif not api_key_rotator:
+            log_print("ℹ️ API keys not available; skipping roll call indexing")
+
+    rolls_written_from_bills = set()
+    roll_write_lock = threading.Lock()
+
     # Convert date strings to YYYY-MM-DD format for S3 path
     start_date_simple = start_date_str.split('T')[0] if start_date_str else None
     end_date_simple = end_date_str.split('T')[0] if end_date_str else None
@@ -2592,7 +2647,10 @@ def main():
                     files_processed, bills_stored = process_bulk_zip_file(
                         congress_num, bill_type, start_date_simple, end_date_simple,
                         politicians, zip_content=zip_content, zip_s3_key=zip_s3_key,
-                        start_date_dt=start_date_dt, end_date_dt=end_date_dt
+                        start_date_dt=start_date_dt, end_date_dt=end_date_dt,
+                        politicians_by_bioguide=politicians_by_bioguide,
+                        rolls_written_from_bills=rolls_written_from_bills,
+                        roll_write_lock=roll_write_lock,
                     )
                     log_print(f"📊 Processing complete: {files_processed} XML file(s) processed, {bills_stored} bill(s) stored for {bill_type} in Congress {congress_num}")
                     processed_count += bills_stored
@@ -2617,6 +2675,18 @@ def main():
                 # Continue with next bill type
                 continue
     
+    if roll_call_indexing and politicians_by_bioguide and set(congresses_to_query):
+        log_print("")
+        log_print("🔄 Running house-vote second pass (SEARCH#ROLL for rolls not tied to bills)...")
+        try:
+            roll_call_indexing.run_house_vote_second_pass(
+                set(congresses_to_query), politicians, politicians_by_bioguide, rolls_written_from_bills
+            )
+            log_print("✅ House-vote second pass complete")
+        except Exception as e:
+            log_print(f"⚠️ House-vote second pass error: {str(e)[:300]}")
+            logger.exception("House-vote second pass failed")
+
     log_print(f"\n{'=' * 80}")
     log_print(f"✅ Bulk Download Processing Complete")
     log_print(f"{'=' * 80}")

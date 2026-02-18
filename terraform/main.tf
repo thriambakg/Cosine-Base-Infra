@@ -2223,8 +2223,8 @@ module "glue_scripts_s3" {
       content_type = "text/x-python"
     },
     {
-      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/crawler/backfill_bill_text.py"
-      s3_key       = "congress_bills/crawler/backfill_bill_text.py"
+      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/fetcher/roll_call_indexing.py"
+      s3_key       = "congress_bills/fetcher/roll_call_indexing.py"
       content_type = "text/x-python"
     },
     {
@@ -3115,9 +3115,9 @@ module "congress_bills_fetcher_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access - least privilege: congress_bills/fetcher/glue_script.py uses put_item only
+  # DynamoDB access - fetcher writes bills (PutItem) and roll_call_indexing uses GetItem, UpdateItem, BatchGetItem, BatchWriteItem, Query (SEARCH#ROLL, SEARCH#VOTE)
   dynamodb_table_arn = module.congress_bills_table.table_arn
-  dynamodb_actions   = ["dynamodb:PutItem"]
+  dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem", "dynamodb:Query"]
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
@@ -3132,7 +3132,7 @@ module "congress_bills_fetcher_glue_job" {
   ]
 
   # Job arguments; fetcher installs deps from S3 requirements file (Glue 5.0: pip -r with S3 URL)
-  # Use flat requirements.txt so Glue can run pip -r; zip would require extraction Glue does not do.
+  # extra-py-files so roll_call_indexing module is importable
   default_arguments = {
     "--PROJECT_NAME"                    = var.project_name
     "--ENVIRONMENT"                     = var.environment
@@ -3143,6 +3143,7 @@ module "congress_bills_fetcher_glue_job" {
     "--BILL_TEXT_SQS_URL"               = module.congress_bills_bill_text_queue.queue_url
     "--additional-python-modules"       = "s3://${module.glue_scripts_s3.bucket_id}/glue_deps/requirements.txt"
     "--python-modules-installer-option" = "-r"
+    "--extra-py-files"                  = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/fetcher/roll_call_indexing.py"
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -3343,8 +3344,7 @@ resource "aws_iam_role_policy_attachment" "glue_congress_bills_bill_text_sqs" {
   ]
 }
 
-# Step Functions State Machine for Congress Bills Fetcher + Roll Call (consolidated)
-# Step 1: Fetcher Glue job. Step 2: Roll call (prefill) Glue job; receives start_date/end_date to derive ZIP folder for future delta logic.
+# Step Functions State Machine for Congress Bills Fetcher (includes roll call indexing in same Glue job)
 module "congress_bills_fetcher_state_machine" {
   source = "./modules/step-functions"
 
@@ -3352,13 +3352,13 @@ module "congress_bills_fetcher_state_machine" {
   environment        = var.environment
 
   definition = jsonencode({
-    Comment = "Congress.gov Bill Data Fetcher then Roll Call - Fetcher Glue then Roll Call Glue"
+    Comment = "Congress.gov Bill Data Fetcher (bills + SEARCH#ROLL/SEARCH#VOTE indexing)"
     StartAt = "StartFetcherJob"
     States = {
       StartFetcherJob = {
         Type       = "Task"
         Resource   = "arn:aws:states:::glue:startJobRun.sync"
-        Comment    = "Start Glue job for Congress bills fetching (2 day timeout)"
+        Comment    = "Start Glue job for Congress bills fetching and roll call indexing (2 day timeout)"
         ResultPath = "$.fetcherResult"
         Parameters = {
           "JobName" : module.congress_bills_fetcher_glue_job.job_name
@@ -3381,33 +3381,6 @@ module "congress_bills_fetcher_state_machine" {
             Next        = "HandleError"
           }
         ]
-        Next = "StartRollCallJob"
-      }
-      StartRollCallJob = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::glue:startJobRun.sync"
-        Comment  = "Start Glue job for roll call maintenance (uses bills from fetcher run; START_DATE/END_DATE for ZIP folder)"
-        Parameters = {
-          "JobName" = module.congress_bills_bill_text_backfill_glue_job.job_name
-          "Arguments" = {
-            "--PROJECT_NAME"          = var.project_name
-            "--ENVIRONMENT"           = var.environment
-            "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
-            "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
-            "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
-            "--REQUEST_TIMEOUT"       = "30"
-            "--START_DATE.$"          = "$.start_date"
-            "--END_DATE.$"            = "$.end_date"
-            "--SOURCE.$"              = "$.source"
-          }
-        }
-        Catch = [
-          {
-            ErrorEquals = ["States.ALL"]
-            ResultPath  = "$.error"
-            Next        = "HandleError"
-          }
-        ]
         Next = "Success"
       }
       Success = {
@@ -3417,7 +3390,7 @@ module "congress_bills_fetcher_state_machine" {
       HandleError = {
         Type  = "Fail"
         Error = "CongressBillsFetchFailed"
-        Cause = "The Congress bills fetcher or roll call job failed. Check CloudWatch logs for details."
+        Cause = "The Congress bills fetcher job failed. Check CloudWatch logs for details."
       }
     }
   })
@@ -3425,8 +3398,7 @@ module "congress_bills_fetcher_state_machine" {
   lambda_function_arns = []
 
   glue_job_names = [
-    module.congress_bills_fetcher_glue_job.job_name,
-    module.congress_bills_bill_text_backfill_glue_job.job_name
+    module.congress_bills_fetcher_glue_job.job_name
   ]
 
   log_level              = var.environment == "production" ? "ERROR" : "ALL"
@@ -3436,92 +3408,7 @@ module "congress_bills_fetcher_state_machine" {
   tags = var.common_tags
 
   depends_on = [
-    module.congress_bills_fetcher_glue_job,
-    module.congress_bills_bill_text_backfill_glue_job
-  ]
-}
-
-# Glue Job for Congress Bills Bill Text Backfill (prefill)
-# Backfills bill_text_s3_key and roll call fields for existing bills in DynamoDB
-module "congress_bills_bill_text_backfill_glue_job" {
-  source = "./modules/glue-job"
-
-  job_name = "${var.project_name}-congress-bills-bill-text-backfill-${var.environment}"
-
-  # Script location - uploaded to glue scripts bucket (congress_bills/crawler/)
-  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/crawler/backfill_bill_text.py"
-  python_version  = "3"
-  glue_version    = "4.0"
-
-  # Job configuration
-  max_retries           = 1
-  timeout               = 2880 # 2 days (48 hours) - may take a while for large tables
-  concurrent_executions = 1    # Only allow 1 concurrent run
-  worker_type           = "G.1X"
-  number_of_workers     = 2
-
-  # S3 buckets
-  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
-  additional_s3_bucket_arns = [
-    module.congress_bills_data_s3.bucket_arn
-  ]
-  spark_logs_bucket = module.static_hosting_bucket.bucket_id
-  temp_bucket       = module.static_hosting_bucket.bucket_id
-
-  # DynamoDB access - backfill uses GetItem, UpdateItem (bills), BatchGetItem/BatchWriteItem, PutItem (SEARCH#VOTE/SEARCH#ROLL), Query (existing SEARCH#ROLL keys)
-  dynamodb_table_arn = module.congress_bills_table.table_arn
-  dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:UpdateItem", "dynamodb:PutItem", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem", "dynamodb:Query"]
-
-  # KMS for encryption
-  kms_key_arn = module.kms.main_key_arn
-  additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
-  ]
-
-  # Additional IAM policies for Secrets Manager
-  additional_policy_arns = [
-    module.congress_api_secrets_manager.secret_access_policy_arn
-  ]
-
-  # Job arguments (START_DATE, END_DATE passed by Step Function when consolidated; optional when run manually)
-  default_arguments = {
-    "--PROJECT_NAME"          = var.project_name
-    "--ENVIRONMENT"           = var.environment
-    "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
-    "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
-    "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
-    "--REQUEST_TIMEOUT"       = "30"
-  }
-
-  job_bookmark_option = "job-bookmark-disable"
-
-  tags = var.common_tags
-
-  depends_on = [
-    module.glue_scripts_s3,
-    module.congress_bills_data_s3,
-    module.static_hosting_bucket,
-    module.congress_bills_table,
-    module.kms,
-    module.congress_api_secrets_manager
-  ]
-}
-
-# Grant backfill Glue job role access to DynamoDB KMS key
-resource "aws_kms_grant" "congress_bills_backfill_glue_dynamodb_key_access" {
-  name              = "${var.project_name}-congress-bills-backfill-${var.environment}-dynamodb-key-grant"
-  key_id            = module.kms.dynamodb_key_id
-  grantee_principal = module.congress_bills_bill_text_backfill_glue_job.role_arn
-  operations = [
-    "Decrypt",
-    "Encrypt",
-    "GenerateDataKey",
-    "DescribeKey"
-  ]
-
-  depends_on = [
-    module.congress_bills_bill_text_backfill_glue_job,
-    module.kms
+    module.congress_bills_fetcher_glue_job
   ]
 }
 

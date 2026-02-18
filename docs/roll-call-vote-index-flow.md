@@ -9,12 +9,8 @@
 3. If **different**: compute `to_fetch = xml_rolls - existing_rolls` (only rolls we don’t have).
 4. **API**: For each `(session, roll)` in `to_fetch` only, call **one** House vote-members API (`_fetch_house_vote_members`). So we do **one API call per new roll**, not per bill and not per roll when we already have it.
 5. **Merge** new roll data into existing `roll_call_votes`, then **UpdateItem** the bill (or write oversize and set key).
-6. **SEARCH#VOTE update** (`update_search_vote_index_for_bill`): Uses **in-memory** `roll_call_votes` only. No extra API. For each entry (each roll), for each member:
-   - Map `voteCast` → bucket (yea/nea/present/not_voting).
-   - Resolve member → politician_id (bioguide or NAME#…).
-   - Add this bill_id to that politician’s `bill_yea` / `bill_nea` / etc.
-   - Add this roll_id to that politician’s `roll_yea` / `roll_nea` / etc.
-7. **BatchGetItem** existing SEARCH#VOTE items for those politicians, **merge** the new ids into the lists, **BatchWriteItem** back.
+6. **SEARCH#ROLL**: For each roll in `roll_call_votes`, write one SEARCH#ROLL item (SK = congress#date#session#roll; date = sort key).
+7. **SEARCH#VOTE update** (`update_search_vote_index_for_bill`): Uses **in-memory** `roll_call_votes` only. No extra API. For each roll, for each member: take `voteCast` as-is (no normalization), resolve member → politician_id (bioguide or NAME#…), append `{ bill_id, roll_id, vote_type }` to that politician’s `vote_entries`. BatchGet existing SEARCH#VOTE items, merge, BatchWrite back.
 
 So we are **not** “calling the API for each roll” when building the vote index. We call the API only for **new** rolls (delta). The vote-index step only iterates the `roll_call_votes` we already have and updates DynamoDB.
 
@@ -81,5 +77,31 @@ So **yes**, storing the full vote structure in one list (and not parsing into bi
 | Question | Answer |
 |----------|--------|
 | Do we call the API for each roll when updating the vote index? | No. We call the API only for **new** rolls (delta). The vote-index update uses in-memory `roll_call_votes` / members. |
-| Are we going through each roll and mapping votes into columns? | Yes. For each roll we already have, we iterate its members, map `voteCast` → bucket, and add bill_id/roll_id to that politician’s bill_yea/roll_yea (or nea/present/not_voting). |
-| Would “just bill and roll” + client-side filtering be better? | No. Without storing vote type per bill/roll, client cannot filter by Yea/Nay/Present/Not Voting without fetching every roll’s members (N+1 calls). Storing vote type (current 8 columns or a (id, vote_type) shape) is what allows single-call fetch + client-side vote-type filter. |
+| Are we mapping SEARCH#VOTE when we create SEARCH#ROLL? | Yes. For each roll we write, we append vote_entries to each politician's SEARCH#VOTE (bill pass and second pass). |
+| Would “just bill and roll” + client-side filtering be better? | No. Without storing vote type per bill/roll, client cannot filter by Yea/Nay/Present/Not Voting without fetching every roll’s members (N+1 calls). Storing vote type (vote_entries) allows single-call fetch + client-side vote-type filter. |
+
+---
+
+## 5. Flow summary: first pass and second pass
+
+**First pass (bills from XML / ZIP date range):**
+
+1. Check XML (via bill's `recorded_votes_json`) for update date within the provided or calculated date range (bill IDs from listing ZIPs in S3 and parsing BILLSTATUS XML).
+2. For each bill, check for any roll calls (compare XML roll set vs existing `roll_call_votes`).
+3. If there are new rolls, call the API once per new roll to get roll call members.
+4. Store each roll as **SEARCH#ROLL** with the date in the sort key (congress#date#session#roll).
+5. For each roll being stored, map each member's vote to a politician: **append** `{ bill_id, roll_id, vote_type }` to that politician's **SEARCH#VOTE** `vote_entries`. Bill and vote type come from the top level (we're inside the bill loop).
+6. Continue until all bills in the list are done.
+
+**Second pass (house-vote list — extra roll calls):**
+
+1. For each roll in the house-vote list not already in SEARCH#ROLL, fetch members from the API, write **SEARCH#ROLL**, then map each vote to politicians and **append** to their **SEARCH#VOTE** `vote_entries`.
+2. These rolls often have no bill associated; we store `bill_id: ""` in the vote entry.
+
+---
+
+## 6. Consolidating the two Glue jobs (recommended)
+
+**Current setup:** Two jobs: **Fetcher** (bill data to DynamoDB + ZIPs to S3) and **Backfill** (ZIP list to bill IDs, then roll delta, SEARCH#ROLL, SEARCH#VOTE; then house-vote second pass). The backfill depends on the fetcher having run first with the same date range.
+
+**Recommendation: consolidate into one job.** One Glue job that (1) fetches bill data and writes bills to DynamoDB, (2) for each bill with `recorded_votes_json`, runs roll-call delta, updates the bill, writes SEARCH#ROLL, updates SEARCH#VOTE, and (3) runs the house-vote second pass at the end. Benefits: one schedule, one date range, no run-order or date-range sync issues. Tradeoff: longer single job. Refactor the fetcher to call the same roll-call logic the backfill uses after writing each bill (or batch); the backfill can be retired or kept as a roll-call-only repair job (e.g. bill IDs from DynamoDB query).
