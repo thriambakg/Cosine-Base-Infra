@@ -962,10 +962,15 @@ def _bill_id_from_house_vote_item(v: Dict) -> str:
 
 
 def _fetch_house_vote_list(congress: int, session: int, api_key: str, key_index: Optional[int] = None) -> List[Dict]:
-    """Fetch all house-vote list items for congress/session; API uses offset/limit (max 250) pagination."""
-    out = []
+    """
+    GET /house-vote/{congress}/{session} - list all roll call votes for that Congress and session.
+    Congress.gov v3 may wrap the list in 'votes', 'houseVotes', 'results', or 'items'.
+    Matches backfill_bill_text._fetch_house_vote_list and test_bill_roll_call.fetch_house_vote_list.
+    """
+    out: List[Dict] = []
     offset, limit = 0, 250
     base = _api_base()
+    _logged_keys = False
     while True:
         url = f"{base}/house-vote/{congress}/{session}"
         params = {"format": "json", "offset": offset, "limit": limit}
@@ -973,21 +978,37 @@ def _fetch_house_vote_list(congress: int, session: int, api_key: str, key_index:
         if not data:
             break
         items = None
-        if isinstance(data, list):
+        if isinstance(data, dict):
+            items = data.get("votes") or data.get("houseVotes") or data.get("results") or data.get("items")
+            if isinstance(items, dict):
+                items = items.get("item", items.get("vote", items.get("votes", [])))
+            if not isinstance(items, list) and isinstance(data.get("houseVote"), dict):
+                items = data["houseVote"].get("votes") or data["houseVote"].get("item")
+            if not isinstance(items, list):
+                for key, val in data.items():
+                    if key in ("pagination", "request"):
+                        continue
+                    if isinstance(val, list) and val and isinstance(val[0], dict):
+                        if "rollCallNumber" in val[0] or "legislationNumber" in val[0] or "rollNumber" in val[0]:
+                            items = val
+                            break
+            if not isinstance(items, list) and offset == 0 and not _logged_keys:
+                _log(f"      House-vote list response keys (Congress {congress} Session {session}): {list(data.keys())}")
+                _logged_keys = True
+            if not isinstance(items, list) and isinstance(data, dict) and data.get("rollCallNumber") is not None:
+                items = [data]
+        elif isinstance(data, list):
             items = data
         if items is None:
-            items = data.get("votes") or data.get("houseVotes") or data.get("results") or data.get("items")
-        if isinstance(items, dict):
-            items = items.get("item", items.get("vote", []))
-        if not isinstance(items, list):
-            # Single vote object returned (e.g. limit=1 or API quirk)
-            if isinstance(data, dict) and data.get("rollCallNumber") is not None:
-                items = [data]
-            else:
-                items = []
-        if items:
+            items = []
+        if isinstance(items, list):
             out.extend(items)
-        if len(items) < limit:
+        elif isinstance(data, dict) and "rollCallNumber" in data:
+            out.append(data)
+        if not isinstance(data, dict):
+            break
+        num_items = len(items) if isinstance(items, list) else 0
+        if num_items < limit:
             break
         offset += limit
     return out
