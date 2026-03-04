@@ -22,6 +22,10 @@ Usage:
 
   # All rolls (house-vote list API)
   python test_bill_roll_call.py --all-rolls --congress 119
+
+  # Inspect house-vote members API response (raw JSON for schema debugging)
+  python test_bill_roll_call.py --inspect-members --api-key YOUR_KEY
+  python test_bill_roll_call.py --inspect-members --congress 119 --session 1 --roll 8 --api-key YOUR_KEY
 """
 
 import argparse
@@ -46,7 +50,7 @@ API_BASE_URL = "https://api.congress.gov/v3"
 
 # Paste your Congress.gov API key here, or set CONGRESS_API_KEY env var.
 # Get a key at: https://api.congress.gov/sign-up/
-CONGRESS_API_KEY = ""  # <-- paste key here
+CONGRESS_API_KEY = "4ju6seBBsE2s3YfudxravIWoMJe0vtRKm4rTDyiX"  # <-- paste key here, or use --api-key
 API_KEY = CONGRESS_API_KEY or os.environ.get("CONGRESS_API_KEY", "")
 
 REQUEST_TIMEOUT = 30
@@ -683,6 +687,12 @@ def main() -> None:
     parser.add_argument("--debug", action="store_true", help="Debug output")
     parser.add_argument("--all-rolls", action="store_true", help="Fetch all roll calls (house-vote list API)")
     parser.add_argument("--session", type=int, default=None, choices=[1, 2], help="Session for --all-rolls")
+    parser.add_argument(
+        "--inspect-members",
+        action="store_true",
+        help="Call house-vote/{congress}/{session}/{roll}/members and print raw JSON (for schema inspection)",
+    )
+    parser.add_argument("--roll", type=int, default=8, help="Roll number for --inspect-members (default: 8)")
 
     parser.add_argument(
         "--simulate-bulk",
@@ -732,6 +742,22 @@ def main() -> None:
             print("Set CONGRESS_API_KEY or --api-key", file=sys.stderr)
             sys.exit(1)
         run_all_rolls(congress, args.session, api_key, args.debug, args.output)
+        return
+
+    if args.inspect_members:
+        sess = args.session if args.session is not None else 1
+        roll = args.roll
+        if not api_key:
+            print("Set CONGRESS_API_KEY or --api-key for API call.", file=sys.stderr)
+            sys.exit(1)
+        url = f"{API_BASE_URL}/house-vote/{congress}/{sess}/{roll}/members"
+        params = {"api_key": api_key, "format": "json", "limit": 5}
+        print(f"GET {url}", file=sys.stderr)
+        data = make_request(url, params)
+        if data is None:
+            print("Request failed.", file=sys.stderr)
+            sys.exit(1)
+        print(json.dumps(data, indent=2, default=str))
         return
 
     if not args.bill_number:

@@ -243,21 +243,36 @@ def _normalize_member(member: Any) -> Optional[Dict]:
     return out
 
 
+def _unwrap_house_vote_response(data: Dict) -> Dict:
+    """Congress API v3 wraps house-vote members in 'houseRollCallVoteMemberVotes'. Return inner dict for extraction."""
+    inner = data.get("houseRollCallVoteMemberVotes") or data.get("houseVote")
+    if isinstance(inner, dict):
+        return inner
+    return data
+
+
 def _extract_members_from_vote_response(data: Any) -> List[Dict]:
     """Extract list of member-vote dicts from Congress API v3 house-vote members response.
-    API returns camelCase; may be top-level (results/memberVotes) or nested under a wrapper."""
+    API returns camelCase; may be top-level (results/memberVotes) or nested under houseRollCallVoteMemberVotes."""
     if not isinstance(data, dict):
         return []
-    # Top-level keys (Congress API v3 may use these)
-    for key in (
-        "results",
-        "members",
-        "memberVotes",
-        "houseRollCallVoteMembers",
-        "houseRollCallVoteMemberVotes",
-        "memberVoteList",
-    ):
-        val = data.get(key)
+    # Congress API v3 wraps in houseRollCallVoteMemberVotes; members are in inner["results"]
+    inner = _unwrap_house_vote_response(data)
+    # Check inner first (houseRollCallVoteMemberVotes.results), then top-level data
+    for d in (inner, data):
+        if d is inner and d is data:
+            continue
+        if not isinstance(d, dict):
+            continue
+        for key in (
+            "results",
+            "members",
+            "memberVotes",
+            "houseRollCallVoteMembers",
+            "houseRollCallVoteMemberVotes",
+            "memberVoteList",
+        ):
+            val = d.get(key)
         if isinstance(val, list):
             if val and _looks_like_member(val[0]):
                 return val
@@ -312,9 +327,11 @@ def _parse_vote_date(data: Dict) -> Optional[str]:
 
 
 def _extract_vote_metadata(data: Dict) -> Optional[Dict]:
-    """Extract vote metadata from Congress API house-vote members response (first page)."""
+    """Extract vote metadata from Congress API house-vote members response (first page).
+    Congress API v3 wraps in houseRollCallVoteMemberVotes; we unwrap before extracting."""
     if not isinstance(data, dict):
         return None
+    inner = _unwrap_house_vote_response(data)
     meta: Dict[str, Any] = {}
     for key, api_key in [
         ("vote_question", "voteQuestion"),
@@ -325,23 +342,23 @@ def _extract_vote_metadata(data: Dict) -> Optional[Dict]:
         ("legislation_url", "legislationUrl"),
         ("source_data_url", "sourceDataURL"),
     ]:
-        val = data.get(api_key)
+        val = inner.get(api_key)
         if val is not None and str(val).strip():
             meta[key] = str(val).strip()
-    vote_date = _parse_vote_date(data)
+    vote_date = _parse_vote_date(inner)
     if vote_date:
         meta["vote_date"] = vote_date
-    start_date = data.get("startDate") or data.get("start_date")
+    start_date = inner.get("startDate") or inner.get("start_date")
     if start_date:
         s = str(start_date).strip()
         if len(s) >= 10:
             meta["start_date"] = s[:10]
-    update_date = data.get("updateDate") or data.get("update_date")
+    update_date = inner.get("updateDate") or inner.get("update_date")
     if update_date:
         s = str(update_date).strip()
         if len(s) >= 10:
             meta["update_date"] = s[:10]
-    vote_party_total = data.get("votePartyTotal") or data.get("vote_party_total")
+    vote_party_total = inner.get("votePartyTotal") or inner.get("vote_party_total")
     if isinstance(vote_party_total, list) and vote_party_total:
         meta["vote_party_total"] = vote_party_total
     return meta if meta else None
