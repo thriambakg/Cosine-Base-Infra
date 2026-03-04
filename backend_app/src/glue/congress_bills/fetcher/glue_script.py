@@ -944,6 +944,7 @@ def store_bill_to_dynamodb(record: Dict):
     # Remove temporary _text_versions field before storing (store it separately for SQS)
     text_versions = record.pop('_text_versions', [])
     
+    
     # Preserve attributes written by backfill/Lambda that the fetcher does not set. Fetcher does a full put_item;
     # without this we would wipe roll_call_votes (backfill) and bill_texts (Lambda).
     try:
