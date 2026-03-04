@@ -273,26 +273,26 @@ def _extract_members_from_vote_response(data: Any) -> List[Dict]:
             "memberVoteList",
         ):
             val = d.get(key)
-        if isinstance(val, list):
-            if val and _looks_like_member(val[0]):
-                return val
-            # Unwrap: list of { "memberVote": {...} } or { "member": {...} }
-            out = []
-            for item in val:
-                if _looks_like_member(item):
-                    out.append(item)
-                elif isinstance(item, dict):
-                    for sub in ("memberVote", "member", "memberVoteDetails"):
-                        if _looks_like_member(item.get(sub)):
-                            out.append(item.get(sub))
-                            break
-            if out:
-                return out
-        if isinstance(val, dict):
-            for sub in ("item", "memberVote", "memberVotes", "members", "results"):
-                v = val.get(sub)
-                if isinstance(v, list) and v and _looks_like_member(v[0]):
-                    return v
+            if isinstance(val, list):
+                if val and _looks_like_member(val[0]):
+                    return val
+                # Unwrap: list of { "memberVote": {...} } or { "member": {...} }
+                out = []
+                for item in val:
+                    if _looks_like_member(item):
+                        out.append(item)
+                    elif isinstance(item, dict):
+                        for sub in ("memberVote", "member", "memberVoteDetails"):
+                            if _looks_like_member(item.get(sub)):
+                                out.append(item.get(sub))
+                                break
+                if out:
+                    return out
+            if isinstance(val, dict):
+                for sub in ("item", "memberVote", "memberVotes", "members", "results"):
+                    v = val.get(sub)
+                    if isinstance(v, list) and v and _looks_like_member(v[0]):
+                        return v
     # Nested: houseRollCallVoteMemberVotes.item etc.
     raw = data.get("houseRollCallVoteMemberVotes")
     if isinstance(raw, list) and raw and _looks_like_member(raw[0]):
