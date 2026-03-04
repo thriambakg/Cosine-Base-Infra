@@ -311,11 +311,48 @@ def _parse_vote_date(data: Dict) -> Optional[str]:
     return None
 
 
+def _extract_vote_metadata(data: Dict) -> Optional[Dict]:
+    """Extract vote metadata from Congress API house-vote members response (first page)."""
+    if not isinstance(data, dict):
+        return None
+    meta: Dict[str, Any] = {}
+    for key, api_key in [
+        ("vote_question", "voteQuestion"),
+        ("result", "result"),
+        ("vote_type", "voteType"),
+        ("legislation_number", "legislationNumber"),
+        ("legislation_type", "legislationType"),
+        ("legislation_url", "legislationUrl"),
+        ("source_data_url", "sourceDataURL"),
+    ]:
+        val = data.get(api_key)
+        if val is not None and str(val).strip():
+            meta[key] = str(val).strip()
+    vote_date = _parse_vote_date(data)
+    if vote_date:
+        meta["vote_date"] = vote_date
+    start_date = data.get("startDate") or data.get("start_date")
+    if start_date:
+        s = str(start_date).strip()
+        if len(s) >= 10:
+            meta["start_date"] = s[:10]
+    update_date = data.get("updateDate") or data.get("update_date")
+    if update_date:
+        s = str(update_date).strip()
+        if len(s) >= 10:
+            meta["update_date"] = s[:10]
+    vote_party_total = data.get("votePartyTotal") or data.get("vote_party_total")
+    if isinstance(vote_party_total, list) and vote_party_total:
+        meta["vote_party_total"] = vote_party_total
+    return meta if meta else None
+
+
 def _fetch_house_vote_members(
     congress: str, session: int, roll_number: int, api_key: str, key_index: Optional[int] = None
-) -> Tuple[List[Dict], Optional[str]]:
+) -> Tuple[List[Dict], Optional[str], Optional[Dict]]:
     all_members = []
     vote_date = None
+    metadata: Optional[Dict] = None
     offset = 0
     limit = 250
     base = _api_base()
@@ -327,6 +364,7 @@ def _fetch_house_vote_members(
             break
         if offset == 0 and isinstance(data, dict):
             vote_date = _parse_vote_date(data)
+            metadata = _extract_vote_metadata(data)
         results = _extract_members_from_vote_response(data)
         if results:
             all_members.extend(results)
@@ -341,7 +379,7 @@ def _fetch_house_vote_members(
         if not (isinstance(results, list) and len(results) == limit):
             break
         offset += limit
-    return all_members, vote_date
+    return all_members, vote_date, metadata
 
 
 def _fetch_new_rolls_only(
@@ -357,10 +395,12 @@ def _fetch_new_rolls_only(
         roll = int(roll_s) if roll_s.isdigit() else 0
         if session <= 0 or roll <= 0:
             continue
-        members, vote_date = _fetch_house_vote_members(congress, session, roll, api_key, key_index)
+        members, vote_date, metadata = _fetch_house_vote_members(congress, session, roll, api_key, key_index)
         entry = {"roll": roll, "session": session, "members": members}
         if vote_date:
             entry["vote_date"] = vote_date
+        if metadata:
+            entry.update(metadata)
         result.append(entry)
     return result
 
@@ -650,6 +690,7 @@ def update_search_vote_index_for_bill(
 def _write_one_roll_item(
     congress: str, session_int: int, roll_int: int, members: List[Dict],
     bill_id_associated: str, latest_action_date: Optional[str] = None,
+    vote_metadata: Optional[Dict[str, Any]] = None,
 ) -> None:
     table = _table()
     if not table:
@@ -673,6 +714,15 @@ def _write_one_roll_item(
     }
     if date_part != "0000-00-00":
         item["latest_action_date"] = date_part
+    # Store additional metadata from Congress API (vote_question, result, vote_type, etc.)
+    if vote_metadata:
+        for key in (
+            "vote_question", "result", "vote_type",
+            "legislation_number", "legislation_type", "legislation_url",
+            "source_data_url", "start_date", "update_date", "vote_party_total",
+        ):
+            if key in vote_metadata and vote_metadata[key] is not None:
+                item[key] = vote_metadata[key]
     if len(json.dumps(item, default=str)) > _OVERSIZE_SAFE_SIZE:
         s3_key = _store_roll_members_to_s3(congress, session_int, roll_int, members)
         item = {
@@ -768,7 +818,16 @@ def update_search_roll_index_for_bill(
                     )
                     _log(f"      [FAIL] {msg}")
                     raise RollCallIndexError(msg)
-        _write_one_roll_item(congress, session_int, roll_int, members, bill_id, latest_action_date=vote_date)
+        vote_meta = {k: entry[k] for k in (
+            "vote_question", "result", "vote_type",
+            "legislation_number", "legislation_type", "legislation_url",
+            "source_data_url", "start_date", "update_date", "vote_party_total",
+        ) if k in entry and entry.get(k) is not None}
+        _write_one_roll_item(
+            congress, session_int, roll_int, members, bill_id,
+            latest_action_date=vote_date,
+            vote_metadata=vote_meta or None,
+        )
         _log("roll call indexed")
 
 
@@ -1145,7 +1204,7 @@ def run_house_vote_second_pass(
                 api_key2, key_index2 = _get_api_key()
                 if not api_key2:
                     continue
-                members, _ = _fetch_house_vote_members(str(congress), sess_int, roll_int, api_key2, key_index2)
+                members, _, vote_meta = _fetch_house_vote_members(str(congress), sess_int, roll_int, api_key2, key_index2)
                 # Get roll → write votes → write roll; fail job if roll has members but vote index not created
                 members_plain = [_normalize_member(m) for m in members if _normalize_member(m)]
                 if members and not members_plain:
@@ -1171,5 +1230,6 @@ def run_house_vote_second_pass(
                 _write_one_roll_item(
                     str(congress), sess_int, roll_int, members,
                     bill_id_associated or "", latest_action_date=latest_action_date,
+                    vote_metadata=vote_meta,
                 )
                 existing_roll_keys.add(key)
