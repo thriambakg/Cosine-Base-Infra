@@ -2550,25 +2550,22 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                         if not tx_key or tx_key not in existing_tx_keys:
                             new_transactions.append(tx)
                     
-                    if new_transactions:
-                        merged = existing_transactions + convert_floats_to_decimal(new_transactions)
-                        db_item['transactions'] = sort_transactions_by_action_date(merged)
-                        db_item['transaction_count'] = len(db_item['transactions'])
-                        # Update total_obligated_amount from the latest CSV row (don't recalculate)
-                        # For IDV parents: prefer combined_obligated_amount if total_obligated_amount is 0
-                        if 'total_obligated_amount' in award_record and award_record.get('total_obligated_amount'):
-                            db_item['total_obligated_amount'] = award_record['total_obligated_amount']
-                        elif 'total_dollars_obligated' in award_record and award_record.get('total_dollars_obligated'):
-                            db_item['total_obligated_amount'] = award_record['total_dollars_obligated']
-                        
-                        # For IDV parents: if total_obligated_amount is 0 but combined_obligated_amount exists, use combined
-                        if (db_item.get('is_idv_parent') and 
-                            db_item.get('total_obligated_amount') == Decimal('0') and 
-                            'combined_obligated_amount' in db_item and 
-                            db_item.get('combined_obligated_amount') and 
-                            db_item.get('combined_obligated_amount') != Decimal('0')):
-                            db_item['total_obligated_amount'] = db_item['combined_obligated_amount']
-                            log_print(f"✅ Updated existing IDV parent {award_id} total_obligated_amount from 0 to combined_obligated_amount ({db_item['combined_obligated_amount']})")
+                    # Merge (existing + new), always sort and write when we have transactions
+                    merged = existing_transactions + convert_floats_to_decimal(new_transactions)
+                    db_item['transactions'] = sort_transactions_by_action_date(merged)
+                    db_item['transaction_count'] = len(db_item['transactions'])
+                    # Update total_obligated_amount from the latest CSV row (don't recalculate)
+                    if 'total_obligated_amount' in award_record and award_record.get('total_obligated_amount'):
+                        db_item['total_obligated_amount'] = award_record['total_obligated_amount']
+                    elif 'total_dollars_obligated' in award_record and award_record.get('total_dollars_obligated'):
+                        db_item['total_obligated_amount'] = award_record['total_dollars_obligated']
+                    if (db_item.get('is_idv_parent') and 
+                        db_item.get('total_obligated_amount') == Decimal('0') and 
+                        'combined_obligated_amount' in db_item and 
+                        db_item.get('combined_obligated_amount') and 
+                        db_item.get('combined_obligated_amount') != Decimal('0')):
+                        db_item['total_obligated_amount'] = db_item['combined_obligated_amount']
+                        log_print(f"✅ Updated existing IDV parent {award_id} total_obligated_amount from 0 to combined_obligated_amount ({db_item['combined_obligated_amount']})")
                 else:
                     # No existing transactions, use new ones
                     db_item['transactions'] = sort_transactions_by_action_date(convert_floats_to_decimal(transactions))
