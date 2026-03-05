@@ -2713,6 +2713,7 @@ module "usaspending_bulk_indexing_state_machine" {
   # Step Functions definition - calculates date range and invokes Glue job
   # Input should include: JobName, AWARDS_TABLE_NAME, S3_BUCKET_NAME, START_DATE (optional), END_DATE (optional)
   # Router Lambda calculates date range (especially for scheduled mode) and always routes to Glue
+
   definition = jsonencode({
     Comment = "USAspending Bulk Indexing - Always uses Glue job"
     StartAt = "CalculateRoute"
