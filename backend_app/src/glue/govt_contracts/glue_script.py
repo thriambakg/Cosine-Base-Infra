@@ -924,6 +924,7 @@ def check_agency_award_count(agency: Dict[str, Any], start_date: str, end_date: 
                     ],
                     "time_period": [
                         {
+                            "date_type": "action_date",
                             "start_date": start_date,
                             "end_date": end_date
                         }
