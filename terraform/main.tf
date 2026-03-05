@@ -4521,7 +4521,7 @@ module "usaspending_awards_index_table" {
     { name = "recipient_location_state", type = "S" },
     { name = "recipient_zip_code", type = "S" },
     { name = "is_assistance", type = "N" },
-    { name = "last_updated", type = "S" }
+    { name = "last_modified_date", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -4591,9 +4591,9 @@ module "usaspending_awards_index_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
-      name            = "LastUpdatedIndex"
+      name            = "LastModifiedDateIndex"
       hash_key        = "is_assistance"
-      range_key       = "last_updated"
+      range_key       = "last_modified_date"
       projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
