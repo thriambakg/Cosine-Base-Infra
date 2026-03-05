@@ -4520,7 +4520,8 @@ module "usaspending_awards_index_table" {
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
     { name = "recipient_zip_code", type = "S" },
-    { name = "is_assistance", type = "N" }
+    { name = "is_assistance", type = "N" },
+    { name = "last_updated", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -4586,6 +4587,14 @@ module "usaspending_awards_index_table" {
       hash_key        = "is_assistance"
       range_key       = "fiscal_year"
       projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "LastUpdatedIndex"
+      hash_key        = "is_assistance"
+      range_key       = "last_updated"
+      projection_type = "KEYS_ONLY"
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
     }
