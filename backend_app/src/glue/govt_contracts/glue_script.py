@@ -627,6 +627,22 @@ def convert_floats_to_decimal(obj: Any) -> Any:
     else:
         return obj
 
+
+def sort_transactions_by_action_date(transactions: List[Dict[str, Any]], descending: bool = True) -> List[Dict[str, Any]]:
+    """
+    Sort transactions by action_date. Matches enrichment Lambda ordering (sort=action_date, order=desc).
+    Default descending so newest transactions appear first (same as USAspending API / enrichment).
+    """
+    def _action_date_sort_key(tx):
+        ad = tx.get('action_date')
+        if ad is None:
+            return ''
+        s = str(ad) if not isinstance(ad, str) else ad
+        return (s[:10] if len(s) >= 10 else s) or '0000-00-00'
+
+    return sorted(transactions, key=_action_date_sort_key, reverse=descending)
+
+
 def normalize_common_fields(record: Dict[str, Any], record_type: str = "prime") -> Dict[str, Any]:
     """
     Normalize common fields between contracts and assistance to reduce blanks in DynamoDB.
@@ -2535,7 +2551,8 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                             new_transactions.append(tx)
                     
                     if new_transactions:
-                        db_item['transactions'] = existing_transactions + convert_floats_to_decimal(new_transactions)
+                        merged = existing_transactions + convert_floats_to_decimal(new_transactions)
+                        db_item['transactions'] = sort_transactions_by_action_date(merged)
                         db_item['transaction_count'] = len(db_item['transactions'])
                         # Update total_obligated_amount from the latest CSV row (don't recalculate)
                         # For IDV parents: prefer combined_obligated_amount if total_obligated_amount is 0
@@ -2554,7 +2571,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
                             log_print(f"✅ Updated existing IDV parent {award_id} total_obligated_amount from 0 to combined_obligated_amount ({db_item['combined_obligated_amount']})")
                 else:
                     # No existing transactions, use new ones
-                    db_item['transactions'] = convert_floats_to_decimal(transactions)
+                    db_item['transactions'] = sort_transactions_by_action_date(convert_floats_to_decimal(transactions))
                     db_item['transaction_count'] = transaction_count
                     # Use total_obligated_amount from CSV (don't calculate)
                     # For IDV parents: prefer combined_obligated_amount if total_obligated_amount is 0
@@ -2698,7 +2715,7 @@ def index_award_complete(award_record: Dict[str, Any]) -> Dict[str, Any]:
             # New item - store transactions and subawards directly in DynamoDB
             # Convert to DynamoDB-compatible format
             if transactions:
-                db_item['transactions'] = convert_floats_to_decimal(transactions)
+                db_item['transactions'] = sort_transactions_by_action_date(convert_floats_to_decimal(transactions))
             if subawards:
                 db_item['subawards'] = convert_floats_to_decimal(subawards)
             
