@@ -2721,14 +2721,8 @@ module "usaspending_bulk_indexing_state_machine" {
         Type     = "Task"
         Resource = module.usaspending_bulk_router_lambda.function_arn
         Comment  = "Calculate date range (handles scheduled mode date calculation)"
-        Parameters = {
-          "JobName.$" : "$.JobName"
-          "AWARDS_TABLE_NAME.$" : "$.AWARDS_TABLE_NAME"
-          "S3_BUCKET_NAME.$" : "$.S3_BUCKET_NAME"
-          "START_DATE.$?" : "$.START_DATE"
-          "END_DATE.$?" : "$.END_DATE"
-          "source.$?" : "$.source"
-        }
+        # Omit Parameters so the Lambda receives the full input state (including START_DATE, END_DATE when provided).
+        # Using Parameters with optional paths ($?) can omit fields; passing full input ensures dates flow through.
         ResultPath = "$.route"
         Next       = "StartGlueJob"
       }
