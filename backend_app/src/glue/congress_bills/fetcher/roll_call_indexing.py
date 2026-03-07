@@ -1183,6 +1183,103 @@ def update_search_vote_index_for_roll(
         raise RollCallIndexError(msg) from e
 
 
+def _sync_bill_roll_call_from_second_pass(
+    bill_id: str,
+    congress: int,
+    session: int,
+    roll: int,
+    latest_action_date: Optional[str] = None,
+    vote_metadata: Optional[Dict[str, Any]] = None,
+) -> None:
+    """
+    Keep bill rows in sync when second-pass house-vote indexing finds rolls
+    that were not present in bill XML recorded_votes.
+    """
+    table = _table()
+    if not table or not bill_id or str(bill_id).startswith("SEARCH#"):
+        return
+
+    try:
+        resp = table.get_item(Key={"bill_id": str(bill_id), "search_index_sk": str(bill_id)})
+        item = resp.get("Item") or {}
+        if not item or str(item.get("bill_id", "")).startswith("SEARCH#"):
+            return
+
+        existing_raw = item.get("recorded_votes_json") or "[]"
+        try:
+            existing_votes = json.loads(existing_raw) if isinstance(existing_raw, str) else list(existing_raw)
+        except Exception:
+            existing_votes = []
+        if not isinstance(existing_votes, list):
+            existing_votes = []
+
+        existing_keys: Set[Tuple[str, str]] = set()
+        for v in existing_votes:
+            if not isinstance(v, dict):
+                continue
+            s = v.get("sessionNumber", v.get("session"))
+            r = v.get("rollNumber", v.get("roll"))
+            if s is not None and r is not None:
+                existing_keys.add((str(s), str(r)))
+
+        roll_key = (str(session), str(roll))
+        if roll_key not in existing_keys:
+            vote_date = (
+                (latest_action_date or "").strip()[:10]
+                or str((vote_metadata or {}).get("vote_date") or "").strip()[:10]
+                or str((vote_metadata or {}).get("start_date") or "").strip()[:10]
+                or str((vote_metadata or {}).get("update_date") or "").strip()[:10]
+            )
+            vote_entry: Dict[str, Any] = {
+                "chamber": "House",
+                "congress": int(congress),
+                "sessionNumber": int(session),
+                "rollNumber": int(roll),
+                "date": vote_date if vote_date else "",
+            }
+            if vote_metadata:
+                if vote_metadata.get("vote_question"):
+                    vote_entry["vote_question"] = vote_metadata.get("vote_question")
+                if vote_metadata.get("result"):
+                    vote_entry["result"] = vote_metadata.get("result")
+                if vote_metadata.get("vote_type"):
+                    vote_entry["type"] = vote_metadata.get("vote_type")
+                if vote_metadata.get("legislation_url"):
+                    vote_entry["url"] = vote_metadata.get("legislation_url")
+            existing_votes.append(vote_entry)
+
+        def _sort_key(v: Dict[str, Any]) -> Tuple[str, int, int]:
+            d = str(v.get("date") or "")[:10]
+            s = v.get("sessionNumber", v.get("session"))
+            r = v.get("rollNumber", v.get("roll"))
+            try:
+                s_i = int(s) if s is not None else -1
+            except Exception:
+                s_i = -1
+            try:
+                r_i = int(r) if r is not None else -1
+            except Exception:
+                r_i = -1
+            return (d, s_i, r_i)
+
+        existing_votes.sort(key=_sort_key, reverse=True)
+        roll_call_number = existing_votes[0].get("rollNumber", existing_votes[0].get("roll")) if existing_votes else roll
+        has_roll_call = 1 if existing_votes else 0
+
+        table.update_item(
+            Key={"bill_id": str(bill_id), "search_index_sk": str(bill_id)},
+            UpdateExpression="SET has_roll_call = :h, roll_call_number = :n, recorded_votes_json = :v, last_updated = :u",
+            ExpressionAttributeValues={
+                ":h": has_roll_call,
+                ":n": int(roll_call_number) if roll_call_number is not None else int(roll),
+                ":v": json.dumps(existing_votes),
+                ":u": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+    except Exception as e:
+        _log(f"      Bill roll-call sync skipped for {bill_id}: {str(e)[:180]}")
+
+
 def run_house_vote_second_pass(
     congresses: Set[int],
     politicians: List[Dict],
@@ -1249,4 +1346,13 @@ def run_house_vote_second_pass(
                     bill_id_associated or "", latest_action_date=latest_action_date,
                     vote_metadata=vote_meta,
                 )
+                if bill_id_associated:
+                    _sync_bill_roll_call_from_second_pass(
+                        bill_id=bill_id_associated,
+                        congress=congress,
+                        session=sess_int,
+                        roll=roll_int,
+                        latest_action_date=latest_action_date,
+                        vote_metadata=vote_meta,
+                    )
                 existing_roll_keys.add(key)
