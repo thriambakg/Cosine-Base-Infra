@@ -1189,6 +1189,17 @@ def _truncate_summary_text(s: str, max_chars: int = 30000) -> str:
     return s[:max_chars].rstrip()
 
 
+def _strip_xml_namespaces(root) -> None:
+    """
+    Remove XML namespaces in-place so .find/.findall calls with plain tags work.
+    GovInfo BILLSTATUS feeds may include default namespaces, which otherwise make
+    lookups like root.find('bill') return None and silently skip every record.
+    """
+    for elem in root.iter():
+        if isinstance(elem.tag, str) and '}' in elem.tag:
+            elem.tag = elem.tag.split('}', 1)[1]
+
+
 def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Optional[Dict]:
     """
     Parse BILLSTATUS XML file and convert to DynamoDB record format.
@@ -1204,6 +1215,7 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
     try:
         # Parse XML (defusedxml prevents XXE)
         root = defusedxml.ElementTree.fromstring(xml_content)
+        _strip_xml_namespaces(root)
         
         # Find <bill> element
         bill_elem = root.find('bill')
@@ -2257,6 +2269,9 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         log_print(f"📄 Found {total_files} XML file(s) to process")
     
     total_stored = 0
+    parse_failed_count = 0
+    missing_bill_id_count = 0
+    date_filtered_count = 0
     for idx, filename in enumerate(xml_file_list):
         try:
             zip_file_single = BytesIO(zip_content)
@@ -2268,10 +2283,12 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         
         bill_record = parse_bill_xml(xml_content, politicians)
         if not bill_record:
+            parse_failed_count += 1
             continue
         
         bill_id = bill_record.get('bill_id')
         if not bill_id:
+            missing_bill_id_count += 1
             continue
         
         # Date filter
@@ -2279,12 +2296,18 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
             filter_date_str = bill_record.get('latest_action_date') or bill_record.get('introduced_date')
             if filter_date_str:
                 try:
+                    # Bill XML dates are typically day-granularity. Compare by date (not time-of-day)
+                    # so scheduler windows like 11:00Z->11:00Z don't drop same-day items at 00:00.
                     if 'T' in filter_date_str:
-                        bill_date = datetime.fromisoformat(filter_date_str.replace('Z', '+00:00'))
+                        bill_date_obj = datetime.fromisoformat(filter_date_str.replace('Z', '+00:00'))
                     else:
-                        bill_date = datetime.strptime(filter_date_str, '%Y-%m-%d')
-                        bill_date = bill_date.replace(tzinfo=timezone.utc)
-                    if not (start_date_dt <= bill_date <= end_date_dt):
+                        bill_date_obj = datetime.strptime(filter_date_str, '%Y-%m-%d')
+                        bill_date_obj = bill_date_obj.replace(tzinfo=timezone.utc)
+                    bill_date_only = bill_date_obj.date()
+                    start_date_only = start_date_dt.date()
+                    end_date_only = end_date_dt.date()
+                    if not (start_date_only <= bill_date_only <= end_date_only):
+                        date_filtered_count += 1
                         continue
                 except (ValueError, AttributeError):
                     pass
@@ -2318,6 +2341,11 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
     
     gc.collect()
     log_print(f"✅ Completed processing {total_files} XML file(s), stored {total_stored} bill(s)")
+    if parse_failed_count or missing_bill_id_count or date_filtered_count:
+        log_print(
+            f"   ↪️ Skips: parse_failed={parse_failed_count}, missing_bill_id={missing_bill_id_count}, "
+            f"date_filtered={date_filtered_count}"
+        )
     return total_files, total_stored
 
 
