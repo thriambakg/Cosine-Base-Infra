@@ -1173,7 +1173,7 @@ module "news_fetcher_scheduler" {
   rule_name           = "${var.project_name}-news-fetcher-${var.environment}"
   rule_description    = "Trigger news fetcher every 8 minutes to distribute 200 credits across 24 hours"
   schedule_expression = "rate(8 minutes)"
-  enabled             = var.enable_all_schedulers
+  enabled             = true
 
   target_arn           = module.news_fetcher.function_arn
   target_id            = "NewsFetcherScheduler"
@@ -1626,7 +1626,7 @@ module "historical_loader_scheduler" {
   rule_name           = "${var.project_name}-historical-loader-${var.environment}"
   rule_description    = "Trigger historical data loader daily at 4:30 PM ET (after market close) to fetch EOD data and update S3"
   schedule_expression = "cron(30 20 ? * MON-FRI *)" # 4:30 PM ET = 8:30 PM UTC during DST
-  enabled             = var.enable_all_schedulers
+  enabled             = true
 
   # Target is Step Functions state machine, not Lambda
   target_arn = module.stock_data_historical_loader_state_machine.state_machine_arn
@@ -1896,7 +1896,7 @@ module "eod_aggregator_scheduler" {
   rule_name           = "${var.project_name}-eod-aggregator-${var.environment}"
   rule_description    = "Trigger EOD aggregator daily at 5:00 PM ET (30 min after historical loader) to update DynamoDB from S3"
   schedule_expression = "cron(0 21 ? * MON-FRI *)" # 5:00 PM ET = 9:00 PM UTC during DST
-  enabled             = var.enable_all_schedulers
+  enabled             = true
 
   # Target is Step Functions state machine, not Lambda
   target_arn = module.eod_aggregator_state_machine.state_machine_arn
@@ -2828,41 +2828,30 @@ resource "aws_iam_role_policy" "usaspending_bulk_indexing_scheduler_policy" {
 
 # EventBridge Scheduler for Daily USAspending Bulk Indexing (9:00 AM EST)
 # Runs daily at 9:00 AM EST to process previous day's contract updates
-# Note: EST is UTC-5, EDT is UTC-4. Using 14:00 UTC = 9:00 AM EST (standard time) or 10:00 AM EDT (daylight time)
-resource "aws_cloudwatch_event_rule" "usaspending_bulk_indexing_scheduler" {
-  name                = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
-  description         = "Trigger daily bulk indexing of USAspending contracts at 9:00 AM EST (14:00 UTC) - processes previous day's contract updates"
+module "usaspending_bulk_indexing_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
+  rule_description    = "Trigger daily bulk indexing of USAspending contracts at 9:00 AM EST (14:00 UTC) - processes previous day's contract updates"
   schedule_expression = "cron(0 14 * * ? *)" # 14:00 UTC = 9:00 AM EST (standard time) or 10:00 AM EDT (daylight time)
-  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
+  enabled             = false
 
-  tags = merge(var.common_tags, {
-    Name        = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
-    Type        = "EventBridgeRule"
-    Purpose     = "USASpendingBulkIndexing"
-    Environment = var.environment
-  })
-}
-
-# EventBridge Target for Step Function
-resource "aws_cloudwatch_event_target" "usaspending_bulk_indexing_scheduler_target" {
-  count = var.enable_all_schedulers ? 1 : 0
-
-  rule      = aws_cloudwatch_event_rule.usaspending_bulk_indexing_scheduler.name
-  target_id = "USASpendingBulkIndexingScheduler"
-  arn       = module.usaspending_bulk_indexing_state_machine.state_machine_arn
-  role_arn  = aws_iam_role.usaspending_bulk_indexing_scheduler_role.arn
-
-  # Input payload for Step Function - scheduled mode will set dates in router Lambda
-  input = jsonencode({
+  target_arn      = module.usaspending_bulk_indexing_state_machine.state_machine_arn
+  target_id       = "USASpendingBulkIndexingScheduler"
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.usaspending_bulk_indexing_scheduler_role.arn
+  target_input = jsonencode({
     source            = "scheduler-daily"
     JobName           = module.usaspending_bulk_indexing_glue_job.job_name
     AWARDS_TABLE_NAME = module.usaspending_awards_index_table.table_name
     S3_BUCKET_NAME    = module.usaspending_data_s3.bucket_id
-    # START_DATE and END_DATE omitted - router Lambda will set to previous day and current day in scheduled mode
   })
 
+  purpose     = "USASpendingBulkIndexing"
+  environment = var.environment
+  tags        = var.common_tags
+
   depends_on = [
-    aws_cloudwatch_event_rule.usaspending_bulk_indexing_scheduler,
     aws_iam_role.usaspending_bulk_indexing_scheduler_role,
     module.usaspending_bulk_indexing_state_machine
   ]
@@ -3898,7 +3887,7 @@ module "lda_disclosures_fetcher_scheduler" {
   rule_name           = "${var.project_name}-lda-disclosures-fetcher-daily-${var.environment}"
   rule_description    = "Trigger LDA disclosures fetcher daily at 5pm EST to process previous day's disclosures"
   schedule_expression = "cron(0 22 * * ? *)" # 22:00 UTC = 5pm EST (standard time) or 6pm EDT (daylight time)
-  enabled             = var.enable_all_schedulers
+  enabled             = false
 
   target_arn           = module.lda_disclosures_fetcher.function_arn
   target_id            = "LDADisclosuresFetcherScheduler"
@@ -4198,36 +4187,28 @@ resource "aws_iam_role_policy" "congress_bills_fetcher_scheduler_policy" {
   })
 }
 
-resource "aws_cloudwatch_event_rule" "congress_bills_fetcher_scheduler" {
-  name                = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
-  description         = "Trigger Congress bills fetcher daily at 11:00 AM UTC (after Congress.gov's 10:00 AM data publication) to fetch yesterday's data"
+# EventBridge Scheduler for Daily Congress Bills Fetcher (11:00 AM UTC)
+module "congress_bills_fetcher_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
+  rule_description    = "Trigger Congress bills fetcher daily at 11:00 AM UTC (after Congress.gov's 10:00 AM data publication) to fetch yesterday's data"
   schedule_expression = "cron(0 11 * * ? *)" # 11:00 AM UTC daily (6:00 AM EST / 7:00 AM EDT)
-  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
+  enabled             = false
 
-  tags = merge(var.common_tags, {
-    Name        = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
-    Type        = "EventBridgeRule"
-    Purpose     = "CongressBillsFetching"
-    Environment = var.environment
-  })
-}
-
-# EventBridge Target for Step Function
-resource "aws_cloudwatch_event_target" "congress_bills_fetcher_scheduler_target" {
-  count = var.enable_all_schedulers ? 1 : 0
-
-  rule      = aws_cloudwatch_event_rule.congress_bills_fetcher_scheduler.name
-  target_id = "CongressBillsFetcherScheduler"
-  arn       = module.congress_bills_fetcher_state_machine.state_machine_arn
-  role_arn  = aws_iam_role.congress_bills_fetcher_scheduler_role.arn
-
-  # Input payload for scheduler: null dates with source="scheduler"
-  # Router lambda will calculate yesterday's date
-  input = jsonencode({
+  target_arn      = module.congress_bills_fetcher_state_machine.state_machine_arn
+  target_id       = "CongressBillsFetcherScheduler"
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.congress_bills_fetcher_scheduler_role.arn
+  target_input = jsonencode({
     start_date = null
     end_date   = null
     source     = "scheduler"
   })
+
+  purpose     = "CongressBillsFetching"
+  environment = var.environment
+  tags        = var.common_tags
 
   depends_on = [
     aws_iam_role.congress_bills_fetcher_scheduler_role,
@@ -5281,7 +5262,7 @@ module "politician_trades_scheduler" {
   rule_name           = "${var.project_name}-politician-trades-${var.environment}"
   rule_description    = "Trigger politician trades aggregation daily at 2:00 AM EST (after SEC filings are typically complete)"
   schedule_expression = "cron(0 6 ? * * *)" # 2:00 AM EST = 6:00 AM UTC (DST) or 7:00 AM UTC (Standard)
-  enabled             = var.enable_all_schedulers
+  enabled             = false
 
   # Target is Step Functions state machine
   target_arn = module.politician_trades_state_machine.state_machine_arn

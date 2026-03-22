@@ -340,12 +340,6 @@ variable "automatic_secret_rotation" {
   }
 }
 
-# Scheduler Configuration
-variable "enable_all_schedulers" {
-  description = "Enable all EventBridge schedulers and CloudWatch Event rules. Set to false to disable all scheduled jobs (useful for staging/dev environments)"
-  type        = bool
-  default     = true
-}
 
 # Lambda Concurrency Configuration
 variable "lambda_reserved_concurrency_default" {
