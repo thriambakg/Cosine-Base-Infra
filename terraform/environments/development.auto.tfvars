@@ -39,7 +39,6 @@ dynamodb_stream_enabled                 = true
 dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
 dynamodb_point_in_time_recovery_enabled = false # Disabled for cost savings
 dynamodb_deletion_protection_enabled    = false # Allow easy cleanup in dev
-dynamodb_ttl_enabled                    = true
 
 # CloudWatch Configuration (shorter retention for cost savings)
 

@@ -70,7 +70,6 @@ dynamodb_stream_enabled                 = true
 dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
 dynamodb_point_in_time_recovery_enabled = true # Critical for production
 dynamodb_deletion_protection_enabled    = true # Prevent accidental deletion
-dynamodb_ttl_enabled                    = true
 
 # Alternative provisioned capacity settings (uncomment if switching to PROVISIONED)
 # dynamodb_billing_mode     = "PROVISIONED"

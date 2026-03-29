@@ -250,18 +250,6 @@ variable "dynamodb_deletion_protection_enabled" {
   default     = false
 }
 
-variable "dynamodb_ttl_enabled" {
-  description = "Enable TTL for appropriate DynamoDB tables"
-  type        = bool
-  default     = true
-}
-
-variable "dynamodb_ttl_attribute_name" {
-  description = "TTL attribute name for DynamoDB tables"
-  type        = string
-  default     = "expires_at"
-}
-
 # CloudWatch Configuration
 variable "cloudwatch_security_log_retention_days" {
   description = "CloudWatch security log retention in days"

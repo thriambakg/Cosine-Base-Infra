@@ -272,8 +272,8 @@ module "user_profiles_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+  ttl_enabled                    = false
+  ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
 
@@ -329,7 +329,7 @@ module "security_events_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -386,7 +386,7 @@ module "alerts_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -442,7 +442,7 @@ module "chat_connections_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -490,7 +490,7 @@ module "chat_sessions_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = false
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -599,7 +599,7 @@ module "stock_data_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -699,7 +699,7 @@ module "news_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -3538,8 +3538,8 @@ module "lda_filings_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+  ttl_enabled                    = false
+  ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
 
@@ -4333,8 +4333,8 @@ module "politician_trades_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+  ttl_enabled                    = false
+  ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
 
@@ -4447,7 +4447,7 @@ module "sec_filings_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true # Enable TTL for cache expiration
+  ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -4583,7 +4583,7 @@ module "usaspending_awards_index_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -4654,7 +4654,7 @@ module "sec_search_query_cache_table" {
   stream_view_type               = null
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true # Enable TTL for cache expiration
+  ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn

@@ -47,7 +47,7 @@ resource "aws_dynamodb_table" "this" {
     enabled = var.point_in_time_recovery_enabled
   }
 
-  # TTL configuration
+  # DynamoDB TTL: when disabled, items are not auto-deleted (ttl_* attributes on items are ignored by AWS)
   ttl {
     attribute_name = var.ttl_attribute_name
     enabled        = var.ttl_enabled

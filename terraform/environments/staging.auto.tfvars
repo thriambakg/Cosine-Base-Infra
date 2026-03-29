@@ -50,7 +50,6 @@ dynamodb_stream_enabled                 = true
 dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
 dynamodb_point_in_time_recovery_enabled = true # Enabled for data protection
 dynamodb_deletion_protection_enabled    = true # Protect against accidental deletion
-dynamodb_ttl_enabled                    = true
 
 # CloudWatch Configuration (moderate retention)
 cloudwatch_security_log_retention_days    = 365 # 1 year
