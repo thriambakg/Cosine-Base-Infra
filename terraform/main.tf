@@ -265,7 +265,6 @@ module "user_profiles_table" {
     }
   ]
 
-
   billing_mode                   = var.dynamodb_billing_mode
   read_capacity                  = var.dynamodb_read_capacity
   write_capacity                 = var.dynamodb_write_capacity
