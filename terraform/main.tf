@@ -3939,8 +3939,8 @@ module "lda_disclosures_indexer" {
     module.core_layer.layer_arn
   ]
 
-  # Reserved concurrency limit
-  reserved_concurrent_executions = var.lambda_reserved_concurrency_default != null ? var.lambda_reserved_concurrency_default : 20
+  # Reserved concurrency (null = share account unreserved pool; no dedicated carve-out)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   # IAM policies
   additional_policy_arns = [
@@ -3973,8 +3973,7 @@ resource "aws_lambda_event_source_mapping" "lda_batch_sqs_trigger" {
   maximum_batching_window_in_seconds = 0 # Process immediately
   enabled                            = true
 
-  # Standard queues scale naturally - reserved_concurrent_executions (25) on Lambda will limit concurrency
-  # No scaling_config needed for standard queues
+  # Standard queues scale naturally; optional reserved concurrency on the indexer limits fan-out
 
   depends_on = [
     module.lda_disclosures_indexer,

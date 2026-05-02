@@ -67,9 +67,8 @@ resource "aws_dynamodb_table" "sessions" {
     enabled        = false
   }
 
-  # Point-in-time recovery for data protection
   point_in_time_recovery {
-    enabled = true
+    enabled = var.enable_point_in_time_recovery
   }
 
   # Server-side encryption
@@ -125,9 +124,8 @@ resource "aws_dynamodb_table" "session_context" {
     enabled        = false
   }
 
-  # Point-in-time recovery for data protection
   point_in_time_recovery {
-    enabled = true
+    enabled = var.enable_point_in_time_recovery
   }
 
   # Server-side encryption

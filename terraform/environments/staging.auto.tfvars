@@ -44,12 +44,12 @@ cognito_access_token_validity  = 60 # 1 hour
 cognito_id_token_validity      = 60 # 1 hour
 cognito_refresh_token_validity = 30 # 30 days
 
-# DynamoDB Configuration (production-like)
+# DynamoDB (hibernate / cost)
 dynamodb_billing_mode                   = "PAY_PER_REQUEST"
-dynamodb_stream_enabled                 = true
+dynamodb_stream_enabled                 = false
 dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
-dynamodb_point_in_time_recovery_enabled = true # Enabled for data protection
-dynamodb_deletion_protection_enabled    = true # Protect against accidental deletion
+dynamodb_point_in_time_recovery_enabled = false
+dynamodb_deletion_protection_enabled    = true
 
 # CloudWatch Configuration (moderate retention)
 cloudwatch_security_log_retention_days    = 365 # 1 year
@@ -72,5 +72,5 @@ cognito_domain_name            = "cosine-auth-staging"
 # OAuth Secrets Manager Integration (console-managed secrets)
 oauth_secrets_enabled = true # Create empty secret resource for console population
 
-# Lambda Concurrency Configuration (limit to 5 concurrent requests for staging)
-lambda_reserved_concurrency_default = 5 # Set all reserved concurrency to 5 (5 concurrent requests allowed at a time)
+# No reserved pool carve-out (hibernate / rare traffic)
+lambda_reserved_concurrency_default = null

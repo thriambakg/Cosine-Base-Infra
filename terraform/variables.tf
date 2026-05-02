@@ -331,7 +331,7 @@ variable "automatic_secret_rotation" {
 
 # Lambda Concurrency Configuration
 variable "lambda_reserved_concurrency_default" {
-  description = "Default reserved concurrent executions for Lambda functions. Set to 0 to disable reserved concurrency (useful for staging/dev environments)"
+  description = "Reserved concurrent executions for Lambdas that use this variable. null = no reservation (share account unreserved pool). Do not use 0 (invalid for AWS); use null instead."
   type        = number
   default     = null
 }
