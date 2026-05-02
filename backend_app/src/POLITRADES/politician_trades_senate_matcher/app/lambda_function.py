@@ -9,6 +9,7 @@ import logging
 import re
 import boto3
 import math
+import requests
 from typing import List, Dict, Any, Optional
 from datetime import datetime
 from decimal import Decimal
@@ -425,7 +426,6 @@ def parse_senate_ptr_from_image(image_url: str, s3_key: str, filer_name: Optiona
     trades = []
     
     try:
-        from urllib.request import urlopen, Request
         from urllib.parse import urlparse, urljoin
         
         logger.info(f"📥 Downloading image from: {image_url}")
@@ -437,18 +437,14 @@ def parse_senate_ptr_from_image(image_url: str, s3_key: str, filer_name: Optiona
             # Extract domain from s3_key context or use default
             image_url = 'https://efdsearch.senate.gov' + image_url
         
-        # Download image using urllib (standard library)
-        req = Request(image_url, headers={
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
-        })
-        
-        with urlopen(req, timeout=30) as response:
-            image_content = response.read()
-            logger.info(f"✅ Downloaded image ({len(image_content)} bytes)")
-            
-            # Check image format
-            content_type = response.headers.get('Content-Type', '').lower()
-            logger.info(f"   Content-Type: {content_type}")
+        # Download image using requests (avoids urllib file:// scheme risk)
+        headers = {'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'}
+        response = requests.get(image_url, headers=headers, timeout=30)
+        response.raise_for_status()
+        image_content = response.content
+        logger.info(f"✅ Downloaded image ({len(image_content)} bytes)")
+        content_type = response.headers.get('Content-Type', '').lower()
+        logger.info(f"   Content-Type: {content_type}")
         
         # Textract only supports PNG, JPEG, PDF, TIFF - convert GIF and other formats
         # Check file extension and content type

@@ -54,9 +54,9 @@ cognito_logout_urls = [
   "https://www.investcosine.com/auth/logout",
   "https://www.investcosine.com/?"
 ]
-cognito_access_token_validity  = 5 # 60 minutes (1 hour)
-cognito_id_token_validity      = 5 # 60 minutes (1 hour)  
-cognito_refresh_token_validity = 1 # 1 day
+cognito_access_token_validity  = 60 # 1 hour
+cognito_id_token_validity      = 60 # 1 hour  
+cognito_refresh_token_validity = 1  # 1 day
 
 # Temporarily disable Google provider until OAuth secrets are configured
 cognito_enable_google_provider = true
@@ -64,13 +64,15 @@ cognito_domain_name            = "cosine-production"
 # Temporarily disable OAuth secrets to fix deployment
 oauth_secrets_enabled = true
 
-# DynamoDB Configuration (maximum durability)
-dynamodb_billing_mode                   = "PAY_PER_REQUEST" # Can switch to PROVISIONED if predictable load
-dynamodb_stream_enabled                 = true
-dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
-dynamodb_point_in_time_recovery_enabled = true # Critical for production
-dynamodb_deletion_protection_enabled    = true # Prevent accidental deletion
-dynamodb_ttl_enabled                    = true
+# DynamoDB (hibernate / cost): on-demand billing; streams & PITR off — app Lambdas use Query/GetItem only
+dynamodb_billing_mode                   = "PAY_PER_REQUEST"
+dynamodb_stream_enabled                 = false
+dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES" # unused when stream_enabled = false
+dynamodb_point_in_time_recovery_enabled = false
+dynamodb_deletion_protection_enabled    = true
+
+# No reserved concurrency carve-out for writer Lambdas (null = use account default pool)
+lambda_reserved_concurrency_default = null
 
 # Alternative provisioned capacity settings (uncomment if switching to PROVISIONED)
 # dynamodb_billing_mode     = "PROVISIONED"

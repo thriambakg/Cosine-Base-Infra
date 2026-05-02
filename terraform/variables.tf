@@ -250,18 +250,6 @@ variable "dynamodb_deletion_protection_enabled" {
   default     = false
 }
 
-variable "dynamodb_ttl_enabled" {
-  description = "Enable TTL for appropriate DynamoDB tables"
-  type        = bool
-  default     = true
-}
-
-variable "dynamodb_ttl_attribute_name" {
-  description = "TTL attribute name for DynamoDB tables"
-  type        = string
-  default     = "expires_at"
-}
-
 # CloudWatch Configuration
 variable "cloudwatch_security_log_retention_days" {
   description = "CloudWatch security log retention in days"
@@ -340,16 +328,10 @@ variable "automatic_secret_rotation" {
   }
 }
 
-# Scheduler Configuration
-variable "enable_all_schedulers" {
-  description = "Enable all EventBridge schedulers and CloudWatch Event rules. Set to false to disable all scheduled jobs (useful for staging/dev environments)"
-  type        = bool
-  default     = true
-}
 
 # Lambda Concurrency Configuration
 variable "lambda_reserved_concurrency_default" {
-  description = "Default reserved concurrent executions for Lambda functions. Set to 0 to disable reserved concurrency (useful for staging/dev environments)"
+  description = "Reserved concurrent executions for Lambdas that use this variable. null = no reservation (share account unreserved pool). Do not use 0 (invalid for AWS); use null instead."
   type        = number
   default     = null
 }

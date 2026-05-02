@@ -61,15 +61,14 @@ resource "aws_dynamodb_table" "sessions" {
     projection_type = "ALL"
   }
 
-  # TTL for automatic cleanup of old sessions
+  # TTL disabled — items retained until explicitly deleted (attribute may still exist on items from apps)
   ttl {
     attribute_name = "ttl"
-    enabled        = true
+    enabled        = false
   }
 
-  # Point-in-time recovery for data protection
   point_in_time_recovery {
-    enabled = true
+    enabled = var.enable_point_in_time_recovery
   }
 
   # Server-side encryption
@@ -119,15 +118,14 @@ resource "aws_dynamodb_table" "session_context" {
     projection_type = "ALL"
   }
 
-  # TTL for automatic cleanup of old context data
+  # TTL disabled — items retained until explicitly deleted
   ttl {
     attribute_name = "ttl"
-    enabled        = true
+    enabled        = false
   }
 
-  # Point-in-time recovery for data protection
   point_in_time_recovery {
-    enabled = true
+    enabled = var.enable_point_in_time_recovery
   }
 
   # Server-side encryption

@@ -20,7 +20,7 @@ import time
 from datetime import datetime, timedelta
 from typing import List, Dict, Any, Optional
 from decimal import Decimal
-import xml.etree.ElementTree as ET
+import defusedxml.ElementTree as ET
 from html import unescape
 from difflib import SequenceMatcher
 import csv

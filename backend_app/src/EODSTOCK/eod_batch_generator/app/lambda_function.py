@@ -10,9 +10,7 @@ import logging
 import boto3
 from typing import List, Dict, Any
 from datetime import datetime
-# TODO: Uncomment after rebuilding financial layer with pandas_market_calendars
-# import pandas_market_calendars as mcal
-# import pytz
+from zoneinfo import ZoneInfo
 
 # Configure logging
 logger = logging.getLogger()
@@ -28,30 +26,19 @@ BATCH_SIZE = int(os.environ.get('BATCH_SIZE', '200'))
 
 def is_trading_day() -> bool:
     """
-    Check if today is a valid NYSE trading day (excludes weekends and holidays).
-    
-    Returns:
-        True if market is open, False if closed (holiday or weekend)
+    Rough NYSE schedule: weekends off in America/New_York. Weekdays proceed as trading days
+    (NYSE weekday holidays are not modeled — avoids pandas_market_calendars / financial layer
+    so Lambda stays under the 250MB unzipped deployment limit with core layer only).
     """
     try:
-        nyse = mcal.get_calendar('NYSE')
-        et_tz = pytz.timezone('America/New_York')
-        today = datetime.now(et_tz).date()
-        
-        # Check if today is in the NYSE trading schedule
-        schedule = nyse.schedule(start_date=today, end_date=today)
-        
-        is_open = not schedule.empty
-        
-        if is_open:
-            logger.info(f"✅ Today ({today}) is a trading day")
-        else:
-            logger.info(f"🎄 Today ({today}) is NOT a trading day (market holiday or weekend)")
-        
-        return is_open
-        
+        et_now = datetime.now(ZoneInfo("America/New_York"))
+        today = et_now.date()
+        if et_now.weekday() >= 5:
+            logger.info(f"🎄 {today} is a weekend (US/Eastern); skipping EOD aggregation")
+            return False
+        logger.info(f"✅ {today} is a weekday (US/Eastern); proceeding (holiday calendar not applied)")
+        return True
     except Exception as e:
-        # If check fails, assume it's a trading day (fail-safe to avoid missing updates)
         logger.warning(f"Could not verify trading day status: {e}, assuming market is open")
         return True
 

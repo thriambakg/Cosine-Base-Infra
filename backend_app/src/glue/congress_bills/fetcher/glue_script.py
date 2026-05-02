@@ -28,19 +28,23 @@ import re
 import gzip
 import zipfile
 import threading
-import xml.etree.ElementTree as ET
+import defusedxml
+import defusedxml.ElementTree as ET
 from datetime import datetime, timedelta, timezone
 from typing import Dict, List, Any, Optional, Tuple
 from io import StringIO, BytesIO
 from difflib import SequenceMatcher
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
 from awsglue.utils import getResolvedOptions
 from awsglue.context import GlueContext
 from awsglue.job import Job
 from pyspark.context import SparkContext
 
 import boto3
+
+try:
+    import roll_call_indexing
+except ImportError:
+    roll_call_indexing = None
 
 # ============================================================================
 # Configuration
@@ -636,7 +640,7 @@ def download_bulk_zip(congress: int, bill_type: str, max_retries: int = 5) -> Op
         for attempt in range(max_retries):
             try:
                 log_print(f"   Attempting: {zip_url} (attempt {attempt + 1}/{max_retries})")
-                response = requests.get(zip_url, timeout=REQUEST_TIMEOUT * 2, stream=True)
+                response = requests.get(zip_url, timeout=(10, REQUEST_TIMEOUT * 2), stream=True)  # nosec B113 - timeout set
                 
                 if response.status_code == 200:
                     content = response.content
@@ -940,6 +944,22 @@ def store_bill_to_dynamodb(record: Dict):
     # Remove temporary _text_versions field before storing (store it separately for SQS)
     text_versions = record.pop('_text_versions', [])
     
+    
+    # Preserve attributes written by backfill/Lambda that the fetcher does not set. Fetcher does a full put_item;
+    # without this we would wipe roll_call_votes (backfill) and bill_texts (Lambda).
+    try:
+        existing = bills_table.get_item(
+            Key={"bill_id": bill_id, "search_index_sk": record.get("search_index_sk", bill_id)},
+            ProjectionExpression="roll_call_votes, roll_call_number, roll_call_votes_oversize_s3_key, bill_texts",
+        )
+        item = existing.get("Item") or {}
+        for key in ("roll_call_votes", "roll_call_number", "roll_call_votes_oversize_s3_key", "bill_texts"):
+            if key in item and item[key] is not None:
+                record[key] = item[key]
+    except Exception as e:
+        log_print(f"      ⚠️ Could not preserve roll-call/bill_texts for {bill_id}: {str(e)[:120]}")
+    
+    # Full overwrite: bulk gives us full bill data, no merge with existing item (bill_texts stay [] until Lambda/backfill run)
     for put_attempt in range(max_put_retries):
         try:
             bills_table.put_item(Item=record)
@@ -966,17 +986,17 @@ def store_bill_to_dynamodb(record: Dict):
                 except (json.JSONDecodeError, TypeError) as e:
                     log_print(f"      ⚠️ Failed to parse cosponsors_json for {bill_id}: {str(e)[:200]}")
             
-            # Send bill text download request to SQS AFTER bill is stored (maintain existing functionality)
+            # Send bill text download request to SQS with full text_versions (Lambda downloads all, no API call)
             if text_versions and BILL_TEXT_SQS_URL:
                 try:
-                    message_body = {'bill_id': bill_id}
+                    search_index_sk = record.get('search_index_sk') or bill_id
+                    message_body = {'bill_id': bill_id, 'search_index_sk': search_index_sk, 'text_versions': text_versions}
                     message_json = json.dumps(message_body, default=str)
-                    
                     sqs_client.send_message(
                         QueueUrl=BILL_TEXT_SQS_URL,
                         MessageBody=message_json
                     )
-                    log_print(f"      📤 Sent bill text download request for {bill_id} to SQS")
+                    log_print(f"      📤 Sent bill text download request for {bill_id} to SQS ({len(text_versions)} version(s))")
                 except Exception as e:
                     log_print(f"      ⚠️ Error sending bill text download to SQS: {str(e)[:200]}")
             
@@ -1019,17 +1039,17 @@ def store_bill_to_dynamodb(record: Dict):
                         except (json.JSONDecodeError, TypeError) as e:
                             log_print(f"      ⚠️ Failed to parse cosponsors_json for {bill_id}: {str(e)[:200]}")
                     
-                    # Send bill text download request to SQS AFTER bill is stored
+                    # Send bill text download request to SQS with full text_versions
                     if text_versions and BILL_TEXT_SQS_URL:
                         try:
-                            message_body = {'bill_id': bill_id}
+                            search_index_sk = record.get('search_index_sk') or bill_id
+                            message_body = {'bill_id': bill_id, 'search_index_sk': search_index_sk, 'text_versions': text_versions}
                             message_json = json.dumps(message_body, default=str)
-                            
                             sqs_client.send_message(
                                 QueueUrl=BILL_TEXT_SQS_URL,
                                 MessageBody=message_json
                             )
-                            log_print(f"      📤 Sent bill text download request for {bill_id} to SQS")
+                            log_print(f"      📤 Sent bill text download request for {bill_id} to SQS ({len(text_versions)} version(s))")
                         except Exception as e:
                             log_print(f"      ⚠️ Error sending bill text download to SQS: {str(e)[:200]}")
                     
@@ -1152,6 +1172,34 @@ def extract_zip_from_s3(zip_s3_key: str) -> Dict[str, bytes]:
     return xml_files
 
 
+def _elem_text(parent, tag: str) -> str:
+    """Get trimmed text of first child element with given tag, or empty string."""
+    if parent is None:
+        return ""
+    child = parent.find(tag)
+    if child is None or child.text is None:
+        return ""
+    return child.text.strip() if isinstance(child.text, str) else str(child.text)
+
+
+def _truncate_summary_text(s: str, max_chars: int = 30000) -> str:
+    """Return s truncated to max_chars to stay within DynamoDB item size limits."""
+    if not s or len(s) <= max_chars:
+        return s or ""
+    return s[:max_chars].rstrip()
+
+
+def _strip_xml_namespaces(root) -> None:
+    """
+    Remove XML namespaces in-place so .find/.findall calls with plain tags work.
+    GovInfo BILLSTATUS feeds may include default namespaces, which otherwise make
+    lookups like root.find('bill') return None and silently skip every record.
+    """
+    for elem in root.iter():
+        if isinstance(elem.tag, str) and '}' in elem.tag:
+            elem.tag = elem.tag.split('}', 1)[1]
+
+
 def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Optional[Dict]:
     """
     Parse BILLSTATUS XML file and convert to DynamoDB record format.
@@ -1165,8 +1213,9 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         Bill record dict matching existing DynamoDB schema, or None if parsing fails
     """
     try:
-        # Parse XML
-        root = ET.fromstring(xml_content)
+        # Parse XML (defusedxml prevents XXE)
+        root = defusedxml.ElementTree.fromstring(xml_content)
+        _strip_xml_namespaces(root)
         
         # Find <bill> element
         bill_elem = root.find('bill')
@@ -1217,6 +1266,51 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             if title_elem is not None and title_elem.text:
                 bill_title = title_elem.text
         
+        # Full titles list (all title types) for indexing/display
+        titles_full = []
+        if titles_elem is not None:
+            for title_item in titles_elem.findall('item') or []:
+                t = {}
+                for tag in ('chamberCode', 'chamberName', 'parentTitleType', 'titleType', 'title'):
+                    child = title_item.find(tag)
+                    if child is not None and child.text is not None:
+                        t[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
+                if t:
+                    titles_full.append(t)
+        
+        # Scalar bill-level fields from XML
+        xml_create_date = _elem_text(bill_elem, 'createDate')
+        xml_update_date = _elem_text(bill_elem, 'updateDate')
+        origin_chamber = _elem_text(bill_elem, 'originChamber')
+        is_by_request = _elem_text(bill_elem, 'isByRequest')
+        xml_version = _elem_text(bill_elem, 'version')
+        if not xml_version and root is not None:
+            xml_version = _elem_text(root, 'version')
+        xml_update_date_including_text = _elem_text(bill_elem, 'updateDateIncludingText')
+        
+        # lastAction / latestAction (dedicated snapshot: actionDate, text, actionTime, links)
+        last_action_json = ""
+        last_action_elem = bill_elem.find('lastAction') or bill_elem.find('latestAction')
+        if last_action_elem is not None:
+            la = {}
+            for tag in ('actionDate', 'text', 'actionTime'):
+                child = last_action_elem.find(tag)
+                if child is not None and child.text is not None:
+                    la[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
+            links_la = last_action_elem.find('links')
+            if links_la is not None:
+                la_links = []
+                for le in links_la.findall('link') or []:
+                    name_e, url_e = le.find('name'), le.find('url')
+                    n = name_e.text if name_e is not None and name_e.text else ""
+                    u = url_e.text if url_e is not None and url_e.text else ""
+                    if n or u:
+                        la_links.append({"name": n, "url": u})
+                if la_links:
+                    la['links'] = la_links
+            if la:
+                last_action_json = json.dumps(la)
+        
         # Extract introduced date
         introduced_date_elem = bill_elem.find('introducedDate')
         introduced_date = introduced_date_elem.text if introduced_date_elem is not None and introduced_date_elem.text else None
@@ -1224,6 +1318,23 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         
         # Find actions element (used for both latest action date and actions extraction)
         actions_elem = bill_elem.find('actions')
+        
+        # Actions container-level counts (facets: actionByCounts, actionTypeCounts)
+        actions_action_by_counts = {}
+        actions_action_type_counts = {}
+        if actions_elem is not None:
+            abc_elem = actions_elem.find('actionByCounts')
+            if abc_elem is not None:
+                for child in abc_elem or []:
+                    if child.tag is not None and child.text is not None:
+                        key = child.tag.split('}')[-1] if '}' in str(child.tag) else child.tag
+                        actions_action_by_counts[key] = child.text.strip()
+            atc_elem = actions_elem.find('actionTypeCounts')
+            if atc_elem is not None:
+                for child in atc_elem or []:
+                    if child.tag is not None and child.text is not None:
+                        key = child.tag.split('}')[-1] if '}' in str(child.tag) else child.tag
+                        actions_action_type_counts[key] = child.text.strip()
         
         # Extract latest action date (from <latestAction> or first action)
         latest_action_date = None
@@ -1255,11 +1366,19 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     bioguide_id_elem = identifiers_elem.find('bioguideId')
                     if bioguide_id_elem is not None and bioguide_id_elem.text:
                         primary_sponsor['bioguideId'] = bioguide_id_elem.text
+                    for id_tag in ('gpoId', 'lisID'):
+                        e = identifiers_elem.find(id_tag)
+                        if e is not None and e.text:
+                            primary_sponsor[id_tag] = e.text.strip()
                 else:
                     # Legacy format: bioguideId might be direct child
                     bioguide_id_elem = sponsor_item.find('bioguideId')
                     if bioguide_id_elem is not None and bioguide_id_elem.text:
                         primary_sponsor['bioguideId'] = bioguide_id_elem.text
+                
+                middle_name_elem = sponsor_item.find('middleName')
+                if middle_name_elem is not None and middle_name_elem.text:
+                    primary_sponsor['middleName'] = middle_name_elem.text.strip()
                 
                 # Extract name (current format has firstName/lastName/fullName)
                 first_name_elem = sponsor_item.find('firstName')
@@ -1342,6 +1461,13 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 last_name_elem = cosponsor_item.find('lastName')
                 full_name_elem = cosponsor_item.find('fullName')
                 name_elem = cosponsor_item.find('name')  # Legacy format
+                middle_name_elem = cosponsor_item.find('middleName')
+                if middle_name_elem is not None and middle_name_elem.text:
+                    cosponsor['middleName'] = middle_name_elem.text.strip()
+                for tag in ('isOriginalCosponsor', 'sponsorshipDate', 'sponsorshipWithdrawnDate'):
+                    e = cosponsor_item.find(tag)
+                    if e is not None and e.text is not None:
+                        cosponsor[tag] = e.text.strip() if isinstance(e.text, str) else str(e.text)
                 
                 if first_name_elem is not None and last_name_elem is not None:
                     cosponsor['firstName'] = first_name_elem.text if first_name_elem.text else ""
@@ -1370,6 +1496,10 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     bioguide_id_elem = identifiers_elem.find('bioguideId')
                     if bioguide_id_elem is not None and bioguide_id_elem.text:
                         cosponsor['bioguideId'] = bioguide_id_elem.text
+                    for id_tag in ('gpoId', 'lisID'):
+                        e = identifiers_elem.find(id_tag)
+                        if e is not None and e.text:
+                            cosponsor[id_tag] = e.text.strip()
                 else:
                     # Legacy format: bioguideId might be direct child
                     bioguide_id_elem = cosponsor_item.find('bioguideId')
@@ -1458,39 +1588,126 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 if action_code_elem is not None and action_code_elem.text:
                     action['actionCode'] = action_code_elem.text
                 
+                action_time_elem = action_item.find('actionTime')
+                if action_time_elem is not None and action_time_elem.text:
+                    action['actionTime'] = action_time_elem.text.strip() if isinstance(action_time_elem.text, str) else str(action_time_elem.text)
+                
+                committee_elem = action_item.find('committee')
+                if committee_elem is not None:
+                    c_name = _elem_text(committee_elem, 'name')
+                    c_code = _elem_text(committee_elem, 'systemCode')
+                    if c_name or c_code:
+                        action['committee'] = {'name': c_name, 'systemCode': c_code}
+                
+                source_elem = action_item.find('sourceSystem')
+                if source_elem is not None:
+                    s_code = _elem_text(source_elem, 'code')
+                    s_name = _elem_text(source_elem, 'name')
+                    if s_code or s_name:
+                        action['sourceSystem'] = {'code': s_code, 'name': s_name}
+                
+                # Links (e.g. roll call: name "Roll no. 60", url to clerk.house.gov/evs/... or senate)
+                links_elem = action_item.find('links')
+                if links_elem is not None:
+                    link_elems = links_elem.findall('link')
+                    action_links = []
+                    for le in link_elems or []:
+                        name_e = le.find('name') if le is not None else None
+                        url_e = le.find('url') if le is not None else None
+                        name = name_e.text if name_e is not None and name_e.text else ""
+                        url = url_e.text if url_e is not None and url_e.text else ""
+                        if name or url:
+                            action_links.append({"name": name, "url": url})
+                    if action_links:
+                        action['links'] = action_links
+                
+                # Per-action recordedVotes (format as of late 2022: votes live under actions/item)
+                rv_action_elem = action_item.find('recordedVotes')
+                if rv_action_elem is not None:
+                    for rv_item in rv_action_elem.findall('recordedVote') or []:
+                        rv = {}
+                        for tag in ('chamber', 'congress', 'date', 'fullActionName', 'rollNumber', 'sessionNumber', 'url'):
+                            child = rv_item.find(tag)
+                            if child is not None and child.text is not None:
+                                rv[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
+                        if rv:
+                            action.setdefault('recordedVotes', []).append(rv)
+                
                 actions.append(action)
         
-        # Extract summaries
+        # Deduplicate actions so we match Congress.gov (one row per logical event; XML has same event from multiple sources e.g. House floor + LoC)
+        seen_action_key = set()
+        deduped_actions = []
+        for a in actions:
+            text = (a.get("text") or "").strip()
+            key = (a.get("actionDate") or "", text)
+            if key in seen_action_key:
+                # Merge recordedVotes into the copy we already kept (recorded_votes dedupe below handles chamber+roll+session)
+                for d in deduped_actions:
+                    if (d.get("actionDate") or "", (d.get("text") or "").strip()) == key:
+                        d.setdefault("recordedVotes", []).extend(a.get("recordedVotes") or [])
+                        break
+                continue
+            seen_action_key.add(key)
+            deduped_actions.append(a)
+        actions = deduped_actions
+        
+        # Recorded votes: bill-level (legacy) + from actions (current format); dedupe by chamber+roll+session
+        def _norm_rv(r):
+            return (r.get('chamber') or '', r.get('rollNumber') or '', r.get('sessionNumber') or '')
+        recorded_votes = []
+        seen_rv = set()
+        rv_elem = bill_elem.find('recordedVotes')
+        if rv_elem is not None:
+            for rv_item in rv_elem.findall('recordedVote') or []:
+                rv = {}
+                for tag in ('chamber', 'congress', 'date', 'fullActionName', 'rollNumber', 'sessionNumber', 'url'):
+                    child = rv_item.find(tag)
+                    if child is not None and child.text is not None:
+                        rv[tag] = child.text.strip() if isinstance(child.text, str) else str(child.text)
+                if rv and _norm_rv(rv) not in seen_rv:
+                    seen_rv.add(_norm_rv(rv))
+                    recorded_votes.append(rv)
+        for a in actions:
+            for rv in a.get('recordedVotes') or []:
+                if _norm_rv(rv) not in seen_rv:
+                    seen_rv.add(_norm_rv(rv))
+                    recorded_votes.append(rv)
+        
+        # Extract summaries (support both billSummaries/item and summary elements)
         summaries = []
         summaries_elem = bill_elem.find('summaries')
         if summaries_elem is not None:
-            # Summaries use <summary> elements, not <item>
-            summary_items = summaries_elem.findall('summary')
-            for summary_item in summary_items:
+            bill_summaries_elem = summaries_elem.find('billSummaries')
+            if bill_summaries_elem is not None:
+                summary_items = bill_summaries_elem.findall('item')
+            else:
+                summary_items = summaries_elem.findall('summary')
+            for summary_item in summary_items or []:
                 summary = {}
-                
-                # Try to get text from <cdata><text> structure (current format)
+                # Try to get text from <cdata><text> structure (current format; text may be in child elements e.g. <p>)
                 cdata_elem = summary_item.find('cdata')
                 if cdata_elem is not None:
                     text_in_cdata = cdata_elem.find('text')
-                    if text_in_cdata is not None and text_in_cdata.text:
-                        summary['text'] = text_in_cdata.text
-                
-                # Fallback to direct <text> element
+                    if text_in_cdata is not None:
+                        summary['text'] = text_in_cdata.text if text_in_cdata.text else (''.join(text_in_cdata.itertext()) if hasattr(text_in_cdata, 'itertext') else '')
                 if not summary.get('text'):
                     text_elem = summary_item.find('text')
-                    if text_elem is not None and text_elem.text:
-                        summary['text'] = text_elem.text
-                
-                version_elem = summary_item.find('versionCode')
-                if version_elem is not None and version_elem.text:
-                    summary['versionCode'] = version_elem.text
-                
-                action_desc_elem = summary_item.find('actionDesc')
-                if action_desc_elem is not None and action_desc_elem.text:
-                    summary['actionDesc'] = action_desc_elem.text
-                
-                if summary.get('text'):  # Only add if we have text
+                    if text_elem is not None:
+                        summary['text'] = text_elem.text if text_elem.text else (''.join(text_elem.itertext()) if hasattr(text_elem, 'itertext') else '')
+                for tag in ('actionDate', 'actionDesc', 'versionCode', 'name', 'updateDate', 'lastSummaryUpdateDate'):
+                    val = _elem_text(summary_item, tag)
+                    if val:
+                        summary[tag] = val
+                if not summary.get('versionCode'):
+                    version_elem = summary_item.find('versionCode')
+                    if version_elem is not None and version_elem.text:
+                        summary['versionCode'] = version_elem.text.strip()
+                if not summary.get('actionDesc'):
+                    action_desc_elem = summary_item.find('actionDesc')
+                    if action_desc_elem is not None and action_desc_elem.text:
+                        summary['actionDesc'] = action_desc_elem.text.strip()
+                if summary.get('text'):
                     summaries.append(summary)
         
         # Extract subjects/policy area
@@ -1516,25 +1733,137 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                     if name_elem is not None and name_elem.text:
                         policy_area = name_elem.text
         
-        # Extract amendments
+        # Full subjects (billSubjects/otherSubjects + primarySubjects, or legislativeSubjects/item + policyArea)
+        subjects_full = []
+        subjects_elem = bill_elem.find('subjects')
+        if subjects_elem is not None:
+            bill_subjects_elem = subjects_elem.find('billSubjects')
+            if bill_subjects_elem is not None:
+                for os_elem in bill_subjects_elem.findall('otherSubjects') or []:
+                    for item in os_elem.findall('item') or []:
+                        s = {}
+                        name_el = item.find('name')
+                        if name_el is not None and name_el.text:
+                            s['name'] = name_el.text.strip()
+                        parent = item.find('parentSubject')
+                        if parent is not None:
+                            pname = parent.find('name')
+                            if pname is not None and pname.text:
+                                s['parentSubject'] = pname.text.strip()
+                        if s:
+                            subjects_full.append(s)
+                for ps_elem in bill_subjects_elem.findall('primarySubjects') or []:
+                    name_el = ps_elem.find('name')
+                    if name_el is not None and name_el.text:
+                        s = {'name': name_el.text.strip(), 'primary': True}
+                        parent = ps_elem.find('parentSubject')
+                        if parent is not None:
+                            pname = parent.find('name')
+                            if pname is not None and pname.text:
+                                s['parentSubject'] = pname.text.strip()
+                        subjects_full.append(s)
+            # Current format: subjects/legislativeSubjects/item (name, updateDate) and subjects/policyArea (name)
+            if not subjects_full:
+                for item in (subjects_elem.find('legislativeSubjects') or subjects_elem).findall('item') or []:
+                    s = {}
+                    v = _elem_text(item, 'name')
+                    if v:
+                        s['name'] = v
+                    v = _elem_text(item, 'updateDate')
+                    if v:
+                        s['updateDate'] = v
+                    if s:
+                        subjects_full.append(s)
+                pa = subjects_elem.find('policyArea')
+                if pa is not None:
+                    v = _elem_text(pa, 'name')
+                    if v and not any(x.get('name') == v and x.get('primary') for x in subjects_full):
+                        subjects_full.append({'name': v, 'primary': True})
+        
+        # Extract amendments (full: number, description, purpose, type, latestAction, amendedBill, sponsors, actions, Congress.gov URL)
         amendments = []
         amendments_elem = bill_elem.find('amendments')
         if amendments_elem is not None:
             amendment_items = amendments_elem.findall('amendment')
-            for amendment_item in amendment_items:
+            for amendment_item in amendment_items or []:
                 amendment = {}
-                
-                number_elem = amendment_item.find('number')
-                if number_elem is not None and number_elem.text:
-                    amendment['number'] = number_elem.text
-                
-                description_elem = amendment_item.find('description')
-                if description_elem is not None and description_elem.text:
-                    amendment['description'] = description_elem.text
-                
-                amendments.append(amendment)
+                for tag in ('number', 'description', 'purpose', 'type', 'submittedDate', 'chamber', 'updateDate'):
+                    val = _elem_text(amendment_item, tag)
+                    if val:
+                        amendment[tag] = val
+                # Amendment congress (for URL); fallback to bill congress
+                amdt_congress = congress
+                c_el = amendment_item.find('congress')
+                if c_el is not None and c_el.text:
+                    try:
+                        amdt_congress = int(c_el.text.strip())
+                    except ValueError:
+                        pass
+                la_am = amendment_item.find('latestAction')
+                if la_am is not None:
+                    la = {}
+                    for t in ('actionDate', 'text'):
+                        v = _elem_text(la_am, t)
+                        if v:
+                            la[t] = v
+                    if la:
+                        amendment['latestAction'] = la
+                ab_elem = amendment_item.find('amendedBill')
+                if ab_elem is not None:
+                    ab = {}
+                    for t in ('congress', 'number', 'originChamber', 'originChamberCode', 'title', 'type', 'updateDateIncludingText'):
+                        v = _elem_text(ab_elem, t)
+                        if v:
+                            ab[t] = v
+                    if ab:
+                        amendment['amendedBill'] = ab
+                # Sponsors (e.g. Rules Committee)
+                sponsors_am = amendment_item.find('sponsors')
+                if sponsors_am is not None:
+                    sponsor_items = sponsors_am.findall('item')
+                    if not sponsor_items:
+                        name_el = sponsors_am.find('name')
+                        if name_el is not None and name_el.text:
+                            amendment['sponsors'] = [{'name': name_el.text.strip()}]
+                    else:
+                        amendment['sponsors'] = []
+                        for si in sponsor_items:
+                            n = _elem_text(si, 'name')
+                            if n:
+                                amendment['sponsors'].append({'name': n})
+                # Actions (count + list of action items)
+                actions_am_elem = amendment_item.find('actions')
+                if actions_am_elem is not None:
+                    count_el = actions_am_elem.find('count')
+                    if count_el is not None and count_el.text is not None:
+                        try:
+                            amendment['actionsCount'] = int(count_el.text.strip())
+                        except ValueError:
+                            pass
+                    actions_container = actions_am_elem.find('actions')
+                    if actions_container is not None:
+                        action_items = actions_container.findall('item')
+                        amdt_actions = []
+                        for act_item in action_items or []:
+                            act = {}
+                            for t in ('actionDate', 'actionTime', 'text', 'type', 'actionCode'):
+                                v = _elem_text(act_item, t)
+                                if v:
+                                    act[t] = v
+                            if act:
+                                amdt_actions.append(act)
+                        if amdt_actions:
+                            amendment['actions'] = amdt_actions
+                # Congress.gov amendment URL (house-amendment / senate-amendment + number)
+                amdt_type = (amendment.get('type') or '').upper()
+                amdt_number = amendment.get('number') or ''
+                if amdt_number and amdt_congress:
+                    path_part = 'house-amendment' if amdt_type == 'HAMDT' else 'senate-amendment' if amdt_type == 'SAMDT' else 'house-amendment'
+                    amendment['congress_gov_url'] = f"https://www.congress.gov/amendment/{amdt_congress}th-congress/{path_part}/{amdt_number}"
+                if amendment:
+                    amendments.append(amendment)
         
-        # Extract text versions (for SQS processing)
+        # Extract text versions (for SQS processing; store all formats per version)
         text_versions = []
         text_versions_elem = bill_elem.find('textVersions')
         if text_versions_elem is not None:
@@ -1549,14 +1878,198 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
                 formats_elem = text_version_item.find('formats')
                 if formats_elem is not None:
                     format_items = formats_elem.findall('item')
+                    formats_list = []
                     for format_item in format_items:
+                        f = {}
                         url_elem = format_item.find('url')
                         if url_elem is not None and url_elem.text:
-                            text_version['url'] = url_elem.text
-                            break
+                            f['url'] = url_elem.text.strip()
+                        type_f = _elem_text(format_item, 'type')
+                        if type_f:
+                            f['type'] = type_f
+                        if f:
+                            formats_list.append(f)
+                    if formats_list:
+                        text_version['formats'] = formats_list
+                    # Keep first url at top level for backward compatibility / SQS
+                    if formats_list and formats_list[0].get('url'):
+                        text_version['url'] = formats_list[0]['url']
                 
+                date_elem = text_version_item.find('date')
+                if date_elem is not None and date_elem.text:
+                    text_version['date'] = date_elem.text.strip()
                 if text_version:
                     text_versions.append(text_version)
+        
+        # Calendar numbers
+        calendar_numbers = []
+        cal_elem = bill_elem.find('calendarNumbers')
+        if cal_elem is not None:
+            for item in cal_elem.findall('item') or []:
+                c = {}
+                for tag in ('calendar', 'number'):
+                    v = _elem_text(item, tag)
+                    if v:
+                        c[tag] = v
+                if c:
+                    calendar_numbers.append(c)
+        
+        # CBO cost estimates
+        cbo_cost_estimates = []
+        cbo_elem = bill_elem.find('cboCostEstimates')
+        if cbo_elem is not None:
+            for item in cbo_elem.findall('item') or []:
+                c = {}
+                for tag in ('rptPubDate', 'rptTitle', 'rptUrl'):
+                    v = _elem_text(item, tag)
+                    if v:
+                        c[tag] = v
+                if c:
+                    cbo_cost_estimates.append(c)
+        
+        # Constitutional authority statement (direct or inside <cdata>)
+        constitutional_authority_statement_text = ""
+        cas_elem = bill_elem.find('constitutionalAuthorityStatementText')
+        if cas_elem is not None and cas_elem.text:
+            constitutional_authority_statement_text = (cas_elem.text or "").strip()[:50000]
+        if not constitutional_authority_statement_text:
+            cdata_elem = bill_elem.find('cdata')
+            if cdata_elem is not None:
+                cas_elem = cdata_elem.find('constitutionalAuthorityStatementText')
+                if cas_elem is not None and cas_elem.text:
+                    constitutional_authority_statement_text = (cas_elem.text or "").strip()[:50000]
+        
+        # Committee reports
+        committee_reports = []
+        cr_elem = bill_elem.find('committeeReports')
+        if cr_elem is not None:
+            for report in cr_elem.findall('committeeReport') or []:
+                cit = _elem_text(report, 'citation')
+                if cit:
+                    committee_reports.append({"citation": cit})
+        
+        # Committees (billCommittees/item or committees/item: chamber, name, systemCode, type, activities, subcommittees)
+        committees_list = []
+        comm_elem = bill_elem.find('committees')
+        if comm_elem is not None:
+            items_src = comm_elem.find('billCommittees')
+            if items_src is not None:
+                committee_items = items_src.findall('item') or []
+            else:
+                committee_items = comm_elem.findall('item') or []
+            if committee_items:
+                for item in committee_items:
+                    c = {}
+                    for tag in ('chamber', 'name', 'systemCode', 'type'):
+                        v = _elem_text(item, tag)
+                        if v:
+                            c[tag] = v
+                    activities = []
+                    act_container = item.find('activities')
+                    for act_item in (act_container.findall('item') if act_container is not None else []) or []:
+                        a = {}
+                        for t in ('date', 'name'):
+                            v = _elem_text(act_item, t)
+                            if v:
+                                a[t] = v
+                        if a:
+                            activities.append(a)
+                    if activities:
+                        c['activities'] = activities
+                    subcoms = []
+                    sub_container = item.find('subcommittees')
+                    for sc in (sub_container.findall('item') if sub_container is not None else []) or []:
+                        sc_d = {}
+                        for t in ('name', 'systemCode'):
+                            v = _elem_text(sc, t)
+                            if v:
+                                sc_d[t] = v
+                        if sc_d:
+                            subcoms.append(sc_d)
+                    if subcoms:
+                        c['subcommittees'] = subcoms
+                    if c:
+                        committees_list.append(c)
+        
+        # Laws (public/private law citations)
+        laws_list = []
+        laws_elem = bill_elem.find('laws')
+        if laws_elem is not None:
+            for item in laws_elem.findall('item') or []:
+                l = {}
+                for tag in ('number', 'type'):
+                    v = _elem_text(item, tag)
+                    if v:
+                        l[tag] = v
+                if l:
+                    laws_list.append(l)
+        
+        # Notes (links + text CDATA)
+        notes_list = []
+        notes_elem = bill_elem.find('notes')
+        if notes_elem is not None:
+            for item in notes_elem.findall('Item') or notes_elem.findall('item') or []:
+                n = {}
+                text_el = item.find('text')
+                if text_el is not None and text_el.text:
+                    n['text'] = (text_el.text or "")[:30000]
+                links_el = item.find('links')
+                if links_el is not None:
+                    link_list = []
+                    for le in links_el.findall('link') or []:
+                        na, u = _elem_text(le, 'name'), _elem_text(le, 'url')
+                        if na or u:
+                            link_list.append({"name": na, "url": u})
+                    if link_list:
+                        n['links'] = link_list
+                if n:
+                    notes_list.append(n)
+        
+        # Related bills
+        related_bills = []
+        rb_elem = bill_elem.find('relatedBills')
+        if rb_elem is not None:
+            for item in rb_elem.findall('item') or []:
+                r = {}
+                for tag in ('congress', 'number', 'type', 'latestTitle', 'title'):
+                    v = _elem_text(item, tag)
+                    if v:
+                        r[tag] = v
+                if r.get('title') and not r.get('latestTitle'):
+                    r['latestTitle'] = r['title']
+                la_r = item.find('latestAction')
+                if la_r is not None:
+                    r_la = {}
+                    for t in ('actionDate', 'text'):
+                        v = _elem_text(la_r, t)
+                        if v:
+                            r_la[t] = v
+                    if r_la:
+                        r['latestAction'] = r_la
+                rd_el = item.find('relationshipDetails')
+                if rd_el is not None:
+                    rds = []
+                    for rd_item in rd_el.findall('item') or []:
+                        rd = {}
+                        for t in ('identifiedBy', 'type'):
+                            v = _elem_text(rd_item, t)
+                            if v:
+                                rd[t] = v
+                        if rd:
+                            rds.append(rd)
+                    if rds:
+                        r['relationshipDetails'] = rds
+                if r:
+                    related_bills.append(r)
+        
+        # Dublin Core metadata (under billStatus root; may use dc: namespace)
+        dublin_core = {}
+        dc_elem = root.find('dublinCore')
+        if dc_elem is not None:
+            for child in dc_elem:
+                if child.text is not None:
+                    key = child.tag.split('}')[-1] if '}' in str(child.tag) else child.tag
+                    dublin_core[key] = child.text.strip()
         
         # Build record matching existing DynamoDB schema
         record = {
@@ -1572,8 +2085,8 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             # Dates
             "introduced_date": introduced_date,
             "latest_action_date": latest_action_date,
-            "update_date": "",
-            "update_date_including_text": "",
+            "update_date": xml_update_date if xml_update_date else "",
+            "update_date_including_text": xml_update_date_including_text if xml_update_date_including_text else "",
             
             # Primary Sponsor
             "sponsor_bioguide_id": primary_sponsor.get("bioguideId", ""),
@@ -1591,27 +2104,61 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
             "cosponsor_parties": "|".join([c.get("party", "") for c in cosponsors if c.get("party")]),
             "cosponsors_json": json.dumps(cosponsors) if cosponsors else "",
             
-            # Actions
+            # Actions (including container-level counts)
             "action_count": len(actions),
             "actions_json": json.dumps(actions) if actions else "",
             "actions_summary": " | ".join([f"{a.get('actionDate', '')}: {a.get('text', '')[:100]}" for a in actions[:10]]) if actions else "",
+            "actions_action_by_counts_json": json.dumps(actions_action_by_counts) if actions_action_by_counts else "",
+            "actions_action_type_counts_json": json.dumps(actions_action_type_counts) if actions_action_type_counts else "",
             
             # Latest action
             "latest_action_text": actions[0].get('text', '') if actions else "",
             "latest_action_type": actions[0].get('type', '') if actions else "",
             
-            # Summaries
+            # Recorded votes (from bulk XML; has_roll_call drives HasRollCallIndex; member-level data from backfill)
+            "has_roll_call": 1 if recorded_votes else 0,
+            "recorded_votes_json": json.dumps(recorded_votes) if recorded_votes else "",
+            
+            # Summaries (full text for search/display; cap total to avoid DynamoDB item size)
             "summary_count": len(summaries),
             "summaries_json": json.dumps(summaries) if summaries else "",
-            "summary_text": " | ".join([s.get('text', '')[:200] for s in summaries[:3]]) if summaries else "",
+            "summary_text": _truncate_summary_text(" | ".join([s.get('text', '') for s in summaries[:5]]), max_chars=30000) if summaries else "",
             
-            # Subjects/Policy Area
+            # Subjects/Policy Area (full subject terms from XML)
             "policy_area": policy_area if policy_area else "Other",
-            "legislative_subjects": "",
+            "legislative_subjects": "|".join([s.get("name", "") for s in subjects_full if s.get("name")])[:4000] if subjects_full else "",
+            "subjects_json": json.dumps(subjects_full) if subjects_full else "",
             
             # Amendments
             "amendment_count": len(amendments),
             "amendments_json": json.dumps(amendments) if amendments else "",
+            
+            # Full titles, lastAction, XML metadata
+            "titles_json": json.dumps(titles_full) if titles_full else "",
+            "last_action_json": last_action_json,
+            "xml_create_date": xml_create_date,
+            "xml_update_date": xml_update_date,
+            "xml_version": xml_version,
+            "origin_chamber": origin_chamber,
+            "is_by_request": is_by_request,
+            
+            # Calendar, CBO, constitutional statement, committees, laws, notes, related bills
+            "calendar_numbers_json": json.dumps(calendar_numbers) if calendar_numbers else "",
+            "cbo_cost_estimates_json": json.dumps(cbo_cost_estimates) if cbo_cost_estimates else "",
+            "constitutional_authority_statement_text": constitutional_authority_statement_text[:50000] if constitutional_authority_statement_text else "",
+            "committee_reports_json": json.dumps(committee_reports) if committee_reports else "",
+            "committees_json": json.dumps(committees_list) if committees_list else "",
+            "laws_json": json.dumps(laws_list) if laws_list else "",
+            "notes_json": json.dumps(notes_list) if notes_list else "",
+            "related_bills_json": json.dumps(related_bills) if related_bills else "",
+            
+            # Text versions (persisted for indexing; also used for SQS)
+            "text_versions_json": json.dumps(text_versions) if text_versions else "",
+            # Bill texts: array of {name, s3_key, type} filled by backfill; fetcher sets [] (we own files in S3)
+            "bill_texts": [],
+            
+            # Dublin Core (root-level metadata)
+            "dublin_core_json": json.dumps(dublin_core) if dublin_core else "",
             
             # Metadata
             "indexed_at": datetime.now(timezone.utc).isoformat(),
@@ -1672,14 +2219,19 @@ def parse_bill_xml(xml_content: bytes, politicians: List[Dict[str, Any]]) -> Opt
         return None
 
 
-def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_date: str, 
-                          politicians: List[Dict[str, Any]], zip_content: Optional[bytes] = None, 
+def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_date: str,
+                          politicians: List[Dict[str, Any]], zip_content: Optional[bytes] = None,
                           zip_s3_key: Optional[str] = None, start_date_dt: Optional[datetime] = None,
-                          end_date_dt: Optional[datetime] = None) -> Tuple[int, int]:
+                          end_date_dt: Optional[datetime] = None,
+                          politicians_by_bioguide: Optional[Dict[str, Dict[str, Any]]] = None,
+                          rolls_written_from_bills: Optional[set] = None,
+                          roll_write_lock: Optional[threading.Lock] = None) -> Tuple[int, int]:
     """
-    Process a bulk ZIP file: extract XML files, parse them, and store each batch immediately.
-    Follows govt_contracts pattern: download, parse, store, clear memory.
-    
+    Process a bulk ZIP file: extract XML files one at a time, parse, store, then index roll calls.
+    Linear (single-threaded) to avoid write conflicts on SEARCH#ROLL and SEARCH#VOTE.
+    When politicians_by_bioguide and rolls_written_from_bills are provided, runs roll call delta
+    after each stored bill (SEARCH#ROLL + SEARCH#VOTE updates).
+
     Args:
         congress: Congress number
         bill_type: Bill type (e.g., "HR", "S")
@@ -1690,25 +2242,25 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         zip_s3_key: S3 key of ZIP file (if exists in S3)
         start_date_dt: Start date as datetime object for filtering
         end_date_dt: End date as datetime object for filtering
-    
+        politicians_by_bioguide: Optional bioguide_id -> politician map for roll call indexing
+        rolls_written_from_bills: Optional set of (congress_str, session, roll) written this run
+        roll_write_lock: Unused (kept for API compatibility; linear flow uses no lock)
+
     Returns:
-        Number of XML files processed
+        (number of XML files processed, number of bills stored)
     """
     bill_type_lower = bill_type.lower()
-    log_print(f"📦 Processing bulk ZIP for Congress {congress}, Bill Type {bill_type}")
+    log_print(f"📦 Processing bulk ZIP for Congress {congress}, Bill Type {bill_type} (linear)")
     
-    # Get ZIP content once (needed for all batches)
     if zip_s3_key:
-        # Download ZIP from S3 to memory
         zip_obj = s3_client.get_object(Bucket=S3_BUCKET_NAME, Key=zip_s3_key)
         zip_content = zip_obj['Body'].read()
     elif zip_content:
-        pass  # Already have content
+        pass
     else:
         log_print(f"   ❌ No ZIP content or S3 key provided")
         return 0, 0
     
-    # Extract file list first (ZIP is not thread-safe for concurrent reads)
     zip_file = BytesIO(zip_content)
     with zipfile.ZipFile(zip_file, 'r') as zip_ref:
         file_list = zip_ref.namelist()
@@ -1716,150 +2268,84 @@ def process_bulk_zip_file(congress: int, bill_type: str, start_date: str, end_da
         total_files = len(xml_file_list)
         log_print(f"📄 Found {total_files} XML file(s) to process")
     
-    # Process in batches: extract batch sequentially, then parse batch in parallel
-    batch_size = 100
-    parse_workers = min(20, batch_size)
-    log_print(f"🔄 Starting parallel parsing with {parse_workers} worker(s), processing in batches of {batch_size}...")
-    
     total_stored = 0
-    
-    def parse_xml_file(filename: str, content: bytes):
+    parse_failed_count = 0
+    missing_bill_id_count = 0
+    date_filtered_count = 0
+    for idx, filename in enumerate(xml_file_list):
         try:
-            bill_record = parse_bill_xml(content, politicians)
-            if bill_record:
-                return bill_record.get('bill_id'), bill_record
-            return None, None
+            zip_file_single = BytesIO(zip_content)
+            with zipfile.ZipFile(zip_file_single, 'r') as zf:
+                xml_content = zf.read(filename)
         except Exception as e:
-            log_print(f"   ⚠️ Error parsing {filename}: {str(e)[:200]}")
-            return None, None
-    
-    # Process batches: extract sequentially, parse in parallel
-    for batch_start in range(0, total_files, batch_size):
-        batch_end = min(batch_start + batch_size, total_files)
-        batch_files = xml_file_list[batch_start:batch_end]
-        batch_num = (batch_start // batch_size) + 1
-        total_batches = (total_files + batch_size - 1) // batch_size
+            log_print(f"   ⚠️ Failed to extract {filename}: {str(e)[:200]}")
+            continue
         
-        log_print(f"   📦 Processing batch {batch_num}/{total_batches} (files {batch_start+1}-{batch_end} of {total_files})...")
+        bill_record = parse_bill_xml(xml_content, politicians)
+        if not bill_record:
+            parse_failed_count += 1
+            continue
         
-        # Initialize bills dict for this batch
-        bills = {}
+        bill_id = bill_record.get('bill_id')
+        if not bill_id:
+            missing_bill_id_count += 1
+            continue
         
-        # Extract batch from ZIP sequentially (ZIP not thread-safe)
-        log_print(f"      📥 Extracting {len(batch_files)} files from ZIP...")
-        batch_xml_data = {}
-        zip_file_batch = BytesIO(zip_content)
-        with zipfile.ZipFile(zip_file_batch, 'r') as zip_ref:
-            for idx, filename in enumerate(batch_files):
-                try:
-                    xml_content = zip_ref.read(filename)
-                    batch_xml_data[filename] = xml_content
-                    if (idx + 1) % 20 == 0:
-                        log_print(f"      📥 Extracted {idx + 1}/{len(batch_files)} files...")
-                except Exception as e:
-                    log_print(f"   ⚠️ Failed to extract {filename}: {str(e)[:200]}")
-        
-        log_print(f"      ✅ Extracted {len(batch_xml_data)} files, starting parallel parsing...")
-        
-        # Parse batch in parallel (now we have the data in memory)
-        with ThreadPoolExecutor(max_workers=parse_workers) as executor:
-            future_to_file = {
-                executor.submit(parse_xml_file, filename, content): filename
-                for filename, content in batch_xml_data.items()
-            }
-            
-            processed_in_batch = 0
-            for future in as_completed(future_to_file):
-                filename = future_to_file[future]
-                processed_in_batch += 1
-                
-                try:
-                    bill_id, bill_record = future.result()
-                    if bill_id and bill_record:
-                        bills[bill_id] = bill_record
-                except Exception as e:
-                    log_print(f"   ⚠️ Error processing {filename}: {str(e)[:200]}")
-                
-                # Log progress every 10 files
-                if processed_in_batch % 10 == 0:
-                    log_print(f"      🔄 Parsed {processed_in_batch}/{len(batch_xml_data)} files in batch {batch_num}...")
-        
-        log_print(f"   ✅ Batch {batch_num} complete: {processed_in_batch} files processed, {len(bills)} bills parsed")
-        
-        # Filter batch by date if needed
-        # For daily runs, filter by latest_action_date to catch bills with new actions
-        # For historical runs, filter by introduced_date
+        # Date filter
         if start_date_dt and end_date_dt:
-            filtered_batch = {}
-            for bill_id, bill_record in bills.items():
-                # Prefer latest_action_date for daily updates (catches bills with new actions)
-                # Fall back to introduced_date if latest_action_date not available
-                filter_date_str = bill_record.get('latest_action_date') or bill_record.get('introduced_date')
-                if filter_date_str:
-                    try:
-                        # Parse date (handle both YYYY-MM-DD and ISO format)
-                        if 'T' in filter_date_str:
-                            bill_date = datetime.fromisoformat(filter_date_str.replace('Z', '+00:00'))
-                        else:
-                            bill_date = datetime.strptime(filter_date_str, '%Y-%m-%d')
-                            bill_date = bill_date.replace(tzinfo=timezone.utc)
-                        
-                        if start_date_dt <= bill_date <= end_date_dt:
-                            filtered_batch[bill_id] = bill_record
-                    except (ValueError, AttributeError):
-                        # If date parsing fails, include bill if it has no date filter
-                        # (for backwards compatibility)
-                        pass
-                else:
-                    # No date available - include in batch (for backwards compatibility)
-                    filtered_batch[bill_id] = bill_record
-            bills = filtered_batch
-        
-        # Store batch to DynamoDB immediately
-        if bills and len(bills) > 0:
-            log_print(f"   💾 Storing {len(bills)} bill(s) from batch {batch_num} to DynamoDB...")
-            store_workers = min(20, len(bills))
-            
-            def store_bill(bill_id: str, bill_record: Dict):
+            filter_date_str = bill_record.get('latest_action_date') or bill_record.get('introduced_date')
+            if filter_date_str:
                 try:
-                    store_bill_to_dynamodb(bill_record)
-                    return True, None
-                except Exception as e:
-                    error_msg = f"Error storing {bill_id}: {str(e)[:200]}"
-                    return False, error_msg
-            
-            stored_count = 0
-            with ThreadPoolExecutor(max_workers=store_workers) as executor:
-                future_to_bill = {
-                    executor.submit(store_bill, bill_id, bill_record): bill_id
-                    for bill_id, bill_record in bills.items()
-                }
-                
-                for future in as_completed(future_to_bill):
-                    bill_id = future_to_bill[future]
-                    try:
-                        success, error_msg = future.result()
-                        if success:
-                            stored_count += 1
-                        else:
-                            if error_msg:
-                                log_print(f"      ❌ {error_msg}")
-                    except Exception as e:
-                        log_print(f"      ❌ Exception storing {bill_id}: {str(e)[:200]}")
-            
-            log_print(f"   ✅ Stored {stored_count}/{len(bills)} bill(s) from batch {batch_num} to DynamoDB")
-            total_stored += stored_count
+                    # Bill XML dates are typically day-granularity. Compare by date (not time-of-day)
+                    # so scheduler windows like 11:00Z->11:00Z don't drop same-day items at 00:00.
+                    if 'T' in filter_date_str:
+                        bill_date_obj = datetime.fromisoformat(filter_date_str.replace('Z', '+00:00'))
+                    else:
+                        bill_date_obj = datetime.strptime(filter_date_str, '%Y-%m-%d')
+                        bill_date_obj = bill_date_obj.replace(tzinfo=timezone.utc)
+                    bill_date_only = bill_date_obj.date()
+                    start_date_only = start_date_dt.date()
+                    end_date_only = end_date_dt.date()
+                    if not (start_date_only <= bill_date_only <= end_date_only):
+                        date_filtered_count += 1
+                        continue
+                except (ValueError, AttributeError):
+                    pass
         
-        # Clear batch data from memory before next batch
-        del bills
-        del batch_xml_data
-        del zip_file_batch
-        import gc
-        gc.collect()
-        log_print(f"   🧹 Memory cleared after batch {batch_num}")
+        bill_display = bill_id.replace("-", "") if bill_id else ""
+        log_print(f"reading bill {bill_display}")
+        
+        try:
+            store_bill_to_dynamodb(bill_record)
+            total_stored += 1
+        except Exception as e:
+            log_print(f"   ❌ Error storing {bill_id}: {str(e)[:200]}")
+            continue
+        
+        if roll_call_indexing and bill_record.get("recorded_votes_json") and politicians_by_bioguide is not None and rolls_written_from_bills is not None:
+            try:
+                roll_call_indexing.run_roll_call_delta_for_bill(
+                    bill_id, bill_record, politicians, politicians_by_bioguide,
+                    rolls_written_from_bills, roll_write_lock=None,
+                )
+            except roll_call_indexing.RollCallIndexError as rc_err:
+                log_print(f"   [FAIL] Roll call vote index not created for {bill_id}: {rc_err}")
+                raise
+            except Exception as rc_err:
+                log_print(f"   ⚠️ Roll call delta for {bill_id}: {str(rc_err)[:200]}")
+        
+        if (idx + 1) % 50 == 0:
+            log_print(f"   Progress: {idx + 1}/{total_files} files, {total_stored} bills stored")
+        del xml_content
+        del bill_record
     
+    gc.collect()
     log_print(f"✅ Completed processing {total_files} XML file(s), stored {total_stored} bill(s)")
-    
+    if parse_failed_count or missing_bill_id_count or date_filtered_count:
+        log_print(
+            f"   ↪️ Skips: parse_failed={parse_failed_count}, missing_bill_id={missing_bill_id_count}, "
+            f"date_filtered={date_filtered_count}"
+        )
     return total_files, total_stored
 
 
@@ -2010,8 +2496,42 @@ def main():
     log_print("📋 Loading politician CSV data for name matching...")
     politicians = load_legislators_csv()
     log_print(f"✅ Loaded {len(politicians)} politician records")
+    politicians_by_bioguide = {}
+    for p in politicians or []:
+        bid = (p.get("bioguide_id") or "").strip()
+        if bid:
+            politicians_by_bioguide[bid.upper()] = p
     log_print("")  # Empty line for readability
-    
+
+    # API keys for roll call indexing (house-vote members API)
+    api_key_rotator = None
+    try:
+        api_key_rotator = get_congress_api_keys()
+        log_print(f"✅ Initialized API key rotator with {api_key_rotator.get_key_count()} key(s) (for roll call indexing)")
+    except Exception as e:
+        log_print(f"ℹ️ API keys not available (roll call indexing will be skipped): {str(e)}")
+
+    if roll_call_indexing and bills_table and api_key_rotator:
+        roll_call_indexing.set_context({
+            "table": bills_table,
+            "s3_client": s3_client,
+            "bucket_name": S3_BUCKET_NAME or "",
+            "api_base_url": API_BASE_URL or "https://api.congress.gov/v3",
+            "get_api_key": lambda: (api_key_rotator.get_key(), 0),
+            "log_print": log_print,
+            "request_timeout": REQUEST_TIMEOUT,
+        })
+        roll_call_indexing.ensure_search_vote_items_for_legislators(politicians)
+        log_print("✅ Roll call indexing context set and SEARCH#VOTE items ensured")
+    else:
+        if not roll_call_indexing:
+            log_print("ℹ️ roll_call_indexing module not available; skipping roll call indexing")
+        elif not api_key_rotator:
+            log_print("ℹ️ API keys not available; skipping roll call indexing")
+
+    rolls_written_from_bills = set()
+    roll_write_lock = threading.Lock()
+
     # Convert date strings to YYYY-MM-DD format for S3 path
     start_date_simple = start_date_str.split('T')[0] if start_date_str else None
     end_date_simple = end_date_str.split('T')[0] if end_date_str else None
@@ -2068,7 +2588,10 @@ def main():
                     files_processed, bills_stored = process_bulk_zip_file(
                         congress_num, bill_type, start_date_simple, end_date_simple,
                         politicians, zip_content=zip_content, zip_s3_key=zip_s3_key,
-                        start_date_dt=start_date_dt, end_date_dt=end_date_dt
+                        start_date_dt=start_date_dt, end_date_dt=end_date_dt,
+                        politicians_by_bioguide=politicians_by_bioguide,
+                        rolls_written_from_bills=rolls_written_from_bills,
+                        roll_write_lock=roll_write_lock,
                     )
                     log_print(f"📊 Processing complete: {files_processed} XML file(s) processed, {bills_stored} bill(s) stored for {bill_type} in Congress {congress_num}")
                     processed_count += bills_stored
@@ -2093,6 +2616,22 @@ def main():
                 # Continue with next bill type
                 continue
     
+    if roll_call_indexing and politicians_by_bioguide and set(congresses_to_query):
+        log_print("")
+        log_print("🔄 Running house-vote second pass (SEARCH#ROLL for rolls not tied to bills)...")
+        try:
+            roll_call_indexing.run_house_vote_second_pass(
+                set(congresses_to_query), politicians, politicians_by_bioguide, rolls_written_from_bills
+            )
+            log_print("✅ House-vote second pass complete")
+        except roll_call_indexing.RollCallIndexError as e:
+            log_print(f"❌ [FAIL] Roll call vote index not created (second pass): {e}")
+            logger.error(f"Roll call vote index not created: {e}", exc_info=True)
+            raise
+        except Exception as e:
+            log_print(f"⚠️ House-vote second pass error: {str(e)[:300]}")
+            logger.exception("House-vote second pass failed")
+
     log_print(f"\n{'=' * 80}")
     log_print(f"✅ Bulk Download Processing Complete")
     log_print(f"{'=' * 80}")

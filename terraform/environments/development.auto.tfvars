@@ -33,13 +33,12 @@
 # cognito_id_token_validity      = 120 # 2 hours for development
 # cognito_refresh_token_validity = 7   # 7 days for development
 
-# # DynamoDB Configuration (cost-optimized)
-# dynamodb_billing_mode                   = "PAY_PER_REQUEST" # Cost-effective for low usage
-# dynamodb_stream_enabled                 = true
-# dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
-# dynamodb_point_in_time_recovery_enabled = false # Disabled for cost savings
-# dynamodb_deletion_protection_enabled    = false # Allow easy cleanup in dev
-# dynamodb_ttl_enabled                    = true
+# DynamoDB Configuration (cost-optimized)
+dynamodb_billing_mode                   = "PAY_PER_REQUEST"
+dynamodb_stream_enabled                 = false
+dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
+dynamodb_point_in_time_recovery_enabled = false
+dynamodb_deletion_protection_enabled    = false
 
 # # CloudWatch Configuration (shorter retention for cost savings)
 

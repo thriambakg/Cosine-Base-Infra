@@ -9,11 +9,12 @@ Runs daily after market close via Step Functions for parallel batch processing.
 import json
 import os
 import logging
+import math
+import statistics
 import boto3
 from typing import List, Dict, Any, Optional
 from datetime import datetime, timedelta
 from decimal import Decimal
-import numpy as np
 
 # Configure logging
 logger = logging.getLogger()
@@ -146,7 +147,11 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
             
             if day_high > 0 and day_low > 0 and day_high > day_low:
                 # Parkinson's volatility (annualized)
-                volatility = float(np.sqrt(1 / (4 * np.log(2))) * np.log(day_high / day_low) * np.sqrt(252))
+                volatility = float(
+                    math.sqrt(1 / (4 * math.log(2)))
+                    * math.log(day_high / day_low)
+                    * math.sqrt(252)
+                )
                 logger.info(f"📊 1d volatility (Parkinson): high={day_high:.2f}, low={day_low:.2f}, vol={volatility:.4f}")
             else:
                 logger.warning(f"⚠️ Invalid high/low for 1d volatility: high={day_high}, low={day_low}")
@@ -158,16 +163,15 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
                 log_returns = []
                 
                 for i in range(1, len(prices)):
-                    if prices[i-1] > 0:
-                        log_return = np.log(prices[i] / prices[i-1])
-                        log_returns.append(log_return)
+                    if prices[i - 1] > 0:
+                        log_returns.append(math.log(prices[i] / prices[i - 1]))
                 
                 if log_returns:
-                    # Standard deviation of log returns
-                    std_log_returns = np.std(log_returns)
-                    
-                    # Annualize: std * sqrt(252) for daily data
-                    volatility = float(std_log_returns * np.sqrt(252))
+                    # Population stdev of log returns (matches prior numpy.std default ddof=0)
+                    std_log_returns = (
+                        statistics.pstdev(log_returns) if len(log_returns) > 1 else 0.0
+                    )
+                    volatility = float(std_log_returns * math.sqrt(252))
                     
                     logger.info(f"📊 Volatility ({timeframe}): {len(prices)} daily points ({len(log_returns)} returns), vol={volatility:.4f}")
         
@@ -188,7 +192,7 @@ def calculate_metrics_for_timeframe(history: List[Dict[str, Any]], timeframe: st
         
         # Calculate average volume (across all points in timeframe)
         volumes = [point.get('volume', 0) for point in relevant_history if point.get('volume', 0) > 0]
-        avg_volume = int(np.mean(volumes)) if volumes else current_volume
+        avg_volume = int(statistics.mean(volumes)) if volumes else current_volume
         
         # Get day high/low from today's EOD bar (not historical lookback)
         # For EOD data, the current point already contains the day's high/low

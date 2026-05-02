@@ -18,8 +18,7 @@ import csv
 import io
 import traceback
 from concurrent.futures import ThreadPoolExecutor, as_completed
-import urllib.request
-import urllib.error
+import requests
 from decimal import Decimal
 import gzip
 
@@ -183,9 +182,9 @@ def load_sec_company_tickers() -> Dict[str, Any]:
         }
         
         logger.info("📥 Loading SEC company tickers (once per batch)...")
-        req = urllib.request.Request(sec_url, headers=headers)
-        with urllib.request.urlopen(req, timeout=15) as response:
-            _sec_company_tickers_cache = json.loads(response.read().decode())
+        response = requests.get(sec_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        _sec_company_tickers_cache = response.json()
         
         logger.info(f"✅ Loaded {len(_sec_company_tickers_cache)} companies from SEC")
         return _sec_company_tickers_cache
@@ -233,9 +232,9 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
                 headers_sec = {
                     'User-Agent': 'CosineApp admin@cosine.com'
                 }
-                req = urllib.request.Request(submissions_url, headers=headers_sec)
-                with urllib.request.urlopen(req, timeout=10) as response:
-                    submissions = json.loads(response.read().decode())
+                response = requests.get(submissions_url, headers=headers_sec, timeout=10)
+                response.raise_for_status()
+                submissions = response.json()
                 
                 sic_code = submissions.get('sic', '')
                 sic_description = submissions.get('sicDescription', 'Unknown')
@@ -270,9 +269,9 @@ def fetch_stock_metadata(symbol: str) -> Dict[str, Any]:
         }
         
         logger.info(f"Fetching Yahoo Finance metadata for {symbol}")
-        req = urllib.request.Request(url, headers=headers)
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
         
         result = data.get('quoteResponse', {}).get('result', [])
         if result and len(result) > 0:
@@ -416,13 +415,12 @@ def calculate_pe_and_dividend_from_sec(cik: str, symbol: str, current_price: flo
             'User-Agent': 'Cosine-AI stock-data-loader contact@cosine-ai.com',
             'Accept-Encoding': 'gzip, deflate'
         }
-        facts_req = urllib.request.Request(facts_url, headers=facts_headers)
-        
-        with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
-            response_data = facts_response.read()
-            if response_data[:2] == b'\x1f\x8b':
-                response_data = gzip.decompress(response_data)
-            facts_data = json.loads(response_data.decode('utf-8'))
+        response = requests.get(facts_url, headers=facts_headers, timeout=10)
+        response.raise_for_status()
+        response_data = response.content
+        if response_data[:2] == b'\x1f\x8b':
+            response_data = gzip.decompress(response_data)
+        facts_data = json.loads(response_data.decode('utf-8'))
         
         us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
         
@@ -479,10 +477,9 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
         headers = {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36'
         }
-        req = urllib.request.Request(url, headers=headers)
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            data = json.loads(response.read().decode())
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        data = response.json()
         
         # Parse Yahoo Finance response
         chart = data.get('chart', {})
@@ -509,7 +506,7 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             # Skip if any required field is None
             if any(x is None or (i < len(x) and x[i] is None) for x in [closes, opens, highs, lows]):
                 continue
-                
+            
             history.append({
                 'timestamp': timestamps[i],
                 'date': datetime.fromtimestamp(timestamps[i]).isoformat(),
@@ -553,58 +550,53 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
                     'User-Agent': 'Cosine-AI stock-data-loader contact@cosine-ai.com',
                     'Accept-Encoding': 'gzip, deflate'
                 }
-                facts_req = urllib.request.Request(facts_url, headers=facts_headers)
+                facts_response = requests.get(facts_url, headers=facts_headers, timeout=10)
+                facts_response.raise_for_status()
+                response_data = facts_response.content
+                if response_data[:2] == b'\x1f\x8b':
+                    response_data = gzip.decompress(response_data)
+                facts_data = json.loads(response_data.decode('utf-8'))
                 
-                with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
-                    # Handle gzip-compressed response
-                    response_data = facts_response.read()
-                    
-                    # Check if response is gzipped (starts with 0x1f8b magic bytes)
-                    if response_data[:2] == b'\x1f\x8b':
-                        response_data = gzip.decompress(response_data)
-                    
-                    facts_data = json.loads(response_data.decode('utf-8'))
-                    
-                    us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
-                    
-                    # Try multiple fields for shares outstanding (in priority order)
-                    share_fields = [
-                        'WeightedAverageNumberOfSharesOutstandingBasic',  # Most reliable
-                        'CommonStockSharesOutstanding',
-                        'EntityCommonStockSharesOutstanding',
-                        'CommonStockSharesIssued'
-                    ]
-                    
-                    # Get ALL historical shares outstanding (not just most recent)
-                    shares_outstanding_history = []
-                    
-                    for field in share_fields:
-                        if field in us_gaap:
-                            units = us_gaap[field].get('units', {}).get('shares', [])
-                            if units:
-                                # Get all non-zero values with their dates
-                                non_zero_units = [u for u in units if u.get('val', 0) > 0]
-                                if non_zero_units:
-                                    # Convert to list of (date, shares) tuples
-                                    for unit in non_zero_units:
-                                        end_date = unit.get('end', '')
-                                        shares = unit.get('val', 0)
-                                        if end_date and shares > 0:
-                                            shares_outstanding_history.append({
-                                                'date': end_date,
-                                                'shares': shares,
-                                                'field': field
-                                            })
+                us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
+                
+                # Try multiple fields for shares outstanding (in priority order)
+                share_fields = [
+                    'WeightedAverageNumberOfSharesOutstandingBasic',  # Most reliable
+                    'CommonStockSharesOutstanding',
+                    'EntityCommonStockSharesOutstanding',
+                    'CommonStockSharesIssued'
+                ]
+                
+                # Get ALL historical shares outstanding (not just most recent)
+                shares_outstanding_history = []
+                
+                for field in share_fields:
+                    if field in us_gaap:
+                        units = us_gaap[field].get('units', {}).get('shares', [])
+                        if units:
+                            # Get all non-zero values with their dates
+                            non_zero_units = [u for u in units if u.get('val', 0) > 0]
+                            if non_zero_units:
+                                # Convert to list of (date, shares) tuples
+                                for unit in non_zero_units:
+                                    end_date = unit.get('end', '')
+                                    shares = unit.get('val', 0)
+                                    if end_date and shares > 0:
+                                        shares_outstanding_history.append({
+                                            'date': end_date,
+                                            'shares': shares,
+                                            'field': field
+                                        })
+                                
+                                # If we found any data, use this field
+                                if shares_outstanding_history:
+                                    # Sort by date (oldest first)
+                                    shares_outstanding_history.sort(key=lambda x: x['date'])
+                                    logger.info(f"✅ Found {len(shares_outstanding_history)} shares outstanding records for {symbol} (field: {field}, range: {shares_outstanding_history[0]['date']} to {shares_outstanding_history[-1]['date']})")
                                     
-                                    # If we found any data, use this field
-                                    if shares_outstanding_history:
-                                        # Sort by date (oldest first)
-                                        shares_outstanding_history.sort(key=lambda x: x['date'])
-                                        logger.info(f"✅ Found {len(shares_outstanding_history)} shares outstanding records for {symbol} (field: {field}, range: {shares_outstanding_history[0]['date']} to {shares_outstanding_history[-1]['date']})")
-                                        
-                                        # Set the most recent as current shares outstanding
-                                        shares_outstanding = shares_outstanding_history[-1]['shares']
-                                        break
+                                    # Set the most recent as current shares outstanding
+                                    shares_outstanding = shares_outstanding_history[-1]['shares']
+                                    break
                 
         except Exception as e:
             logger.warning(f"Could not fetch shares outstanding from SEC for {symbol}: {e}")
@@ -614,15 +606,14 @@ def fetch_historical_data(symbol: str, years: int = 5) -> Optional[Dict[str, Any
             try:
                 fmp_url = f"https://financialmodelingprep.com/api/v3/profile/{symbol}?apikey=demo"
                 fmp_headers = {'User-Agent': 'Mozilla/5.0'}
-                fmp_req = urllib.request.Request(fmp_url, headers=fmp_headers)
-                
-                with urllib.request.urlopen(fmp_req, timeout=5) as fmp_response:
-                    fmp_data = json.loads(fmp_response.read().decode())
-                    if fmp_data and len(fmp_data) > 0:
-                        profile = fmp_data[0]
-                        shares_outstanding = profile.get('sharesOutstanding', 0)
-                        if shares_outstanding > 0:
-                            logger.info(f"✅ Found shares outstanding for {symbol} from FMP: {shares_outstanding:,}")
+                fmp_response = requests.get(fmp_url, headers=fmp_headers, timeout=5)
+                fmp_response.raise_for_status()
+                fmp_data = fmp_response.json()
+                if fmp_data and len(fmp_data) > 0:
+                    profile = fmp_data[0]
+                    shares_outstanding = profile.get('sharesOutstanding', 0)
+                    if shares_outstanding > 0:
+                        logger.info(f"✅ Found shares outstanding for {symbol} from FMP: {shares_outstanding:,}")
             except Exception as fmp_error:
                 logger.warning(f"Could not fetch shares from FMP for {symbol}: {fmp_error}")
         

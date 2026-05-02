@@ -189,7 +189,7 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
     """Download bill text file (HTML) from Congress.gov with exponential backoff for rate limiting."""
     for attempt in range(retries):
         try:
-            response = requests.get(text_url, timeout=REQUEST_TIMEOUT * 2)
+            response = requests.get(text_url, timeout=(10, REQUEST_TIMEOUT * 2))  # nosec B113 - timeout set
             
             # Handle 429 Too Many Requests with exponential backoff
             if response.status_code == 429:
@@ -223,30 +223,167 @@ def download_bill_text_file(text_url: str, retries: int = MAX_RETRIES) -> Option
     return None
 
 
-def store_bill_text_to_s3(bill_id: str, text_content: bytes) -> str:
+def store_bill_text_to_s3(
+    bill_id: str,
+    text_content: bytes,
+    file_index: int = 1,
+    file_extension: str = "html",
+    content_type: Optional[str] = None,
+) -> str:
     """
-    Store bill text HTML file to S3 in billtext/ folder.
-    
+    Store bill text file to S3 in billtext/{bill_id}/ (e.g. 1.html or 1.xml).
+
     Args:
         bill_id: Bill ID (e.g., "119-HR-303")
-        text_content: Bill text HTML content as bytes
-        
+        text_content: Bill text content as bytes (HTML, XML, etc.)
+        file_index: 1-based file number for naming 1.html, 2.xml, ...
+        file_extension: Extension without dot (html, xml, htm).
+        content_type: S3 Content-Type (defaults: html -> text/html, xml -> application/xml).
+
     Returns:
-        S3 key where the file was stored
+        S3 key where the file was stored (e.g. billtext/119-HR-303/1.html)
     """
-    # Create S3 key: billtext/{bill_id}.html
-    s3_key = f"billtext/{bill_id}.html"
-    
-    # Upload to S3
+    ext = (file_extension or "html").lstrip(".")
+    if content_type is None:
+        content_type = "text/html" if ext in ("html", "htm") else "application/xml"
+    s3_key = f"billtext/{bill_id}/{file_index}.{ext}"
     s3_client.put_object(
         Bucket=S3_BUCKET_NAME,
         Key=s3_key,
         Body=text_content,
-        ContentType='text/html'
+        ContentType=content_type,
     )
-    
-    logger.info(f"💾 Stored HTML bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes)")
+    logger.info(f"💾 Stored bill text for {bill_id} to S3: {s3_key} ({len(text_content):,} bytes, {content_type})")
     return s3_key
+
+
+def _get_format_items(version: Dict[str, Any]) -> list:
+    """Extract format items list from a text version (handles list or dict with item)."""
+    formats = version.get("formats", {})
+    if isinstance(formats, list):
+        return formats
+    if isinstance(formats, dict):
+        if "item" in formats:
+            item_data = formats["item"]
+            if isinstance(item_data, list):
+                return item_data
+            if isinstance(item_data, dict):
+                return [item_data]
+        return list(formats.values()) if formats else []
+    return []
+
+
+def _derive_govinfo_html_url(xml_url: str) -> Optional[str]:
+    """
+    Derive govinfo HTML bill text URL from XML URL.
+    Bulk XML often only lists XML format; HTML exists at same package path with /html/ and .htm.
+    """
+    if not xml_url or "govinfo.gov" not in xml_url or "/xml/" not in xml_url or not xml_url.rstrip("/").endswith(".xml"):
+        return None
+    html_url = xml_url.replace("/xml/", "/html/", 1).rstrip("/")
+    if html_url.endswith(".xml"):
+        html_url = html_url[:-4] + ".htm"
+    return html_url if html_url != xml_url else None
+
+
+def _extension_and_content_type_for_format(format_type: str) -> tuple[str, str]:
+    """Map format type (from API/XML) to file extension and S3 Content-Type. Supports any type (Formatted Text, USLM, XML, etc.)."""
+    t = (format_type or "").strip().lower()
+    if t in ("formatted text", "html", "htm", "text/html"):
+        return "html", "text/html"
+    if t in ("uslm", "united states legislative markup", "xml", "text/xml", "application/xml"):
+        return "xml", "application/xml"
+    # URL-based hint
+    if ".xml" in t or "xml" in t:
+        return "xml", "application/xml"
+    return "html", "text/html"
+
+
+def _pick_best_format_url(format_items: list) -> tuple[Optional[str], Optional[str]]:
+    """
+    Pick best (url, format_type) from format items. Supports any type: Formatted Text, USLM, XML, etc.
+    Preference: Formatted Text -> govinfo derived HTML -> first available URL (use its type for extension).
+    Returns (url, format_type) or (None, None).
+    """
+    first_url: Optional[str] = None
+    first_type: Optional[str] = None
+    for fmt_item in format_items or []:
+        if not isinstance(fmt_item, dict):
+            continue
+        url = fmt_item.get("url")
+        if not url or not isinstance(url, str):
+            continue
+        fmt_type = (fmt_item.get("type") or "").strip() or None
+        if not first_url:
+            first_url, first_type = url, fmt_type
+        if fmt_type and "formatted text" in fmt_type.lower():
+            return url, fmt_type
+    if not first_url:
+        return None, None
+    derived = _derive_govinfo_html_url(first_url)
+    if derived:
+        return derived, "Formatted Text"
+    return first_url, first_type or "Unknown"
+
+
+def process_bill_text_download_from_versions(
+    bill_id: str, text_versions: list, search_index_sk: Optional[str] = None
+) -> tuple[bool, Optional[str]]:
+    """
+    Download and store all bill text versions from the provided list (no API call).
+    Message payload from fetcher: bill_id + text_versions from bulk XML.
+
+    Returns:
+        (success: bool, last_s3_key: Optional[str])
+    """
+    if not bill_id or not isinstance(text_versions, list):
+        return False, None
+    search_index_sk = search_index_sk or bill_id
+    max_versions = 20
+    stored = []
+
+    for idx, version in enumerate(text_versions):
+        if len(stored) >= max_versions:
+            break
+        version_type = (version.get("type") or "").strip() or f"Version {len(stored) + 1}"
+        format_items = _get_format_items(version)
+        url, chosen_fmt_type = _pick_best_format_url(format_items)
+        if not url:
+            continue
+        file_index = len(stored) + 1
+        ext, content_type = _extension_and_content_type_for_format(chosen_fmt_type or "")
+        try:
+            logger.info(f"📄 Downloading bill text ({version_type}, {chosen_fmt_type or 'unknown'}) for {bill_id}...")
+            content = download_bill_text_file(url)
+            if content:
+                s3_key = store_bill_text_to_s3(
+                    bill_id, content, file_index=file_index,
+                    file_extension=ext, content_type=content_type,
+                )
+                stored.append({
+                    "name": f"{file_index}.{ext}",
+                    "s3_key": s3_key,
+                    "type": version_type,
+                })
+            else:
+                logger.warning(f"⚠️  Failed to download for version: {version_type}")
+        except Exception as e:
+            logger.warning(f"⚠️  Error downloading version '{version_type}': {str(e)}")
+
+    try:
+        bills_table.update_item(
+            Key={"bill_id": bill_id, "search_index_sk": search_index_sk},
+            UpdateExpression="SET bill_texts = :bt REMOVE bill_text_html_s3_key, bill_text_versions_s3_json",
+            ExpressionAttributeValues={":bt": stored},
+        )
+        if stored:
+            logger.info(f"✅ Stored {len(stored)} bill text file(s) for {bill_id}")
+        else:
+            logger.info(f"✅ Updated {bill_id} with empty bill_texts")
+        return True, stored[-1]["s3_key"] if stored else None
+    except Exception as e:
+        logger.error(f"❌ DynamoDB update failed for {bill_id}: {str(e)}")
+        return False, None
 
 
 def process_bill_text_download(bill_id: str) -> tuple[bool, Optional[str]]:
@@ -274,15 +411,11 @@ def process_bill_text_download(bill_id: str) -> tuple[bool, Optional[str]]:
         # Fetch text versions (API key rotation handled internally)
         text_versions = fetch_bill_text_versions(congress, bill_type, bill_number)
         if not text_versions:
-            logger.warning(f"⚠️  No text versions found for {bill_id}, setting key to empty")
-            # Update DynamoDB with empty key (include both keys for composite key table)
+            logger.warning(f"⚠️  No text versions found for {bill_id}, setting bill_texts to []")
             bills_table.update_item(
-                Key={
-                    'bill_id': bill_id,
-                    'search_index_sk': bill_id  # For regular bills, search_index_sk equals bill_id
-                },
-                UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                ExpressionAttributeValues={':html_key': ""}
+                Key={'bill_id': bill_id, 'search_index_sk': bill_id},
+                UpdateExpression="SET bill_texts = :empty REMOVE bill_text_html_s3_key, bill_text_versions_s3_json",
+                ExpressionAttributeValues={':empty': []}
             )
             return True, ""
         
@@ -295,7 +428,8 @@ def process_bill_text_download(bill_id: str) -> tuple[bool, Optional[str]]:
                 break
         
         selected_version = introduced_version if introduced_version else text_versions[0]
-        
+        version_type = (selected_version.get("type") or "").strip() or "Bill text"
+
         # Get the formats
         formats = selected_version.get("formats", {})
         format_items = []
@@ -331,60 +465,45 @@ def process_bill_text_download(bill_id: str) -> tuple[bool, Optional[str]]:
                     logger.info(f"📄 Downloading HTML bill text from {html_url}...")
                     html_content = download_bill_text_file(html_url)
                     if html_content:
-                        bill_text_html_s3_key = store_bill_text_to_s3(bill_id, html_content)
-                        # Update DynamoDB (include both keys for composite key table)
+                        s3_key = store_bill_text_to_s3(bill_id, html_content, file_index=1)
+                        bill_texts = [{"name": "1.html", "s3_key": s3_key, "type": version_type}]
                         bills_table.update_item(
-                            Key={
-                                'bill_id': bill_id,
-                                'search_index_sk': bill_id  # For regular bills, search_index_sk equals bill_id
-                            },
-                            UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                            ExpressionAttributeValues={':html_key': bill_text_html_s3_key}
+                            Key={'bill_id': bill_id, 'search_index_sk': bill_id},
+                            UpdateExpression="SET bill_texts = :bt REMOVE bill_text_html_s3_key, bill_text_versions_s3_json",
+                            ExpressionAttributeValues={':bt': bill_texts}
                         )
-                        logger.info(f"✅ Stored HTML bill text to S3: {bill_text_html_s3_key}")
-                        return True, bill_text_html_s3_key
+                        logger.info(f"✅ Stored HTML bill text to S3: {s3_key}")
+                        return True, s3_key
                     else:
-                        logger.warning(f"⚠️  Failed to download HTML bill text, setting key to empty")
+                        logger.warning(f"⚠️  Failed to download HTML bill text, setting bill_texts to []")
                         bills_table.update_item(
-                            Key={
-                                'bill_id': bill_id,
-                                'search_index_sk': bill_id
-                            },
-                            UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                            ExpressionAttributeValues={':html_key': ""}
+                            Key={'bill_id': bill_id, 'search_index_sk': bill_id},
+                            UpdateExpression="SET bill_texts = :empty REMOVE bill_text_html_s3_key, bill_text_versions_s3_json",
+                            ExpressionAttributeValues={':empty': []}
                         )
                         return True, ""
                 except Exception as e:
-                    logger.error(f"⚠️  Error downloading HTML bill text: {str(e)}, setting key to empty")
+                    logger.error(f"⚠️  Error downloading HTML bill text: {str(e)}, setting bill_texts to []")
                     bills_table.update_item(
-                        Key={
-                            'bill_id': bill_id,
-                            'search_index_sk': bill_id
-                        },
-                        UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                        ExpressionAttributeValues={':html_key': ""}
+                        Key={'bill_id': bill_id, 'search_index_sk': bill_id},
+                        UpdateExpression="SET bill_texts = :empty REMOVE bill_text_html_s3_key, bill_text_versions_s3_json",
+                        ExpressionAttributeValues={':empty': []}
                     )
                     return True, ""
             else:
-                logger.warning(f"⚠️  No HTML URL found, setting key to empty")
+                logger.warning(f"⚠️  No HTML URL found, setting bill_texts to []")
                 bills_table.update_item(
-                    Key={
-                        'bill_id': bill_id,
-                        'search_index_sk': bill_id
-                    },
-                    UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                    ExpressionAttributeValues={':html_key': ""}
+                    Key={'bill_id': bill_id, 'search_index_sk': bill_id},
+                    UpdateExpression="SET bill_texts = :empty REMOVE bill_text_html_s3_key, bill_text_versions_s3_json",
+                    ExpressionAttributeValues={':empty': []}
                 )
                 return True, ""
         else:
-            logger.warning(f"⚠️  No format items found, setting key to empty")
+            logger.warning(f"⚠️  No format items found, setting bill_texts to []")
             bills_table.update_item(
-                Key={
-                    'bill_id': bill_id,
-                    'search_index_sk': bill_id
-                },
-                UpdateExpression="SET bill_text_html_s3_key = :html_key",
-                ExpressionAttributeValues={':html_key': ""}
+                Key={'bill_id': bill_id, 'search_index_sk': bill_id},
+                UpdateExpression="SET bill_texts = :empty REMOVE bill_text_html_s3_key, bill_text_versions_s3_json",
+                ExpressionAttributeValues={':empty': []}
             )
             return True, ""
         
@@ -397,30 +516,32 @@ def process_bill_text_download(bill_id: str) -> tuple[bool, Optional[str]]:
 def process_message(record: Dict[str, Any]) -> tuple[bool, Optional[str]]:
     """
     Process a single SQS message.
-    
-    Expected message format:
-    {
-        "bill_id": "119-HR-303"
-    }
-    
-    Returns:
-        (success: bool, bill_id: Optional[str])
+
+    Preferred format (from fetcher): {"bill_id": "...", "text_versions": [...]}
+    Fallback: {"bill_id": "..."} -> fetch versions from API, store one.
     """
     try:
-        # Parse message body
         if isinstance(record.get('body'), str):
             message_body = json.loads(record['body'])
         else:
             message_body = record.get('body', {})
-        
+
         bill_id = message_body.get('bill_id')
         if not bill_id:
             logger.error("❌ Message missing bill_id")
             return (False, None)
-        
-        success, s3_key = process_bill_text_download(bill_id)
+
+        text_versions = message_body.get('text_versions')
+        if isinstance(text_versions, list) and len(text_versions) > 0:
+            search_index_sk = message_body.get('search_index_sk') or bill_id
+            success, _ = process_bill_text_download_from_versions(
+                bill_id, text_versions, search_index_sk=search_index_sk
+            )
+            return (success, bill_id)
+
+        success, _ = process_bill_text_download(bill_id)
         return (success, bill_id)
-        
+
     except Exception as e:
         logger.error(f"❌ Error processing SQS record: {str(e)}", exc_info=True)
         return (False, None)
@@ -430,11 +551,10 @@ def lambda_handler(event, context):
     """
     Lambda handler for processing bill text download messages from SQS.
     Processes up to 10 messages per invocation sequentially.
-    
-    Expected message format:
-    {
-        "bill_id": "119-HR-303"
-    }
+
+    Preferred message format (from fetcher; no API call):
+    {"bill_id": "119-HR-303", "search_index_sk": "119-HR-303", "text_versions": [{type, date, formats: [{url, type}]}, ...]}
+    Fallback: {"bill_id": "119-HR-303"} -> fetch versions from Congress API, store one.
     """
     records = event.get('Records', [])
     total_messages = len(records)

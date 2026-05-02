@@ -272,8 +272,8 @@ module "user_profiles_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+  ttl_enabled                    = false
+  ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
 
@@ -329,7 +329,7 @@ module "security_events_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -386,7 +386,7 @@ module "alerts_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -442,7 +442,7 @@ module "chat_connections_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -490,7 +490,7 @@ module "chat_sessions_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = false
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -599,7 +599,7 @@ module "stock_data_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
+  ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -699,7 +699,7 @@ module "news_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -958,7 +958,7 @@ module "financial_layer" {
   project_name        = var.project_name
   environment         = var.environment
   layer_name_suffix   = "financial"
-  layer_description   = "Financial analysis dependencies (yfinance, numpy, pandas, scipy)"
+  layer_description   = "Financial stack: yfinance, numpy, pandas, pytz (slimmed for Lambda 250MB cap with core layer)"
   requirements_file   = "financial-dependencies.txt"
   compatible_runtimes = ["python3.11", "python3.12"]
   s3_bucket_name      = module.static_hosting_bucket.bucket_id
@@ -1173,7 +1173,7 @@ module "news_fetcher_scheduler" {
   rule_name           = "${var.project_name}-news-fetcher-${var.environment}"
   rule_description    = "Trigger news fetcher every 8 minutes to distribute 200 credits across 24 hours"
   schedule_expression = "rate(8 minutes)"
-  enabled             = var.enable_all_schedulers
+  enabled             = false
 
   target_arn           = module.news_fetcher.function_arn
   target_id            = "NewsFetcherScheduler"
@@ -1370,11 +1370,8 @@ module "stock_data_historical_loader" {
     MAX_WORKERS = "5"   # Parallel workers for batch processing
   }
 
-  # Lambda layers (Python 3.11)
-  layers = [
-    module.core_layer.layer_arn,
-    module.financial_layer.layer_arn
-  ]
+  # Core layer only — historical loader uses requests + boto3 (financial stack exceeds Lambda 250MB unzipped combined limit)
+  layers = [module.core_layer.layer_arn]
 
   # IAM policies
   additional_policy_arns = [
@@ -1626,7 +1623,7 @@ module "historical_loader_scheduler" {
   rule_name           = "${var.project_name}-historical-loader-${var.environment}"
   rule_description    = "Trigger historical data loader daily at 4:30 PM ET (after market close) to fetch EOD data and update S3"
   schedule_expression = "cron(30 20 ? * MON-FRI *)" # 4:30 PM ET = 8:30 PM UTC during DST
-  enabled             = var.enable_all_schedulers
+  enabled             = false
 
   # Target is Step Functions state machine, not Lambda
   target_arn = module.stock_data_historical_loader_state_machine.state_machine_arn
@@ -1677,11 +1674,8 @@ module "eod_batch_generator" {
     BATCH_SIZE = "200" # Stocks per batch for parallel processing
   }
 
-  # Lambda layers - includes financial layer for pandas_market_calendars
-  layers = [
-    module.core_layer.layer_arn,
-    module.financial_layer.layer_arn
-  ]
+  # Core only — batch generator is boto3 + stdlib (financial layer pushes total unzipped size over 250MB)
+  layers = [module.core_layer.layer_arn]
 
   # IAM policies - ListBucket only for listing historical/* keys
   additional_policy_arns = [
@@ -1713,11 +1707,8 @@ module "eod_aggregator" {
     DYNAMODB_TABLE_NAME = module.stock_data_table.table_name
   }
 
-  # Lambda layers
-  layers = [
-    module.core_layer.layer_arn,
-    module.financial_layer.layer_arn
-  ]
+  # Core only — aggregator uses math/statistics instead of numpy to stay under 250MB with core layer
+  layers = [module.core_layer.layer_arn]
 
   # IAM policies - GetObject on historical/*, PutItem/BatchWriteItem on stock_data table
   additional_policy_arns = [
@@ -1896,7 +1887,7 @@ module "eod_aggregator_scheduler" {
   rule_name           = "${var.project_name}-eod-aggregator-${var.environment}"
   rule_description    = "Trigger EOD aggregator daily at 5:00 PM ET (30 min after historical loader) to update DynamoDB from S3"
   schedule_expression = "cron(0 21 ? * MON-FRI *)" # 5:00 PM ET = 9:00 PM UTC during DST
-  enabled             = var.enable_all_schedulers
+  enabled             = false
 
   # Target is Step Functions state machine, not Lambda
   target_arn = module.eod_aggregator_state_machine.state_machine_arn
@@ -2205,7 +2196,7 @@ module "glue_scripts_s3" {
 
   kms_key_arn = module.kms.main_key_arn
 
-  # Upload Glue scripts to S3
+  # Upload Glue scripts and glue_deps (requirements) to S3
   static_files = [
     {
       source_path  = "${path.module}/../backend_app/src/glue/govt_contracts/glue_script.py"
@@ -2218,19 +2209,24 @@ module "glue_scripts_s3" {
       content_type = "text/x-python"
     },
     {
-      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/glue_script.py"
-      s3_key       = "congress_bills/glue_script.py"
+      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/fetcher/glue_script.py"
+      s3_key       = "congress_bills/fetcher/glue_script.py"
       content_type = "text/x-python"
     },
     {
-      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/backfill_bill_text.py"
-      s3_key       = "congress_bills/backfill_bill_text.py"
+      source_path  = "${path.module}/../backend_app/src/glue/congress_bills/fetcher/roll_call_indexing.py"
+      s3_key       = "congress_bills/fetcher/roll_call_indexing.py"
       content_type = "text/x-python"
     },
     {
       source_path  = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
       s3_key       = "lda_disclosures/glue_script.py"
       content_type = "text/x-python"
+    },
+    {
+      source_path  = "${path.module}/../static-files/glue_deps/requirements.txt"
+      s3_key       = "glue_deps/requirements.txt"
+      content_type = "text/plain"
     }
   ]
 
@@ -2708,6 +2704,7 @@ module "usaspending_bulk_indexing_state_machine" {
   # Step Functions definition - calculates date range and invokes Glue job
   # Input should include: JobName, AWARDS_TABLE_NAME, S3_BUCKET_NAME, START_DATE (optional), END_DATE (optional)
   # Router Lambda calculates date range (especially for scheduled mode) and always routes to Glue
+
   definition = jsonencode({
     Comment = "USAspending Bulk Indexing - Always uses Glue job"
     StartAt = "CalculateRoute"
@@ -2716,14 +2713,8 @@ module "usaspending_bulk_indexing_state_machine" {
         Type     = "Task"
         Resource = module.usaspending_bulk_router_lambda.function_arn
         Comment  = "Calculate date range (handles scheduled mode date calculation)"
-        Parameters = {
-          "JobName.$" : "$.JobName"
-          "AWARDS_TABLE_NAME.$" : "$.AWARDS_TABLE_NAME"
-          "S3_BUCKET_NAME.$" : "$.S3_BUCKET_NAME"
-          "START_DATE.$?" : "$.START_DATE"
-          "END_DATE.$?" : "$.END_DATE"
-          "source.$?" : "$.source"
-        }
+        # Omit Parameters so the Lambda receives the full input state (including START_DATE, END_DATE when provided).
+        # Using Parameters with optional paths ($?) can omit fields; passing full input ensures dates flow through.
         ResultPath = "$.route"
         Next       = "StartGlueJob"
       }
@@ -2828,41 +2819,30 @@ resource "aws_iam_role_policy" "usaspending_bulk_indexing_scheduler_policy" {
 
 # EventBridge Scheduler for Daily USAspending Bulk Indexing (9:00 AM EST)
 # Runs daily at 9:00 AM EST to process previous day's contract updates
-# Note: EST is UTC-5, EDT is UTC-4. Using 14:00 UTC = 9:00 AM EST (standard time) or 10:00 AM EDT (daylight time)
-resource "aws_cloudwatch_event_rule" "usaspending_bulk_indexing_scheduler" {
-  name                = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
-  description         = "Trigger daily bulk indexing of USAspending contracts at 9:00 AM EST (14:00 UTC) - processes previous day's contract updates"
+module "usaspending_bulk_indexing_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
+  rule_description    = "Trigger daily bulk indexing of USAspending contracts at 9:00 AM EST (14:00 UTC) - processes previous day's contract updates"
   schedule_expression = "cron(0 14 * * ? *)" # 14:00 UTC = 9:00 AM EST (standard time) or 10:00 AM EDT (daylight time)
-  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
+  enabled             = false
 
-  tags = merge(var.common_tags, {
-    Name        = "${var.project_name}-usaspending-bulk-indexing-daily-${var.environment}"
-    Type        = "EventBridgeRule"
-    Purpose     = "USASpendingBulkIndexing"
-    Environment = var.environment
-  })
-}
-
-# EventBridge Target for Step Function
-resource "aws_cloudwatch_event_target" "usaspending_bulk_indexing_scheduler_target" {
-  count = var.enable_all_schedulers ? 1 : 0
-
-  rule      = aws_cloudwatch_event_rule.usaspending_bulk_indexing_scheduler.name
-  target_id = "USASpendingBulkIndexingScheduler"
-  arn       = module.usaspending_bulk_indexing_state_machine.state_machine_arn
-  role_arn  = aws_iam_role.usaspending_bulk_indexing_scheduler_role.arn
-
-  # Input payload for Step Function - scheduled mode will set dates in router Lambda
-  input = jsonencode({
+  target_arn      = module.usaspending_bulk_indexing_state_machine.state_machine_arn
+  target_id       = "USASpendingBulkIndexingScheduler"
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.usaspending_bulk_indexing_scheduler_role.arn
+  target_input = jsonencode({
     source            = "scheduler-daily"
     JobName           = module.usaspending_bulk_indexing_glue_job.job_name
     AWARDS_TABLE_NAME = module.usaspending_awards_index_table.table_name
     S3_BUCKET_NAME    = module.usaspending_data_s3.bucket_id
-    # START_DATE and END_DATE omitted - router Lambda will set to previous day and current day in scheduled mode
   })
 
+  purpose     = "USASpendingBulkIndexing"
+  environment = var.environment
+  tags        = var.common_tags
+
   depends_on = [
-    aws_cloudwatch_event_rule.usaspending_bulk_indexing_scheduler,
     aws_iam_role.usaspending_bulk_indexing_scheduler_role,
     module.usaspending_bulk_indexing_state_machine
   ]
@@ -2971,7 +2951,8 @@ module "congress_bills_table" {
     { name = "bill_title", type = "S" },
     { name = "bill_number", type = "N" },
     { name = "bipartisan", type = "N" },
-    { name = "policy_area", type = "S" }
+    { name = "policy_area", type = "S" },
+    { name = "has_roll_call", type = "N" }
   ]
 
   global_secondary_indexes = [
@@ -3048,6 +3029,14 @@ module "congress_bills_table" {
       write_capacity  = var.dynamodb_gsi_write_capacity
     },
     {
+      name            = "HasRollCallIndex"
+      hash_key        = "has_roll_call"
+      range_key       = "introduced_date"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
       name            = "IntroducedDateIndex"
       hash_key        = "introduced_date"
       range_key       = null
@@ -3079,10 +3068,10 @@ module "congress_bills_fetcher_glue_job" {
 
   job_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
 
-  # Script location - uploaded to glue scripts bucket
-  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/glue_script.py"
+  # Script location - uploaded to glue scripts bucket (congress_bills/fetcher/)
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/fetcher/glue_script.py"
   python_version  = "3"
-  glue_version    = "4.0"
+  glue_version    = "5.0" # 5.0 required for --additional-python-modules with S3 requirements file (-r)
 
   # Job configuration
   max_retries           = 1
@@ -3101,9 +3090,9 @@ module "congress_bills_fetcher_glue_job" {
   spark_logs_bucket = module.static_hosting_bucket.bucket_id
   temp_bucket       = module.static_hosting_bucket.bucket_id
 
-  # DynamoDB access - least privilege: congress_bills/glue_script.py uses put_item only
+  # DynamoDB access - fetcher writes bills (PutItem) and roll_call_indexing uses GetItem, UpdateItem, BatchGetItem, BatchWriteItem, Query (SEARCH#ROLL, SEARCH#VOTE)
   dynamodb_table_arn = module.congress_bills_table.table_arn
-  dynamodb_actions   = ["dynamodb:PutItem"]
+  dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem", "dynamodb:Query"]
 
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
@@ -3117,15 +3106,19 @@ module "congress_bills_fetcher_glue_job" {
     aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
 
-  # Job arguments
+  # Job arguments; fetcher installs deps from S3 requirements file (Glue 5.0: pip -r with S3 URL)
+  # extra-py-files so roll_call_indexing module is importable
   default_arguments = {
-    "--PROJECT_NAME"          = var.project_name
-    "--ENVIRONMENT"           = var.environment
-    "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
-    "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
-    "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
-    "--REQUEST_TIMEOUT"       = "30"
-    "--BILL_TEXT_SQS_URL"     = module.congress_bills_bill_text_queue.queue_url
+    "--PROJECT_NAME"                    = var.project_name
+    "--ENVIRONMENT"                     = var.environment
+    "--CONGRESS_API_BASE_URL"           = "https://api.congress.gov/v3"
+    "--BILLS_TABLE_NAME"                = module.congress_bills_table.table_name
+    "--S3_BUCKET_NAME"                  = module.congress_bills_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"                 = "30"
+    "--BILL_TEXT_SQS_URL"               = module.congress_bills_bill_text_queue.queue_url
+    "--additional-python-modules"       = "s3://${module.glue_scripts_s3.bucket_id}/glue_deps/requirements.txt"
+    "--python-modules-installer-option" = "-r"
+    "--extra-py-files"                  = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/fetcher/roll_call_indexing.py"
   }
 
   job_bookmark_option = "job-bookmark-disable"
@@ -3326,24 +3319,22 @@ resource "aws_iam_role_policy_attachment" "glue_congress_bills_bill_text_sqs" {
   ]
 }
 
-# Step Functions State Machine for Congress Bills Fetcher
-# Uses Glue job only (Lambda removed due to timeout limitations with large bill counts)
+# Step Functions State Machine for Congress Bills Fetcher (includes roll call indexing in same Glue job)
 module "congress_bills_fetcher_state_machine" {
   source = "./modules/step-functions"
 
   state_machine_name = "${var.project_name}-congress-bills-fetcher-${var.environment}"
   environment        = var.environment
 
-  # Step Functions definition - directly invokes Glue job
-  # Input should include: start_date, end_date, congress (optional)
   definition = jsonencode({
-    Comment = "Congress.gov Bill Data Fetcher - Uses Glue job only"
-    StartAt = "StartGlueJob"
+    Comment = "Congress.gov Bill Data Fetcher (bills + SEARCH#ROLL/SEARCH#VOTE indexing)"
+    StartAt = "StartFetcherJob"
     States = {
-      StartGlueJob = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::glue:startJobRun.sync"
-        Comment  = "Start Glue job for Congress bills fetching (2 day timeout)"
+      StartFetcherJob = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::glue:startJobRun.sync"
+        Comment    = "Start Glue job for Congress bills fetching and roll call indexing (2 day timeout)"
+        ResultPath = "$.fetcherResult"
         Parameters = {
           "JobName" : module.congress_bills_fetcher_glue_job.job_name
           "Arguments" : {
@@ -3369,25 +3360,22 @@ module "congress_bills_fetcher_state_machine" {
       }
       Success = {
         Type    = "Succeed"
-        Comment = "Congress bills fetched and stored successfully"
+        Comment = "Congress bills fetched and roll call data updated"
       }
       HandleError = {
         Type  = "Fail"
         Error = "CongressBillsFetchFailed"
-        Cause = "The Congress.gov bill fetching job failed. Check CloudWatch logs for details."
+        Cause = "The Congress bills fetcher job failed. Check CloudWatch logs for details."
       }
     }
   })
 
-  # Lambda function ARNs for IAM permissions (removed - no longer using Lambda)
   lambda_function_arns = []
 
-  # Glue job name for IAM permissions
   glue_job_names = [
     module.congress_bills_fetcher_glue_job.job_name
   ]
 
-  # Logging configuration
   log_level              = var.environment == "production" ? "ERROR" : "ALL"
   log_retention_days     = 7
   include_execution_data = true
@@ -3397,196 +3385,6 @@ module "congress_bills_fetcher_state_machine" {
   depends_on = [
     module.congress_bills_fetcher_glue_job
   ]
-}
-
-# Temporary Glue Job for Congress Bills Bill Text Backfill
-# This job backfills bill_text_s3_key for existing bills in DynamoDB
-module "congress_bills_bill_text_backfill_glue_job" {
-  source = "./modules/glue-job"
-
-  job_name = "${var.project_name}-congress-bills-bill-text-backfill-${var.environment}"
-
-  # Script location - uploaded to glue scripts bucket
-  script_location = "s3://${module.glue_scripts_s3.bucket_id}/congress_bills/backfill_bill_text.py"
-  python_version  = "3"
-  glue_version    = "4.0"
-
-  # Job configuration
-  max_retries           = 1
-  timeout               = 2880 # 2 days (48 hours) - may take a while for large tables
-  concurrent_executions = 1    # Only allow 1 concurrent run
-  worker_type           = "G.1X"
-  number_of_workers     = 2
-
-  # S3 buckets
-  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
-  additional_s3_bucket_arns = [
-    module.congress_bills_data_s3.bucket_arn
-  ]
-  spark_logs_bucket = module.static_hosting_bucket.bucket_id
-  temp_bucket       = module.static_hosting_bucket.bucket_id
-
-  # DynamoDB access - least privilege: backfill_bill_text.py uses update_item, scan only
-  dynamodb_table_arn = module.congress_bills_table.table_arn
-  dynamodb_actions   = ["dynamodb:UpdateItem", "dynamodb:Scan"]
-
-  # KMS for encryption
-  kms_key_arn = module.kms.main_key_arn
-  additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
-  ]
-
-  # Additional IAM policies for Secrets Manager
-  additional_policy_arns = [
-    module.congress_api_secrets_manager.secret_access_policy_arn
-  ]
-
-  # Job arguments
-  default_arguments = {
-    "--PROJECT_NAME"          = var.project_name
-    "--ENVIRONMENT"           = var.environment
-    "--CONGRESS_API_BASE_URL" = "https://api.congress.gov/v3"
-    "--BILLS_TABLE_NAME"      = module.congress_bills_table.table_name
-    "--S3_BUCKET_NAME"        = module.congress_bills_data_s3.bucket_id
-    "--REQUEST_TIMEOUT"       = "30"
-  }
-
-  job_bookmark_option = "job-bookmark-disable"
-
-  tags = var.common_tags
-
-  depends_on = [
-    module.glue_scripts_s3,
-    module.congress_bills_data_s3,
-    module.static_hosting_bucket,
-    module.congress_bills_table,
-    module.kms,
-    module.congress_api_secrets_manager
-  ]
-}
-
-# Grant backfill Glue job role access to DynamoDB KMS key
-resource "aws_kms_grant" "congress_bills_backfill_glue_dynamodb_key_access" {
-  name              = "${var.project_name}-congress-bills-backfill-${var.environment}-dynamodb-key-grant"
-  key_id            = module.kms.dynamodb_key_id
-  grantee_principal = module.congress_bills_bill_text_backfill_glue_job.role_arn
-  operations = [
-    "Decrypt",
-    "Encrypt",
-    "GenerateDataKey",
-    "DescribeKey"
-  ]
-
-  depends_on = [
-    module.congress_bills_bill_text_backfill_glue_job,
-    module.kms
-  ]
-}
-
-# Step Functions State Machine for Congress Bills Bill Text Prefill
-# Single stage that directly invokes the Glue job with EVENT="Begin prefill"
-module "congress_bills_bill_text_prefill_state_machine" {
-  source = "./modules/step-functions"
-
-  state_machine_name = "${var.project_name}-congress-bill-text-prefill-${var.environment}"
-  environment        = var.environment
-
-  # Step Functions definition - single stage with Glue job
-  definition = jsonencode({
-    Comment = "Congress Bills Bill Text Prefill - Directly invokes Glue job with EVENT='Begin prefill'"
-    StartAt = "StartGlueJob"
-    States = {
-      StartGlueJob = {
-        Type     = "Task"
-        Resource = "arn:aws:states:::glue:startJobRun.sync"
-        Comment  = "Start Glue job for bill text prefill (crawls for bills with empty bill_text_html_s3_key)"
-        Parameters = {
-          "JobName" = module.congress_bills_bill_text_backfill_glue_job.job_name
-          "Arguments" = {
-            "--EVENT" = "Begin prefill"
-          }
-        }
-        Catch = [
-          {
-            ErrorEquals = ["States.ALL"]
-            ResultPath  = "$.error"
-            Next        = "HandleError"
-          }
-        ]
-        Next = "Success"
-      }
-      Success = {
-        Type    = "Succeed"
-        Comment = "Bill text prefill completed successfully"
-      }
-      HandleError = {
-        Type  = "Fail"
-        Error = "BillTextPrefillFailed"
-        Cause = "The bill text prefill job failed. Check CloudWatch logs for details."
-      }
-    }
-  })
-
-  # No Lambda functions needed
-  lambda_function_arns = []
-
-  # Glue job name for IAM permissions
-  glue_job_names = [
-    module.congress_bills_bill_text_backfill_glue_job.job_name
-  ]
-
-  # Logging configuration
-  log_level              = var.environment == "production" ? "ERROR" : "ALL"
-  log_retention_days     = 7
-  include_execution_data = true
-
-  tags = var.common_tags
-
-  depends_on = [
-    module.congress_bills_bill_text_backfill_glue_job
-  ]
-}
-
-# EventBridge Scheduler for Daily Congress Bills Bill Text Prefill (2:00 PM UTC)
-# Runs 3 hours after the bills fetcher to crawl for bills with empty bill_text_html_s3_key
-
-# IAM Role for EventBridge to invoke Congress Bills Bill Text Prefill Step Function
-resource "aws_iam_role" "congress_bills_bill_text_prefill_scheduler_role" {
-  name = "${var.project_name}-congress-bill-text-prefill-role-${var.environment}"
-
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Principal = {
-          Service = "events.amazonaws.com"
-        }
-        Action = "sts:AssumeRole"
-      }
-    ]
-  })
-
-  tags = var.common_tags
-}
-
-# IAM Policy for EventBridge to start Congress Bills Bill Text Prefill Step Function
-resource "aws_iam_role_policy" "congress_bills_bill_text_prefill_scheduler_policy" {
-  name = "${var.project_name}-congress-bill-text-prefill-policy-${var.environment}"
-  role = aws_iam_role.congress_bills_bill_text_prefill_scheduler_role.id
-
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "states:StartExecution"
-        ]
-        Resource = module.congress_bills_bill_text_prefill_state_machine.state_machine_arn
-      }
-    ]
-  })
 }
 
 # ==============================================================================
@@ -3731,8 +3529,8 @@ module "lda_filings_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+  ttl_enabled                    = false
+  ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
 
@@ -4080,7 +3878,7 @@ module "lda_disclosures_fetcher_scheduler" {
   rule_name           = "${var.project_name}-lda-disclosures-fetcher-daily-${var.environment}"
   rule_description    = "Trigger LDA disclosures fetcher daily at 5pm EST to process previous day's disclosures"
   schedule_expression = "cron(0 22 * * ? *)" # 22:00 UTC = 5pm EST (standard time) or 6pm EDT (daylight time)
-  enabled             = var.enable_all_schedulers
+  enabled             = false
 
   target_arn           = module.lda_disclosures_fetcher.function_arn
   target_id            = "LDADisclosuresFetcherScheduler"
@@ -4132,8 +3930,8 @@ module "lda_disclosures_indexer" {
     module.core_layer.layer_arn
   ]
 
-  # Reserved concurrency limit
-  reserved_concurrent_executions = var.lambda_reserved_concurrency_default != null ? var.lambda_reserved_concurrency_default : 20
+  # Reserved concurrency (null = share account unreserved pool; no dedicated carve-out)
+  reserved_concurrent_executions = var.lambda_reserved_concurrency_default
 
   # IAM policies
   additional_policy_arns = [
@@ -4166,8 +3964,7 @@ resource "aws_lambda_event_source_mapping" "lda_batch_sqs_trigger" {
   maximum_batching_window_in_seconds = 0 # Process immediately
   enabled                            = true
 
-  # Standard queues scale naturally - reserved_concurrent_executions (25) on Lambda will limit concurrency
-  # No scaling_config needed for standard queues
+  # Standard queues scale naturally; optional reserved concurrency on the indexer limits fan-out
 
   depends_on = [
     module.lda_disclosures_indexer,
@@ -4221,7 +4018,7 @@ resource "aws_cloudwatch_event_rule" "lda_batch_dlq_redrive" {
   name                = "${var.project_name}-lda-batch-dlq-redrive-${var.environment}"
   description         = "Automatically redrive messages from LDA batch DLQ back to source queue every hour"
   schedule_expression = "rate(1 hour)"
-  state               = "ENABLED"
+  state               = "DISABLED"
 
   tags = merge(var.common_tags, {
     Name        = "${var.project_name}-lda-batch-dlq-redrive-${var.environment}"
@@ -4339,42 +4136,6 @@ resource "aws_lambda_event_source_mapping" "lda_pac_autocomplete_sqs_trigger" {
 
 # IAM Policy for Glue Job to send PAC names to SQS
 
-# EventBridge Rule for Daily Bill Text Prefill
-resource "aws_cloudwatch_event_rule" "congress_bills_bill_text_prefill_scheduler" {
-  name                = "${var.project_name}-congress-bill-text-prefill-daily-${var.environment}"
-  description         = "Trigger Congress bills bill text prefill daily at 2:00 PM UTC (3 hours after bills fetcher) to crawl for bills with empty bill_text_html_s3_key"
-  schedule_expression = "cron(0 14 * * ? *)" # 2:00 PM UTC daily (9:00 AM EST / 10:00 AM EDT)
-  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
-
-  tags = merge(var.common_tags, {
-    Name        = "${var.project_name}-congress-bills-bill-text-prefill-daily-${var.environment}"
-    Type        = "EventBridgeRule"
-    Purpose     = "CongressBillsBillTextPrefill"
-    Environment = var.environment
-  })
-}
-
-# EventBridge Target for Step Function
-resource "aws_cloudwatch_event_target" "congress_bills_bill_text_prefill_scheduler_target" {
-  count = var.enable_all_schedulers ? 1 : 0
-
-  rule      = aws_cloudwatch_event_rule.congress_bills_bill_text_prefill_scheduler.name
-  target_id = "CongressBillsBillTextPrefillScheduler"
-  arn       = module.congress_bills_bill_text_prefill_state_machine.state_machine_arn
-  role_arn  = aws_iam_role.congress_bills_bill_text_prefill_scheduler_role.arn
-
-  # Input payload for Step Function (empty - Step Function will use hardcoded parameters)
-  input = jsonencode({
-    source = "scheduler"
-  })
-
-  depends_on = [
-    aws_cloudwatch_event_rule.congress_bills_bill_text_prefill_scheduler,
-    aws_iam_role.congress_bills_bill_text_prefill_scheduler_role,
-    module.congress_bills_bill_text_prefill_state_machine
-  ]
-}
-
 # EventBridge Scheduler for Daily Congress Bills Fetcher (11:00 AM UTC)
 
 # IAM Role for EventBridge to invoke Congress Bills Fetcher Step Function
@@ -4416,36 +4177,28 @@ resource "aws_iam_role_policy" "congress_bills_fetcher_scheduler_policy" {
   })
 }
 
-resource "aws_cloudwatch_event_rule" "congress_bills_fetcher_scheduler" {
-  name                = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
-  description         = "Trigger Congress bills fetcher daily at 11:00 AM UTC (after Congress.gov's 10:00 AM data publication) to fetch yesterday's data"
+# EventBridge Scheduler for Daily Congress Bills Fetcher (11:00 AM UTC)
+module "congress_bills_fetcher_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
+  rule_description    = "Trigger Congress bills fetcher daily at 11:00 AM UTC (after Congress.gov's 10:00 AM data publication) to fetch yesterday's data"
   schedule_expression = "cron(0 11 * * ? *)" # 11:00 AM UTC daily (6:00 AM EST / 7:00 AM EDT)
-  state               = var.enable_all_schedulers ? "ENABLED" : "DISABLED"
+  enabled             = false
 
-  tags = merge(var.common_tags, {
-    Name        = "${var.project_name}-congress-bills-fetcher-daily-${var.environment}"
-    Type        = "EventBridgeRule"
-    Purpose     = "CongressBillsFetching"
-    Environment = var.environment
-  })
-}
-
-# EventBridge Target for Step Function
-resource "aws_cloudwatch_event_target" "congress_bills_fetcher_scheduler_target" {
-  count = var.enable_all_schedulers ? 1 : 0
-
-  rule      = aws_cloudwatch_event_rule.congress_bills_fetcher_scheduler.name
-  target_id = "CongressBillsFetcherScheduler"
-  arn       = module.congress_bills_fetcher_state_machine.state_machine_arn
-  role_arn  = aws_iam_role.congress_bills_fetcher_scheduler_role.arn
-
-  # Input payload for scheduler: null dates with source="scheduler"
-  # Router lambda will calculate yesterday's date
-  input = jsonencode({
+  target_arn      = module.congress_bills_fetcher_state_machine.state_machine_arn
+  target_id       = "CongressBillsFetcherScheduler"
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.congress_bills_fetcher_scheduler_role.arn
+  target_input = jsonencode({
     start_date = null
     end_date   = null
     source     = "scheduler"
   })
+
+  purpose     = "CongressBillsFetching"
+  environment = var.environment
+  tags        = var.common_tags
 
   depends_on = [
     aws_iam_role.congress_bills_fetcher_scheduler_role,
@@ -4570,8 +4323,8 @@ module "politician_trades_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = var.dynamodb_ttl_enabled
-  ttl_attribute_name             = var.dynamodb_ttl_attribute_name
+  ttl_enabled                    = false
+  ttl_attribute_name             = "expires_at"
 
   kms_key_arn = module.kms.dynamodb_key_arn
 
@@ -4684,7 +4437,7 @@ module "sec_filings_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true # Enable TTL for cache expiration
+  ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -4733,7 +4486,8 @@ module "usaspending_awards_index_table" {
     { name = "period_end_date", type = "S" },
     { name = "recipient_location_state", type = "S" },
     { name = "recipient_zip_code", type = "S" },
-    { name = "is_assistance", type = "N" }
+    { name = "is_assistance", type = "N" },
+    { name = "last_modified_date", type = "S" }
   ]
 
   global_secondary_indexes = [
@@ -4801,6 +4555,14 @@ module "usaspending_awards_index_table" {
       projection_type = "KEYS_ONLY" # Changed from ALL to reduce write costs
       read_capacity   = var.dynamodb_gsi_read_capacity
       write_capacity  = var.dynamodb_gsi_write_capacity
+    },
+    {
+      name            = "LastModifiedDateIndex"
+      hash_key        = "is_assistance"
+      range_key       = "last_modified_date"
+      projection_type = "KEYS_ONLY"
+      read_capacity   = var.dynamodb_gsi_read_capacity
+      write_capacity  = var.dynamodb_gsi_write_capacity
     }
   ]
 
@@ -4811,7 +4573,7 @@ module "usaspending_awards_index_table" {
   stream_view_type               = var.dynamodb_stream_view_type
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true
+  ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -4882,7 +4644,7 @@ module "sec_search_query_cache_table" {
   stream_view_type               = null
   point_in_time_recovery_enabled = var.dynamodb_point_in_time_recovery_enabled
   deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
-  ttl_enabled                    = true # Enable TTL for cache expiration
+  ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
   kms_key_arn = module.kms.dynamodb_key_arn
@@ -5490,7 +5252,7 @@ module "politician_trades_scheduler" {
   rule_name           = "${var.project_name}-politician-trades-${var.environment}"
   rule_description    = "Trigger politician trades aggregation daily at 2:00 AM EST (after SEC filings are typically complete)"
   schedule_expression = "cron(0 6 ? * * *)" # 2:00 AM EST = 6:00 AM UTC (DST) or 7:00 AM UTC (Standard)
-  enabled             = var.enable_all_schedulers
+  enabled             = false
 
   # Target is Step Functions state machine
   target_arn = module.politician_trades_state_machine.state_machine_arn

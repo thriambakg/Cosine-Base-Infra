@@ -20,6 +20,7 @@ on:
     paths:
       - 'terraform/**'
       - 'backend_app/**'
+      - '.github/workflows/**'
   workflow_dispatch:
     inputs:
       environment:
@@ -66,9 +67,69 @@ jobs:
             echo "environment=staging" >> $GITHUB_OUTPUT
           fi
 
+  python-security:
+    name: 'Python Security (SAST / SCA / Secrets)'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.11'
+
+      - name: Install security tools
+        run: |
+          python -m pip install --upgrade pip
+          pip install bandit semgrep pip-audit
+
+      - name: Bandit (SAST)
+        run: |
+          echo "🔍 Running Bandit on backend_app/src..."
+          bandit -r backend_app/src -f screen --severity-level medium \
+            -x backend_app/src/deprecated || true
+        continue-on-error: true
+
+      - name: Semgrep (Python SAST)
+        run: |
+          echo "🔍 Running Semgrep Python rules..."
+          semgrep scan --config=p/python --config=p/security-audit \
+            --error --no-git-ignore backend_app/src 2>/dev/null || \
+          semgrep scan --config=auto --error --no-git-ignore backend_app/src 2>/dev/null || true
+        continue-on-error: true
+
+      - name: pip-audit (SCA)
+        run: |
+          echo "🔍 Scanning dependencies for known vulnerabilities..."
+          REQ_FILES=$(find backend_app -name "requirements.txt" -type f 2>/dev/null || true)
+          if [ -z "$REQ_FILES" ]; then
+            echo "✅ No requirements.txt in backend_app (dependencies via Lambda layers). Skipping pip-audit."
+            exit 0
+          fi
+          FAILED=0
+          for req in $REQ_FILES; do
+            echo "--- $req ---"
+            pip-audit -r "$req" || FAILED=1
+          done
+          if [ $FAILED -eq 1 ]; then
+            echo "❌ One or more requirements.txt have known vulnerabilities. Fix with pip-audit and update pins."
+            exit 1
+          fi
+          echo "✅ No known vulnerabilities in scanned requirements."
+
+
+      - name: Gitleaks (Secrets)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        continue-on-error: true
+
   build-lambda-layers:
     name: 'Build Lambda Layers'
-    needs: [determine-environment]
+    needs: [determine-environment, python-security]
     runs-on: ubuntu-latest
     outputs:
       layers-built: ${{ steps.build.outputs.layers-built }}
@@ -238,8 +299,10 @@ jobs:
             - **EventBridge:** ✅ Scheduled triggers for data fetching
             
             ### Security Scans:
-            - **TFLint:** Passed
-            - **Security Scans:** Passed  
+            - **Python SAST:** Bandit + Semgrep (Python)
+            - **Python SCA:** pip-audit (dependencies)
+            - **Secrets:** Gitleaks
+            - **TFLint / Trivy / Terrascan:** (reusable workflow)  
             
             ### Next Steps:
             - Merge this PR to apply the infrastructure changes

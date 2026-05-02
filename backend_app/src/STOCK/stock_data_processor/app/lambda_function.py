@@ -15,7 +15,6 @@ import random
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import numpy as np
-import urllib.request
 import gzip
 
 # Configure logging
@@ -151,13 +150,12 @@ def load_sec_company_tickers() -> Dict[str, Any]:
             'User-Agent': 'Cosine-AI stock-data-processor contact@cosine-ai.com',
             'Accept-Encoding': 'gzip, deflate'
         }
-        req = urllib.request.Request(url, headers=headers)
-        
-        with urllib.request.urlopen(req, timeout=10) as response:
-            _sec_company_tickers_cache = json.loads(response.read().decode())
-            logger.info(f"✅ Loaded SEC company tickers: {len(_sec_company_tickers_cache)} companies")
-            return _sec_company_tickers_cache
-    
+        response = requests.get(url, headers=headers, timeout=10)
+        response.raise_for_status()
+        _sec_company_tickers_cache = response.json()
+        logger.info(f"✅ Loaded SEC company tickers: {len(_sec_company_tickers_cache)} companies")
+        return _sec_company_tickers_cache
+
     except Exception as e:
         logger.error(f"Failed to load SEC company tickers: {e}")
         return {}
@@ -199,41 +197,36 @@ def fetch_shares_outstanding_sec(symbol: str) -> int:
             'User-Agent': 'Cosine-AI stock-data-processor contact@cosine-ai.com',
             'Accept-Encoding': 'gzip, deflate'
         }
-        facts_req = urllib.request.Request(facts_url, headers=facts_headers)
+        response = requests.get(facts_url, headers=facts_headers, timeout=10)
+        response.raise_for_status()
+        response_data = response.content
+        if response_data[:2] == b'\x1f\x8b':
+            response_data = gzip.decompress(response_data)
+        facts_data = json.loads(response_data.decode('utf-8'))
         
-        with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
-            # Handle gzip-compressed response
-            response_data = facts_response.read()
-            
-            # Check if response is gzipped (starts with 0x1f8b magic bytes)
-            if response_data[:2] == b'\x1f\x8b':
-                response_data = gzip.decompress(response_data)
-            
-            facts_data = json.loads(response_data.decode('utf-8'))
-            
-            us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
-            
-            # Try multiple fields for shares outstanding (in priority order)
-            share_fields = [
-                'WeightedAverageNumberOfSharesOutstandingBasic',  # Most reliable
-                'CommonStockSharesOutstanding',
-                'EntityCommonStockSharesOutstanding',
-                'CommonStockSharesIssued'
-            ]
-            
-            for field in share_fields:
-                if field in us_gaap:
-                    units = us_gaap[field].get('units', {}).get('shares', [])
-                    if units:
-                        # Filter for non-zero values FIRST, then sort by date
-                        non_zero_units = [u for u in units if u.get('val', 0) > 0]
-                        if non_zero_units:
-                            most_recent = sorted(non_zero_units, key=lambda x: x.get('end', ''), reverse=True)[0]
-                            shares = most_recent.get('val', 0)
-                            if shares > 0:
-                                logger.info(f"✅ Found shares outstanding for {symbol}: {shares:,} (field: {field}, date: {most_recent.get('end')})")
-                                _shares_outstanding_cache[symbol] = shares
-                                return shares
+        us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
+        
+        # Try multiple fields for shares outstanding (in priority order)
+        share_fields = [
+            'WeightedAverageNumberOfSharesOutstandingBasic',  # Most reliable
+            'CommonStockSharesOutstanding',
+            'EntityCommonStockSharesOutstanding',
+            'CommonStockSharesIssued'
+        ]
+        
+        for field in share_fields:
+            if field in us_gaap:
+                units = us_gaap[field].get('units', {}).get('shares', [])
+                if units:
+                    # Filter for non-zero values FIRST, then sort by date
+                    non_zero_units = [u for u in units if u.get('val', 0) > 0]
+                    if non_zero_units:
+                        most_recent = sorted(non_zero_units, key=lambda x: x.get('end', ''), reverse=True)[0]
+                        shares = most_recent.get('val', 0)
+                        if shares > 0:
+                            logger.info(f"✅ Found shares outstanding for {symbol}: {shares:,} (field: {field}, date: {most_recent.get('end')})")
+                            _shares_outstanding_cache[symbol] = shares
+                            return shares
         
         # Not found
         logger.warning(f"⚠️ No shares outstanding found in SEC data for {symbol}")
@@ -461,13 +454,12 @@ def fetch_pe_and_dividend_from_sec(symbol: str, current_price: float) -> Dict[st
             'User-Agent': 'Cosine-AI stock-data-processor contact@cosine-ai.com',
             'Accept-Encoding': 'gzip, deflate'
         }
-        facts_req = urllib.request.Request(facts_url, headers=facts_headers)
-        
-        with urllib.request.urlopen(facts_req, timeout=10) as facts_response:
-            response_data = facts_response.read()
-            if response_data[:2] == b'\x1f\x8b':
-                response_data = gzip.decompress(response_data)
-            facts_data = json.loads(response_data.decode('utf-8'))
+        response = requests.get(facts_url, headers=facts_headers, timeout=10)
+        response.raise_for_status()
+        response_data = response.content
+        if response_data[:2] == b'\x1f\x8b':
+            response_data = gzip.decompress(response_data)
+        facts_data = json.loads(response_data.decode('utf-8'))
         
         us_gaap = facts_data.get('facts', {}).get('us-gaap', {})
         
