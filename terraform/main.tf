@@ -1370,11 +1370,8 @@ module "stock_data_historical_loader" {
     MAX_WORKERS = "5"   # Parallel workers for batch processing
   }
 
-  # Lambda layers (Python 3.11)
-  layers = [
-    module.core_layer.layer_arn,
-    module.financial_layer.layer_arn
-  ]
+  # Core layer only — historical loader uses requests + boto3 (financial stack exceeds Lambda 250MB unzipped combined limit)
+  layers = [module.core_layer.layer_arn]
 
   # IAM policies
   additional_policy_arns = [
@@ -1677,11 +1674,8 @@ module "eod_batch_generator" {
     BATCH_SIZE = "200" # Stocks per batch for parallel processing
   }
 
-  # Lambda layers - includes financial layer for pandas_market_calendars
-  layers = [
-    module.core_layer.layer_arn,
-    module.financial_layer.layer_arn
-  ]
+  # Core only — batch generator is boto3 + stdlib (financial layer pushes total unzipped size over 250MB)
+  layers = [module.core_layer.layer_arn]
 
   # IAM policies - ListBucket only for listing historical/* keys
   additional_policy_arns = [
@@ -1713,11 +1707,8 @@ module "eod_aggregator" {
     DYNAMODB_TABLE_NAME = module.stock_data_table.table_name
   }
 
-  # Lambda layers
-  layers = [
-    module.core_layer.layer_arn,
-    module.financial_layer.layer_arn
-  ]
+  # Core only — aggregator uses math/statistics instead of numpy to stay under 250MB with core layer
+  layers = [module.core_layer.layer_arn]
 
   # IAM policies - GetObject on historical/*, PutItem/BatchWriteItem on stock_data table
   additional_policy_arns = [
