@@ -1173,7 +1173,7 @@ module "news_fetcher_scheduler" {
   rule_name           = "${var.project_name}-news-fetcher-${var.environment}"
   rule_description    = "Trigger news fetcher every 8 minutes to distribute 200 credits across 24 hours"
   schedule_expression = "rate(8 minutes)"
-  enabled             = true
+  enabled             = false
 
   target_arn           = module.news_fetcher.function_arn
   target_id            = "NewsFetcherScheduler"
@@ -1626,7 +1626,7 @@ module "historical_loader_scheduler" {
   rule_name           = "${var.project_name}-historical-loader-${var.environment}"
   rule_description    = "Trigger historical data loader daily at 4:30 PM ET (after market close) to fetch EOD data and update S3"
   schedule_expression = "cron(30 20 ? * MON-FRI *)" # 4:30 PM ET = 8:30 PM UTC during DST
-  enabled             = true
+  enabled             = false
 
   # Target is Step Functions state machine, not Lambda
   target_arn = module.stock_data_historical_loader_state_machine.state_machine_arn
@@ -1896,7 +1896,7 @@ module "eod_aggregator_scheduler" {
   rule_name           = "${var.project_name}-eod-aggregator-${var.environment}"
   rule_description    = "Trigger EOD aggregator daily at 5:00 PM ET (30 min after historical loader) to update DynamoDB from S3"
   schedule_expression = "cron(0 21 ? * MON-FRI *)" # 5:00 PM ET = 9:00 PM UTC during DST
-  enabled             = true
+  enabled             = false
 
   # Target is Step Functions state machine, not Lambda
   target_arn = module.eod_aggregator_state_machine.state_machine_arn
@@ -4028,7 +4028,7 @@ resource "aws_cloudwatch_event_rule" "lda_batch_dlq_redrive" {
   name                = "${var.project_name}-lda-batch-dlq-redrive-${var.environment}"
   description         = "Automatically redrive messages from LDA batch DLQ back to source queue every hour"
   schedule_expression = "rate(1 hour)"
-  state               = "ENABLED"
+  state               = "DISABLED"
 
   tags = merge(var.common_tags, {
     Name        = "${var.project_name}-lda-batch-dlq-redrive-${var.environment}"
