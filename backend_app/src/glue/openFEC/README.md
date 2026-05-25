@@ -102,6 +102,9 @@ The Glue **driver** uses a thread pool for I/O-bound openFEC calls (extra Glue `
 | `WORKERS_PER_KEY` | 2 | Threads = `min(keys × this, 24, entity_count)` |
 | `MAX_PARALLEL_WORKERS` | 24 | Cap on concurrent entity indexes |
 | `RATE_LIMIT_DELAY` | 0.1 | Extra sleep after each call (seconds) |
+| `REQUEST_TIMEOUT` | 120 | Default HTTP timeout (seconds) |
+| `SCHEDULE_REQUEST_TIMEOUT` | 180 | Timeout for `/schedules/schedule_*` paths |
+| `REQUEST_RETRIES` | 4 | Retries; timeouts use exponential backoff (5s → 90s cap) |
 
 At startup the job logs parallelism, hourly API budget, and a rough ETA.
 

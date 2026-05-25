@@ -122,6 +122,9 @@ FEC_SECRET_NAME = args["FEC_SECRET_NAME"]
 TABLE_NAME = args["FEC_PROFILES_TABLE_NAME"]
 S3_BUCKET = args["S3_BUCKET_NAME"]
 REQUEST_TIMEOUT = int(args["REQUEST_TIMEOUT"])
+SCHEDULE_REQUEST_TIMEOUT = int(
+    _optional_float("SCHEDULE_REQUEST_TIMEOUT", max(REQUEST_TIMEOUT, 180))
+)
 RATE_LIMIT_DELAY = float(args["RATE_LIMIT_DELAY"])
 CYCLE_PER_PAGE = int(args.get("CYCLE_PER_PAGE") or "100")
 TESTING_LIMIT = args.get("TESTING_LIMIT")
@@ -130,7 +133,15 @@ SOURCE = args["SOURCE"]
 ENTITY_TYPE = (args.get("ENTITY_TYPE") or "").strip().lower()
 ENTITY_ID = (args.get("ENTITY_ID") or "").strip()
 
-REQUEST_RETRIES = 3
+REQUEST_RETRIES = int(_optional_float("REQUEST_RETRIES", 4))
+TIMEOUT_BACKOFF_BASE = float(_optional_float("TIMEOUT_BACKOFF_BASE", 5.0))
+TIMEOUT_BACKOFF_MAX = float(_optional_float("TIMEOUT_BACKOFF_MAX", 90.0))
+HTTP_BACKOFF_BASE = float(_optional_float("HTTP_BACKOFF_BASE", 5.0))
+SLOW_FEC_PATHS = (
+    "/schedules/schedule_a/",
+    "/schedules/schedule_b/",
+    "/schedules/schedule_e/",
+)
 PROFILE_SIZE_WARN_BYTES = 350_000
 TOP_PAC_FUNDRAISER_LIMIT = 2
 PAC_DONOR_SAMPLE = 5
@@ -286,6 +297,33 @@ def load_api_keys(secret_name: str) -> List[str]:
     return keys
 
 
+def _is_timeout(exc: BaseException) -> bool:
+    if isinstance(exc, TimeoutError):
+        return True
+    if isinstance(exc, URLError):
+        reason = getattr(exc, "reason", None)
+        if isinstance(reason, TimeoutError):
+            return True
+        return "timed out" in str(exc).lower()
+    return False
+
+
+def _request_timeout_for(path: str, override: Optional[int] = None) -> int:
+    if override is not None:
+        return override
+    if any(path.startswith(prefix) for prefix in SLOW_FEC_PATHS):
+        return SCHEDULE_REQUEST_TIMEOUT
+    return REQUEST_TIMEOUT
+
+
+def _timeout_backoff_seconds(attempt: int) -> float:
+    return min(TIMEOUT_BACKOFF_MAX, TIMEOUT_BACKOFF_BASE * (2**attempt))
+
+
+def _http_backoff_seconds(attempt: int) -> float:
+    return max(HTTP_BACKOFF_BASE, HTTP_BACKOFF_BASE * (2**attempt))
+
+
 class FecClient:
     def __init__(self, slot: KeySlot, log_prefix: str = "") -> None:
         self.slot = slot
@@ -301,6 +339,7 @@ class FecClient:
         params: Optional[Dict[str, Any]] = None,
         *,
         allow_404: bool = False,
+        timeout: Optional[int] = None,
     ) -> Dict[str, Any]:
         self.slot.limiter.acquire()
         if RATE_LIMIT_DELAY > 0:
@@ -315,10 +354,11 @@ class FecClient:
                 "User-Agent": "Cosine-openFEC-glue/1.0",
             },
         )
+        wait = _request_timeout_for(path, timeout)
         last_err: Optional[BaseException] = None
         for attempt in range(REQUEST_RETRIES + 1):
             try:
-                with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                with urlopen(req, timeout=wait) as resp:
                     self._record_call()
                     return json.loads(resp.read().decode("utf-8"))
             except HTTPError as exc:
@@ -326,23 +366,28 @@ class FecClient:
                     self._record_call()
                     return {"results": [], "pagination": {"count": 0}}
                 if exc.code in (429, 500, 502, 503, 504) and attempt < REQUEST_RETRIES:
-                    wait = max(5.0, 2.0 * (attempt + 1))
+                    delay = _http_backoff_seconds(attempt)
                     log(
                         f"{self.log_prefix} HTTP {exc.code} {path} — "
-                        f"retry in {wait:.0f}s (attempt {attempt + 1})"
+                        f"retry in {delay:.0f}s (attempt {attempt + 1}/{REQUEST_RETRIES})"
                     )
-                    time.sleep(wait)
+                    time.sleep(delay)
                     self.slot.limiter.acquire()
                     last_err = exc
                     continue
                 body = exc.read().decode("utf-8", errors="replace")[:300]
                 raise RuntimeError(f"HTTP {exc.code} {path}: {body}") from exc
             except (TimeoutError, URLError) as exc:
+                if not _is_timeout(exc):
+                    raise
                 last_err = exc
                 if attempt < REQUEST_RETRIES:
-                    wait = 1.5 * (attempt + 1)
-                    log(f"{self.log_prefix} Timeout {path} — retry in {wait:.0f}s")
-                    time.sleep(wait)
+                    delay = _timeout_backoff_seconds(attempt)
+                    log(
+                        f"{self.log_prefix} Timeout {path} ({wait}s) — "
+                        f"retry in {delay:.0f}s (attempt {attempt + 1}/{REQUEST_RETRIES})"
+                    )
+                    time.sleep(delay)
                     continue
                 raise
         if last_err:
@@ -356,20 +401,25 @@ class FecClient:
         *,
         allow_404: bool = False,
         label: str = "",
+        timeout: Optional[int] = None,
+        max_pages: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
+        """Fetch pages; set max_pages=1 for samples (test script uses a single GET)."""
         base = dict(params or {})
         base.setdefault("per_page", CYCLE_PER_PAGE)
         page = 1
         all_rows: List[Dict[str, Any]] = []
         while True:
             base["page"] = page
-            data = self.get(path, base, allow_404=allow_404)
+            data = self.get(path, base, allow_404=allow_404, timeout=timeout)
             rows = data.get("results") or []
             pagination = data.get("pagination") or {}
             pages = int(pagination.get("pages") or 1) or 1
             tag = label or path
             log(f"{self.log_prefix} FEC {tag} page {page}/{pages} — ok ({len(rows)} rows)")
             all_rows.extend(rows)
+            if max_pages is not None and page >= max_pages:
+                break
             if page >= pages:
                 break
             page += 1
@@ -736,16 +786,27 @@ def build_candidate_profile(
             ),
             cycle,
         )
-        donors = client.paginate(
-            "/schedules/schedule_a/",
-            {
-                "committee_id": cid,
-                "two_year_transaction_period": cycle,
-                "per_page": PAC_DONOR_SAMPLE,
-                "sort": "-contribution_receipt_date",
-            },
-            label=f"outside PAC donors {cid}",
-        )[:PAC_DONOR_SAMPLE]
+        try:
+            donors = client.paginate(
+                "/schedules/schedule_a/",
+                {
+                    "committee_id": cid,
+                    "two_year_transaction_period": cycle,
+                    "per_page": PAC_DONOR_SAMPLE,
+                    "sort": "-contribution_receipt_date",
+                },
+                label=f"outside PAC donors {cid}",
+                max_pages=1,
+            )[:PAC_DONOR_SAMPLE]
+        except (TimeoutError, URLError) as exc:
+            if _is_timeout(exc):
+                log(
+                    f"{client.log_prefix} outside PAC donors {cid} skipped "
+                    f"(timeout after {SCHEDULE_REQUEST_TIMEOUT}s)"
+                )
+                donors = []
+            else:
+                raise
         top_outside.append(
             {
                 "committee_id": cid,
@@ -761,21 +822,42 @@ def build_candidate_profile(
         if len(top_outside) >= TOP_PAC_FUNDRAISER_LIMIT:
             break
 
-    recent_e = client.paginate(
-        "/schedules/schedule_e/",
-        {
-            "candidate_id": candidate_id,
-            "cycle": cycle,
-            "sort": "-expenditure_date",
-        },
-        label=f"schedule_e {candidate_id}",
-    )[:RECENT_IE_SAMPLE]
+    try:
+        recent_e = client.paginate(
+            "/schedules/schedule_e/",
+            {
+                "candidate_id": candidate_id,
+                "two_year_transaction_period": cycle,
+                "per_page": RECENT_IE_SAMPLE,
+                "sort": "-expenditure_date",
+            },
+            label=f"schedule_e {candidate_id}",
+            max_pages=1,
+        )[:RECENT_IE_SAMPLE]
+    except (TimeoutError, URLError) as exc:
+        if _is_timeout(exc):
+            log(f"{client.log_prefix} recent schedule_e skipped (timeout)")
+            recent_e = []
+        else:
+            raise
 
-    recent_efile = client.paginate(
-        "/schedules/schedule_e/efile/",
-        {"candidate_id": candidate_id, "sort": "-expenditure_date"},
-        label=f"schedule_e/efile {candidate_id}",
-    )[:RECENT_IE_SAMPLE]
+    try:
+        recent_efile = client.paginate(
+            "/schedules/schedule_e/efile/",
+            {
+                "candidate_id": candidate_id,
+                "per_page": RECENT_IE_SAMPLE,
+                "sort": "-expenditure_date",
+            },
+            label=f"schedule_e/efile {candidate_id}",
+            max_pages=1,
+        )[:RECENT_IE_SAMPLE]
+    except (TimeoutError, URLError) as exc:
+        if _is_timeout(exc):
+            log(f"{client.log_prefix} recent schedule_e/efile skipped (timeout)")
+            recent_efile = []
+        else:
+            raise
 
     now = datetime.now(timezone.utc).isoformat()
     ie_dates = [

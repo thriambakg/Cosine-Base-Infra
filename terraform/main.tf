@@ -3855,7 +3855,9 @@ module "openfec_glue_job" {
     "--FEC_SECRET_NAME"            = module.fec_api_secrets_manager.secret_names["fec-api"]
     "--FEC_PROFILES_TABLE_NAME"    = module.fec_profiles_table.table_name
     "--S3_BUCKET_NAME"             = module.fec_data_s3.bucket_id
-    "--REQUEST_TIMEOUT"            = "90"
+    "--REQUEST_TIMEOUT"            = "120"
+    "--SCHEDULE_REQUEST_TIMEOUT"   = "180"
+    "--REQUEST_RETRIES"            = "4"
     "--RATE_LIMIT_DELAY"           = "0.1"
     "--CYCLE_PER_PAGE"             = "100"
     "--MAX_CALLS_PER_HOUR_PER_KEY" = "900"
@@ -3895,13 +3897,15 @@ module "openfec_indexing_state_machine" {
         Parameters = {
           "JobName" = module.openfec_glue_job.job_name
           "Arguments" = {
-            "--FEC_API_BASE_URL"        = "https://api.open.fec.gov/v1"
-            "--FEC_SECRET_NAME"         = module.fec_api_secrets_manager.secret_names["fec-api"]
-            "--FEC_PROFILES_TABLE_NAME" = module.fec_profiles_table.table_name
-            "--S3_BUCKET_NAME"          = module.fec_data_s3.bucket_id
-            "--REQUEST_TIMEOUT"         = "90"
-            "--RATE_LIMIT_DELAY"        = "0.35"
-            "--CYCLE_PER_PAGE"          = "100"
+            "--FEC_API_BASE_URL"         = "https://api.open.fec.gov/v1"
+            "--FEC_SECRET_NAME"          = module.fec_api_secrets_manager.secret_names["fec-api"]
+            "--FEC_PROFILES_TABLE_NAME"  = module.fec_profiles_table.table_name
+            "--S3_BUCKET_NAME"           = module.fec_data_s3.bucket_id
+            "--REQUEST_TIMEOUT"          = "120"
+            "--SCHEDULE_REQUEST_TIMEOUT" = "180"
+            "--REQUEST_RETRIES"          = "4"
+            "--RATE_LIMIT_DELAY"         = "0.35"
+            "--CYCLE_PER_PAGE"           = "100"
             # Glue Arguments must be strings; use States.Format for numbers, "" not null in input
             "--SOURCE.$"           = "$.source"
             "--MODE.$"             = "$.mode"
