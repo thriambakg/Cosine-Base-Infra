@@ -3851,13 +3851,16 @@ module "openfec_glue_job" {
   ]
 
   default_arguments = {
-    "--FEC_API_BASE_URL"        = "https://api.open.fec.gov/v1"
-    "--FEC_SECRET_NAME"         = module.fec_api_secrets_manager.secret_names["fec-api"]
-    "--FEC_PROFILES_TABLE_NAME" = module.fec_profiles_table.table_name
-    "--S3_BUCKET_NAME"          = module.fec_data_s3.bucket_id
-    "--REQUEST_TIMEOUT"         = "90"
-    "--RATE_LIMIT_DELAY"        = "0.35"
-    "--CYCLE_PER_PAGE"          = "100"
+    "--FEC_API_BASE_URL"           = "https://api.open.fec.gov/v1"
+    "--FEC_SECRET_NAME"            = module.fec_api_secrets_manager.secret_names["fec-api"]
+    "--FEC_PROFILES_TABLE_NAME"    = module.fec_profiles_table.table_name
+    "--S3_BUCKET_NAME"             = module.fec_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"            = "90"
+    "--RATE_LIMIT_DELAY"           = "0.1"
+    "--CYCLE_PER_PAGE"             = "100"
+    "--MAX_CALLS_PER_HOUR_PER_KEY" = "900"
+    "--WORKERS_PER_KEY"            = "2"
+    "--MAX_PARALLEL_WORKERS"       = "24"
   }
 
   job_bookmark_option = "job-bookmark-disable"

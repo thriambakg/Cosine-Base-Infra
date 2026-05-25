@@ -19,7 +19,10 @@ import hashlib
 import json
 import logging
 import sys
+import threading
 import time
+from collections import deque
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any, Dict, List, Optional, Tuple
@@ -91,6 +94,18 @@ _cycle_per_page = _parse_optional_glue_arg("CYCLE_PER_PAGE")
 if _cycle_per_page:
     args["CYCLE_PER_PAGE"] = _cycle_per_page
 
+
+def _optional_float(name: str, default: float) -> float:
+    raw = _parse_optional_glue_arg(name)
+    return float(raw) if raw is not None else default
+
+
+# openFEC documents 1,000 requests/hour per API key; default 900 for headroom
+MAX_CALLS_PER_HOUR_PER_KEY = int(_optional_float("MAX_CALLS_PER_HOUR_PER_KEY", 900))
+WORKERS_PER_KEY = int(_optional_float("WORKERS_PER_KEY", 2))
+MAX_PARALLEL_WORKERS = int(_optional_float("MAX_PARALLEL_WORKERS", 24))
+AVG_API_CALLS_PER_ENTITY = int(_optional_float("AVG_API_CALLS_PER_ENTITY", 22))
+
 sc = SparkContext()
 glueContext = GlueContext(sc)
 spark = glueContext.spark_session
@@ -127,6 +142,9 @@ dynamodb = boto3.resource("dynamodb")
 table = dynamodb.Table(TABLE_NAME)
 s3_client = boto3.client("s3")
 secrets_client = boto3.client("secretsmanager")
+_dynamo_write_lock = threading.Lock()
+_stats_lock = threading.Lock()
+_stats: Dict[str, int] = {"success": 0, "failed": 0, "api_calls": 0}
 
 
 def log(msg: str) -> None:
@@ -157,24 +175,96 @@ def _to_decimal(obj: Any) -> Any:
 
 
 # ---------------------------------------------------------------------------
-# API keys + HTTP client
+# API keys, per-key rate limits, parallel HTTP clients
 # ---------------------------------------------------------------------------
 
 
-class ApiKeyPool:
-    def __init__(self, keys: List[str]) -> None:
+class PerKeyRateLimiter:
+    """Sliding window per API key (openFEC: 1,000 calls/hour/key)."""
+
+    def __init__(self, max_per_hour: int) -> None:
+        self.max_per_hour = max_per_hour
+        self._timestamps: deque = deque()
+        self._lock = threading.Lock()
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.time()
+            while self._timestamps and self._timestamps[0] < now - 3600:
+                self._timestamps.popleft()
+            while len(self._timestamps) >= self.max_per_hour:
+                wait = self._timestamps[0] + 3600 - now
+                if wait > 0:
+                    time.sleep(wait)
+                now = time.time()
+                while self._timestamps and self._timestamps[0] < now - 3600:
+                    self._timestamps.popleft()
+            self._timestamps.append(time.time())
+
+
+class KeySlot:
+    def __init__(self, api_key: str, index: int, max_per_hour: int) -> None:
+        self.api_key = api_key
+        self.index = index
+        self.limiter = PerKeyRateLimiter(max_per_hour)
+
+
+class FecClientPool:
+    """Dedicated key + rate bucket per slot; worker N uses slot N % num_keys."""
+
+    def __init__(self, keys: List[str], max_per_hour_per_key: int) -> None:
         if not keys:
-            raise ValueError("No FEC API keys loaded from Secrets Manager")
-        self._keys = keys
-        self._index = 0
+            raise ValueError("No FEC API keys")
+        self.slots = [
+            KeySlot(k, i, max_per_hour_per_key) for i, k in enumerate(keys)
+        ]
 
-    def next_key(self) -> str:
-        key = self._keys[self._index % len(self._keys)]
-        self._index += 1
-        return key
+    @property
+    def num_keys(self) -> int:
+        return len(self.slots)
+
+    def client_for_worker(self, worker_id: int, context: str) -> "FecClient":
+        slot = self.slots[worker_id % len(self.slots)]
+        prefix = f"[key {slot.index + 1}/{len(self.slots)} {context}]"
+        return FecClient(slot, log_prefix=prefix)
+
+    def discovery_client(self) -> "FecClient":
+        return self.client_for_worker(0, "discovery")
 
 
-def load_api_keys(secret_name: str) -> ApiKeyPool:
+def resolve_parallel_workers(num_keys: int, total_entities: int) -> int:
+    if total_entities <= 0:
+        return 1
+    return max(
+        1,
+        min(num_keys * WORKERS_PER_KEY, MAX_PARALLEL_WORKERS, total_entities),
+    )
+
+
+def log_capacity_plan(num_keys: int, total_entities: int, workers: int) -> None:
+    hourly_budget = num_keys * MAX_CALLS_PER_HOUR_PER_KEY
+    est_calls = total_entities * AVG_API_CALLS_PER_ENTITY
+    est_hours = est_calls / hourly_budget if hourly_budget else 0
+    log(
+        f"Parallelism: {workers} threads from {num_keys} key(s) "
+        f"(×{WORKERS_PER_KEY} workers/key, cap {MAX_PARALLEL_WORKERS})"
+    )
+    log(
+        f"Rate budget: {hourly_budget:,} API calls/hour "
+        f"({MAX_CALLS_PER_HOUR_PER_KEY}/key; openFEC hard limit 1,000/key)"
+    )
+    if total_entities:
+        log(
+            f"Rough ETA: ~{est_hours:.1f}h for {total_entities} entities "
+            f"(~{AVG_API_CALLS_PER_ENTITY} calls each, ~{est_calls:,} total)"
+        )
+    log(
+        "Keys: 10–15 is usually enough for bootstrap; add keys if logs show 429s or "
+        "long limiter waits. Threads cap ~24 on G.1X driver."
+    )
+
+
+def load_api_keys(secret_name: str) -> List[str]:
     """Secret JSON: { \"api_keys\": [\"key1\", \"key2\"] } (Terraform stores api_keys as JSON string)."""
     resp = secrets_client.get_secret_value(SecretId=secret_name)
     payload = json.loads(resp["SecretString"])
@@ -193,12 +283,17 @@ def load_api_keys(secret_name: str) -> ApiKeyPool:
     if not keys:
         raise ValueError("FEC secret api_keys array is empty")
     log(f"Loaded {len(keys)} FEC API key(s) from Secrets Manager")
-    return ApiKeyPool(keys)
+    return keys
 
 
 class FecClient:
-    def __init__(self, key_pool: ApiKeyPool) -> None:
-        self.key_pool = key_pool
+    def __init__(self, slot: KeySlot, log_prefix: str = "") -> None:
+        self.slot = slot
+        self.log_prefix = log_prefix
+
+    def _record_call(self) -> None:
+        with _stats_lock:
+            _stats["api_calls"] += 1
 
     def get(
         self,
@@ -207,10 +302,12 @@ class FecClient:
         *,
         allow_404: bool = False,
     ) -> Dict[str, Any]:
+        self.slot.limiter.acquire()
+        if RATE_LIMIT_DELAY > 0:
+            time.sleep(RATE_LIMIT_DELAY)
         query = dict(params or {})
-        query["api_key"] = self.key_pool.next_key()
+        query["api_key"] = self.slot.api_key
         url = f"{API_BASE}{path}?{urlencode(query, doseq=True)}"
-        time.sleep(RATE_LIMIT_DELAY)
         req = Request(
             url,
             headers={
@@ -222,23 +319,20 @@ class FecClient:
         for attempt in range(REQUEST_RETRIES + 1):
             try:
                 with urlopen(req, timeout=REQUEST_TIMEOUT) as resp:
+                    self._record_call()
                     return json.loads(resp.read().decode("utf-8"))
             except HTTPError as exc:
                 if allow_404 and exc.code == 404:
+                    self._record_call()
                     return {"results": [], "pagination": {"count": 0}}
                 if exc.code in (429, 500, 502, 503, 504) and attempt < REQUEST_RETRIES:
-                    wait = 2.0 * (attempt + 1)
-                    log(f"HTTP {exc.code} on {path} — retry in {wait:.0f}s (attempt {attempt + 1})")
-                    time.sleep(wait)
-                    query["api_key"] = self.key_pool.next_key()
-                    url = f"{API_BASE}{path}?{urlencode(query, doseq=True)}"
-                    req = Request(
-                        url,
-                        headers={
-                            "Accept": "application/json",
-                            "User-Agent": "Cosine-openFEC-glue/1.0",
-                        },
+                    wait = max(5.0, 2.0 * (attempt + 1))
+                    log(
+                        f"{self.log_prefix} HTTP {exc.code} {path} — "
+                        f"retry in {wait:.0f}s (attempt {attempt + 1})"
                     )
+                    time.sleep(wait)
+                    self.slot.limiter.acquire()
                     last_err = exc
                     continue
                 body = exc.read().decode("utf-8", errors="replace")[:300]
@@ -247,7 +341,7 @@ class FecClient:
                 last_err = exc
                 if attempt < REQUEST_RETRIES:
                     wait = 1.5 * (attempt + 1)
-                    log(f"Timeout on {path} — retry in {wait:.0f}s")
+                    log(f"{self.log_prefix} Timeout {path} — retry in {wait:.0f}s")
                     time.sleep(wait)
                     continue
                 raise
@@ -274,7 +368,7 @@ class FecClient:
             pagination = data.get("pagination") or {}
             pages = int(pagination.get("pages") or 1) or 1
             tag = label or path
-            log(f"FEC {tag} page {page}/{pages} — ok ({len(rows)} rows)")
+            log(f"{self.log_prefix} FEC {tag} page {page}/{pages} — ok ({len(rows)} rows)")
             all_rows.extend(rows)
             if page >= pages:
                 break
@@ -354,7 +448,8 @@ def put_profile(entity_type: str, entity_id: str, cycle: int, profile: Dict[str,
     raw_size = len(json.dumps(item, default=str))
     if raw_size > PROFILE_SIZE_WARN_BYTES:
         log(f"WARNING {pk} {sk} size {raw_size} exceeds {PROFILE_SIZE_WARN_BYTES} bytes")
-    table.put_item(Item=_to_decimal(item))
+    with _dynamo_write_lock:
+        table.put_item(Item=_to_decimal(item))
     log(f"DynamoDB put {pk} {sk} ({raw_size} bytes)")
 
 
@@ -739,7 +834,8 @@ def build_candidate_profile(
 # ---------------------------------------------------------------------------
 
 
-def discover_bootstrap(client: FecClient, cycle: int) -> Tuple[List[str], List[str]]:
+def discover_bootstrap(pool: FecClientPool, cycle: int) -> Tuple[List[str], List[str]]:
+    client = pool.discovery_client()
     log(f"Discovering all candidates and committees for cycle {cycle}")
     candidates = client.paginate(
         "/candidates/",
@@ -757,7 +853,10 @@ def discover_bootstrap(client: FecClient, cycle: int) -> Tuple[List[str], List[s
     return c_ids, comm_ids
 
 
-def discover_nightly(client: FecClient, cycle: int, min_receipt_date: str) -> Tuple[List[str], List[str]]:
+def discover_nightly(
+    pool: FecClientPool, cycle: int, min_receipt_date: str
+) -> Tuple[List[str], List[str]]:
+    client = pool.discovery_client()
     log(f"Nightly discovery: filings since {min_receipt_date} (cycle {cycle})")
     filings = client.paginate(
         "/filings/",
@@ -792,19 +891,59 @@ def discover_nightly(client: FecClient, cycle: int, min_receipt_date: str) -> Tu
 
 
 def index_entity(client: FecClient, entity_type: str, entity_id: str, cycle: int) -> None:
-    log(f"Indexing {entity_type} {entity_id} (cycle {cycle})")
+    log(f"{client.log_prefix} START index (cycle {cycle})")
+    if entity_type == "candidate":
+        profile = build_candidate_profile(client, entity_id, cycle)
+    elif entity_type == "committee":
+        profile = build_committee_profile(client, entity_id, cycle)
+    else:
+        raise ValueError(f"Unknown entity_type: {entity_type}")
+    put_profile(entity_type, entity_id, cycle, profile)
+    log(f"{client.log_prefix} SUCCESS")
+
+
+def _index_entity_task(
+    pool: FecClientPool,
+    worker_id: int,
+    entity_type: str,
+    entity_id: str,
+    cycle: int,
+) -> Tuple[str, str, bool, Optional[str]]:
+    client = pool.client_for_worker(worker_id, f"{entity_type}/{entity_id}")
     try:
-        if entity_type == "candidate":
-            profile = build_candidate_profile(client, entity_id, cycle)
-        elif entity_type == "committee":
-            profile = build_committee_profile(client, entity_id, cycle)
-        else:
-            raise ValueError(f"Unknown entity_type: {entity_type}")
-        put_profile(entity_type, entity_id, cycle, profile)
-        log(f"SUCCESS {entity_type} {entity_id}")
+        index_entity(client, entity_type, entity_id, cycle)
+        with _stats_lock:
+            _stats["success"] += 1
+        return entity_type, entity_id, True, None
     except Exception as exc:
-        log(f"FAILED {entity_type} {entity_id}: {exc}")
-        raise
+        with _stats_lock:
+            _stats["failed"] += 1
+        log(f"{client.log_prefix} FAILED — {exc}")
+        return entity_type, entity_id, False, str(exc)
+
+
+def _run_parallel_index(
+    pool: FecClientPool,
+    tasks: List[Tuple[str, str]],
+    cycle: int,
+) -> List[Tuple[str, str, bool, Optional[str]]]:
+    workers = resolve_parallel_workers(pool.num_keys, len(tasks))
+    log_capacity_plan(pool.num_keys, len(tasks), workers)
+    results: List[Tuple[str, str, bool, Optional[str]]] = []
+    with ThreadPoolExecutor(max_workers=workers) as executor:
+        futures = {
+            executor.submit(
+                _index_entity_task, pool, i % workers, etype, eid, cycle
+            ): (etype, eid)
+            for i, (etype, eid) in enumerate(tasks)
+        }
+        done = 0
+        for future in as_completed(futures):
+            results.append(future.result())
+            done += 1
+            if done % 50 == 0 or done == len(tasks):
+                log(f"Progress: {done}/{len(tasks)} entities finished")
+    return results
 
 
 def main() -> None:
@@ -820,21 +959,22 @@ def main() -> None:
     log(f"Table={TABLE_NAME} S3={S3_BUCKET}")
     log("=" * 72)
 
-    key_pool = load_api_keys(FEC_SECRET_NAME)
-    client = FecClient(key_pool)
+    api_keys = load_api_keys(FEC_SECRET_NAME)
+    pool = FecClientPool(api_keys, MAX_CALLS_PER_HOUR_PER_KEY)
 
     if MODE == "single":
         if not ENTITY_TYPE or not ENTITY_ID:
             raise ValueError("MODE=single requires --ENTITY_TYPE and --ENTITY_ID")
+        client = pool.client_for_worker(0, f"{ENTITY_TYPE}/{ENTITY_ID}")
         index_entity(client, ENTITY_TYPE, ENTITY_ID, cycle)
         log("Job finished (single entity)")
         job.commit()
         return
 
     if MODE == "bootstrap":
-        candidate_ids, committee_ids = discover_bootstrap(client, cycle)
+        candidate_ids, committee_ids = discover_bootstrap(pool, cycle)
     elif MODE == "nightly":
-        candidate_ids, committee_ids = discover_nightly(client, cycle, min_date)
+        candidate_ids, committee_ids = discover_nightly(pool, cycle, min_date)
     else:
         raise ValueError(f"Unknown MODE: {MODE} (use bootstrap, nightly, or single)")
 
@@ -843,23 +983,26 @@ def main() -> None:
         committee_ids = committee_ids[:TESTING_LIMIT]
         log(f"TESTING_LIMIT={TESTING_LIMIT} applied")
 
-    total = len(candidate_ids) + len(committee_ids)
-    log(f"Indexing {len(candidate_ids)} candidates + {len(committee_ids)} committees ({total} total)")
+    tasks: List[Tuple[str, str]] = (
+        [("candidate", cid) for cid in candidate_ids]
+        + [("committee", cid) for cid in committee_ids]
+    )
+    log(
+        f"Queue: {len(candidate_ids)} candidates + {len(committee_ids)} committees "
+        f"({len(tasks)} total)"
+    )
 
-    done = 0
-    for cid in candidate_ids:
-        index_entity(client, "candidate", cid, cycle)
-        done += 1
-        if done % 25 == 0:
-            log(f"Progress: {done}/{total}")
-
-    for comm_id in committee_ids:
-        index_entity(client, "committee", comm_id, cycle)
-        done += 1
-        if done % 25 == 0:
-            log(f"Progress: {done}/{total}")
-
-    log(f"Job finished — indexed {done} entities for cycle {cycle}")
+    results = _run_parallel_index(pool, tasks, cycle)
+    failed = [(t, e, err) for t, e, ok, err in results if not ok]
+    log(
+        f"Job finished — success={_stats['success']} failed={_stats['failed']} "
+        f"api_calls={_stats['api_calls']} cycle={cycle}"
+    )
+    if failed:
+        log(f"Failed entities ({len(failed)}) — first 10:")
+        for entity_type, entity_id, err in failed[:10]:
+            log(f"  {entity_type} {entity_id}: {err}")
+        raise RuntimeError(f"{len(failed)} entities failed indexing")
     job.commit()
 
 

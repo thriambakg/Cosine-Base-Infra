@@ -78,15 +78,40 @@ aws stepfunctions start-execution \
 
 ## Secrets (`fec-api`)
 
-One field: a JSON array of openFEC API keys (round-robin per request).
+One field: a JSON array of openFEC API keys. Worker threads are pinned to keys (`worker_id % len(keys)`), each with its own hourly rate limiter.
 
 ```json
 {
-  "api_keys": ["key-one", "key-two"]
+  "api_keys": ["key-one", "key-two", "..."]
 }
 ```
 
 In the AWS console you can use a real JSON array. Terraform’s placeholder stores `api_keys` as a stringified array because the secrets module only accepts `map(string)` values.
+
+## Parallelism and API keys
+
+The Glue **driver** uses a thread pool for I/O-bound openFEC calls (extra Glue `number_of_workers` does not help HTTP here).
+
+| Glue arg | Default | Meaning |
+|----------|---------|---------|
+| `MAX_CALLS_PER_HOUR_PER_KEY` | 900 | Per-key sliding window (openFEC hard limit: 1,000/hr/key) |
+| `WORKERS_PER_KEY` | 2 | Threads = `min(keys × this, 24, entity_count)` |
+| `MAX_PARALLEL_WORKERS` | 24 | Cap on concurrent entity indexes |
+| `RATE_LIMIT_DELAY` | 0.1 | Extra sleep after each call (seconds) |
+
+At startup the job logs parallelism, hourly API budget, and a rough ETA.
+
+### How many keys?
+
+| Keys | ~calls/hour | Notes |
+|------|-------------|--------|
+| 1 | 900 | OK for nightly; slow bootstrap |
+| 10 | 9,000 | Solid default for full bootstrap |
+| 15–20 | 13.5k–18k | Usually enough; thread cap is 24 |
+
+You do not need dozens of keys. Add keys only if logs show **HTTP 429** or threads waiting on the limiter. Register separate keys at [api.data.gov](https://api.data.gov/signup/) (same email can hold multiple).
+
+Logs include entity and pagination context, e.g. `[key 2/10 candidate/H2KY04121] FEC /schedules/schedule_a/ page 4/12 — ok`.
 
 ## Scheduler
 
