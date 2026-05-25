@@ -3745,9 +3745,9 @@ module "fec_api_secrets_manager" {
 
   secrets = {
     fec-api = {
-      description = "openFEC API keys (api_keys array for rotation; populate in console)"
+      description = "openFEC API keys — JSON api_keys array for rotation (populate in console)"
       secret_data = {
-        api_key  = "PLACEHOLDER_FEC_API_KEY"
+        # JSON array string — add more keys in console for rotation: ["key1","key2"]
         api_keys = jsonencode(["PLACEHOLDER_FEC_API_KEY"])
       }
     }

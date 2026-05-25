@@ -78,12 +78,15 @@ aws stepfunctions start-execution \
 
 ## Secrets (`fec-api`)
 
+One field: a JSON array of openFEC API keys (round-robin per request).
+
 ```json
 {
-  "api_keys": ["key-one", "key-two"],
-  "api_key": "key-one"
+  "api_keys": ["key-one", "key-two"]
 }
 ```
+
+In the AWS console you can use a real JSON array. Terraform’s placeholder stores `api_keys` as a stringified array because the secrets module only accepts `map(string)` values.
 
 ## Scheduler
 

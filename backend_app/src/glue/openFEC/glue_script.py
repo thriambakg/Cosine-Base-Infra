@@ -9,7 +9,7 @@ Job modes (--MODE):
   nightly   — re-index entities with filings since --MIN_RECEIPT_DATE (default: yesterday UTC)
   single    — index one entity (--ENTITY_TYPE, --ENTITY_ID)
 
-Secrets (--FEC_SECRET_NAME): JSON with api_keys[] or api_key string.
+Secrets (--FEC_SECRET_NAME): JSON object with api_keys[] (array of API key strings).
 """
 
 from __future__ import annotations
@@ -175,20 +175,23 @@ class ApiKeyPool:
 
 
 def load_api_keys(secret_name: str) -> ApiKeyPool:
+    """Secret JSON: { \"api_keys\": [\"key1\", \"key2\"] } (Terraform stores api_keys as JSON string)."""
     resp = secrets_client.get_secret_value(SecretId=secret_name)
     payload = json.loads(resp["SecretString"])
-    keys: List[str] = []
-    raw_keys = payload.get("api_keys")
+    raw_keys: Any = payload.get("api_keys") if isinstance(payload, dict) else payload
     if isinstance(raw_keys, str) and raw_keys.strip():
         try:
             raw_keys = json.loads(raw_keys)
         except json.JSONDecodeError:
             raw_keys = [raw_keys]
-    if isinstance(raw_keys, list):
-        keys = [str(k).strip() for k in raw_keys if str(k).strip()]
-    single = (payload.get("api_key") or "").strip()
-    if single and single not in keys:
-        keys.insert(0, single)
+    if not isinstance(raw_keys, list):
+        raise ValueError(
+            "FEC secret must contain api_keys as a JSON array "
+            '(e.g. {"api_keys": ["key1", "key2"]})'
+        )
+    keys = [str(k).strip() for k in raw_keys if str(k).strip()]
+    if not keys:
+        raise ValueError("FEC secret api_keys array is empty")
     log(f"Loaded {len(keys)} FEC API key(s) from Secrets Manager")
     return ApiKeyPool(keys)
 
