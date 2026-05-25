@@ -3902,13 +3902,14 @@ module "openfec_indexing_state_machine" {
             "--REQUEST_TIMEOUT"         = "90"
             "--RATE_LIMIT_DELAY"        = "0.35"
             "--CYCLE_PER_PAGE"          = "100"
-            "--SOURCE.$"                = "$.source"
-            "--MODE.$"                  = "$.mode"
-            "--FEC_CYCLE.$"             = "$.cycle"
-            "--MIN_RECEIPT_DATE.$"      = "$.min_receipt_date"
-            "--TESTING_LIMIT.$"         = "$.testing_limit"
-            "--ENTITY_TYPE.$"           = "$.entity_type"
-            "--ENTITY_ID.$"             = "$.entity_id"
+            # Glue Arguments must be strings; use States.Format for numbers, "" not null in input
+            "--SOURCE.$"           = "$.source"
+            "--MODE.$"             = "$.mode"
+            "--FEC_CYCLE.$"        = "States.Format('{}', $.cycle)"
+            "--MIN_RECEIPT_DATE.$" = "$.min_receipt_date"
+            "--TESTING_LIMIT.$"    = "States.Format('{}', $.testing_limit)"
+            "--ENTITY_TYPE.$"      = "$.entity_type"
+            "--ENTITY_ID.$"        = "$.entity_id"
           }
         }
         Catch = [
@@ -4000,11 +4001,11 @@ module "openfec_indexing_scheduler" {
   target_input = jsonencode({
     source           = "scheduler-nightly"
     mode             = "nightly"
-    cycle            = null
-    min_receipt_date = null
-    testing_limit    = null
-    entity_type      = null
-    entity_id        = null
+    cycle            = ""
+    min_receipt_date = ""
+    testing_limit    = ""
+    entity_type      = ""
+    entity_id        = ""
   })
 
   purpose     = "OpenFECIndexing"

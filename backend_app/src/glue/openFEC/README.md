@@ -4,7 +4,9 @@ Materializes FEC profiles into DynamoDB and schedule line items into S3. **Run v
 
 ## Step Functions input
 
-All fields are optional except `mode` for clarity; Glue derives `cycle` from today's date when `cycle` is null.
+All fields are optional except `mode` for clarity. **Use empty strings `""` for unused fields — not JSON `null`.** Glue job arguments must be strings; `cycle` may be `"2026"` or `2026` (Step Functions coerces via `States.Format`).
+
+Glue derives `cycle` from today's date when `cycle` is `""`.
 
 ### Nightly (scheduler — 23:00 UTC)
 
@@ -12,11 +14,11 @@ All fields are optional except `mode` for clarity; Glue derives `cycle` from tod
 {
   "source": "scheduler-nightly",
   "mode": "nightly",
-  "cycle": null,
-  "min_receipt_date": null,
-  "testing_limit": null,
-  "entity_type": null,
-  "entity_id": null
+  "cycle": "",
+  "min_receipt_date": "",
+  "testing_limit": "",
+  "entity_type": "",
+  "entity_id": ""
 }
 ```
 
@@ -26,11 +28,11 @@ All fields are optional except `mode` for clarity; Glue derives `cycle` from tod
 {
   "source": "manual",
   "mode": "bootstrap",
-  "cycle": 2026,
-  "min_receipt_date": null,
-  "testing_limit": null,
-  "entity_type": null,
-  "entity_id": null
+  "cycle": "2026",
+  "min_receipt_date": "",
+  "testing_limit": "10",
+  "entity_type": "",
+  "entity_id": ""
 }
 ```
 
@@ -38,9 +40,11 @@ All fields are optional except `mode` for clarity; Glue derives `cycle` from tod
 
 ```json
 {
-  "source": "manual",
+  "source": "manual-test",
   "mode": "single",
-  "cycle": 2026,
+  "cycle": "2026",
+  "min_receipt_date": "",
+  "testing_limit": "",
   "entity_type": "candidate",
   "entity_id": "H2KY04121"
 }
