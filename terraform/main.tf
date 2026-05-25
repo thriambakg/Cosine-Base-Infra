@@ -958,7 +958,7 @@ module "financial_layer" {
   project_name        = var.project_name
   environment         = var.environment
   layer_name_suffix   = "financial"
-  layer_description   = "Financial analysis dependencies (yfinance, numpy, pandas, scipy)"
+  layer_description   = "yfinance stack: requests, numpy, pandas, pytz (slim; no core layer on stock workers)"
   requirements_file   = "financial-dependencies.txt"
   compatible_runtimes = ["python3.11", "python3.12"]
   s3_bucket_name      = module.static_hosting_bucket.bucket_id
@@ -2221,6 +2221,11 @@ module "glue_scripts_s3" {
     {
       source_path  = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
       s3_key       = "lda_disclosures/glue_script.py"
+      content_type = "text/x-python"
+    },
+    {
+      source_path  = "${path.module}/../backend_app/src/glue/openFEC/glue_script.py"
+      s3_key       = "openFEC/glue_script.py"
       content_type = "text/x-python"
     },
     {
@@ -3716,6 +3721,297 @@ module "lda_disclosures_state_machine" {
 
   depends_on = [
     module.lda_disclosures_glue_job
+  ]
+}
+
+
+# ==============================================================================
+# OPENFEC CAMPAIGN FINANCE INGESTION SYSTEM
+# ==============================================================================
+# Nightly Glue job: discover candidates/committees for a cycle, index PROFILE
+# rows to DynamoDB, and store Schedule A/B/E line items in S3.
+
+module "fec_api_secrets_manager" {
+  source = "./modules/secrets-manager"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  tags                 = var.common_tags
+  kms_key_id           = module.kms.main_key_id
+  recovery_window_days = var.secrets_recovery_window_days
+  policy_name_suffix   = "fec-api"
+
+  automatic_rotation = {}
+
+  secrets = {
+    fec-api = {
+      description = "openFEC API keys (api_keys array for rotation; populate in console)"
+      secret_data = {
+        api_key  = "PLACEHOLDER_FEC_API_KEY"
+        api_keys = ["PLACEHOLDER_FEC_API_KEY"]
+      }
+    }
+  }
+
+  depends_on = [module.kms]
+}
+
+module "fec_data_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name = "${var.project_name}-fec-data-${var.environment}"
+  environment = var.environment
+  purpose     = "FECData"
+
+  enable_lifecycle_transitions           = true
+  transition_to_ia_days                  = 90
+  transition_to_glacier_days             = 180
+  enable_expiration                      = false
+  abort_incomplete_multipart_upload_days = 1
+  noncurrent_version_expiration_days     = 30
+
+  kms_key_arn = module.kms.main_key_arn
+  tags        = var.common_tags
+}
+
+module "fec_profiles_table" {
+  source = "./modules/dynamodb-table"
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "fec-profiles"
+
+  hash_key  = "PK"
+  range_key = "SK"
+
+  attributes = [
+    { name = "PK", type = "S" },
+    { name = "SK", type = "S" }
+  ]
+
+  global_secondary_indexes = []
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = false
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = false
+  ttl_attribute_name             = "expires_at"
+
+  kms_key_arn = module.kms.dynamodb_key_arn
+
+  table_type    = "CampaignFinanceData"
+  table_purpose = "FECProfiles"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+module "openfec_glue_job" {
+  source = "./modules/glue-job"
+
+  job_name = "${var.project_name}-openfec-indexing-${var.environment}"
+
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/openFEC/glue_script.py"
+  python_version  = "3"
+  glue_version    = "4.0"
+
+  max_retries           = 1
+  timeout               = 2880
+  concurrent_executions = 1
+  worker_type           = "G.1X"
+  number_of_workers     = 2
+
+  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
+  additional_s3_bucket_arns = [
+    module.fec_data_s3.bucket_arn
+  ]
+  spark_logs_bucket = module.static_hosting_bucket.bucket_id
+  temp_bucket       = module.static_hosting_bucket.bucket_id
+
+  dynamodb_table_arn = module.fec_profiles_table.table_arn
+  dynamodb_actions   = ["dynamodb:PutItem", "dynamodb:GetItem"]
+
+  kms_key_arn = module.kms.main_key_arn
+  additional_kms_key_arns = [
+    module.kms.dynamodb_key_arn
+  ]
+
+  additional_policy_arns = [
+    module.fec_api_secrets_manager.secret_access_policy_arn
+  ]
+
+  default_arguments = {
+    "--FEC_API_BASE_URL"        = "https://api.open.fec.gov/v1"
+    "--FEC_SECRET_NAME"         = module.fec_api_secrets_manager.secret_names["fec-api"]
+    "--FEC_PROFILES_TABLE_NAME" = module.fec_profiles_table.table_name
+    "--S3_BUCKET_NAME"          = module.fec_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"         = "90"
+    "--RATE_LIMIT_DELAY"        = "0.35"
+    "--CYCLE_PER_PAGE"          = "100"
+  }
+
+  job_bookmark_option = "job-bookmark-disable"
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.fec_profiles_table,
+    module.fec_data_s3,
+    module.kms,
+    module.glue_scripts_s3,
+    module.fec_api_secrets_manager
+  ]
+}
+
+# Step Functions — orchestrates openFEC Glue indexing (bootstrap / nightly / single)
+module "openfec_indexing_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-openfec-indexing-${var.environment}"
+  environment        = var.environment
+
+  definition = jsonencode({
+    Comment = "openFEC campaign finance indexing — Glue job"
+    StartAt = "StartGlueJob"
+    States = {
+      StartGlueJob = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::glue:startJobRun.sync"
+        Comment    = "Index FEC candidates/committees for cycle (bootstrap or nightly delta)"
+        ResultPath = "$.glueResult"
+        Parameters = {
+          "JobName" = module.openfec_glue_job.job_name
+          "Arguments" = {
+            "--FEC_API_BASE_URL"        = "https://api.open.fec.gov/v1"
+            "--FEC_SECRET_NAME"         = module.fec_api_secrets_manager.secret_names["fec-api"]
+            "--FEC_PROFILES_TABLE_NAME" = module.fec_profiles_table.table_name
+            "--S3_BUCKET_NAME"          = module.fec_data_s3.bucket_id
+            "--REQUEST_TIMEOUT"         = "90"
+            "--RATE_LIMIT_DELAY"        = "0.35"
+            "--CYCLE_PER_PAGE"          = "100"
+            "--SOURCE.$"                = "$.source"
+            "--MODE.$"                  = "$.mode"
+            "--FEC_CYCLE.$"             = "$.cycle"
+            "--MIN_RECEIPT_DATE.$"      = "$.min_receipt_date"
+            "--TESTING_LIMIT.$"         = "$.testing_limit"
+            "--ENTITY_TYPE.$"           = "$.entity_type"
+            "--ENTITY_ID.$"             = "$.entity_id"
+          }
+        }
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "HandleError"
+          }
+        ]
+        Next = "Success"
+      }
+      Success = {
+        Type    = "Succeed"
+        Comment = "openFEC indexing completed successfully"
+      }
+      HandleError = {
+        Type  = "Fail"
+        Error = "OpenFECIndexingFailed"
+        Cause = "The openFEC indexing Glue job failed. Check CloudWatch logs for details."
+      }
+    }
+  })
+
+  glue_job_names = [
+    module.openfec_glue_job.job_name
+  ]
+
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.openfec_glue_job
+  ]
+}
+
+resource "aws_iam_role" "openfec_indexing_scheduler_role" {
+  name = "${var.project_name}-openfec-indexing-scheduler-role-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_role_policy" "openfec_indexing_scheduler_policy" {
+  name = "${var.project_name}-openfec-indexing-scheduler-policy-${var.environment}"
+  role = aws_iam_role.openfec_indexing_scheduler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = module.openfec_indexing_state_machine.state_machine_arn
+      }
+    ]
+  })
+}
+
+# Nightly batch at 23:00 UTC — fixed Step Functions input (cycle derived in Glue when null)
+module "openfec_indexing_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-openfec-indexing-nightly-${var.environment}"
+  rule_description    = "Trigger openFEC indexing Step Function nightly at 23:00 UTC (after FEC load)"
+  schedule_expression = "cron(0 23 * * ? *)"
+  enabled             = false
+
+  target_arn      = module.openfec_indexing_state_machine.state_machine_arn
+  target_id       = "OpenFECIndexingScheduler"
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.openfec_indexing_scheduler_role.arn
+  target_input = jsonencode({
+    source           = "scheduler-nightly"
+    mode             = "nightly"
+    cycle            = null
+    min_receipt_date = null
+    testing_limit    = null
+    entity_type      = null
+    entity_id        = null
+  })
+
+  purpose     = "OpenFECIndexing"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [
+    aws_iam_role.openfec_indexing_scheduler_role,
+    aws_iam_role_policy.openfec_indexing_scheduler_policy,
+    module.openfec_indexing_state_machine
   ]
 }
 

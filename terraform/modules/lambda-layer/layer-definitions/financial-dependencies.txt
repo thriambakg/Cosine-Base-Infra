@@ -1,10 +1,8 @@
-# Financial Dependencies Layer - MINIMAL
-# Only financial analysis packages (core layer provides boto3, requests, etc.)
-# Version: 4.7 - Preserve dist-info metadata for curl_cffi/yfinance
+# Stock / yfinance worker layer (use WITHOUT core_layer on workers to stay under 250MB total unzipped).
+# Includes requests so boto3 from Lambda runtime + this layer is enough for stock Lambdas.
+# Omit: scipy, Nasdaq-Data-Link, pandas_market_calendars (large / unused by Cosine2 stock paths).
+requests>=2.31.0,<3.0.0
 yfinance>=0.2.18
 numpy>=1.24.0
 pandas>=2.0.0
-scipy>=1.10.0
-Nasdaq-Data-Link>=1.0.0
-pandas_market_calendars>=4.3.0
 pytz>=2023.3

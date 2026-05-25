@@ -645,6 +645,47 @@ output "lda_disclosures_s3_bucket_arn" {
 # Note: Parameter-filing mappings are stored in the same lda-filings table
 # using PK = "PARAMETER_TYPE#VALUE" and SK = "FILING#{uuid}" or "CONTRIBUTION#{uuid}"
 
+# openFEC outputs
+output "fec_profiles_table_name" {
+  description = "Name of the FEC profiles DynamoDB table"
+  value       = module.fec_profiles_table.table_name
+}
+
+output "fec_profiles_table_arn" {
+  description = "ARN of the FEC profiles DynamoDB table"
+  value       = module.fec_profiles_table.table_arn
+}
+
+output "fec_data_s3_bucket_name" {
+  description = "Name of the FEC schedule data S3 bucket"
+  value       = module.fec_data_s3.bucket_id
+}
+
+output "fec_data_s3_bucket_arn" {
+  description = "ARN of the FEC schedule data S3 bucket"
+  value       = module.fec_data_s3.bucket_arn
+}
+
+output "openfec_glue_job_name" {
+  description = "Name of the openFEC indexing Glue job"
+  value       = module.openfec_glue_job.job_name
+}
+
+output "openfec_indexing_state_machine_arn" {
+  description = "ARN of the openFEC indexing Step Functions state machine"
+  value       = module.openfec_indexing_state_machine.state_machine_arn
+}
+
+output "openfec_indexing_state_machine_name" {
+  description = "Name of the openFEC indexing Step Functions state machine"
+  value       = module.openfec_indexing_state_machine.state_machine_name
+}
+
+output "fec_api_secret_name" {
+  description = "Secrets Manager name for openFEC API keys"
+  value       = module.fec_api_secrets_manager.secret_names["fec-api"]
+}
+
 # OpenSearch Domain Outputs
 # DISABLED FOR MVP - OpenSearch is not being used
 # output "opensearch_domain_endpoint" {
