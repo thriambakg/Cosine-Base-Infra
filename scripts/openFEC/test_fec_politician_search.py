@@ -40,7 +40,7 @@ from urllib.request import Request, urlopen
 # ---------------------------------------------------------------------------
 # Configuration — paste your key here
 # ---------------------------------------------------------------------------
-FEC_API_KEY = "cyUc8pUZ6NAtEh3ql3AtTiKBVhJBROkDnwJvGGgT"
+FEC_API_KEY = "TEMP"
 
 API_BASE = "https://api.open.fec.gov/v1"
 REQUEST_TIMEOUT = 90

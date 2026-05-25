@@ -3748,7 +3748,7 @@ module "fec_api_secrets_manager" {
       description = "openFEC API keys (api_keys array for rotation; populate in console)"
       secret_data = {
         api_key  = "PLACEHOLDER_FEC_API_KEY"
-        api_keys = ["PLACEHOLDER_FEC_API_KEY"]
+        api_keys = jsonencode(["PLACEHOLDER_FEC_API_KEY"])
       }
     }
   }

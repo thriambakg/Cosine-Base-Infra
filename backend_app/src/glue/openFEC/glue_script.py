@@ -178,8 +178,14 @@ def load_api_keys(secret_name: str) -> ApiKeyPool:
     resp = secrets_client.get_secret_value(SecretId=secret_name)
     payload = json.loads(resp["SecretString"])
     keys: List[str] = []
-    if isinstance(payload.get("api_keys"), list):
-        keys = [str(k).strip() for k in payload["api_keys"] if str(k).strip()]
+    raw_keys = payload.get("api_keys")
+    if isinstance(raw_keys, str) and raw_keys.strip():
+        try:
+            raw_keys = json.loads(raw_keys)
+        except json.JSONDecodeError:
+            raw_keys = [raw_keys]
+    if isinstance(raw_keys, list):
+        keys = [str(k).strip() for k in raw_keys if str(k).strip()]
     single = (payload.get("api_key") or "").strip()
     if single and single not in keys:
         keys.insert(0, single)
