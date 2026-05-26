@@ -64,13 +64,19 @@ def _parse_optional_glue_arg(name: str) -> Optional[str]:
                 return None
             if raw.startswith("$."):
                 return None
+            # Glue argv can omit a value; next token may be another --FLAG
+            if raw.startswith("--"):
+                return None
             return raw
     try:
         resolved = getResolvedOptions(sys.argv, [name])
         val = resolved.get(name)
         if val is None or str(val).strip() == "":
             return None
-        return str(val).strip()
+        val_str = str(val).strip()
+        if val_str.startswith("--"):
+            return None
+        return val_str
     except Exception:
         return None
 
@@ -79,7 +85,20 @@ def _optional_int(name: str) -> Optional[int]:
     raw = _parse_optional_glue_arg(name)
     if raw is None:
         return None
-    return int(raw)
+    try:
+        return int(raw)
+    except ValueError:
+        return None
+
+
+def _optional_float(name: str, default: float) -> float:
+    raw = _parse_optional_glue_arg(name)
+    if raw is None:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
 
 
 # Step Functions input: mode, cycle, min_receipt_date, testing_limit, entity_type, entity_id, source
@@ -93,11 +112,6 @@ args["TESTING_LIMIT"] = _optional_int("TESTING_LIMIT")
 _cycle_per_page = _parse_optional_glue_arg("CYCLE_PER_PAGE")
 if _cycle_per_page:
     args["CYCLE_PER_PAGE"] = _cycle_per_page
-
-
-def _optional_float(name: str, default: float) -> float:
-    raw = _parse_optional_glue_arg(name)
-    return float(raw) if raw is not None else default
 
 
 # openFEC documents 1,000 requests/hour per API key; default 900 for headroom
