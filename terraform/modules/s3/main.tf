@@ -8,6 +8,7 @@ data "aws_region" "current" {}
 
 # Primary S3 bucket
 resource "aws_s3_bucket" "this" {
+  count         = var.create ? 1 : 0
   bucket        = var.bucket_name
   force_destroy = var.force_destroy
 
@@ -20,7 +21,8 @@ resource "aws_s3_bucket" "this" {
 
 # Versioning - Always enabled for compliance
 resource "aws_s3_bucket_versioning" "this" {
-  bucket = aws_s3_bucket.this.id
+  count  = var.create ? 1 : 0
+  bucket = aws_s3_bucket.this[0].id
   versioning_configuration {
     status = "Enabled"
   }
@@ -28,7 +30,8 @@ resource "aws_s3_bucket_versioning" "this" {
 
 # Server-side encryption - Always enabled
 resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
-  bucket = aws_s3_bucket.this.id
+  count  = var.create ? 1 : 0
+  bucket = aws_s3_bucket.this[0].id
 
   rule {
     apply_server_side_encryption_by_default {
@@ -41,7 +44,8 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "this" {
 
 # Public access block - Configurable for CloudFront compatibility
 resource "aws_s3_bucket_public_access_block" "this" {
-  bucket = aws_s3_bucket.this.id
+  count  = var.create ? 1 : 0
+  bucket = aws_s3_bucket.this[0].id
 
   block_public_acls       = var.block_public_acls
   block_public_policy     = var.allow_cloudfront_oac ? false : var.block_public_policy
@@ -51,7 +55,8 @@ resource "aws_s3_bucket_public_access_block" "this" {
 
 # Lifecycle configuration - Always configured
 resource "aws_s3_bucket_lifecycle_configuration" "this" {
-  bucket = aws_s3_bucket.this.id
+  count  = var.create ? 1 : 0
+  bucket = aws_s3_bucket.this[0].id
 
   rule {
     id     = "security_compliance"
@@ -147,7 +152,8 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
 
 # CORS configuration - Enable for buckets that need browser uploads
 resource "aws_s3_bucket_cors_configuration" "this" {
-  bucket = aws_s3_bucket.this.id
+  count  = var.create ? 1 : 0
+  bucket = aws_s3_bucket.this[0].id
 
   cors_rule {
     allowed_headers = ["*"]
@@ -160,8 +166,8 @@ resource "aws_s3_bucket_cors_configuration" "this" {
 
 # Notification configuration - Optional
 resource "aws_s3_bucket_notification" "this" {
-  count  = var.notification_topic_arn != "" ? 1 : 0
-  bucket = aws_s3_bucket.this.id
+  count  = var.create && var.notification_topic_arn != "" ? 1 : 0
+  bucket = aws_s3_bucket.this[0].id
 
   topic {
     topic_arn     = var.notification_topic_arn
@@ -172,15 +178,15 @@ resource "aws_s3_bucket_notification" "this" {
 
 # Access logging - Optional but recommended
 resource "aws_s3_bucket_logging" "this" {
-  count         = var.access_log_bucket != "" ? 1 : 0
-  bucket        = aws_s3_bucket.this.id
+  count         = var.create && var.access_log_bucket != "" ? 1 : 0
+  bucket        = aws_s3_bucket.this[0].id
   target_bucket = var.access_log_bucket
   target_prefix = var.access_log_prefix
 }
 
 # Cross-region replication - Optional
 resource "aws_s3_bucket" "replica" {
-  count    = var.enable_cross_region_replication ? 1 : 0
+  count    = var.create && var.enable_cross_region_replication ? 1 : 0
   provider = aws.replica
   bucket   = "${var.bucket_name}-replica"
 
@@ -192,7 +198,7 @@ resource "aws_s3_bucket" "replica" {
 }
 
 resource "aws_s3_bucket_versioning" "replica" {
-  count    = var.enable_cross_region_replication ? 1 : 0
+  count    = var.create && var.enable_cross_region_replication ? 1 : 0
   provider = aws.replica
   bucket   = aws_s3_bucket.replica[0].id
   versioning_configuration {
@@ -202,7 +208,7 @@ resource "aws_s3_bucket_versioning" "replica" {
 
 
 resource "aws_s3_bucket_server_side_encryption_configuration" "replica" {
-  count    = var.enable_cross_region_replication ? 1 : 0
+  count    = var.create && var.enable_cross_region_replication ? 1 : 0
   provider = aws.replica
   bucket   = aws_s3_bucket.replica[0].id
 
@@ -216,7 +222,7 @@ resource "aws_s3_bucket_server_side_encryption_configuration" "replica" {
 }
 
 resource "aws_s3_bucket_public_access_block" "replica" {
-  count    = var.enable_cross_region_replication ? 1 : 0
+  count    = var.create && var.enable_cross_region_replication ? 1 : 0
   provider = aws.replica
   bucket   = aws_s3_bucket.replica[0].id
 
@@ -228,7 +234,7 @@ resource "aws_s3_bucket_public_access_block" "replica" {
 
 # CKV2_AWS_61: Lifecycle configuration for replica bucket
 resource "aws_s3_bucket_lifecycle_configuration" "replica" {
-  count    = var.enable_cross_region_replication ? 1 : 0
+  count    = var.create && var.enable_cross_region_replication ? 1 : 0
   provider = aws.replica
   bucket   = aws_s3_bucket.replica[0].id
 
@@ -256,7 +262,7 @@ resource "aws_s3_bucket_lifecycle_configuration" "replica" {
 
 # CKV_AWS_18: Access logging for replica bucket
 resource "aws_s3_bucket_logging" "replica" {
-  count    = var.enable_cross_region_replication && var.access_log_bucket != "" ? 1 : 0
+  count    = var.create && var.enable_cross_region_replication && var.access_log_bucket != "" ? 1 : 0
   provider = aws.replica
   bucket   = aws_s3_bucket.replica[0].id
 
@@ -266,7 +272,7 @@ resource "aws_s3_bucket_logging" "replica" {
 
 # CKV2_AWS_62: Event notifications for replica bucket
 resource "aws_s3_bucket_notification" "replica" {
-  count    = var.enable_cross_region_replication && var.notification_topic_arn != "" ? 1 : 0
+  count    = var.create && var.enable_cross_region_replication && var.notification_topic_arn != "" ? 1 : 0
   provider = aws.replica
   bucket   = aws_s3_bucket.replica[0].id
 
@@ -278,7 +284,7 @@ resource "aws_s3_bucket_notification" "replica" {
 
 # IAM role for replication
 resource "aws_iam_role" "replication" {
-  count = var.enable_cross_region_replication ? 1 : 0
+  count = var.create && var.enable_cross_region_replication ? 1 : 0
   name  = "${var.bucket_name}-replication-role"
 
   assume_role_policy = jsonencode({
@@ -298,7 +304,7 @@ resource "aws_iam_role" "replication" {
 }
 
 resource "aws_iam_role_policy" "replication" {
-  count = var.enable_cross_region_replication ? 1 : 0
+  count = var.create && var.enable_cross_region_replication ? 1 : 0
   name  = "${var.bucket_name}-replication-policy"
   role  = aws_iam_role.replication[0].id
 
@@ -312,7 +318,7 @@ resource "aws_iam_role_policy" "replication" {
           "s3:ListBucket"
         ]
         Resource = [
-          aws_s3_bucket.this.arn,
+          aws_s3_bucket.this[0].arn,
           aws_s3_bucket.replica[0].arn
         ]
       },
@@ -324,7 +330,7 @@ resource "aws_iam_role_policy" "replication" {
           "s3:GetObjectVersionTagging"
         ]
         Resource = [
-          "${aws_s3_bucket.this.arn}/*"
+          "${aws_s3_bucket.this[0].arn}/*"
         ]
       },
       {
@@ -344,8 +350,8 @@ resource "aws_iam_role_policy" "replication" {
 
 # Replication configuration
 resource "aws_s3_bucket_replication_configuration" "this" {
-  count  = var.enable_cross_region_replication ? 1 : 0
-  bucket = aws_s3_bucket.this.id
+  count  = var.create && var.enable_cross_region_replication ? 1 : 0
+  bucket = aws_s3_bucket.this[0].id
   role   = aws_iam_role.replication[0].arn
 
   rule {
@@ -368,11 +374,11 @@ resource "aws_s3_bucket_replication_configuration" "this" {
 
 # Upload static files to the bucket
 resource "aws_s3_object" "static_files" {
-  for_each = {
+  for_each = var.create ? {
     for idx, file in var.static_files : file.s3_key => file
-  }
+  } : {}
 
-  bucket       = aws_s3_bucket.this.id
+  bucket       = aws_s3_bucket.this[0].id
   key          = each.value.s3_key
   source       = each.value.source_path
   content_type = each.value.content_type != null ? each.value.content_type : null

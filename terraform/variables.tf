@@ -250,6 +250,12 @@ variable "dynamodb_deletion_protection_enabled" {
   default     = false
 }
 
+variable "enable_indexed_data" {
+  description = "If false, destroy indexed search data (DynamoDB tables and data S3 buckets). App Lambdas stay; queries return no data. Set true to recreate empty resources later."
+  type        = bool
+  default     = true
+}
+
 # CloudWatch Configuration
 variable "cloudwatch_security_log_retention_days" {
   description = "CloudWatch security log retention in days"

@@ -507,6 +507,8 @@ module "chat_sessions_table" {
 module "stock_data_table" {
   source = "./modules/dynamodb-table"
 
+  create = var.enable_indexed_data
+
   project_name = var.project_name
   environment  = var.environment
   table_name   = "stock-data"
@@ -626,6 +628,8 @@ module "stock_data_table" {
 # News Table - for storing financial news articles
 module "news_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -1204,9 +1208,11 @@ module "stock_data_historical_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-stock-historical-${var.environment}"
-  environment = var.environment
-  purpose     = "StockHistoricalData"
+  bucket_name   = "${var.project_name}-stock-historical-${var.environment}"
+  environment   = var.environment
+  purpose       = "StockHistoricalData"
+  create        = var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions to Glacier
   enable_lifecycle_transitions = true
@@ -1929,9 +1935,11 @@ module "politician_trades_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-politician-trades-${var.environment}"
-  environment = var.environment
-  purpose     = "PoliticianTradesData"
+  bucket_name   = "${var.project_name}-politician-trades-${var.environment}"
+  environment   = var.environment
+  purpose       = "PoliticianTradesData"
+  create        = var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
   enable_lifecycle_transitions = true
@@ -1977,9 +1985,11 @@ module "sec_filings_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-sec-filings-${var.environment}"
-  environment = var.environment
-  purpose     = "SECFilingsData"
+  bucket_name   = "${var.project_name}-sec-filings-${var.environment}"
+  environment   = var.environment
+  purpose       = "SECFilingsData"
+  create        = var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
   enable_lifecycle_transitions = true
@@ -2022,9 +2032,11 @@ module "usaspending_data_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-usaspending-data-${var.environment}"
-  environment = var.environment
-  purpose     = "USASpendingAwardDetails"
+  bucket_name   = "${var.project_name}-usaspending-data-${var.environment}"
+  environment   = var.environment
+  purpose       = "USASpendingAwardDetails"
+  create        = var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
   enable_lifecycle_transitions = true
@@ -2474,7 +2486,7 @@ resource "aws_lambda_event_source_mapping" "orphan_subaward_sqs_trigger" {
   function_name                      = module.usaspending_orphan_subaward_processor_lambda.function_arn
   batch_size                         = 50 # Process up to 50 messages per invocation
   maximum_batching_window_in_seconds = 3  # Wait up to 3 seconds to collect more messages (required when batch_size > 10)
-  enabled                            = true
+  enabled                            = false
 
   depends_on = [
     module.usaspending_orphan_subaward_processor_lambda,
@@ -2629,7 +2641,7 @@ resource "aws_lambda_event_source_mapping" "dlq_sqs_trigger" {
   function_name                      = module.usaspending_individual_award_processor_lambda.function_arn
   batch_size                         = 1 # Process one award at a time
   maximum_batching_window_in_seconds = 0
-  enabled                            = true
+  enabled                            = false
 
   depends_on = [
     module.usaspending_dlq_queue,
@@ -2868,9 +2880,11 @@ module "lda_disclosures_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-lda-disclosures-${var.environment}"
-  environment = var.environment
-  purpose     = "LDADisclosures"
+  bucket_name   = "${var.project_name}-lda-disclosures-${var.environment}"
+  environment   = var.environment
+  purpose       = "LDADisclosures"
+  create        = var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions for cost optimization
   enable_lifecycle_transitions = true
@@ -2908,9 +2922,11 @@ module "congress_bills_data_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-congress-bills-data-${var.environment}"
-  environment = var.environment
-  purpose     = "CongressBillsData"
+  bucket_name   = "${var.project_name}-congress-bills-data-${var.environment}"
+  environment   = var.environment
+  purpose       = "CongressBillsData"
+  create        = var.enable_indexed_data
+  force_destroy = true
 
   kms_key_arn = module.kms.main_key_arn
 
@@ -2936,6 +2952,8 @@ module "congress_bills_data_s3" {
 # GSIs for sorting by proposer, party, and dates
 module "congress_bills_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -3274,7 +3292,7 @@ resource "aws_lambda_event_source_mapping" "congress_bills_bill_text_sqs_trigger
   function_name                      = module.congress_bills_bill_text_processor_lambda.function_arn
   batch_size                         = 10 # Process up to 10 messages per invocation (sequential processing)
   maximum_batching_window_in_seconds = 0  # No batching window - process immediately
-  enabled                            = true
+  enabled                            = false
 
   depends_on = [
     module.congress_bills_bill_text_queue,
@@ -3401,6 +3419,8 @@ module "congress_bills_fetcher_state_machine" {
 # DynamoDB Table for LDA Filings (LD-1, LD-2)
 module "lda_filings_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -3764,9 +3784,11 @@ module "fec_data_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-fec-data-${var.environment}"
-  environment = var.environment
-  purpose     = "FECData"
+  bucket_name   = "${var.project_name}-fec-data-${var.environment}"
+  environment   = var.environment
+  purpose       = "FECData"
+  create        = var.enable_indexed_data
+  force_destroy = true
 
   enable_lifecycle_transitions           = true
   transition_to_ia_days                  = 90
@@ -3781,6 +3803,8 @@ module "fec_data_s3" {
 
 module "fec_profiles_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -4266,7 +4290,7 @@ resource "aws_lambda_event_source_mapping" "lda_batch_sqs_trigger" {
   function_name                      = module.lda_disclosures_indexer.function_arn
   batch_size                         = 1 # Process 1 page at a time
   maximum_batching_window_in_seconds = 0 # Process immediately
-  enabled                            = true
+  enabled                            = false
 
   # Standard queues scale naturally; optional reserved concurrency on the indexer limits fan-out
 
@@ -4430,7 +4454,7 @@ resource "aws_lambda_event_source_mapping" "lda_pac_autocomplete_sqs_trigger" {
   function_name                      = module.lda_pac_autocomplete_processor.function_arn
   batch_size                         = 10
   maximum_batching_window_in_seconds = 5
-  enabled                            = true
+  enabled                            = false
 
   depends_on = [
     module.lda_pac_autocomplete_queue,
@@ -4532,6 +4556,8 @@ resource "aws_iam_policy" "lambda_politician_trades_senate_matcher_textract_poli
 # Politician Trades DynamoDB Table
 module "politician_trades_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -4646,6 +4672,8 @@ module "politician_trades_table" {
 # Note: documentUrls will be stored as a String Set (SS) in items but doesn't need to be in schema
 module "sec_filings_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -4772,6 +4800,8 @@ module "sec_filings_table" {
 # Transactions and subawards stored in S3 (referenced via award_details_s3_key)
 module "usaspending_awards_index_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -4908,6 +4938,8 @@ module "usaspending_awards_index_table" {
 # Stores job_id and S3 key for quick retrieval of cached results
 module "sec_search_query_cache_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment

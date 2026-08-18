@@ -1,6 +1,12 @@
 # S3 Module Variables - Security Compliant Defaults
 # modules/s3/variables.tf
 
+variable "create" {
+  description = "If false, destroy/omit the bucket but keep name/ARN outputs so dependent stacks still apply"
+  type        = bool
+  default     = true
+}
+
 variable "bucket_name" {
   description = "Name of the S3 bucket"
   type        = string

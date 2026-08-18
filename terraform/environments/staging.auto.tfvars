@@ -21,7 +21,7 @@ kms_deletion_window_in_days = 10
 
 # Cognito Configuration (production-like)
 cognito_mfa_configuration      = "OPTIONAL" # Optional MFA for testing
-cognito_advanced_security_mode = "ENFORCED" # Full security
+cognito_advanced_security_mode = "OFF"
 cognito_callback_urls = [
   "https://d5b4qcbiesv5t.cloudfront.net/dashboard",
   "https://d5b4qcbiesv5t.cloudfront.net/auth/callback",
@@ -49,7 +49,8 @@ dynamodb_billing_mode                   = "PAY_PER_REQUEST"
 dynamodb_stream_enabled                 = false
 dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
 dynamodb_point_in_time_recovery_enabled = false
-dynamodb_deletion_protection_enabled    = true
+dynamodb_deletion_protection_enabled    = false
+enable_indexed_data                     = false
 
 # CloudWatch Configuration (moderate retention)
 cloudwatch_security_log_retention_days    = 365 # 1 year
