@@ -35,6 +35,12 @@ variable "force_destroy" {
   default     = false
 }
 
+variable "empty_bucket" {
+  description = "If true, delete all object versions on apply (needed before destroying versioned buckets)"
+  type        = bool
+  default     = false
+}
+
 variable "kms_key_arn" {
   description = "ARN of the KMS key for S3 encryption"
   type        = string

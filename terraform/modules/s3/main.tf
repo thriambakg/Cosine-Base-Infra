@@ -17,6 +17,24 @@ resource "aws_s3_bucket" "this" {
     Environment = var.environment
     Purpose     = var.purpose
   })
+
+  provisioner "local-exec" {
+    when    = destroy
+    command = "bash '${path.module}/empty-bucket.sh' '${self.bucket}' || true"
+  }
+}
+
+# Empty versioned objects on apply when hibernating (force_destroy is ignored if the bucket is destroyed in the same apply that first sets it)
+resource "terraform_data" "empty_bucket" {
+  count = var.create && var.empty_bucket ? 1 : 0
+
+  input = var.bucket_name
+
+  provisioner "local-exec" {
+    command = "bash '${path.module}/empty-bucket.sh' '${var.bucket_name}'"
+  }
+
+  depends_on = [aws_s3_bucket.this]
 }
 
 # Versioning - Always enabled for compliance
@@ -71,14 +89,14 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
       days_after_initiation = var.abort_incomplete_multipart_upload_days
     }
 
-    # Expire old versions
+    # Expire old versions (immediately when hibernating)
     noncurrent_version_expiration {
-      noncurrent_days = var.noncurrent_version_expiration_days
+      noncurrent_days = var.empty_bucket ? 1 : var.noncurrent_version_expiration_days
     }
 
     # Optional: Transition to IA and Glacier
     dynamic "transition" {
-      for_each = var.enable_lifecycle_transitions ? [1] : []
+      for_each = var.empty_bucket ? [] : (var.enable_lifecycle_transitions ? [1] : [])
       content {
         days          = var.transition_to_ia_days
         storage_class = "STANDARD_IA"
@@ -86,18 +104,32 @@ resource "aws_s3_bucket_lifecycle_configuration" "this" {
     }
 
     dynamic "transition" {
-      for_each = var.enable_lifecycle_transitions ? [1] : []
+      for_each = var.empty_bucket ? [] : (var.enable_lifecycle_transitions ? [1] : [])
       content {
         days          = var.transition_to_glacier_days
         storage_class = "GLACIER"
       }
     }
 
-    # Optional: Expiration
+    # Optional: Expiration (1 day when hibernating so leftover versions drop even if CLI empty is incomplete)
     dynamic "expiration" {
-      for_each = var.enable_expiration ? [1] : []
+      for_each = var.empty_bucket || var.enable_expiration ? [1] : []
       content {
-        days = var.expiration_days
+        days = var.empty_bucket ? 1 : var.expiration_days
+      }
+    }
+  }
+
+  dynamic "rule" {
+    for_each = var.empty_bucket ? [1] : []
+    content {
+      id     = "hibernate_delete_markers"
+      status = "Enabled"
+      filter {
+        prefix = ""
+      }
+      expiration {
+        expired_object_delete_marker = true
       }
     }
   }

@@ -1211,7 +1211,8 @@ module "stock_data_historical_s3" {
   bucket_name   = "${var.project_name}-stock-historical-${var.environment}"
   environment   = var.environment
   purpose       = "StockHistoricalData"
-  create        = var.enable_indexed_data
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
   force_destroy = true
 
   # Enable lifecycle transitions to Glacier
@@ -1938,7 +1939,8 @@ module "politician_trades_s3" {
   bucket_name   = "${var.project_name}-politician-trades-${var.environment}"
   environment   = var.environment
   purpose       = "PoliticianTradesData"
-  create        = var.enable_indexed_data
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
   force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
@@ -1988,7 +1990,8 @@ module "sec_filings_s3" {
   bucket_name   = "${var.project_name}-sec-filings-${var.environment}"
   environment   = var.environment
   purpose       = "SECFilingsData"
-  create        = var.enable_indexed_data
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
   force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
@@ -2035,7 +2038,8 @@ module "usaspending_data_s3" {
   bucket_name   = "${var.project_name}-usaspending-data-${var.environment}"
   environment   = var.environment
   purpose       = "USASpendingAwardDetails"
-  create        = var.enable_indexed_data
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
   force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
@@ -2883,7 +2887,8 @@ module "lda_disclosures_s3" {
   bucket_name   = "${var.project_name}-lda-disclosures-${var.environment}"
   environment   = var.environment
   purpose       = "LDADisclosures"
-  create        = var.enable_indexed_data
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
   force_destroy = true
 
   # Enable lifecycle transitions for cost optimization
@@ -2925,7 +2930,8 @@ module "congress_bills_data_s3" {
   bucket_name   = "${var.project_name}-congress-bills-data-${var.environment}"
   environment   = var.environment
   purpose       = "CongressBillsData"
-  create        = var.enable_indexed_data
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
   force_destroy = true
 
   kms_key_arn = module.kms.main_key_arn
@@ -3787,7 +3793,8 @@ module "fec_data_s3" {
   bucket_name   = "${var.project_name}-fec-data-${var.environment}"
   environment   = var.environment
   purpose       = "FECData"
-  create        = var.enable_indexed_data
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
   force_destroy = true
 
   enable_lifecycle_transitions           = true
