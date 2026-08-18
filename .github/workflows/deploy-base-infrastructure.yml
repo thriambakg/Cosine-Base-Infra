@@ -252,18 +252,47 @@ jobs:
   deploy-base-infrastructure:
     name: 'Deploy Base Infrastructure'
     needs: [determine-environment, build-lambda-layers]
-    uses: thriambakg/Cosine-pipelines/.github/workflows/terraform-reusable.yml@master
-    with:
-      terraform_directory: 'terraform'
-      infrastructure_type: 'base'
-      environment: ${{ needs.determine-environment.outputs.environment }}
-      destroy: ${{ github.event.inputs.destroy == 'true' }}
-      force_apply: ${{ github.event.inputs.force_apply == 'true' }}
-      base_infra_dependency: false
-      has_lambda_layer: true
-    secrets:
-      AWS_ACCESS_KEY_ID: ${{ secrets.AWS_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+    runs-on: ubuntu-latest
+    environment: ${{ needs.determine-environment.outputs.environment }}
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Download Lambda Layer Artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: lambda-layers-${{ needs.determine-environment.outputs.environment }}
+          path: terraform/modules/lambda-layer/
+
+      - name: Configure AWS Credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Setup Terraform
+        uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: 1.6.6
+
+      - name: Terraform Init
+        working-directory: terraform
+        run: terraform init -backend-config="backend-configs/${{ needs.determine-environment.outputs.environment }}.tfbackend"
+
+      - name: Terraform Plan
+        working-directory: terraform
+        run: terraform plan -var-file="environments/${{ needs.determine-environment.outputs.environment }}.auto.tfvars"
+
+      - name: Terraform Apply
+        if: github.event_name == 'workflow_dispatch' || github.ref == 'refs/heads/main' || github.ref == 'refs/heads/prod' || github.ref == 'refs/heads/staging' || github.ref == 'refs/heads/develop'
+        working-directory: terraform
+        run: |
+          if [ "${{ github.event.inputs.destroy }}" == "true" ]; then
+            terraform destroy -var-file="environments/${{ needs.determine-environment.outputs.environment }}.auto.tfvars" -auto-approve
+          else
+            terraform apply -var-file="environments/${{ needs.determine-environment.outputs.environment }}.auto.tfvars" -auto-approve
+          fi
 
   comment-pr:
     name: 'Comment on PR'
