@@ -17,24 +17,6 @@ resource "aws_s3_bucket" "this" {
     Environment = var.environment
     Purpose     = var.purpose
   })
-
-  provisioner "local-exec" {
-    when    = destroy
-    command = "bash '${path.module}/empty-bucket.sh' '${self.bucket}' || true"
-  }
-}
-
-# Empty versioned objects on apply when hibernating (force_destroy is ignored if the bucket is destroyed in the same apply that first sets it)
-resource "terraform_data" "empty_bucket" {
-  count = var.create && var.empty_bucket ? 1 : 0
-
-  input = var.bucket_name
-
-  provisioner "local-exec" {
-    command = "bash '${path.module}/empty-bucket.sh' '${var.bucket_name}'"
-  }
-
-  depends_on = [aws_s3_bucket.this]
 }
 
 # Versioning - Always enabled for compliance

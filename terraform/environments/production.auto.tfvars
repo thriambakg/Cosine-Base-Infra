@@ -71,9 +71,9 @@ dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES" # unused when str
 dynamodb_point_in_time_recovery_enabled = false
 dynamodb_deletion_protection_enabled    = false
 
-# Hibernate indexed data: next apply destroys large tables/buckets (USASpending, LDA, etc.)
-# Flip to true later to recreate empty tables/buckets. Does not touch CloudFront, Cognito, or user/chat tables.
-enable_indexed_data = false
+# Keep indexed tables/buckets in Terraform (empty is fine; storage is $0).
+# Set false only if you want Terraform to destroy the search tables.
+enable_indexed_data = true
 
 # No reserved concurrency carve-out for writer Lambdas (null = use account default pool)
 lambda_reserved_concurrency_default = null
