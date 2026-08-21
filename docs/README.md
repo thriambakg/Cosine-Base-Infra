@@ -2,6 +2,12 @@
 
 This repository contains the shared infrastructure components for the Cosine project using Terraform. It provides reusable modules for authentication, data storage, encryption, and monitoring that can be used across different environments and projects.
 
+## Product design case study
+
+FinGov / Cosine product design write-up (problem, rejected directions, constraints, final UI):
+
+**→ [FinGov Product Design Case Study](./FinGov-Product-Design-Case-Study.md)**
+
 ## 🏗️ Architecture Overview
 
 The base infrastructure includes:
