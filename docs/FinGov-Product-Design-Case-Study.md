@@ -91,16 +91,23 @@ The interesting work was not the final screens. It was the forks that did not sh
 
 ```mermaid
 flowchart TD
-  Ideal["Ideal: Cursor-style dashboard + side chat only"]
-  Ideal -->|Heavy search cramped in tiles"| Pages["Add full pages per integration"]
-  Ideal -->|"Keep for overview"| Dash["Dashboard tiles + ambient chat"]
+  Ideal[Ideal: Cursor-style dashboard and side chat only]
+  Pages[Add full pages per integration]
+  Dash[Dashboard tiles and ambient chat]
+  Ctx1[Right-click add to context]
+  Ctx2[Drag objects into chat]
+  Broad[Open text search across all sources]
+  Narrow[Targeted search per source]
+  Broad2[Future: nearest-match fan-out e.g. Apple]
+  Realtime[WebSockets or SSE for search progress]
+  Poll[DynamoDB plus polling 1-2s]
 
-  Ctx1["Right-click → add to context"] -->|"Too hidden / slow"| Ctx2["Drag objects into chat"]
-
-  Broad["Open text search across all sources"] -->|"Too slow as indexes grew"| Narrow["Targeted search per source"]
-  Narrow -.->|"Revisit as catalog grows"| Broad2["Future: nearest-match fan-out e.g. Apple"]
-
-  Realtime["WebSockets / SSE for search progress"] -->|"Infra cost for solo"| Poll["DynamoDB + polling ~1–2s"]
+  Ideal -->|Heavy search cramped in tiles| Pages
+  Ideal -->|Keep for overview| Dash
+  Ctx1 -->|Too hidden or slow| Ctx2
+  Broad -->|Too slow as indexes grew| Narrow
+  Narrow -.->|Revisit as catalog grows| Broad2
+  Realtime -->|Infra cost for solo| Poll
 ```
 
 ### 1. Workspace-only vs. tiles + pages
@@ -127,14 +134,14 @@ That tradeoff was right early. With many integrations live, bringing back neares
 
 ```mermaid
 flowchart LR
-  subgraph Fetch["Integration patterns"]
-    B["Batch / zip → index"]
-    O["On-demand API"]
-    W["Scrape where APIs fail"]
+  subgraph Fetch[Integration patterns]
+    B[Batch or zip then index]
+    O[On-demand API]
+    W[Scrape where APIs fail]
   end
-  B --> UX1["Coverage windows & freshness notes"]
-  O --> UX2["Progress + polling states"]
-  W --> UX3["Fragile fields · incomplete rows · careful labeling"]
+  B --> UX1[Coverage windows and freshness notes]
+  O --> UX2[Progress and polling states]
+  W --> UX3[Fragile fields and incomplete rows]
 ```
 
 Politician trades, for example, required scraping where APIs were inadequate. Users feel that as uneven richness — design had to absorb inconsistency instead of pretending every source is EDGAR-quality.
@@ -146,18 +153,18 @@ Politician trades, for example, required scraping where APIs were inadequate. Us
 ```mermaid
 flowchart TB
   Landing[Landing / demo]
-  Dash[Unified dashboard — tiles]
+  Dash[Unified dashboard - tiles]
   Search[Full search pages per source]
-  Files[Files — saved context & uploads]
-  Chat[AI chat — session context]
+  Files[Files - saved context and uploads]
+  Chat[AI chat - session context]
 
   Landing --> Dash
-  Dash -->|"pin / monitor"| Search
-  Dash -->|"open chat"| Chat
-  Search -->|"save object"| Files
-  Search -->|"drag into chat"| Chat
-  Files -->|"attach folder / file"| Chat
-  Chat -->|"save analysis"| Files
+  Dash -->|pin / monitor| Search
+  Dash -->|open chat| Chat
+  Search -->|save object| Files
+  Search -->|drag into chat| Chat
+  Files -->|attach folder or file| Chat
+  Chat -->|save analysis| Files
 ```
 
 **Core loop:** discover on the dashboard → deepen on a full search page → capture into Files → analyze in chat on attached context → return to saved work later.
