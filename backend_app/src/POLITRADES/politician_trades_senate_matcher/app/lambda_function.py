@@ -106,6 +106,21 @@ def find_standard_range(amount_value: float) -> tuple:
     return SENATE_PTR_RANGES[0]
 
 
+def parse_over_amount(amount_str: Optional[str]) -> Optional[int]:
+    """Lower bound of an open-ended PTR amount, or None.
+
+    "Over $50,000,000" and "Spouse/DC Over $1,000,000" have no upper bound and are not exact
+    amounts. Read as a fixed amount they land in the band BELOW the figure (50,000,000 falls in
+    25,000,001-50,000,000), so they are mapped to [figure + 1, unbounded] instead.
+    """
+    if not amount_str:
+        return None
+    match = re.search(r'\bover\s*\$?\s*([\d,]+)', amount_str, re.IGNORECASE)
+    if not match or not match.group(1).replace(',', ''):
+        return None
+    return int(match.group(1).replace(',', '')) + 1
+
+
 def load_politician_list() -> List[Dict[str, Any]]:
     """
     Load congress-legislators CSV from S3
@@ -750,6 +765,9 @@ def parse_amount_range(amount_str: str) -> Optional[List[int]]:
     """
     if not amount_str:
         return None
+    over_min = parse_over_amount(amount_str)
+    if over_min is not None:
+        return [over_min, 999999999]  # Unbounded top, as for the $50,000,001+ band
     try:
         # Remove currency symbols and whitespace
         amount_str_clean = re.sub(r'[\$,\s]', '', amount_str)
@@ -1298,6 +1316,12 @@ def parse_ptr_with_textract(pdf_content: bytes, source: str = 'senate') -> List[
                             amount_min = amount_range[0]
                             amount_max = amount_range[1] if amount_range[1] != 999999999 else None
                     
+                    # "Over $X" is open-ended: not an exact amount, and above the band X falls in
+                    over_min = parse_over_amount(amount_str) if amount_col is not None and amount_col < len(row) else None
+                    if over_min is not None:
+                        amount_min, amount_max, exact_amount = over_min, None, None
+                        amount_range = [over_min, 999999999]
+
                     # Build amountRange array (convert tuple to list, handle None max)
                     if amount_range:
                         if isinstance(amount_range, tuple):
@@ -1638,6 +1662,12 @@ def parse_senate_ptr_html(html_content: str) -> List[Dict[str, Any]]:
                             logger.warning(f"   ⚠️ Error parsing fixed amount: {e}")
                             pass
                 
+                # "Over $X" is open-ended: not an exact amount, and above the band X falls in
+                over_min = parse_over_amount(amount_str)
+                if over_min is not None:
+                    amount_min, amount_max, exact_amount = over_min, None, None
+                    amount_range = [over_min, 999999999]
+
                 # Map transaction type
                 transaction_code = None
                 if transaction_type.lower() in ['purchase', 'buy', 'acquired']:

@@ -8,7 +8,6 @@ This Lambda handles House PTR matching only.
 import json
 import os
 import logging
-import re
 import boto3
 import time
 from botocore.exceptions import ClientError
@@ -18,6 +17,9 @@ import csv
 from io import StringIO, BytesIO
 from difflib import SequenceMatcher
 from pypdf import PdfReader
+
+# Pure text parsing (no AWS); HOUSE_PTR_RANGES / find_standard_range are re-exported from it.
+from house_ptr_parser import HOUSE_PTR_RANGES, find_standard_range, parse_house_ptr_text  # noqa: F401
 
 # Configure logging
 logger = logging.getLogger()
@@ -33,38 +35,6 @@ DYNAMODB_TABLE_NAME = os.environ.get('DYNAMODB_TABLE_NAME')
 
 # Name matching threshold (0.0 to 1.0)
 NAME_MATCH_THRESHOLD = 0.85  # 85% similarity
-
-# Standard House PTR ranges (same as Senate PTR ranges)
-# Note: Minimum reporting threshold is $1,000, but we handle sub-$1k amounts
-HOUSE_PTR_RANGES = [
-    (0, 1000),  # $0 - $1,000 (handles sub-$1k amounts)
-    (1001, 15000),
-    (15001, 50000),
-    (50001, 100000),
-    (100001, 250000),
-    (250001, 500000),
-    (500001, 1000000),
-    (1000001, 5000000),
-    (5000001, 25000000),
-    (25000001, 50000000),
-    (50000001, None)  # Over $50,000,000 - max is None/unbounded
-]
-
-def find_standard_range(amount_value: float) -> tuple:
-    """Find the standard House PTR range that contains the given amount"""
-    # Handle zero or negative amounts (use first range)
-    if amount_value <= 0:
-        return HOUSE_PTR_RANGES[0]
-    
-    for range_min, range_max in HOUSE_PTR_RANGES:
-        if range_max is None:
-            if amount_value >= range_min:
-                return (range_min, None)
-        else:
-            if range_min <= amount_value <= range_max:
-                return (range_min, range_max)
-    # Fallback: if amount is less than minimum, use first range
-    return HOUSE_PTR_RANGES[0]
 
 # Module-level cache for asset codes mapping (loaded once per lambda container)
 _ASSET_CODES_CACHE: Optional[Dict[str, str]] = None
@@ -726,12 +696,16 @@ def find_matching_politician(filer_name: str, politicians: List[Dict[str, Any]],
 def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
     """
     Parse House PTR PDF using PyPDF to extract trade data
-    
+
+    Despite the name, this uses pypdf's extract_text(), not Textract. It downloads the PDF,
+    extracts the text of every page and hands it to house_ptr_parser.parse_house_ptr_text.
+
     Args:
         s3_key: S3 key of the House PTR PDF
-        
+
     Returns:
         List of trade dicts with filerName, securitySymbol, transactionDate, amount, etc.
+        (see parse_house_ptr_text for the full key list)
     """
     logger.info(f"📄 Parsing House PTR with PyPDF: {s3_key}")
     
@@ -805,560 +779,16 @@ def parse_house_ptr_with_textract(s3_key: str) -> List[Dict[str, Any]]:
         
         logger.info(f"   Full text (first 1000 chars): {full_text[:1000]}")
         
-        # Extract filer name from House PTR
-        filer_name = None
-        
-        # Look for FILER INFORMATION section
-        # Pattern: "Name:" followed by name, stopping before "Status:"
-        # Example: "Name: Hon. Virginia Foxx Status: Member"
-        name_patterns = [
-            r'Name:\s*(?:Hon\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+?)(?:\s+Status:)',  # Stop before "Status:"
-            r'Name:\s*(?:Hon\.?\s+)?([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',  # Fallback without Status
-        ]
-        
-        for pattern in name_patterns:
-            match = re.search(pattern, full_text, re.IGNORECASE | re.MULTILINE)
-            if match:
-                filer_name = match.group(1).strip()
-                    # Remove "Hon." prefix if present
-                filer_name = re.sub(r'^Hon\.?\s+', '', filer_name, flags=re.IGNORECASE).strip()
-                # Remove any trailing "Status" that might have been captured
-                filer_name = re.sub(r'\s+Status\s*$', '', filer_name, flags=re.IGNORECASE).strip()
-                logger.info(f"✅ Extracted filer name from FILER INFORMATION: {filer_name}")
-                break
-        
-        # If not found, try other patterns
-        if not filer_name:
-            house_patterns = [
-                r'Hon\.?\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
-                r'The Honorable\s+([A-Z][a-z]+(?:\s+[A-Z][a-z.]+)+)',
-            ]
-            for pattern in house_patterns:
-                match = re.search(pattern, full_text)
-                if match:
-                    filer_name = match.group(1).strip()
-                    filer_name = re.sub(r'\b(Honorable|Hon\.?|Representative|Rep\.?)\b', '', filer_name, flags=re.IGNORECASE).strip()
-                    break
-        
-        if not filer_name:
-            logger.warning(f"⚠️ Could not extract filer name from House PTR: {s3_key}")
-        
-        # Extract filing date from e-signature at bottom (fallback - primary source is notification date from trade text)
-        filing_date = None
-        
-        # Look for "Digitally Signed: [Name] [Date]" pattern
-        signature_patterns = [
-            r'Digitally Signed:\s+[^,]+,\s*(\d{1,2}/\d{1,2}/\d{4})',  # "Digitally Signed: Name, MM/DD/YYYY"
-            r'Digitally Signed:\s+[^\d]+(\d{1,2}/\d{1,2}/\d{4})',    # "Digitally Signed: Name MM/DD/YYYY"
-            r'(?:signed|signature)[:\s]+[^,]+,\s*(\d{1,2}/\d{1,2}/\d{4})',
-            r'(?:signed|signature)[:\s]+[^\d]+(\d{1,2}/\d{1,2}/\d{4})',
-        ]
-        
-        # Search in reverse order (bottom of document) for signature date
-        for pattern in signature_patterns:
-            matches = list(re.finditer(pattern, full_text, re.IGNORECASE))
-            if matches:
-                # Take the last match (likely at bottom near signature)
-                match = matches[-1]
-                date_str = match.group(1)
-                try:
-                    filing_date = datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
-                    logger.info(f"✅ Extracted filing date from signature: {filing_date}")
-                    break
-                except ValueError:
-                    continue
-        
-        # Fallback: any date in MM/DD/YYYY format at the end of the document
-        if not filing_date:
-            date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', full_text))
-            if date_matches:
-                # Take the last date found (likely signature date)
-                date_str = date_matches[-1].group(1)
-                try:
-                    filing_date = datetime.strptime(date_str, '%m/%d/%Y').strftime('%Y-%m-%d')
-                    logger.info(f"✅ Extracted filing date (fallback): {filing_date}")
-                except ValueError:
-                    pass
-        
-        # Parse transaction tables using structured approach
-        # House PTR format: Trade data comes FIRST, then metadata at the END
-        # Structure:
-        #   Trade data line(s): Asset name + (optional ticker) + [asset type] + Transaction type + Dates + Amount
-        #   F S: New (Filing Status - marks END of trade)
-        #   S O: [account name] (Subholding Of - marks END of trade)
-        #   D: [description] (optional - Description, e.g., call options details)
-        #
-        # Asset parsing:
-        #   - Asset name = text before parentheses (or before brackets if no ticker)
-        #   - Ticker = characters in parentheses (optional, can be null for bonds)
-        #   - Asset type = characters in brackets (always present)
-        
-        # Split into lines for processing
-        lines = [line.strip() for line in full_text.split('\n') if line.strip()]
-        
-        # Find all trade entries by looking for trade data lines (with asset type and dates/amount)
-        # Then collect the following F S and S O lines as metadata
-        i = 0
-        while i < len(lines):
-            line = lines[i].strip()
-            
-            # Skip header lines
-            line_lower = line.lower()
-            if any(skip in line_lower for skip in ['ownerasset', 'transaction', 'notification', 'cap. gains', 'filing id', 'digitally signed', 'certify', 'id owner', 'type date', 'dateamount', 'gains >', '$200?']):
-                i += 1
-                continue
-                
-            # Skip metadata lines (F S, S O, D) - we'll collect these after finding trade data
-            if re.match(r'^(F\s+S:|S\s+O:|D:)\s*', line, re.IGNORECASE):
-                i += 1
-                continue
-                
-            # Look for trade data line - has asset type in brackets and dates/amount
-            has_asset_type = bool(re.search(r'\[([A-Z]{2,3})\]', line))
-            has_dates = bool(re.search(r'\d{1,2}/\d{1,2}/\d{4}', line))
-            has_amount = bool(re.search(r'\$\d+', line))
-            has_owner_code = bool(re.match(r'^[A-Z]{1,3}\s+', line))
-            
-            # Trade data line should have asset type and (dates or amount or owner code)
-            if not has_asset_type or not (has_dates or has_amount or has_owner_code):
-                i += 1
-                continue
-            
-            # Found potential trade data - collect it and following metadata
-            logger.debug(f"   Found trade data at line {i+1}: {line[:100]}")
-            
-            # Initialize metadata - metadata appears at the END of trade entries, so we'll look ahead
-            trade_metadata = {
-                'filing_status': None,
-                'subholding_of': None,
-                'description': None
-            }
-            
-            # Look backwards to collect asset name if it's on previous line(s)
-            # Sometimes the asset name is on a line before the asset type bracket
-            # NOTE: We skip metadata lines here - metadata appears at the END of trades, not before
-            trade_data_lines = []
-            lookback_start = max(0, i - 3)  # Look back up to 3 lines
-            for back_idx in range(lookback_start, i):
-                back_line = lines[back_idx].strip()
-                if not back_line:
-                    continue
-                # Skip if it's metadata or header - metadata is at the END of trades, not before
-                if re.match(r'^(F\s+S:|S\s+O:|D:)\s*', back_line, re.IGNORECASE):
-                    continue
-                if any(header in back_line.lower() for header in ['ownerasset', 'transaction', 'notification', 'id owner', 'type date', 'dateamount', 'filing id']):
-                    continue
-                # If this line doesn't have asset type bracket or dates/amount, it might be asset name
-                if not re.search(r'\[([A-Z]{2,3})\]', back_line) and not re.search(r'\d{1,2}/\d{1,2}/\d{4}', back_line):
-                    # Check if it has owner code - if so, it's likely part of asset name
-                    if re.match(r'^[A-Z]{1,3}\s+', back_line):
-                        trade_data_lines.append(back_line)
-                    # Or if it looks like part of an asset name (has ticker or common words)
-                    elif re.search(r'\([A-Z]{1,5}\)', back_line) or any(word in back_line.lower() for word in ['stock', 'common', 'corporation', 'inc', 'ltd', 'company', 'shares']):
-                        trade_data_lines.append(back_line)
-            
-            # Add the current line (which has asset type and dates/amount)
-            trade_data_lines.append(line)
-            # Track where the trade data line ends (for metadata search)
-            trade_data_end_idx = i
-            j = i + 1
-            
-            # Collect continuation lines (multi-line asset names, amount on separate line)
-            # Stop when we hit metadata (F S, S O, D) or next trade
-            while j < len(lines):
-                next_line = lines[j].strip()
-                if not next_line:
-                    j += 1
-                    continue
-                
-                # FIRST: Check if we hit metadata (F S, S O, D) - these mark the end of trade data
-                if re.match(r'^(F\s+S:|S\s+O:|D:)\s*', next_line, re.IGNORECASE):
-                    # Stop collecting trade data - metadata starts here
-                    break
-                
-                # Stop if we hit next trade data (has asset type and dates/amount and owner code)
-                if re.search(r'\[([A-Z]{2,3})\]', next_line) and re.match(r'^[A-Z]{1,3}\s+', next_line):
-                    break
-                
-                # Stop if we hit a header
-                if any(header in next_line.lower() for header in ['ownerasset', 'transaction', 'notification', 'id owner', 'type date', 'dateamount', 'filing id']):
-                    break
-                
-                # If this is amount continuation (just starts with $ and no dates)
-                if re.match(r'^\$\d+', next_line) and not re.search(r'\d{1,2}/\d{1,2}/\d{4}', next_line):
-                    trade_data_lines.append(next_line)
-                    j += 1
-                    break
-                
-                # If this could be part of multi-line asset name (no asset type bracket yet)
-                if not re.search(r'\[([A-Z]{2,3})\]', next_line):
-                    # Check if it has owner code - might be start of next trade
-                    if re.match(r'^[A-Z]{1,3}\s+', next_line) and j > i + 3:
-                        # Too far from start, probably next trade
-                        break
-                    trade_data_lines.append(next_line)
-                    j += 1
-                    continue
-                
-                # If we already have asset type and dates/amount in collected lines, this is probably next trade
-                collected_text = ' '.join(trade_data_lines)
-                if re.search(r'\[([A-Z]{2,3})\]', collected_text) and re.search(r'\d{1,2}/\d{1,2}/\d{4}', collected_text) and re.search(r'\$\d+', collected_text):
-                    # We have complete trade data, stop
-                    break
-                
-                j += 1
-            
-            # Combine trade data lines into single text for parsing
-            trade_text = ' '.join(trade_data_lines)
-            
-            # SIMPLIFIED: Collect lines between this trade and the next trade as a blob
-            # Stop when we see the start of the next trade (owner code + asset type bracket, possibly on adjacent lines)
-            k = i + 1  # Start from right after the trade data line
-            metadata_lines = []  # Collect all lines between trades
-            
-            logger.debug(f"   Collecting metadata blob starting from line {k+1} (trade data at line {i+1})")
-            
-            # Collect all lines until we hit the next trade
-            while k < len(lines):
-                meta_line = lines[k].strip()
-                if not meta_line:
-                    k += 1
-                    continue
-                
-                # Skip table headers (they're all the same, so we can ignore them)
-                if any(header in meta_line.lower() for header in ['id ownerasset', 'transaction', 'type date', 'dateamount', 'cap. gains', '$200?', 'gains >']):
-                    k += 1
-                    continue
-                
-                # Check if this is the start of the next trade
-                # Next trade starts with owner code (JT, SP, etc.) and has asset type bracket
-                # They might be on the same line or adjacent lines
-                has_owner_code = bool(re.match(r'^[A-Z]{1,3}\s+', meta_line))
-                has_asset_type = bool(re.search(r'\[([A-Z]{2,3})\]', meta_line))
-                
-                # Also check next line for asset type if current line has owner code
-                if has_owner_code and not has_asset_type and k + 1 < len(lines):
-                    next_line = lines[k + 1].strip() if k + 1 < len(lines) else ''
-                    has_asset_type = bool(re.search(r'\[([A-Z]{2,3})\]', next_line))
-                
-                # If we have owner code and asset type (on same or adjacent lines), this is the next trade
-                if has_owner_code and has_asset_type:
-                    # Found next trade, stop collecting BEFORE adding this line
-                    logger.debug(f"   Stopped metadata collection at line {k+1} - found next trade: {meta_line[:60]}")
-                    break
-                
-                # Add this line to the metadata blob (everything else goes in)
-                metadata_lines.append(meta_line)
-                k += 1
-            
-            # Store all collected lines as metadata blob (no parsing, just dump it)
-            metadata_blob = '\n'.join(metadata_lines).strip()
-            if metadata_blob:
-                # Store the raw blob in metadata field - simplified schema
-                trade_metadata['metadata'] = metadata_blob
-                logger.info(f"   ✅ Collected {len(metadata_lines)} lines of metadata for trade at line {i+1}: {metadata_blob[:100]}...")
-            else:
-                logger.debug(f"   No metadata found for trade at line {i+1}")
-            
-            # Parse the collected trade text
-            owner = None
-            transaction_type = None
-            transaction_date = None
-            amount = None
-            amount_min = None
-            amount_max = None
-            security_name = None
-            security_symbol = None
-            asset_type = None
-            
-            # Extract owner (optional, first 1-3 uppercase letters at start)
-            owner_match = re.match(r'^([A-Z]{1,3})\s+', trade_text)
-            if owner_match:
-                owner = owner_match.group(1)
-            
-            # Extract transaction type (single letter: P, S, E, etc., usually after asset type bracket)
-            # Format: [asset type]TransactionType [optional text like "(partial)"] Date
-            # Examples: "[ST]S 12/20/2024", "[OP]P 12/20/2024", "[ST] S 12/20/2024", "[ST]S (partial) 12/27/2024"
-            # The transaction type is the single letter AFTER the asset type bracket, before the date
-            # There may be optional text like "(partial)" between the transaction type and date
-            type_char = None
-            
-            # Primary pattern: [asset type]TransactionType [optional text] Date
-            # Allow for optional text like "(partial)" between transaction type and date
-            # Group 1 = asset type, Group 2 = transaction type
-            type_match = re.search(r'\[([A-Z]{2,3})\]\s*([A-Z])(?:\s*\([^)]*\))?\s+\d{1,2}/\d{1,2}/\d{4}', trade_text)
-            if type_match:
-                asset_type_code = type_match.group(1)  # This is the asset type (ST, OP, etc.)
-                type_char = type_match.group(2)  # This is the transaction type (P, S, E, etc.)
-                logger.debug(f"   Extracted transaction type: '{type_char}' (asset type: '{asset_type_code}')")
-            else:
-                # Try pattern: ) [asset type]TransactionType [optional text] Date (when ticker and asset type are on same line)
-                type_match = re.search(r'\)\s*\[([A-Z]{2,3})\]\s*([A-Z])(?:\s*\([^)]*\))?\s+\d{1,2}/\d{1,2}/\d{4}', trade_text)
-                if type_match:
-                    asset_type_code = type_match.group(1)
-                    type_char = type_match.group(2)
-                    logger.debug(f"   Extracted transaction type (pattern 2): '{type_char}' (asset type: '{asset_type_code}')")
-                else:
-                    # Try pattern: ) [asset type]TransactionType [optional text] Date (no space between bracket and type)
-                    type_match = re.search(r'\)\s*\[([A-Z]{2,3})\]([A-Z])(?:\s*\([^)]*\))?\s+\d{1,2}/\d{1,2}/\d{4}', trade_text)
-                    if type_match:
-                        asset_type_code = type_match.group(1)
-                        type_char = type_match.group(2)
-                        logger.debug(f"   Extracted transaction type (pattern 3): '{type_char}' (asset type: '{asset_type_code}')")
-                    else:
-                        # Fallback: Try just letter before date (less reliable, but allow for optional text)
-                        type_match = re.search(r'\s+([PS])(?:\s*\([^)]*\))?\s+\d{1,2}/\d{1,2}/\d{4}', trade_text)
-                        if type_match:
-                            type_char = type_match.group(1)
-                            logger.debug(f"   Extracted transaction type (fallback): '{type_char}'")
-            
-            # Validate that type_char is actually a transaction type, not an asset type code
-            if type_char:
-                # Transaction types are single letters: P, S, E, etc.
-                # Asset type codes are 2-3 letters: ST, OP, GS, etc.
-                if len(type_char) > 1:
-                    # This might be an asset type code, not a transaction type
-                    logger.warning(f"   ⚠️ Extracted transaction type looks like asset type code: '{type_char}' from trade_text: {trade_text[:100]}")
-                    type_char = None
-            
-            if type_char:
-                if type_char == 'P':
-                    transaction_type = 'Purchase'
-                elif type_char == 'S':
-                    transaction_type = 'Sale'
-                elif type_char == 'E':
-                    transaction_type = 'Exercise'
-                else:
-                    transaction_type = type_char  # Keep as-is for other types
-            
-            # Extract dates (MM/DD/YYYY format)
-            # Transaction date is first date, notification date is second date (right next to it)
-            date_matches = list(re.finditer(r'(\d{1,2}/\d{1,2}/\d{4})', trade_text))
-            notification_date = None
-            if date_matches and len(date_matches) >= 1:
-                try:
-                    transaction_date = datetime.strptime(date_matches[0].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
-                    # Extract notification date (second date) if present
-                    if len(date_matches) >= 2:
-                        try:
-                            notification_date = datetime.strptime(date_matches[1].group(1), '%m/%d/%Y').strftime('%Y-%m-%d')
-                            logger.debug(f"   Extracted notification date: {notification_date}")
-                        except ValueError:
-                            pass
-                except ValueError:
-                    pass
-                    
-            # Extract amount - handle both ranges and fixed amounts
-            amount_min = None
-            amount_max = None
-            exact_amount = None
-            amount_range = None
-            
-            # First try to match a range (like "$1,001 - $15,000" or "$1,001-$15,000")
-            # Pattern requires either a dash/separator OR two dollar signs to ensure it's a range
-            # This prevents matching a single amount followed by unrelated numbers
-            range_patterns = [
-                r'\$([\d,]+)\s*[-–—]\s*\$([\d,]+)',  # "$1,001 - $15,000" (with dash and both have $)
-                r'\$([\d,]+)\s+to\s+\$([\d,]+)',      # "$1,001 to $15,000"
-                r'\$([\d,]+)\s+through\s+\$([\d,]+)', # "$1,001 through $15,000"
-            ]
-            
-            amount_match = None
-            for pattern in range_patterns:
-                amount_match = re.search(pattern, trade_text, re.IGNORECASE)
-                if amount_match:
-                    break
-            
-            if amount_match:
-                try:
-                    min_str = amount_match.group(1).replace(',', '')
-                    max_str = amount_match.group(2).replace(',', '')
-                    amount_min = float(min_str)
-                    amount_max = float(max_str)
-                    
-                    # Validate: for a range, min must be less than max
-                    if amount_min >= amount_max:
-                        # If min >= max, treat as fixed amount (could be OCR error or same value)
-                        exact_amount = int(amount_min)
-                        logger.info(f"   ⚠️ Range validation: min ({amount_min}) >= max ({amount_max}), treating as fixed amount ${exact_amount:,}")
-                        # Map fixed amount to standard range
-                        standard_range = find_standard_range(amount_min)
-                        if standard_range[1] is None:
-                            amount_range = [standard_range[0], 999999999]
-                        else:
-                            amount_range = [standard_range[0], standard_range[1]]
-                        amount_min = amount_range[0]
-                        amount_max = amount_range[1] if amount_range[1] != 999999999 else None
-                        logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
-                    else:
-                        # Valid range: min < max
-                        logger.info(f"   ✅ Detected valid range: ${amount_min:,.0f} - ${amount_max:,.0f}")
-                        # It's a range - map to standard range using midpoint
-                        midpoint = (amount_min + amount_max) / 2
-                        standard_range = find_standard_range(midpoint)
-                        if standard_range[1] is None:
-                            amount_range = [standard_range[0], 999999999]
-                        else:
-                            amount_range = [standard_range[0], standard_range[1]]
-                        # Update min/max to standard range values
-                        amount_min = amount_range[0]
-                        amount_max = amount_range[1] if amount_range[1] != 999999999 else None
-                        logger.info(f"   ✅ Mapped range to standard range: ${amount_range[0]:,} - ${amount_range[1]:,}")
-                except ValueError as e:
-                    logger.warning(f"   ⚠️ Error parsing range: {e}")
-                    amount_match = None  # Reset to try fixed amount pattern
-            
-            # If no valid range found, try to match a single fixed amount
-            if not amount_match or amount_min is None:
-                # Try to match a single fixed amount (like "$15,000")
-                # Use word boundaries or end of string to avoid matching partial amounts
-                fixed_amount_match = re.search(r'\$([\d,]+)(?:\s|$|[^\d,])', trade_text)
-                if fixed_amount_match:
-                    try:
-                        amount_str = fixed_amount_match.group(1).replace(',', '')
-                        exact_amount = int(float(amount_str))
-                        logger.info(f"   ✅ Detected fixed amount: ${exact_amount:,}")
-                        # Map fixed amount to standard range
-                        standard_range = find_standard_range(exact_amount)
-                        if standard_range[1] is None:
-                            amount_range = [standard_range[0], 999999999]  # Use large number instead of None
-                        else:
-                            amount_range = [standard_range[0], standard_range[1]]
-                        # Set amountMin/amountMax to the standard range values (for GSI queries)
-                        # The exactAmount field preserves the original fixed value
-                        amount_min = amount_range[0]
-                        amount_max = amount_range[1] if amount_range[1] != 999999999 else None
-                        logger.info(f"   ✅ Mapped fixed amount ${exact_amount:,} to range ${amount_range[0]:,} - ${amount_range[1]:,}")
-                    except (ValueError, TypeError) as e:
-                        logger.warning(f"   ⚠️ Error parsing fixed amount: {e}")
-                        pass
-            
-            # Calculate average amount for backwards compatibility
-            amount = None
-            if amount_min is not None and amount_max is not None:
-                amount = (amount_min + amount_max) / 2
-                    
-            # Extract asset information according to the structured format
-            # Format: Asset name + (optional ticker) + [asset type] + Transaction type + Dates + Amount
-            # Rules:
-            #   - Asset name = text before parentheses (or before brackets if no ticker)
-            #   - Ticker = characters in parentheses (optional, can be null for bonds)
-            #   - Asset type = characters in brackets (always present)
-            
-            # First, remove any metadata that might have been captured (F S, S O, D, C: Ref)
-            # Remove from anywhere in the text, not just the end
-            trade_text = re.sub(r'\s*F\s+S:\s*[^\s]*.*?(?=\s|$)', '', trade_text, flags=re.IGNORECASE)
-            trade_text = re.sub(r'\s*S\s+O:\s*[^S]*?(?=\s*[A-Z]{1,3}\s+|\[|$)', '', trade_text, flags=re.IGNORECASE)
-            trade_text = re.sub(r'\s*D:\s*.*?(?=\s*[A-Z]{1,3}\s+|\[|$)', '', trade_text, flags=re.IGNORECASE)
-            trade_text = re.sub(r'\s*C:\s*Ref:\s*[^\s]*.*?(?=\s|$)', '', trade_text, flags=re.IGNORECASE)
-            
-            # Remove owner code if present (JT, SP, etc.)
-            asset_text = trade_text
-            if owner:
-                asset_text = re.sub(r'^' + re.escape(owner) + r'\s+', '', asset_text)
-            
-            # Extract asset type code (in brackets) - always present
-            asset_code_match = re.search(r'\[([A-Z]{2,3})\]', asset_text)
-            if asset_code_match:
-                code = asset_code_match.group(1)
-                if code in asset_codes:
-                    asset_type = asset_codes[code]
-                # Find position of asset type bracket
-                asset_type_pos = asset_text.find(asset_code_match.group(0))
-            else:
-                asset_type_pos = len(asset_text)  # If no asset type found, use end of text
-            
-            # Extract ticker symbol (in parentheses) - optional
-            # Look for ticker BEFORE the asset type bracket
-            ticker_match = None
-            if asset_type_pos < len(asset_text):
-                # Search for ticker in the portion before asset type
-                text_before_asset_type = asset_text[:asset_type_pos]
-                ticker_match = re.search(r'\(([A-Z]{1,5})\)', text_before_asset_type)
-        
-                if ticker_match:
-                    security_symbol = ticker_match.group(1)
-                    ticker_pos = asset_text.find(ticker_match.group(0))
-                    # Asset name is everything before the ticker parentheses
-                    security_name = asset_text[:ticker_pos].strip()
-                else:
-                # No ticker found - asset name is everything before the asset type bracket
-                    security_name = asset_text[:asset_type_pos].strip()
-            
-            # Clean up security name - remove transaction data that might have been captured
-            if security_name:
-                # Remove asset type codes in brackets (e.g., [ST], [OP])
-                security_name = re.sub(r'\[([A-Z]{2,3})\]', '', security_name)
-                # Remove transaction type letters (P, S, E, etc.) that might be anywhere
-                security_name = re.sub(r'\s+[PS]\s+', ' ', security_name)
-                security_name = re.sub(r'\s+[PS]\s*$', '', security_name)
-                security_name = re.sub(r'^\s*[PS]\s+', '', security_name)
-                # Remove owner codes that might have been missed
-                security_name = re.sub(r'^[A-Z]{1,3}\s+', '', security_name)
-                # Remove dates
-                security_name = re.sub(r'\d{1,2}/\d{1,2}/\d{4}', '', security_name)
-                # Remove amounts
-                security_name = re.sub(r'\$\d+[\d,]*\s*[-–]?\s*\$?\d+[\d,]*', '', security_name)
-                # Remove "(partial)" if present
-                security_name = re.sub(r'\s*\(partial\)\s*', '', security_name, flags=re.IGNORECASE)
-                # Remove metadata markers (F S, S O, D, C: Ref) that might have been missed
-                security_name = re.sub(r'\s*F\s+S:\s*[^\s]*', '', security_name, flags=re.IGNORECASE)
-                security_name = re.sub(r'\s*S\s+O:\s*[^S]*', '', security_name, flags=re.IGNORECASE)
-                security_name = re.sub(r'\s*D:\s*[^D]*', '', security_name, flags=re.IGNORECASE)
-                security_name = re.sub(r'\s*C:\s*Ref:\s*[^\s]*', '', security_name, flags=re.IGNORECASE)
-                # Remove common account names that might have been captured
-                security_name = re.sub(r'\s*Morgan\s+Stanley[^S]*', '', security_name, flags=re.IGNORECASE)
-                security_name = re.sub(r'\s*Account\s*#?\s*\d*', '', security_name, flags=re.IGNORECASE)
-                # Remove any trailing commas or periods
-                security_name = re.sub(r'[,.]\s*$', '', security_name)
-                # Normalize whitespace (multiple spaces/newlines to single space)
-                security_name = re.sub(r'\s+', ' ', security_name)
-                security_name = security_name.strip()
-                
-                # Only create trade if we have minimum required fields
-                if transaction_date and (security_name or security_symbol) and transaction_type and (amount_min is not None or amount_max is not None):
-                    # Use notification_date as filingDate if available, otherwise fall back to signature-based filing_date
-                    trade_filing_date = notification_date if notification_date else filing_date
-                    
-                    # Build amountRange array
-                    if amount_range is None and amount_min is not None and amount_max is not None:
-                        amount_range = [amount_min, amount_max]
-                    
-                    trade = {
-                        'filerName': filer_name,
-                        'filingDate': trade_filing_date,
-                        'transactionDate': transaction_date,
-                        'securityName': security_name,
-                        'securitySymbol': security_symbol,
-                        'assetType': asset_type,
-                        'transactionType': transaction_type,
-                        'amount': amount,  # Average/midpoint for backwards compatibility
-                        'amountMin': amount_min,
-                        'amountMax': amount_max,
-                        'amountRange': amount_range,  # Standard range [min, max] for GSI queries
-                        'exactAmount': exact_amount,  # Exact dollar amount if it was a fixed value
-                        'owner': owner,
-                        'formType': 'house_ptr',
-                        'source': 'house',
-                        'metadata': trade_metadata.get('metadata')
-                    }
-                    trades.append(trade)
-                logger.info(f"   ✅ Extracted trade: {security_symbol or security_name} - {transaction_type} - ${amount_min}-${amount_max} (name: '{security_name}')")
-            else:
-                # Log why trade wasn't created for debugging
-                missing = []
-                if not transaction_date:
-                    missing.append('transaction_date')
-                if not (security_name or security_symbol):
-                    missing.append('security_name/symbol')
-                if not transaction_type:
-                    missing.append('transaction_type')
-                if not amount:
-                    missing.append('amount')
-                logger.info(f"   ⚠️ Skipped potential trade (missing: {', '.join(missing)}): {trade_text[:150]}")
-            
-            i = j  # Move to next potential trade (skip the metadata lines we just processed)
-        
+        # Parse the extracted text (pure function, see house_ptr_parser.py)
+        trades = parse_house_ptr_text(full_text, asset_codes)
+        if trades:
+            logger.info(f"   Filer: {trades[0].get('filerName')}")
+        for trade in trades:
+            logger.info(f"   ✅ Extracted trade: {trade.get('securitySymbol') or trade.get('securityName')} - "
+                        f"{trade.get('transactionType')} - ${trade.get('amountMin')}-${trade.get('amountMax')} "
+                        f"(name: '{trade.get('securityName')}', status: {trade.get('filingStatus')}, "
+                        f"option: {trade.get('isOption')})")
+
         logger.info(f"✅ Extracted {len(trades)} trades from House PTR: {s3_key}")
         
     except Exception as e:
@@ -1589,7 +1019,9 @@ def match_house_ptr_trades(s3_key: str, politicians: List[Dict[str, Any]], skip_
                     'isUnparsed': False,
                     'requiresManualReview': False,
                     'stateDistrict': state_district,
-                    'metadata': trade.get('metadata')
+                    'metadata': trade.get('metadata'),
+                    'filingStatus': trade.get('filingStatus'),  # "New" / "Amended" / "Deleted"
+                    'isOption': trade.get('isOption', False)
                 }
                 matched_trades.append(matched_trade)
             else:
