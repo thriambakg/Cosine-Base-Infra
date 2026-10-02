@@ -262,6 +262,12 @@ variable "enable_kms" {
   default     = true
 }
 
+variable "retain_kms_keys" {
+  description = "Keep the KMS keys even when enable_kms is false. Turning KMS off is two applies: (1) enable_kms=false + retain_kms_keys=true moves resources off the keys, (2) retain_kms_keys=false schedules the keys for deletion."
+  type        = bool
+  default     = false
+}
+
 variable "enable_sqs" {
   description = "Create SQS queues and their Lambda event source mappings. When false, queues are destroyed; dependent env vars/IAM point at the queue's would-be name."
   type        = bool

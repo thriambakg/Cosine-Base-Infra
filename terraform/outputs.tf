@@ -7,37 +7,37 @@
 # KMS outputs
 output "kms_key_id" {
   description = "ID of the main KMS key"
-  value       = module.kms.main_key_id
+  value       = local.kms.main_key_id
 }
 
 output "kms_key_arn" {
   description = "ARN of the main KMS key"
-  value       = module.kms.main_key_arn
+  value       = local.kms.main_key_arn
 }
 
 output "kms_key_alias" {
   description = "Alias of the main KMS key"
-  value       = module.kms.main_key_alias
+  value       = local.kms.main_key_alias
 }
 
 output "dynamodb_key_id" {
   description = "ID of the DynamoDB KMS key"
-  value       = module.kms.dynamodb_key_id
+  value       = local.kms.dynamodb_key_id
 }
 
 output "dynamodb_key_arn" {
   description = "ARN of the DynamoDB KMS key"
-  value       = module.kms.dynamodb_key_arn
+  value       = local.kms.dynamodb_key_arn
 }
 
 output "cloudwatch_key_id" {
   description = "ID of the CloudWatch KMS key"
-  value       = module.kms.cloudwatch_key_id
+  value       = local.kms.cloudwatch_key_id
 }
 
 output "cloudwatch_key_arn" {
   description = "ARN of the CloudWatch KMS key"
-  value       = module.kms.cloudwatch_key_arn
+  value       = local.kms.cloudwatch_key_arn
 }
 
 # Cognito outputs
@@ -101,18 +101,18 @@ output "user_profiles_table_stream_arn" {
 # DynamoDB KMS Key outputs
 output "dynamodb_module_kms_key_arn" {
   description = "ARN of the KMS key used for DynamoDB encryption"
-  value       = module.kms.dynamodb_key_arn
+  value       = local.kms.dynamodb_key_arn
 }
 
 output "dynamodb_module_kms_key_id" {
   description = "ID of the KMS key used for DynamoDB encryption"
-  value       = module.kms.dynamodb_key_id
+  value       = local.kms.dynamodb_key_id
 }
 
 # KMS Access Policy
 output "kms_access_policy_arn" {
   description = "ARN of the IAM policy for accessing KMS keys"
-  value       = module.kms.kms_access_policy_arn
+  value       = local.kms.kms_access_policy_arn
 }
 
 # Security Events Table Outputs

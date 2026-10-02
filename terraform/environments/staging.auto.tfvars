@@ -52,6 +52,7 @@ dynamodb_point_in_time_recovery_enabled = false
 dynamodb_deletion_protection_enabled    = false
 enable_indexed_data                     = true
 enable_kms                              = false
+retain_kms_keys                         = true # set false on a later deploy, after this one succeeds
 enable_sqs                              = false
 
 # CloudWatch Configuration (moderate retention)
