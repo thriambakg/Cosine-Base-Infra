@@ -250,6 +250,30 @@ variable "dynamodb_deletion_protection_enabled" {
   default     = false
 }
 
+variable "enable_indexed_data" {
+  description = "If false, destroy indexed search data (DynamoDB tables and data S3 buckets). App Lambdas stay; queries return no data. Set true to recreate empty resources later."
+  type        = bool
+  default     = true
+}
+
+variable "enable_kms" {
+  description = "Create customer-managed KMS keys. When false, keys are scheduled for deletion and resources fall back to AWS-owned/managed encryption (DynamoDB AWS-owned, S3 SSE-S3, Secrets Manager aws/secretsmanager)."
+  type        = bool
+  default     = true
+}
+
+variable "retain_kms_keys" {
+  description = "Keep the KMS keys even when enable_kms is false. Turning KMS off is two applies: (1) enable_kms=false + retain_kms_keys=true moves resources off the keys, (2) retain_kms_keys=false schedules the keys for deletion."
+  type        = bool
+  default     = false
+}
+
+variable "enable_sqs" {
+  description = "Create SQS queues and their Lambda event source mappings. When false, queues are destroyed; dependent env vars/IAM point at the queue's would-be name."
+  type        = bool
+  default     = true
+}
+
 # CloudWatch Configuration
 variable "cloudwatch_security_log_retention_days" {
   description = "CloudWatch security log retention in days"

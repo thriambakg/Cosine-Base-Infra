@@ -21,7 +21,7 @@ kms_deletion_window_in_days = 30 # Maximum retention
 
 # Cognito Configuration (maximum security)
 cognito_mfa_configuration      = "OPTIONAL" # Optional MFA
-cognito_advanced_security_mode = "ENFORCED" # Full security enforcement
+cognito_advanced_security_mode = "OFF"      # Cognito Plus (ENFORCED) bills per MAU even when idle-ish
 cognito_callback_urls = [
   "https://fingov.ai",
   "https://fingov.ai/app",
@@ -69,7 +69,13 @@ dynamodb_billing_mode                   = "PAY_PER_REQUEST"
 dynamodb_stream_enabled                 = false
 dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES" # unused when stream_enabled = false
 dynamodb_point_in_time_recovery_enabled = false
-dynamodb_deletion_protection_enabled    = true
+dynamodb_deletion_protection_enabled    = false
+
+# Keep indexed tables/buckets in Terraform (empty is fine; storage is $0).
+# Set false only if you want Terraform to destroy the search tables.
+enable_indexed_data = true
+enable_kms          = false
+enable_sqs          = false
 
 # No reserved concurrency carve-out for writer Lambdas (null = use account default pool)
 lambda_reserved_concurrency_default = null
@@ -81,13 +87,13 @@ lambda_reserved_concurrency_default = null
 # dynamodb_gsi_read_capacity = 5
 # dynamodb_gsi_write_capacity = 5
 
-# CloudWatch Configuration (maximum retention)
+# CloudWatch Configuration (short retention — idle cost save)
 
-cloudwatch_security_log_retention_days    = 365 # 1 year
-cloudwatch_auth_log_retention_days        = 365 # 1 year
-cloudwatch_application_log_retention_days = 365 # 1 year
-cloudwatch_lambda_log_retention_days      = 365 # 1 year
-cloudwatch_api_gateway_log_retention_days = 365 # 1 year
+cloudwatch_security_log_retention_days    = 7
+cloudwatch_auth_log_retention_days        = 7
+cloudwatch_application_log_retention_days = 7
+cloudwatch_lambda_log_retention_days      = 7
+cloudwatch_api_gateway_log_retention_days = 7
 
 # Alert thresholds (strict for production)
 cloudwatch_failed_login_threshold        = 3 # Very sensitive

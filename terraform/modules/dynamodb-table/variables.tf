@@ -1,6 +1,12 @@
 # DynamoDB Table Module Variables
 # modules/dynamodb-table/variables.tf
 
+variable "create" {
+  description = "If false, destroy/omit the table but keep name/ARN outputs so dependent stacks still apply"
+  type        = bool
+  default     = true
+}
+
 variable "project_name" {
   description = "Name of the project"
   type        = string

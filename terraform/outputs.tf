@@ -7,37 +7,37 @@
 # KMS outputs
 output "kms_key_id" {
   description = "ID of the main KMS key"
-  value       = module.kms.main_key_id
+  value       = local.kms.main_key_id
 }
 
 output "kms_key_arn" {
   description = "ARN of the main KMS key"
-  value       = module.kms.main_key_arn
+  value       = local.kms.main_key_arn
 }
 
 output "kms_key_alias" {
   description = "Alias of the main KMS key"
-  value       = module.kms.main_key_alias
+  value       = local.kms.main_key_alias
 }
 
 output "dynamodb_key_id" {
   description = "ID of the DynamoDB KMS key"
-  value       = module.kms.dynamodb_key_id
+  value       = local.kms.dynamodb_key_id
 }
 
 output "dynamodb_key_arn" {
   description = "ARN of the DynamoDB KMS key"
-  value       = module.kms.dynamodb_key_arn
+  value       = local.kms.dynamodb_key_arn
 }
 
 output "cloudwatch_key_id" {
   description = "ID of the CloudWatch KMS key"
-  value       = module.kms.cloudwatch_key_id
+  value       = local.kms.cloudwatch_key_id
 }
 
 output "cloudwatch_key_arn" {
   description = "ARN of the CloudWatch KMS key"
-  value       = module.kms.cloudwatch_key_arn
+  value       = local.kms.cloudwatch_key_arn
 }
 
 # Cognito outputs
@@ -101,18 +101,18 @@ output "user_profiles_table_stream_arn" {
 # DynamoDB KMS Key outputs
 output "dynamodb_module_kms_key_arn" {
   description = "ARN of the KMS key used for DynamoDB encryption"
-  value       = module.kms.dynamodb_key_arn
+  value       = local.kms.dynamodb_key_arn
 }
 
 output "dynamodb_module_kms_key_id" {
   description = "ID of the KMS key used for DynamoDB encryption"
-  value       = module.kms.dynamodb_key_id
+  value       = local.kms.dynamodb_key_id
 }
 
 # KMS Access Policy
 output "kms_access_policy_arn" {
   description = "ARN of the IAM policy for accessing KMS keys"
-  value       = module.kms.kms_access_policy_arn
+  value       = local.kms.kms_access_policy_arn
 }
 
 # Security Events Table Outputs
@@ -644,6 +644,47 @@ output "lda_disclosures_s3_bucket_arn" {
 
 # Note: Parameter-filing mappings are stored in the same lda-filings table
 # using PK = "PARAMETER_TYPE#VALUE" and SK = "FILING#{uuid}" or "CONTRIBUTION#{uuid}"
+
+# openFEC outputs
+output "fec_profiles_table_name" {
+  description = "Name of the FEC profiles DynamoDB table"
+  value       = module.fec_profiles_table.table_name
+}
+
+output "fec_profiles_table_arn" {
+  description = "ARN of the FEC profiles DynamoDB table"
+  value       = module.fec_profiles_table.table_arn
+}
+
+output "fec_data_s3_bucket_name" {
+  description = "Name of the FEC schedule data S3 bucket"
+  value       = module.fec_data_s3.bucket_id
+}
+
+output "fec_data_s3_bucket_arn" {
+  description = "ARN of the FEC schedule data S3 bucket"
+  value       = module.fec_data_s3.bucket_arn
+}
+
+output "openfec_glue_job_name" {
+  description = "Name of the openFEC indexing Glue job"
+  value       = module.openfec_glue_job.job_name
+}
+
+output "openfec_indexing_state_machine_arn" {
+  description = "ARN of the openFEC indexing Step Functions state machine"
+  value       = module.openfec_indexing_state_machine.state_machine_arn
+}
+
+output "openfec_indexing_state_machine_name" {
+  description = "Name of the openFEC indexing Step Functions state machine"
+  value       = module.openfec_indexing_state_machine.state_machine_name
+}
+
+output "fec_api_secret_name" {
+  description = "Secrets Manager name for openFEC API keys"
+  value       = module.fec_api_secrets_manager.secret_names["fec-api"]
+}
 
 # OpenSearch Domain Outputs
 # DISABLED FOR MVP - OpenSearch is not being used

@@ -1,8 +1,17 @@
 # Generic DynamoDB Table Module
 # modules/dynamodb-table/main.tf
 
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+locals {
+  table_name = "${var.project_name}-${var.table_name}-${var.environment}"
+}
+
 resource "aws_dynamodb_table" "this" {
-  name                        = "${var.project_name}-${var.table_name}-${var.environment}"
+  count = var.create ? 1 : 0
+
+  name                        = local.table_name
   billing_mode                = var.billing_mode
   hash_key                    = var.hash_key
   range_key                   = var.range_key
@@ -36,9 +45,9 @@ resource "aws_dynamodb_table" "this" {
     }
   }
 
-  # Server-side encryption
+  # Server-side encryption (AWS-owned key when no CMK is provided)
   server_side_encryption {
-    enabled     = true
+    enabled     = var.kms_key_arn != null
     kms_key_arn = var.kms_key_arn
   }
 
@@ -54,12 +63,19 @@ resource "aws_dynamodb_table" "this" {
   }
 
   tags = merge(var.tags, {
-    Name    = "${var.project_name}-${var.table_name}-${var.environment}"
+    Name    = local.table_name
     Type    = var.table_type
     Purpose = var.table_purpose
   })
 
   lifecycle {
     prevent_destroy = false
+  }
+
+  # Deletion protection must be off before AWS will delete the table. This runs
+  # on destroy so a single apply can hibernate protected tables.
+  provisioner "local-exec" {
+    when    = destroy
+    command = "aws dynamodb update-table --table-name ${self.name} --no-deletion-protection-enabled || true"
   }
 }

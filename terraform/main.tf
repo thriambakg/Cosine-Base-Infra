@@ -38,6 +38,9 @@ provider "aws" {
 module "kms" {
   source = "./modules/kms"
 
+  # Keys must outlive their consumers: resources can't move off a key once it is pending deletion.
+  create = var.enable_kms || var.retain_kms_keys
+
   project_name            = var.project_name
   environment             = var.environment
   tags                    = var.common_tags
@@ -49,6 +52,30 @@ module "kms" {
   additional_role_arns = []
 }
 
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# Consumers only see the keys when enable_kms is true (keys may still exist via retain_kms_keys)
+locals {
+  kms = {
+    main_key_id           = var.enable_kms ? module.kms.main_key_id : null
+    main_key_arn          = var.enable_kms ? module.kms.main_key_arn : null
+    main_key_alias        = var.enable_kms ? module.kms.main_key_alias : null
+    dynamodb_key_id       = var.enable_kms ? module.kms.dynamodb_key_id : null
+    dynamodb_key_arn      = var.enable_kms ? module.kms.dynamodb_key_arn : null
+    cloudwatch_key_id     = var.enable_kms ? module.kms.cloudwatch_key_id : null
+    cloudwatch_key_arn    = var.enable_kms ? module.kms.cloudwatch_key_arn : null
+    kms_access_policy_arn = module.kms.kms_access_policy_arn
+  }
+}
+
+# IAM statements must name a resource, so with KMS disabled they point at the (nonexistent) key alias and grant nothing.
+locals {
+  kms_alias_arn_prefix        = "arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:alias/${var.project_name}"
+  kms_main_key_policy_arn     = var.enable_kms ? local.kms.main_key_arn : "${local.kms_alias_arn_prefix}-main-${var.environment}"
+  kms_dynamodb_key_policy_arn = var.enable_kms ? local.kms.dynamodb_key_arn : "${local.kms_alias_arn_prefix}-dynamodb-${var.environment}"
+}
+
 # Secrets Manager for OAuth credentials
 module "secrets_manager" {
   source = "./modules/secrets-manager"
@@ -56,7 +83,7 @@ module "secrets_manager" {
   project_name         = var.project_name
   environment          = var.environment
   tags                 = var.common_tags
-  kms_key_id           = module.kms.main_key_id
+  kms_key_id           = local.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
   policy_name_suffix   = "oauth"
 
@@ -83,7 +110,7 @@ module "newsdata_secrets_manager" {
   project_name         = var.project_name
   environment          = var.environment
   tags                 = var.common_tags
-  kms_key_id           = module.kms.main_key_id
+  kms_key_id           = local.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
   policy_name_suffix   = "newsdata"
 
@@ -111,7 +138,7 @@ module "congress_api_secrets_manager" {
   project_name         = var.project_name
   environment          = var.environment
   tags                 = var.common_tags
-  kms_key_id           = module.kms.main_key_id
+  kms_key_id           = local.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
   policy_name_suffix   = "congress-api"
 
@@ -142,7 +169,7 @@ module "lda_api_secrets_manager" {
   project_name         = var.project_name
   environment          = var.environment
   tags                 = var.common_tags
-  kms_key_id           = module.kms.main_key_id
+  kms_key_id           = local.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
   policy_name_suffix   = "lda-api"
 
@@ -170,7 +197,7 @@ module "stripe_secrets_manager" {
   project_name         = var.project_name
   environment          = var.environment
   tags                 = var.common_tags
-  kms_key_id           = module.kms.main_key_id
+  kms_key_id           = local.kms.main_key_id
   recovery_window_days = var.secrets_recovery_window_days
   policy_name_suffix   = "stripe"
 
@@ -275,7 +302,7 @@ module "user_profiles_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "UserData"
   table_purpose = "UserProfiles"
@@ -332,7 +359,7 @@ module "security_events_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "SecurityData"
   table_purpose = "AuditLogs"
@@ -389,7 +416,7 @@ module "alerts_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "AlertData"
   table_purpose = "StockAlerts"
@@ -445,7 +472,7 @@ module "chat_connections_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "ConnectionData"
   table_purpose = "WebSocketConnections"
@@ -493,7 +520,7 @@ module "chat_sessions_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "ChatData"
   table_purpose = "CompleteChatSessions"
@@ -506,6 +533,8 @@ module "chat_sessions_table" {
 # Stock Data Table
 module "stock_data_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -602,7 +631,7 @@ module "stock_data_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "StockData"
   table_purpose = "RealTimeStockData"
@@ -626,6 +655,8 @@ module "stock_data_table" {
 # News Table - for storing financial news articles
 module "news_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -702,7 +733,7 @@ module "news_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "NewsData"
   table_purpose = "FinancialNews"
@@ -728,7 +759,7 @@ resource "aws_iam_policy" "user_profiles_table_dynamodb_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.dynamodb_key_arn
+        Resource = local.kms_dynamodb_key_policy_arn
       }
     ]
   })
@@ -750,7 +781,7 @@ resource "aws_iam_policy" "news_table_dynamodb_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.dynamodb_key_arn
+        Resource = local.kms_dynamodb_key_policy_arn
       }
     ]
   })
@@ -773,7 +804,7 @@ resource "aws_iam_policy" "news_fetcher_sqs_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.main_key_arn
+        Resource = local.kms_main_key_policy_arn
       }
     ]
   })
@@ -815,7 +846,7 @@ resource "aws_iam_policy" "lda_filings_table_dynamodb_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.dynamodb_key_arn
+        Resource = local.kms_dynamodb_key_policy_arn
       }
     ]
   })
@@ -837,7 +868,7 @@ resource "aws_iam_policy" "politician_trades_table_dynamodb_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.dynamodb_key_arn
+        Resource = local.kms_dynamodb_key_policy_arn
       }
     ]
   })
@@ -894,7 +925,7 @@ module "cloudwatch" {
   project_name                   = var.project_name
   environment                    = var.environment
   tags                           = var.common_tags
-  kms_key_id                     = module.kms.cloudwatch_key_arn
+  kms_key_id                     = local.kms.cloudwatch_key_arn
   aws_region                     = var.aws_region
   cognito_user_pool_id           = module.cognito.user_pool_id
   user_profiles_table_name       = module.user_profiles_table.table_name
@@ -921,7 +952,7 @@ module "static_hosting_bucket" {
   environment                     = var.environment
   purpose                         = "static-website-hosting"
   force_destroy                   = true
-  kms_key_arn                     = module.kms.main_key_arn
+  kms_key_arn                     = local.kms.main_key_arn
   tags                            = var.common_tags
   enable_cross_region_replication = false # Explicitly disable replication
   allow_cloudfront_oac            = true  # Enable CloudFront OAC compatibility
@@ -958,7 +989,7 @@ module "financial_layer" {
   project_name        = var.project_name
   environment         = var.environment
   layer_name_suffix   = "financial"
-  layer_description   = "Financial stack: yfinance, numpy, pandas, pytz (slimmed for Lambda 250MB cap with core layer)"
+  layer_description   = "yfinance stack: requests, numpy, pandas, pytz (slim; no core layer on stock workers)"
   requirements_file   = "financial-dependencies.txt"
   compatible_runtimes = ["python3.11", "python3.12"]
   s3_bucket_name      = module.static_hosting_bucket.bucket_id
@@ -1067,6 +1098,8 @@ module "payment_layer" {
 module "news_queue" {
   source = "./modules/sqs"
 
+  create = var.enable_sqs
+
   project_name = var.project_name
   environment  = var.environment
   queue_name   = "news"
@@ -1079,7 +1112,7 @@ module "news_queue" {
   enable_dlq                 = true
 
   # Encryption
-  kms_key_id = module.kms.main_key_id
+  kms_key_id = local.kms.main_key_id
 
   tags = var.common_tags
 }
@@ -1113,7 +1146,7 @@ module "news_fetcher" {
   additional_policy_arns = [
     aws_iam_policy.news_fetcher_sqs_policy.arn,
     module.newsdata_secrets_manager.secret_access_policy_arn,
-    module.kms.kms_access_policy_arn
+    local.kms.kms_access_policy_arn
   ]
 
   # Reserved concurrency (uses default from environment variables)
@@ -1160,6 +1193,8 @@ module "news_processor" {
 
 # SQS Event Source Mapping for News Processor
 resource "aws_lambda_event_source_mapping" "news_processor_sqs" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.news_queue.queue_arn
   function_name                      = module.news_processor.function_arn
   batch_size                         = 10
@@ -1204,9 +1239,12 @@ module "stock_data_historical_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-stock-historical-${var.environment}"
-  environment = var.environment
-  purpose     = "StockHistoricalData"
+  bucket_name   = "${var.project_name}-stock-historical-${var.environment}"
+  environment   = var.environment
+  purpose       = "StockHistoricalData"
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions to Glacier
   enable_lifecycle_transitions = true
@@ -1222,7 +1260,7 @@ module "stock_data_historical_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 30
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
   tags        = var.common_tags
 }
 
@@ -1277,7 +1315,7 @@ module "chat_files_s3" {
   # S3 notifications disabled - handled by separate notification resource below
   notification_topic_arn = ""
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
   tags        = var.common_tags
 }
 
@@ -1314,7 +1352,7 @@ module "spending_s3" {
   ignore_public_acls      = true
   restrict_public_buckets = true
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
   tags        = var.common_tags
 }
 
@@ -1376,7 +1414,7 @@ module "stock_data_historical_loader" {
   # IAM policies
   additional_policy_arns = [
     aws_iam_policy.stock_data_historical_s3_access.arn,
-    module.kms.kms_access_policy_arn
+    local.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
@@ -1680,7 +1718,7 @@ module "eod_batch_generator" {
   # IAM policies - ListBucket only for listing historical/* keys
   additional_policy_arns = [
     aws_iam_policy.eod_batch_generator_s3_policy.arn,
-    module.kms.kms_access_policy_arn
+    local.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
@@ -1714,7 +1752,7 @@ module "eod_aggregator" {
   additional_policy_arns = [
     aws_iam_policy.eod_aggregator_s3_policy.arn,
     aws_iam_policy.eod_aggregator_dynamodb_policy.arn,
-    module.kms.kms_access_policy_arn
+    local.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
@@ -1929,9 +1967,12 @@ module "politician_trades_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-politician-trades-${var.environment}"
-  environment = var.environment
-  purpose     = "PoliticianTradesData"
+  bucket_name   = "${var.project_name}-politician-trades-${var.environment}"
+  environment   = var.environment
+  purpose       = "PoliticianTradesData"
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
   enable_lifecycle_transitions = true
@@ -1948,7 +1989,7 @@ module "politician_trades_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 30
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
 
   # Upload static files (legislators CSV from cloned congress-legislators repo)
   # Note: Keep this file updated by running: scripts/update-legislators-csv.ps1
@@ -1977,9 +2018,12 @@ module "sec_filings_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-sec-filings-${var.environment}"
-  environment = var.environment
-  purpose     = "SECFilingsData"
+  bucket_name   = "${var.project_name}-sec-filings-${var.environment}"
+  environment   = var.environment
+  purpose       = "SECFilingsData"
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
   enable_lifecycle_transitions = true
@@ -1996,7 +2040,7 @@ module "sec_filings_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 30
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
 
   # Upload static files (legislators CSV - same file as politician trades)
   # Note: Keep this file updated by running: scripts/update-legislators-csv.ps1
@@ -2022,9 +2066,12 @@ module "usaspending_data_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-usaspending-data-${var.environment}"
-  environment = var.environment
-  purpose     = "USASpendingAwardDetails"
+  bucket_name   = "${var.project_name}-usaspending-data-${var.environment}"
+  environment   = var.environment
+  purpose       = "USASpendingAwardDetails"
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions to Glacier for cost optimization
   enable_lifecycle_transitions = true
@@ -2042,7 +2089,7 @@ module "usaspending_data_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 30
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
 
   tags = var.common_tags
 }
@@ -2194,7 +2241,7 @@ module "glue_scripts_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 30
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
 
   # Upload Glue scripts and glue_deps (requirements) to S3
   static_files = [
@@ -2221,6 +2268,11 @@ module "glue_scripts_s3" {
     {
       source_path  = "${path.module}/../backend_app/src/glue/lda_disclosures/glue_script.py"
       s3_key       = "lda_disclosures/glue_script.py"
+      content_type = "text/x-python"
+    },
+    {
+      source_path  = "${path.module}/../backend_app/src/glue/openFEC/glue_script.py"
+      s3_key       = "openFEC/glue_script.py"
       content_type = "text/x-python"
     },
     {
@@ -2267,10 +2319,10 @@ module "usaspending_bulk_indexing_glue_job" {
   dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:PutItem"]
 
   # KMS for encryption
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
   # Also include DynamoDB KMS key since the table is encrypted with it
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   # Job arguments
@@ -2301,8 +2353,10 @@ module "usaspending_bulk_indexing_glue_job" {
 # Grant Glue job role access to DynamoDB KMS key
 # This is needed because the DynamoDB table is encrypted with the DynamoDB-specific KMS key
 resource "aws_kms_grant" "glue_dynamodb_key_access" {
+  count = var.enable_kms ? 1 : 0
+
   name              = "${var.project_name}-usaspending-bulk-indexing-${var.environment}-dynamodb-key-grant"
-  key_id            = module.kms.dynamodb_key_id
+  key_id            = local.kms.dynamodb_key_id
   grantee_principal = module.usaspending_bulk_indexing_glue_job.role_arn
   operations = [
     "Decrypt",
@@ -2347,9 +2401,9 @@ module "idv_obligation_update_glue_job" {
   dynamodb_actions   = ["dynamodb:UpdateItem", "dynamodb:Query", "dynamodb:BatchGetItem"]
 
   # KMS for encryption (same keys as indexing job)
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   # Job arguments
@@ -2374,8 +2428,10 @@ module "idv_obligation_update_glue_job" {
 
 # Grant Glue job role access to DynamoDB KMS key (same as indexing job)
 resource "aws_kms_grant" "idv_update_glue_dynamodb_key_access" {
+  count = var.enable_kms ? 1 : 0
+
   name              = "${var.project_name}-idv-obligation-update-${var.environment}-dynamodb-key-grant"
-  key_id            = module.kms.dynamodb_key_id
+  key_id            = local.kms.dynamodb_key_id
   grantee_principal = module.idv_obligation_update_glue_job.role_arn
   operations = [
     "Decrypt",
@@ -2395,6 +2451,8 @@ resource "aws_kms_grant" "idv_update_glue_dynamodb_key_access" {
 module "usaspending_orphan_subaward_queue" {
   source = "./modules/sqs"
 
+  create = var.enable_sqs
+
   project_name = var.project_name
   environment  = var.environment
   queue_name   = "usaspending-orphan-subaward"
@@ -2406,7 +2464,7 @@ module "usaspending_orphan_subaward_queue" {
   enable_dlq                    = true
   dlq_message_retention_seconds = 1209600 # 14 days
 
-  kms_key_id = module.kms.main_key_id
+  kms_key_id = local.kms.main_key_id
 
   tags = var.common_tags
 }
@@ -2445,7 +2503,7 @@ module "usaspending_orphan_subaward_processor_lambda" {
 
   additional_policy_arns = [
     aws_iam_policy.usaspending_orphan_subaward_processor_dynamodb_policy.arn,
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     module.usaspending_orphan_subaward_queue.sqs_access_policy_arn,
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn
   ]
@@ -2465,11 +2523,13 @@ module "usaspending_orphan_subaward_processor_lambda" {
 
 # SQS Event Source Mapping for Lambda
 resource "aws_lambda_event_source_mapping" "orphan_subaward_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.usaspending_orphan_subaward_queue.queue_arn
   function_name                      = module.usaspending_orphan_subaward_processor_lambda.function_arn
   batch_size                         = 50 # Process up to 50 messages per invocation
   maximum_batching_window_in_seconds = 3  # Wait up to 3 seconds to collect more messages (required when batch_size > 10)
-  enabled                            = true
+  enabled                            = false
 
   depends_on = [
     module.usaspending_orphan_subaward_processor_lambda,
@@ -2503,7 +2563,7 @@ resource "aws_iam_policy" "glue_orphan_subaward_sqs_policy" {
           "kms:DescribeKey"
         ]
         Resource = [
-          module.kms.main_key_arn
+          local.kms_main_key_policy_arn
         ]
       }
     ]
@@ -2527,6 +2587,8 @@ resource "aws_iam_role_policy_attachment" "glue_orphan_subaward_sqs" {
 module "usaspending_dlq_queue" {
   source = "./modules/sqs"
 
+  create = var.enable_sqs
+
   project_name = var.project_name
   environment  = var.environment
   queue_name   = "usaspending-dlq"
@@ -2538,7 +2600,7 @@ module "usaspending_dlq_queue" {
   enable_dlq                    = true
   dlq_message_retention_seconds = 1209600 # 14 days
 
-  kms_key_id = module.kms.main_key_id
+  kms_key_id = local.kms.main_key_id
 
   tags = var.common_tags
 }
@@ -2569,7 +2631,7 @@ module "usaspending_individual_award_processor_lambda" {
 
   additional_policy_arns = [
     aws_iam_policy.usaspending_individual_award_processor_dynamodb_policy.arn,
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn,
     module.usaspending_dlq_queue.sqs_access_policy_arn
   ]
@@ -2620,11 +2682,13 @@ resource "aws_iam_role_policy_attachment" "glue_dlq_sqs" {
 
 # SQS Event Source Mapping for DLQ to Lambda (SQS triggers Lambda directly)
 resource "aws_lambda_event_source_mapping" "dlq_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.usaspending_dlq_queue.queue_arn
   function_name                      = module.usaspending_individual_award_processor_lambda.function_arn
   batch_size                         = 1 # Process one award at a time
   maximum_batching_window_in_seconds = 0
-  enabled                            = true
+  enabled                            = false
 
   depends_on = [
     module.usaspending_dlq_queue,
@@ -2678,7 +2742,7 @@ module "usaspending_bulk_fetcher_lambda" {
 
   additional_policy_arns = [
     aws_iam_policy.usaspending_bulk_fetcher_dynamodb_policy.arn,
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     aws_iam_policy.lambda_usaspending_data_s3_policy.arn
   ]
 
@@ -2863,9 +2927,12 @@ module "lda_disclosures_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-lda-disclosures-${var.environment}"
-  environment = var.environment
-  purpose     = "LDADisclosures"
+  bucket_name   = "${var.project_name}-lda-disclosures-${var.environment}"
+  environment   = var.environment
+  purpose       = "LDADisclosures"
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
+  force_destroy = true
 
   # Enable lifecycle transitions for cost optimization
   enable_lifecycle_transitions = true
@@ -2881,7 +2948,7 @@ module "lda_disclosures_s3" {
   # Noncurrent version expiration
   noncurrent_version_expiration_days = 30
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
   tags        = var.common_tags
 }
 
@@ -2903,11 +2970,14 @@ module "congress_bills_data_s3" {
     aws.replica = aws.replica
   }
 
-  bucket_name = "${var.project_name}-congress-bills-data-${var.environment}"
-  environment = var.environment
-  purpose     = "CongressBillsData"
+  bucket_name   = "${var.project_name}-congress-bills-data-${var.environment}"
+  environment   = var.environment
+  purpose       = "CongressBillsData"
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
+  force_destroy = true
 
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
 
   # Enable lifecycle transitions to Glacier for cost optimization
   enable_lifecycle_transitions = true
@@ -2931,6 +3001,8 @@ module "congress_bills_data_s3" {
 # GSIs for sorting by proposer, party, and dates
 module "congress_bills_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -3047,7 +3119,7 @@ module "congress_bills_table" {
   ]
 
   billing_mode = "PAY_PER_REQUEST"
-  kms_key_arn  = module.kms.dynamodb_key_arn
+  kms_key_arn  = local.kms.dynamodb_key_arn
 
   deletion_protection_enabled = var.dynamodb_deletion_protection_enabled
 
@@ -3095,9 +3167,9 @@ module "congress_bills_fetcher_glue_job" {
   dynamodb_actions   = ["dynamodb:GetItem", "dynamodb:PutItem", "dynamodb:UpdateItem", "dynamodb:BatchGetItem", "dynamodb:BatchWriteItem", "dynamodb:Query"]
 
   # KMS for encryption
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   # Additional IAM policies for Secrets Manager and S3 access
@@ -3138,8 +3210,10 @@ module "congress_bills_fetcher_glue_job" {
 
 # Grant Glue job role access to DynamoDB KMS key
 resource "aws_kms_grant" "congress_bills_glue_dynamodb_key_access" {
+  count = var.enable_kms ? 1 : 0
+
   name              = "${var.project_name}-congress-bills-fetcher-${var.environment}-dynamodb-key-grant"
-  key_id            = module.kms.dynamodb_key_id
+  key_id            = local.kms.dynamodb_key_id
   grantee_principal = module.congress_bills_fetcher_glue_job.role_arn
   operations = [
     "Decrypt",
@@ -3158,6 +3232,8 @@ resource "aws_kms_grant" "congress_bills_glue_dynamodb_key_access" {
 module "congress_bills_bill_text_queue" {
   source = "./modules/sqs"
 
+  create = var.enable_sqs
+
   project_name = var.project_name
   environment  = var.environment
   queue_name   = "congress-bills-bill-text"
@@ -3169,7 +3245,7 @@ module "congress_bills_bill_text_queue" {
   enable_dlq                    = true
   dlq_message_retention_seconds = 1209600 # 14 days
 
-  kms_key_id = module.kms.main_key_id
+  kms_key_id = local.kms.main_key_id
 
   tags = var.common_tags
 }
@@ -3223,7 +3299,7 @@ module "congress_bills_bill_text_processor_lambda" {
 
   additional_policy_arns = [
     aws_iam_policy.congress_bills_bill_text_processor_dynamodb_policy.arn,
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     module.congress_api_secrets_manager.secret_access_policy_arn,
     module.congress_bills_bill_text_queue.sqs_access_policy_arn,
     aws_iam_policy.lambda_congress_bills_data_s3_policy.arn
@@ -3265,11 +3341,13 @@ resource "aws_iam_policy" "lambda_congress_bills_data_s3_policy" {
 
 # SQS Event Source Mapping for Lambda (SQS triggers Lambda directly)
 resource "aws_lambda_event_source_mapping" "congress_bills_bill_text_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.congress_bills_bill_text_queue.queue_arn
   function_name                      = module.congress_bills_bill_text_processor_lambda.function_arn
   batch_size                         = 10 # Process up to 10 messages per invocation (sequential processing)
   maximum_batching_window_in_seconds = 0  # No batching window - process immediately
-  enabled                            = true
+  enabled                            = false
 
   depends_on = [
     module.congress_bills_bill_text_queue,
@@ -3300,7 +3378,7 @@ resource "aws_iam_policy" "glue_congress_bills_bill_text_sqs_policy" {
           "kms:GenerateDataKey",
           "kms:DescribeKey"
         ]
-        Resource = module.kms.main_key_arn
+        Resource = local.kms_main_key_policy_arn
       }
     ]
   })
@@ -3396,6 +3474,8 @@ module "congress_bills_fetcher_state_machine" {
 # DynamoDB Table for LDA Filings (LD-1, LD-2)
 module "lda_filings_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -3532,7 +3612,7 @@ module "lda_filings_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "LobbyingData"
   table_purpose = "LDAFilings"
@@ -3581,10 +3661,10 @@ module "lda_disclosures_glue_job" {
   # Note: Parameter-filing mappings are stored in the same table using different PK/SK patterns
 
   # KMS for encryption
-  kms_key_arn = module.kms.main_key_arn
+  kms_key_arn = local.kms.main_key_arn
   # Also include DynamoDB KMS key since the table is encrypted with it
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   # Additional IAM policies for Secrets Manager and SQS access
@@ -3720,9 +3800,315 @@ module "lda_disclosures_state_machine" {
 }
 
 
+# ==============================================================================
+# OPENFEC CAMPAIGN FINANCE INGESTION SYSTEM
+# ==============================================================================
+# Nightly Glue job: discover candidates/committees for a cycle, index PROFILE
+# rows to DynamoDB, and store Schedule A/B/E line items in S3.
+
+module "fec_api_secrets_manager" {
+  source = "./modules/secrets-manager"
+
+  project_name         = var.project_name
+  environment          = var.environment
+  tags                 = var.common_tags
+  kms_key_id           = local.kms.main_key_id
+  recovery_window_days = var.secrets_recovery_window_days
+  policy_name_suffix   = "fec-api"
+
+  automatic_rotation = {}
+
+  secrets = {
+    fec-api = {
+      description = "openFEC API keys — JSON api_keys array for rotation (populate in console)"
+      secret_data = {
+        # JSON array string — add more keys in console for rotation: ["key1","key2"]
+        api_keys = jsonencode(["PLACEHOLDER_FEC_API_KEY"])
+      }
+    }
+  }
+
+  depends_on = [module.kms]
+}
+
+module "fec_data_s3" {
+  source = "./modules/s3"
+
+  providers = {
+    aws         = aws
+    aws.replica = aws.replica
+  }
+
+  bucket_name   = "${var.project_name}-fec-data-${var.environment}"
+  environment   = var.environment
+  purpose       = "FECData"
+  create        = true
+  empty_bucket  = !var.enable_indexed_data
+  force_destroy = true
+
+  enable_lifecycle_transitions           = true
+  transition_to_ia_days                  = 90
+  transition_to_glacier_days             = 180
+  enable_expiration                      = false
+  abort_incomplete_multipart_upload_days = 1
+  noncurrent_version_expiration_days     = 30
+
+  kms_key_arn = local.kms.main_key_arn
+  tags        = var.common_tags
+}
+
+module "fec_profiles_table" {
+  source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
+
+  project_name = var.project_name
+  environment  = var.environment
+  table_name   = "fec-profiles"
+
+  hash_key  = "PK"
+  range_key = "SK"
+
+  attributes = [
+    { name = "PK", type = "S" },
+    { name = "SK", type = "S" }
+  ]
+
+  global_secondary_indexes = []
+
+  billing_mode                   = var.dynamodb_billing_mode
+  read_capacity                  = var.dynamodb_read_capacity
+  write_capacity                 = var.dynamodb_write_capacity
+  stream_enabled                 = var.dynamodb_stream_enabled
+  stream_view_type               = var.dynamodb_stream_view_type
+  point_in_time_recovery_enabled = false
+  deletion_protection_enabled    = var.dynamodb_deletion_protection_enabled
+  ttl_enabled                    = false
+  ttl_attribute_name             = "expires_at"
+
+  kms_key_arn = local.kms.dynamodb_key_arn
+
+  table_type    = "CampaignFinanceData"
+  table_purpose = "FECProfiles"
+
+  tags = var.common_tags
+
+  depends_on = [module.kms]
+}
+
+module "openfec_glue_job" {
+  source = "./modules/glue-job"
+
+  job_name = "${var.project_name}-openfec-indexing-${var.environment}"
+
+  script_location = "s3://${module.glue_scripts_s3.bucket_id}/openFEC/glue_script.py"
+  python_version  = "3"
+  glue_version    = "4.0"
+
+  max_retries           = 1
+  timeout               = 2880
+  concurrent_executions = 1
+  worker_type           = "G.1X"
+  number_of_workers     = 2
+
+  s3_bucket_arn = module.glue_scripts_s3.bucket_arn
+  additional_s3_bucket_arns = [
+    module.fec_data_s3.bucket_arn
+  ]
+  spark_logs_bucket = module.static_hosting_bucket.bucket_id
+  temp_bucket       = module.static_hosting_bucket.bucket_id
+
+  dynamodb_table_arn = module.fec_profiles_table.table_arn
+  dynamodb_actions   = ["dynamodb:PutItem", "dynamodb:GetItem"]
+
+  kms_key_arn = local.kms.main_key_arn
+  additional_kms_key_arns = [
+    local.kms_dynamodb_key_policy_arn
+  ]
+
+  additional_policy_arns = [
+    module.fec_api_secrets_manager.secret_access_policy_arn
+  ]
+
+  default_arguments = {
+    "--FEC_API_BASE_URL"           = "https://api.open.fec.gov/v1"
+    "--FEC_SECRET_NAME"            = module.fec_api_secrets_manager.secret_names["fec-api"]
+    "--FEC_PROFILES_TABLE_NAME"    = module.fec_profiles_table.table_name
+    "--S3_BUCKET_NAME"             = module.fec_data_s3.bucket_id
+    "--REQUEST_TIMEOUT"            = "120"
+    "--SCHEDULE_REQUEST_TIMEOUT"   = "180"
+    "--REQUEST_RETRIES"            = "4"
+    "--RATE_LIMIT_DELAY"           = "0.1"
+    "--CYCLE_PER_PAGE"             = "100"
+    "--MAX_CALLS_PER_HOUR_PER_KEY" = "900"
+    "--WORKERS_PER_KEY"            = "2"
+    "--MAX_PARALLEL_WORKERS"       = "24"
+  }
+
+  job_bookmark_option = "job-bookmark-disable"
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.fec_profiles_table,
+    module.fec_data_s3,
+    module.kms,
+    module.glue_scripts_s3,
+    module.fec_api_secrets_manager
+  ]
+}
+
+# Step Functions — orchestrates openFEC Glue indexing (bootstrap / nightly / single)
+module "openfec_indexing_state_machine" {
+  source = "./modules/step-functions"
+
+  state_machine_name = "${var.project_name}-openfec-indexing-${var.environment}"
+  environment        = var.environment
+
+  definition = jsonencode({
+    Comment = "openFEC campaign finance indexing — Glue job"
+    StartAt = "StartGlueJob"
+    States = {
+      StartGlueJob = {
+        Type       = "Task"
+        Resource   = "arn:aws:states:::glue:startJobRun.sync"
+        Comment    = "Index FEC candidates/committees for cycle (bootstrap or nightly delta)"
+        ResultPath = "$.glueResult"
+        Parameters = {
+          "JobName" = module.openfec_glue_job.job_name
+          "Arguments" = {
+            "--FEC_API_BASE_URL"         = "https://api.open.fec.gov/v1"
+            "--FEC_SECRET_NAME"          = module.fec_api_secrets_manager.secret_names["fec-api"]
+            "--FEC_PROFILES_TABLE_NAME"  = module.fec_profiles_table.table_name
+            "--S3_BUCKET_NAME"           = module.fec_data_s3.bucket_id
+            "--REQUEST_TIMEOUT"          = "120"
+            "--SCHEDULE_REQUEST_TIMEOUT" = "180"
+            "--REQUEST_RETRIES"          = "4"
+            "--RATE_LIMIT_DELAY"         = "0.35"
+            "--CYCLE_PER_PAGE"           = "100"
+            # Glue Arguments must be strings; use States.Format for numbers, "" not null in input
+            "--SOURCE.$"           = "$.source"
+            "--MODE.$"             = "$.mode"
+            "--FEC_CYCLE.$"        = "States.Format('{}', $.cycle)"
+            "--MIN_RECEIPT_DATE.$" = "$.min_receipt_date"
+            "--TESTING_LIMIT.$"    = "States.Format('{}', $.testing_limit)"
+            "--ENTITY_TYPE.$"      = "$.entity_type"
+            "--ENTITY_ID.$"        = "$.entity_id"
+          }
+        }
+        Catch = [
+          {
+            ErrorEquals = ["States.ALL"]
+            ResultPath  = "$.error"
+            Next        = "HandleError"
+          }
+        ]
+        Next = "Success"
+      }
+      Success = {
+        Type    = "Succeed"
+        Comment = "openFEC indexing completed successfully"
+      }
+      HandleError = {
+        Type  = "Fail"
+        Error = "OpenFECIndexingFailed"
+        Cause = "The openFEC indexing Glue job failed. Check CloudWatch logs for details."
+      }
+    }
+  })
+
+  glue_job_names = [
+    module.openfec_glue_job.job_name
+  ]
+
+  log_level              = var.environment == "production" ? "ERROR" : "ALL"
+  log_retention_days     = 7
+  include_execution_data = true
+
+  tags = var.common_tags
+
+  depends_on = [
+    module.openfec_glue_job
+  ]
+}
+
+resource "aws_iam_role" "openfec_indexing_scheduler_role" {
+  name = "${var.project_name}-openfec-indexing-scheduler-role-${var.environment}"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+        Action = "sts:AssumeRole"
+      }
+    ]
+  })
+
+  tags = var.common_tags
+}
+
+resource "aws_iam_role_policy" "openfec_indexing_scheduler_policy" {
+  name = "${var.project_name}-openfec-indexing-scheduler-policy-${var.environment}"
+  role = aws_iam_role.openfec_indexing_scheduler_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = module.openfec_indexing_state_machine.state_machine_arn
+      }
+    ]
+  })
+}
+
+# Nightly batch at 23:00 UTC — fixed Step Functions input (cycle derived in Glue when null)
+module "openfec_indexing_scheduler" {
+  source = "./modules/eventbridge-scheduler"
+
+  rule_name           = "${var.project_name}-openfec-indexing-nightly-${var.environment}"
+  rule_description    = "Trigger openFEC indexing Step Function nightly at 23:00 UTC (after FEC load)"
+  schedule_expression = "cron(0 23 * * ? *)"
+  enabled             = false
+
+  target_arn      = module.openfec_indexing_state_machine.state_machine_arn
+  target_id       = "OpenFECIndexingScheduler"
+  target_type     = "stepfunctions"
+  target_role_arn = aws_iam_role.openfec_indexing_scheduler_role.arn
+  target_input = jsonencode({
+    source           = "scheduler-nightly"
+    mode             = "nightly"
+    cycle            = ""
+    min_receipt_date = ""
+    testing_limit    = ""
+    entity_type      = ""
+    entity_id        = ""
+  })
+
+  purpose     = "OpenFECIndexing"
+  environment = var.environment
+  tags        = var.common_tags
+
+  depends_on = [
+    aws_iam_role.openfec_indexing_scheduler_role,
+    aws_iam_role_policy.openfec_indexing_scheduler_policy,
+    module.openfec_indexing_state_machine
+  ]
+}
+
+
 # SQS Queue for LDA PAC Autocomplete Processing
 module "lda_pac_autocomplete_queue" {
   source = "./modules/sqs"
+
+  create = var.enable_sqs
 
   project_name = var.project_name
   environment  = var.environment
@@ -3736,7 +4122,7 @@ module "lda_pac_autocomplete_queue" {
   enable_dlq                 = true
 
   # Encryption
-  kms_key_id = module.kms.main_key_id
+  kms_key_id = local.kms.main_key_id
 
   tags = var.common_tags
 }
@@ -3767,7 +4153,7 @@ module "lda_pac_autocomplete_processor" {
   # IAM policies
   additional_policy_arns = [
     module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     aws_iam_policy.lda_pac_autocomplete_s3_policy.arn
   ]
 
@@ -3804,6 +4190,8 @@ resource "aws_iam_policy" "lda_indexer_s3_policy" {
 module "lda_batch_queue" {
   source = "./modules/sqs"
 
+  create = var.enable_sqs
+
   project_name = var.project_name
   environment  = var.environment
   queue_name   = "lda-batch-processing"
@@ -3819,7 +4207,7 @@ module "lda_batch_queue" {
   enable_dlq                 = true
 
   # Encryption
-  kms_key_id = module.kms.main_key_id
+  kms_key_id = local.kms.main_key_id
 
   tags = var.common_tags
 }
@@ -3855,7 +4243,7 @@ module "lda_disclosures_fetcher" {
   additional_policy_arns = [
     module.lda_api_secrets_manager.secret_access_policy_arn,
     module.lda_batch_queue.sqs_access_policy_arn,
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     aws_iam_policy.lda_fetcher_s3_policy.arn
   ]
 
@@ -3939,7 +4327,7 @@ module "lda_disclosures_indexer" {
     aws_iam_policy.lda_filings_table_dynamodb_policy.arn,
     module.lda_batch_queue.sqs_access_policy_arn,
     module.lda_pac_autocomplete_queue.sqs_access_policy_arn,
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     aws_iam_policy.lda_indexer_s3_policy.arn
   ]
 
@@ -3958,11 +4346,13 @@ module "lda_disclosures_indexer" {
 
 # SQS Event Source Mapping for Indexer Lambda
 resource "aws_lambda_event_source_mapping" "lda_batch_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.lda_batch_queue.queue_arn
   function_name                      = module.lda_disclosures_indexer.function_arn
   batch_size                         = 1 # Process 1 page at a time
   maximum_batching_window_in_seconds = 0 # Process immediately
-  enabled                            = true
+  enabled                            = false
 
   # Standard queues scale naturally; optional reserved concurrency on the indexer limits fan-out
 
@@ -3996,7 +4386,7 @@ module "lda_batch_dlq_redrive_lambda" {
   ]
 
   additional_policy_arns = [
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     aws_iam_policy.lda_batch_dlq_redrive_sqs_policy.arn
   ]
 
@@ -4122,11 +4512,13 @@ resource "aws_iam_policy" "lda_fetcher_s3_policy" {
 
 # SQS Event Source Mapping for PAC Autocomplete Processor
 resource "aws_lambda_event_source_mapping" "lda_pac_autocomplete_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.lda_pac_autocomplete_queue.queue_arn
   function_name                      = module.lda_pac_autocomplete_processor.function_arn
   batch_size                         = 10
   maximum_batching_window_in_seconds = 5
-  enabled                            = true
+  enabled                            = false
 
   depends_on = [
     module.lda_pac_autocomplete_queue,
@@ -4229,6 +4621,8 @@ resource "aws_iam_policy" "lambda_politician_trades_senate_matcher_textract_poli
 module "politician_trades_table" {
   source = "./modules/dynamodb-table"
 
+  create = var.enable_indexed_data
+
   project_name = var.project_name
   environment  = var.environment
   table_name   = "politician-trades"
@@ -4326,7 +4720,7 @@ module "politician_trades_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "expires_at"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "TradeData"
   table_purpose = "PoliticianTrades"
@@ -4342,6 +4736,8 @@ module "politician_trades_table" {
 # Note: documentUrls will be stored as a String Set (SS) in items but doesn't need to be in schema
 module "sec_filings_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -4440,7 +4836,7 @@ module "sec_filings_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "CacheData"
   table_purpose = "SECFilingsCache"
@@ -4468,6 +4864,8 @@ module "sec_filings_table" {
 # Transactions and subawards stored in S3 (referenced via award_details_s3_key)
 module "usaspending_awards_index_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -4576,7 +4974,7 @@ module "usaspending_awards_index_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "AwardData"
   table_purpose = "USASpendingAwardsIndex"
@@ -4604,6 +5002,8 @@ module "usaspending_awards_index_table" {
 # Stores job_id and S3 key for quick retrieval of cached results
 module "sec_search_query_cache_table" {
   source = "./modules/dynamodb-table"
+
+  create = var.enable_indexed_data
 
   project_name = var.project_name
   environment  = var.environment
@@ -4647,7 +5047,7 @@ module "sec_search_query_cache_table" {
   ttl_enabled                    = false
   ttl_attribute_name             = "ttl"
 
-  kms_key_arn = module.kms.dynamodb_key_arn
+  kms_key_arn = local.kms.dynamodb_key_arn
 
   table_type    = "CacheData"
   table_purpose = "SECSearchQueryCache"
@@ -4695,7 +5095,7 @@ module "politician_trades_fetcher" {
   # IAM policies - fetcher: S3 only (no Textract; no DynamoDB)
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
-    module.kms.kms_access_policy_arn
+    local.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
@@ -4729,7 +5129,7 @@ module "politician_trades_downloader" {
   # IAM policies
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
-    module.kms.kms_access_policy_arn
+    local.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
@@ -4768,7 +5168,7 @@ module "politician_trades_senate_matcher" {
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
     aws_iam_policy.lambda_politician_trades_senate_matcher_textract_policy.arn,
     aws_iam_policy.politician_trades_table_dynamodb_policy.arn,
-    module.kms.kms_access_policy_arn
+    local.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
@@ -4805,7 +5205,7 @@ module "politician_trades_house_matcher" {
   additional_policy_arns = [
     aws_iam_policy.lambda_politician_trades_s3_policy.arn,
     aws_iam_policy.politician_trades_table_dynamodb_policy.arn,
-    module.kms.kms_access_policy_arn
+    local.kms.kms_access_policy_arn
   ]
 
   tags = var.common_tags
@@ -4840,7 +5240,7 @@ module "politician_trades_saver" {
   # IAM policies
   additional_policy_arns = [
     aws_iam_policy.politician_trades_table_dynamodb_policy.arn,
-    module.kms.kms_access_policy_arn,
+    local.kms.kms_access_policy_arn,
     aws_iam_policy.lambda_politician_trades_s3_policy.arn
   ]
 
@@ -5307,7 +5707,7 @@ module "politician_trades_scheduler" {
 #   ebs_volume_size = var.environment == "production" ? 100 : 20
 #
 #   # Security
-#   kms_key_arn                     = module.kms.main_key_arn
+#   kms_key_arn                     = local.kms.main_key_arn
 #   node_to_node_encryption_enabled = true
 #   enforce_https                   = true
 #   tls_security_policy             = "Policy-Min-TLS-1-2-2019-07"

@@ -1,6 +1,12 @@
 # S3 Module Variables - Security Compliant Defaults
 # modules/s3/variables.tf
 
+variable "create" {
+  description = "If false, destroy/omit the bucket but keep name/ARN outputs so dependent stacks still apply"
+  type        = bool
+  default     = true
+}
+
 variable "bucket_name" {
   description = "Name of the S3 bucket"
   type        = string
@@ -25,6 +31,12 @@ variable "tags" {
 
 variable "force_destroy" {
   description = "Allow bucket to be destroyed even if it contains objects"
+  type        = bool
+  default     = false
+}
+
+variable "empty_bucket" {
+  description = "If true, delete all object versions on apply (needed before destroying versioned buckets)"
   type        = bool
   default     = false
 }

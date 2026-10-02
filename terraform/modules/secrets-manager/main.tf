@@ -7,7 +7,8 @@ resource "aws_secretsmanager_secret" "secrets" {
 
   name        = "${var.project_name}-${each.key}-${var.environment}"
   description = each.value.description
-  kms_key_id  = var.kms_key_id
+  # Explicit alias: a null kms_key_id on update leaves the secret on its previous CMK
+  kms_key_id = coalesce(var.kms_key_id, "alias/aws/secretsmanager")
 
   recovery_window_in_days = var.recovery_window_days
 

@@ -1,11 +1,26 @@
 # SQS Module
 # modules/sqs/main.tf
 
+locals {
+  create_dlq = var.create && var.enable_dlq
+
+  queue_name = var.fifo_queue ? "${var.project_name}-${var.queue_name}-${var.environment}.fifo" : "${var.project_name}-${var.queue_name}-${var.environment}"
+  dlq_name   = var.fifo_queue ? "${var.project_name}-${var.queue_name}-dlq-${var.environment}.fifo" : "${var.project_name}-${var.queue_name}-dlq-${var.environment}"
+
+  arn_prefix = "arn:aws:sqs:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}"
+  url_prefix = "https://sqs.${data.aws_region.current.name}.amazonaws.com/${data.aws_caller_identity.current.account_id}"
+
+  queue_arn = var.create ? aws_sqs_queue.main[0].arn : "${local.arn_prefix}:${local.queue_name}"
+  queue_url = var.create ? aws_sqs_queue.main[0].url : "${local.url_prefix}/${local.queue_name}"
+  dlq_arn   = var.enable_dlq ? (var.create ? aws_sqs_queue.dlq[0].arn : "${local.arn_prefix}:${local.dlq_name}") : null
+  dlq_url   = var.enable_dlq ? (var.create ? aws_sqs_queue.dlq[0].url : "${local.url_prefix}/${local.dlq_name}") : null
+}
+
 # Dead Letter Queue for failed message processing
 resource "aws_sqs_queue" "dlq" {
-  count = var.enable_dlq ? 1 : 0
+  count = local.create_dlq ? 1 : 0
 
-  name                        = var.fifo_queue ? "${var.project_name}-${var.queue_name}-dlq-${var.environment}.fifo" : "${var.project_name}-${var.queue_name}-dlq-${var.environment}"
+  name                        = local.dlq_name
   fifo_queue                  = var.fifo_queue
   content_based_deduplication = var.fifo_queue ? var.content_based_deduplication : false
   message_retention_seconds   = var.dlq_message_retention_seconds
@@ -25,13 +40,13 @@ resource "aws_sqs_queue" "dlq" {
 # Redrive allow policy for DLQ (separate resource to avoid cycle)
 # This enables the "Start DLQ Redrive" feature in the AWS console
 resource "aws_sqs_queue_redrive_allow_policy" "dlq_redrive_allow" {
-  count = var.enable_dlq ? 1 : 0
+  count = local.create_dlq ? 1 : 0
 
   queue_url = aws_sqs_queue.dlq[0].id
 
   redrive_allow_policy = jsonencode({
     redrivePermission = "byQueue"
-    sourceQueueArns   = [aws_sqs_queue.main.arn]
+    sourceQueueArns   = [aws_sqs_queue.main[0].arn]
   })
 
   depends_on = [
@@ -42,7 +57,9 @@ resource "aws_sqs_queue_redrive_allow_policy" "dlq_redrive_allow" {
 
 # Main SQS Queue
 resource "aws_sqs_queue" "main" {
-  name                       = var.fifo_queue ? "${var.project_name}-${var.queue_name}-${var.environment}.fifo" : "${var.project_name}-${var.queue_name}-${var.environment}"
+  count = var.create ? 1 : 0
+
+  name                       = local.queue_name
   message_retention_seconds  = var.message_retention_seconds
   visibility_timeout_seconds = var.visibility_timeout_seconds
   delay_seconds              = var.delay_seconds
@@ -50,7 +67,7 @@ resource "aws_sqs_queue" "main" {
   receive_wait_time_seconds  = var.receive_wait_time_seconds
 
   # Dead Letter Queue configuration
-  redrive_policy = var.enable_dlq ? jsonencode({
+  redrive_policy = local.create_dlq ? jsonencode({
     deadLetterTargetArn = aws_sqs_queue.dlq[0].arn
     maxReceiveCount     = var.max_receive_count
   }) : null
@@ -78,45 +95,51 @@ resource "aws_iam_policy" "sqs_access_policy" {
 
   policy = jsonencode({
     Version = "2012-10-17"
-    Statement = [
-      {
-        Effect = "Allow"
-        Action = [
-          "sqs:SendMessage",
-          "sqs:ReceiveMessage",
-          "sqs:DeleteMessage",
-          "sqs:GetQueueAttributes",
-          "sqs:ChangeMessageVisibility"
-        ]
-        Resource = [
-          aws_sqs_queue.main.arn
-        ]
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "sqs:SendMessage",
-          "sqs:ReceiveMessage",
-          "sqs:DeleteMessage",
-          "sqs:GetQueueAttributes",
-          "sqs:ChangeMessageVisibility"
-        ]
-        Resource = var.enable_dlq ? [
-          aws_sqs_queue.dlq[0].arn
-        ] : []
-      },
-      {
-        Effect = "Allow"
-        Action = [
-          "kms:Decrypt",
-          "kms:GenerateDataKey",
-          "kms:DescribeKey"
-        ]
-        Resource = var.kms_key_id != null ? [
-          "arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/${var.kms_key_id}"
-        ] : []
-      }
-    ]
+    Statement = concat(
+      [
+        {
+          Effect = "Allow"
+          Action = [
+            "sqs:SendMessage",
+            "sqs:ReceiveMessage",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:ChangeMessageVisibility"
+          ]
+          Resource = [
+            local.queue_arn
+          ]
+        }
+      ],
+      var.enable_dlq ? [
+        {
+          Effect = "Allow"
+          Action = [
+            "sqs:SendMessage",
+            "sqs:ReceiveMessage",
+            "sqs:DeleteMessage",
+            "sqs:GetQueueAttributes",
+            "sqs:ChangeMessageVisibility"
+          ]
+          Resource = [
+            local.dlq_arn
+          ]
+        }
+      ] : [],
+      var.kms_key_id != null ? [
+        {
+          Effect = "Allow"
+          Action = [
+            "kms:Decrypt",
+            "kms:GenerateDataKey",
+            "kms:DescribeKey"
+          ]
+          Resource = [
+            "arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/${var.kms_key_id}"
+          ]
+        }
+      ] : []
+    )
   })
 
   tags = var.tags

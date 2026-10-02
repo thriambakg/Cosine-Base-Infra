@@ -8,6 +8,8 @@ data "aws_region" "current" {}
 # Main KMS key for general encryption
 # Note: This key policy includes CloudFront service principal to allow CloudFront to decrypt S3 objects
 resource "aws_kms_key" "main" {
+  count = var.create ? 1 : 0
+
   description              = "Main KMS key for ${var.project_name} ${var.environment}"
   key_usage                = "ENCRYPT_DECRYPT"
   customer_master_key_spec = "SYMMETRIC_DEFAULT"
@@ -96,12 +98,16 @@ resource "aws_kms_key" "main" {
 
 # KMS alias for the main key
 resource "aws_kms_alias" "main" {
+  count = var.create ? 1 : 0
+
   name          = "alias/${var.project_name}-main-${var.environment}"
-  target_key_id = aws_kms_key.main.key_id
+  target_key_id = aws_kms_key.main[0].key_id
 }
 
 # DynamoDB-specific KMS key
 resource "aws_kms_key" "dynamodb" {
+  count = var.create ? 1 : 0
+
   description              = "DynamoDB encryption key for ${var.project_name} ${var.environment}"
   key_usage                = "ENCRYPT_DECRYPT"
   customer_master_key_spec = "SYMMETRIC_DEFAULT"
@@ -190,12 +196,16 @@ resource "aws_kms_key" "dynamodb" {
 
 # KMS alias for DynamoDB key
 resource "aws_kms_alias" "dynamodb" {
+  count = var.create ? 1 : 0
+
   name          = "alias/${var.project_name}-dynamodb-${var.environment}"
-  target_key_id = aws_kms_key.dynamodb.key_id
+  target_key_id = aws_kms_key.dynamodb[0].key_id
 }
 
 # CloudWatch Logs KMS key
 resource "aws_kms_key" "cloudwatch" {
+  count = var.create ? 1 : 0
+
   description              = "CloudWatch Logs encryption key for ${var.project_name} ${var.environment}"
   key_usage                = "ENCRYPT_DECRYPT"
   customer_master_key_spec = "SYMMETRIC_DEFAULT"
@@ -269,11 +279,14 @@ resource "aws_kms_key" "cloudwatch" {
 
 # KMS alias for CloudWatch key
 resource "aws_kms_alias" "cloudwatch" {
+  count = var.create ? 1 : 0
+
   name          = "alias/${var.project_name}-cloudwatch-${var.environment}"
-  target_key_id = aws_kms_key.cloudwatch.key_id
+  target_key_id = aws_kms_key.cloudwatch[0].key_id
 }
 
 # IAM policy for KMS access
+# Kept when keys are disabled (consumers attach it by ARN); it then only grants DescribeKey, which is metadata-only.
 resource "aws_iam_policy" "kms_access_policy" {
   name        = "${var.project_name}-kms-access-policy-${var.environment}"
   description = "IAM policy for accessing KMS keys"
@@ -284,18 +297,18 @@ resource "aws_iam_policy" "kms_access_policy" {
     Statement = [
       {
         Effect = "Allow"
-        Action = [
+        Action = var.create ? tolist([
           "kms:Encrypt",
           "kms:Decrypt",
           "kms:ReEncrypt*",
           "kms:GenerateDataKey*",
           "kms:DescribeKey"
-        ]
-        Resource = [
-          aws_kms_key.main.arn,
-          aws_kms_key.dynamodb.arn,
-          aws_kms_key.cloudwatch.arn
-        ]
+        ]) : tolist(["kms:DescribeKey"])
+        Resource = var.create ? tolist([
+          aws_kms_key.main[0].arn,
+          aws_kms_key.dynamodb[0].arn,
+          aws_kms_key.cloudwatch[0].arn
+        ]) : tolist(["arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:key/*"])
       }
     ]
   })
