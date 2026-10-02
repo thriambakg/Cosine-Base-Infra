@@ -1,6 +1,12 @@
 # KMS Module Variables
 # modules/kms/variables.tf
 
+variable "create" {
+  description = "Whether to create the customer-managed KMS keys. When false, all key outputs are null and consumers fall back to AWS-owned/managed encryption."
+  type        = bool
+  default     = true
+}
+
 variable "project_name" {
   description = "Name of the project"
   type        = string

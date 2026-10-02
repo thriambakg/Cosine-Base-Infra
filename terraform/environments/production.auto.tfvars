@@ -74,6 +74,8 @@ dynamodb_deletion_protection_enabled    = false
 # Keep indexed tables/buckets in Terraform (empty is fine; storage is $0).
 # Set false only if you want Terraform to destroy the search tables.
 enable_indexed_data = true
+enable_kms          = false
+enable_sqs          = false
 
 # No reserved concurrency carve-out for writer Lambdas (null = use account default pool)
 lambda_reserved_concurrency_default = null

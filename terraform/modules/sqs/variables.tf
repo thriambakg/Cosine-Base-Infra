@@ -1,6 +1,12 @@
 # SQS Module Variables
 # modules/sqs/variables.tf
 
+variable "create" {
+  description = "Whether to create the queue(s). When false, outputs are synthesized names/ARNs/URLs so IAM policies and env vars stay valid."
+  type        = bool
+  default     = true
+}
+
 variable "project_name" {
   description = "Name of the project"
   type        = string

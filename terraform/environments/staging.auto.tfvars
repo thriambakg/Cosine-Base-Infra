@@ -51,6 +51,8 @@ dynamodb_stream_view_type               = "NEW_AND_OLD_IMAGES"
 dynamodb_point_in_time_recovery_enabled = false
 dynamodb_deletion_protection_enabled    = false
 enable_indexed_data                     = true
+enable_kms                              = false
+enable_sqs                              = false
 
 # CloudWatch Configuration (moderate retention)
 cloudwatch_security_log_retention_days    = 365 # 1 year

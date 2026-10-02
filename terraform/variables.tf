@@ -256,6 +256,18 @@ variable "enable_indexed_data" {
   default     = true
 }
 
+variable "enable_kms" {
+  description = "Create customer-managed KMS keys. When false, keys are scheduled for deletion and resources fall back to AWS-owned/managed encryption (DynamoDB AWS-owned, S3 SSE-S3, Secrets Manager aws/secretsmanager)."
+  type        = bool
+  default     = true
+}
+
+variable "enable_sqs" {
+  description = "Create SQS queues and their Lambda event source mappings. When false, queues are destroyed; dependent env vars/IAM point at the queue's would-be name."
+  type        = bool
+  default     = true
+}
+
 # CloudWatch Configuration
 variable "cloudwatch_security_log_retention_days" {
   description = "CloudWatch security log retention in days"

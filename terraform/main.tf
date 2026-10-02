@@ -38,6 +38,8 @@ provider "aws" {
 module "kms" {
   source = "./modules/kms"
 
+  create = var.enable_kms
+
   project_name            = var.project_name
   environment             = var.environment
   tags                    = var.common_tags
@@ -47,6 +49,16 @@ module "kms" {
   allowed_services        = var.kms_allowed_services
   # Note: Glue role ARN will be added via separate aws_kms_key_policy resource to avoid circular dependency
   additional_role_arns = []
+}
+
+data "aws_caller_identity" "current" {}
+data "aws_region" "current" {}
+
+# IAM statements must name a resource, so with KMS disabled they point at the (nonexistent) key alias and grant nothing.
+locals {
+  kms_alias_arn_prefix        = "arn:aws:kms:${data.aws_region.current.name}:${data.aws_caller_identity.current.account_id}:alias/${var.project_name}"
+  kms_main_key_policy_arn     = var.enable_kms ? module.kms.main_key_arn : "${local.kms_alias_arn_prefix}-main-${var.environment}"
+  kms_dynamodb_key_policy_arn = var.enable_kms ? module.kms.dynamodb_key_arn : "${local.kms_alias_arn_prefix}-dynamodb-${var.environment}"
 }
 
 # Secrets Manager for OAuth credentials
@@ -732,7 +744,7 @@ resource "aws_iam_policy" "user_profiles_table_dynamodb_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.dynamodb_key_arn
+        Resource = local.kms_dynamodb_key_policy_arn
       }
     ]
   })
@@ -754,7 +766,7 @@ resource "aws_iam_policy" "news_table_dynamodb_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.dynamodb_key_arn
+        Resource = local.kms_dynamodb_key_policy_arn
       }
     ]
   })
@@ -777,7 +789,7 @@ resource "aws_iam_policy" "news_fetcher_sqs_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.main_key_arn
+        Resource = local.kms_main_key_policy_arn
       }
     ]
   })
@@ -819,7 +831,7 @@ resource "aws_iam_policy" "lda_filings_table_dynamodb_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.dynamodb_key_arn
+        Resource = local.kms_dynamodb_key_policy_arn
       }
     ]
   })
@@ -841,7 +853,7 @@ resource "aws_iam_policy" "politician_trades_table_dynamodb_policy" {
       {
         Effect   = "Allow"
         Action   = ["kms:Decrypt", "kms:GenerateDataKey", "kms:DescribeKey"]
-        Resource = module.kms.dynamodb_key_arn
+        Resource = local.kms_dynamodb_key_policy_arn
       }
     ]
   })
@@ -1071,6 +1083,8 @@ module "payment_layer" {
 module "news_queue" {
   source = "./modules/sqs"
 
+  create = var.enable_sqs
+
   project_name = var.project_name
   environment  = var.environment
   queue_name   = "news"
@@ -1164,6 +1178,8 @@ module "news_processor" {
 
 # SQS Event Source Mapping for News Processor
 resource "aws_lambda_event_source_mapping" "news_processor_sqs" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.news_queue.queue_arn
   function_name                      = module.news_processor.function_arn
   batch_size                         = 10
@@ -2291,7 +2307,7 @@ module "usaspending_bulk_indexing_glue_job" {
   kms_key_arn = module.kms.main_key_arn
   # Also include DynamoDB KMS key since the table is encrypted with it
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   # Job arguments
@@ -2322,6 +2338,8 @@ module "usaspending_bulk_indexing_glue_job" {
 # Grant Glue job role access to DynamoDB KMS key
 # This is needed because the DynamoDB table is encrypted with the DynamoDB-specific KMS key
 resource "aws_kms_grant" "glue_dynamodb_key_access" {
+  count = var.enable_kms ? 1 : 0
+
   name              = "${var.project_name}-usaspending-bulk-indexing-${var.environment}-dynamodb-key-grant"
   key_id            = module.kms.dynamodb_key_id
   grantee_principal = module.usaspending_bulk_indexing_glue_job.role_arn
@@ -2370,7 +2388,7 @@ module "idv_obligation_update_glue_job" {
   # KMS for encryption (same keys as indexing job)
   kms_key_arn = module.kms.main_key_arn
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   # Job arguments
@@ -2395,6 +2413,8 @@ module "idv_obligation_update_glue_job" {
 
 # Grant Glue job role access to DynamoDB KMS key (same as indexing job)
 resource "aws_kms_grant" "idv_update_glue_dynamodb_key_access" {
+  count = var.enable_kms ? 1 : 0
+
   name              = "${var.project_name}-idv-obligation-update-${var.environment}-dynamodb-key-grant"
   key_id            = module.kms.dynamodb_key_id
   grantee_principal = module.idv_obligation_update_glue_job.role_arn
@@ -2415,6 +2435,8 @@ resource "aws_kms_grant" "idv_update_glue_dynamodb_key_access" {
 # SQS Queue for Orphan Subaward Processing
 module "usaspending_orphan_subaward_queue" {
   source = "./modules/sqs"
+
+  create = var.enable_sqs
 
   project_name = var.project_name
   environment  = var.environment
@@ -2486,6 +2508,8 @@ module "usaspending_orphan_subaward_processor_lambda" {
 
 # SQS Event Source Mapping for Lambda
 resource "aws_lambda_event_source_mapping" "orphan_subaward_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.usaspending_orphan_subaward_queue.queue_arn
   function_name                      = module.usaspending_orphan_subaward_processor_lambda.function_arn
   batch_size                         = 50 # Process up to 50 messages per invocation
@@ -2524,7 +2548,7 @@ resource "aws_iam_policy" "glue_orphan_subaward_sqs_policy" {
           "kms:DescribeKey"
         ]
         Resource = [
-          module.kms.main_key_arn
+          local.kms_main_key_policy_arn
         ]
       }
     ]
@@ -2547,6 +2571,8 @@ resource "aws_iam_role_policy_attachment" "glue_orphan_subaward_sqs" {
 # SQS Queue for Failed Awards DLQ (Dead Letter Queue)
 module "usaspending_dlq_queue" {
   source = "./modules/sqs"
+
+  create = var.enable_sqs
 
   project_name = var.project_name
   environment  = var.environment
@@ -2641,6 +2667,8 @@ resource "aws_iam_role_policy_attachment" "glue_dlq_sqs" {
 
 # SQS Event Source Mapping for DLQ to Lambda (SQS triggers Lambda directly)
 resource "aws_lambda_event_source_mapping" "dlq_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.usaspending_dlq_queue.queue_arn
   function_name                      = module.usaspending_individual_award_processor_lambda.function_arn
   batch_size                         = 1 # Process one award at a time
@@ -3126,7 +3154,7 @@ module "congress_bills_fetcher_glue_job" {
   # KMS for encryption
   kms_key_arn = module.kms.main_key_arn
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   # Additional IAM policies for Secrets Manager and S3 access
@@ -3167,6 +3195,8 @@ module "congress_bills_fetcher_glue_job" {
 
 # Grant Glue job role access to DynamoDB KMS key
 resource "aws_kms_grant" "congress_bills_glue_dynamodb_key_access" {
+  count = var.enable_kms ? 1 : 0
+
   name              = "${var.project_name}-congress-bills-fetcher-${var.environment}-dynamodb-key-grant"
   key_id            = module.kms.dynamodb_key_id
   grantee_principal = module.congress_bills_fetcher_glue_job.role_arn
@@ -3186,6 +3216,8 @@ resource "aws_kms_grant" "congress_bills_glue_dynamodb_key_access" {
 # SQS Queue for Congress Bills Bill Text Downloads
 module "congress_bills_bill_text_queue" {
   source = "./modules/sqs"
+
+  create = var.enable_sqs
 
   project_name = var.project_name
   environment  = var.environment
@@ -3294,6 +3326,8 @@ resource "aws_iam_policy" "lambda_congress_bills_data_s3_policy" {
 
 # SQS Event Source Mapping for Lambda (SQS triggers Lambda directly)
 resource "aws_lambda_event_source_mapping" "congress_bills_bill_text_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.congress_bills_bill_text_queue.queue_arn
   function_name                      = module.congress_bills_bill_text_processor_lambda.function_arn
   batch_size                         = 10 # Process up to 10 messages per invocation (sequential processing)
@@ -3329,7 +3363,7 @@ resource "aws_iam_policy" "glue_congress_bills_bill_text_sqs_policy" {
           "kms:GenerateDataKey",
           "kms:DescribeKey"
         ]
-        Resource = module.kms.main_key_arn
+        Resource = local.kms_main_key_policy_arn
       }
     ]
   })
@@ -3615,7 +3649,7 @@ module "lda_disclosures_glue_job" {
   kms_key_arn = module.kms.main_key_arn
   # Also include DynamoDB KMS key since the table is encrypted with it
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   # Additional IAM policies for Secrets Manager and SQS access
@@ -3874,7 +3908,7 @@ module "openfec_glue_job" {
 
   kms_key_arn = module.kms.main_key_arn
   additional_kms_key_arns = [
-    module.kms.dynamodb_key_arn
+    local.kms_dynamodb_key_policy_arn
   ]
 
   additional_policy_arns = [
@@ -4059,6 +4093,8 @@ module "openfec_indexing_scheduler" {
 module "lda_pac_autocomplete_queue" {
   source = "./modules/sqs"
 
+  create = var.enable_sqs
+
   project_name = var.project_name
   environment  = var.environment
   queue_name   = "lda-pac-autocomplete"
@@ -4138,6 +4174,8 @@ resource "aws_iam_policy" "lda_indexer_s3_policy" {
 # Using standard queue (not FIFO) to enable full concurrency - order doesn't matter
 module "lda_batch_queue" {
   source = "./modules/sqs"
+
+  create = var.enable_sqs
 
   project_name = var.project_name
   environment  = var.environment
@@ -4293,6 +4331,8 @@ module "lda_disclosures_indexer" {
 
 # SQS Event Source Mapping for Indexer Lambda
 resource "aws_lambda_event_source_mapping" "lda_batch_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.lda_batch_queue.queue_arn
   function_name                      = module.lda_disclosures_indexer.function_arn
   batch_size                         = 1 # Process 1 page at a time
@@ -4457,6 +4497,8 @@ resource "aws_iam_policy" "lda_fetcher_s3_policy" {
 
 # SQS Event Source Mapping for PAC Autocomplete Processor
 resource "aws_lambda_event_source_mapping" "lda_pac_autocomplete_sqs_trigger" {
+  count = var.enable_sqs ? 1 : 0
+
   event_source_arn                   = module.lda_pac_autocomplete_queue.queue_arn
   function_name                      = module.lda_pac_autocomplete_processor.function_arn
   batch_size                         = 10
