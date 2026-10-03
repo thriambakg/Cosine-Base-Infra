@@ -398,11 +398,13 @@ resource "aws_s3_object" "static_files" {
   content_type = each.value.content_type != null ? each.value.content_type : null
 
   # Use file hash to detect changes and trigger updates
-  etag = filemd5(each.value.source_path)
+  # source_hash, not etag: etag conflicts with kms_key_id, and S3 etags aren't MD5s for KMS-encrypted objects
+  source_hash = filemd5(each.value.source_path)
 
   # Explicit so existing objects are rewritten when the bucket's encryption changes
   server_side_encryption = var.kms_key_arn != null ? "aws:kms" : "AES256"
-  kms_key_id             = var.kms_key_arn
+  # "" rather than null: kms_key_id is computed, so null keeps the old key ID and PutObject rejects AES256 + key ID
+  kms_key_id = var.kms_key_arn != null ? var.kms_key_arn : ""
 
   tags = merge(var.tags, {
     Name    = each.value.s3_key

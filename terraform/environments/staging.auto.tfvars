@@ -53,6 +53,7 @@ dynamodb_deletion_protection_enabled    = false
 enable_indexed_data                     = true
 enable_kms                              = false
 retain_kms_keys                         = false
+manage_initial_secret_versions          = false
 enable_sqs                              = false
 
 # CloudWatch Configuration (short retention - idle cost save)

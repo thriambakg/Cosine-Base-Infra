@@ -268,6 +268,12 @@ variable "retain_kms_keys" {
   default     = false
 }
 
+variable "manage_initial_secret_versions" {
+  description = "Track each secret's initial placeholder version in Terraform. Set false in environments whose secret values are managed in the console."
+  type        = bool
+  default     = true
+}
+
 variable "enable_sqs" {
   description = "Create SQS queues and their Lambda event source mappings. When false, queues are destroyed; dependent env vars/IAM point at the queue's would-be name."
   type        = bool
