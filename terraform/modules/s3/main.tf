@@ -400,7 +400,9 @@ resource "aws_s3_object" "static_files" {
   # Use file hash to detect changes and trigger updates
   etag = filemd5(each.value.source_path)
 
-  # Server-side encryption inherited from bucket configuration
+  # Explicit so existing objects are rewritten when the bucket's encryption changes
+  server_side_encryption = var.kms_key_arn != null ? "aws:kms" : "AES256"
+  kms_key_id             = var.kms_key_arn
 
   tags = merge(var.tags, {
     Name    = each.value.s3_key
