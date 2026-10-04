@@ -6,7 +6,8 @@ Usage:
   python test_fec_politician_search.py
   # or: python3.13 test_fec_politician_search.py
 
-Stdlib only (no pip install). Set FEC_API_KEY below or export FEC_API_KEY.
+Stdlib only, plus boto3 when reading the key from Secrets Manager. Export FEC_API_KEY
+to skip Secrets Manager.
 Uses api.open.fec.gov (same as ApiDocs.txt).
 
 Cycle: all profile API calls use one FEC two-year cycle (default = derived from
@@ -38,9 +39,11 @@ from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 # ---------------------------------------------------------------------------
-# Configuration — paste your key here
+# Configuration
 # ---------------------------------------------------------------------------
-FEC_API_KEY = "TEMP"
+# Key lookup order: FEC_API_KEY env var, then Secrets Manager
+# (cosine-fec-api-<COSINE_ENV>, default production). Never hardcode keys here.
+SECRET_NAME_TEMPLATE = "cosine-fec-api-{env}"
 
 API_BASE = "https://api.open.fec.gov/v1"
 REQUEST_TIMEOUT = 90
@@ -66,10 +69,25 @@ class SearchHit:
     cycles: Optional[List[int]] = None
 
 
+def _secret_api_key() -> str:
+    secret_name = SECRET_NAME_TEMPLATE.format(env=os.environ.get("COSINE_ENV", "production"))
+    try:
+        import boto3
+
+        secret = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
+        keys = json.loads(secret["SecretString"]).get("api_keys") or []
+        if isinstance(keys, str):
+            keys = json.loads(keys)
+        return str(keys[0]).strip() if keys else ""
+    except Exception as e:
+        print(f"Could not read {secret_name} from Secrets Manager: {e}")
+        return ""
+
+
 def _api_key() -> str:
-    key = (os.environ.get("FEC_API_KEY") or FEC_API_KEY or "").strip()
-    if not key or key == "PASTE_YOUR_API_KEY_HERE":
-        print("Set FEC_API_KEY in this file or export FEC_API_KEY in your environment.")
+    key = (os.environ.get("FEC_API_KEY") or "").strip() or _secret_api_key()
+    if not key or key.startswith("PLACEHOLDER"):
+        print("Export FEC_API_KEY or populate the api_keys secret in Secrets Manager.")
         sys.exit(1)
     return key
 

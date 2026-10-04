@@ -48,10 +48,24 @@ import requests
 
 API_BASE_URL = "https://api.congress.gov/v3"
 
-# Paste your Congress.gov API key here, or set CONGRESS_API_KEY env var.
-# Get a key at: https://api.congress.gov/sign-up/
-CONGRESS_API_KEY = ""  # <-- paste key here, or use --api-key
-API_KEY = CONGRESS_API_KEY or os.environ.get("CONGRESS_API_KEY", "")
+# Key lookup order: --api-key, CONGRESS_API_KEY env var, then Secrets Manager
+# (cosine-congress-api-<COSINE_ENV>, default production). Never hardcode keys here.
+SECRET_NAME_TEMPLATE = "cosine-congress-api-{env}"
+
+
+def load_congress_api_key(cli_key: str = "") -> str:
+    key = (cli_key or os.environ.get("CONGRESS_API_KEY") or "").strip()
+    if key:
+        return key
+    secret_name = SECRET_NAME_TEMPLATE.format(env=os.environ.get("COSINE_ENV", "production"))
+    try:
+        import boto3
+
+        secret = boto3.client("secretsmanager").get_secret_value(SecretId=secret_name)
+        return (json.loads(secret["SecretString"]).get("api_key") or "").strip()
+    except Exception as e:
+        print(f"Could not read {secret_name} from Secrets Manager: {e}", file=sys.stderr)
+        return ""
 
 REQUEST_TIMEOUT = 30
 MAX_RETRIES = 3
@@ -720,7 +734,7 @@ def main() -> None:
 
     args = parser.parse_args()
     congress = args.congress or get_current_congress()
-    api_key = (args.api_key or CONGRESS_API_KEY or os.environ.get("CONGRESS_API_KEY") or "").strip()
+    api_key = load_congress_api_key(args.api_key)
 
     if args.simulate_bulk:
         if not api_key:
