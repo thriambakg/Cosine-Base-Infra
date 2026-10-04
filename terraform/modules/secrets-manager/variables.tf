@@ -26,6 +26,12 @@ variable "secrets" {
   default = {}
 }
 
+variable "manage_initial_versions" {
+  description = "Track the initial placeholder version of each secret. Disable once real values are set outside Terraform, so plans don't read versions encrypted with retired KMS keys."
+  type        = bool
+  default     = true
+}
+
 variable "kms_key_id" {
   description = "KMS key ID for encrypting secrets (optional)"
   type        = string
