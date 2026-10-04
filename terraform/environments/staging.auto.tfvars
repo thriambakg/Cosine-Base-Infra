@@ -52,15 +52,16 @@ dynamodb_point_in_time_recovery_enabled = false
 dynamodb_deletion_protection_enabled    = false
 enable_indexed_data                     = true
 enable_kms                              = false
-retain_kms_keys                         = true # set false on a later deploy, after this one succeeds
+retain_kms_keys                         = false
+manage_initial_secret_versions          = false
 enable_sqs                              = false
 
-# CloudWatch Configuration (moderate retention)
-cloudwatch_security_log_retention_days    = 365 # 1 year
-cloudwatch_auth_log_retention_days        = 365 # 1 year
-cloudwatch_application_log_retention_days = 365 # 1 year
-cloudwatch_lambda_log_retention_days      = 365 # 1 year
-cloudwatch_api_gateway_log_retention_days = 365 # 1 year
+# CloudWatch Configuration (short retention - idle cost save)
+cloudwatch_security_log_retention_days    = 7
+cloudwatch_auth_log_retention_days        = 7
+cloudwatch_application_log_retention_days = 7
+cloudwatch_lambda_log_retention_days      = 7
+cloudwatch_api_gateway_log_retention_days = 7
 
 # Secrets Manager automatic rotation (disabled for manual console management)
 automatic_secret_rotation = {}

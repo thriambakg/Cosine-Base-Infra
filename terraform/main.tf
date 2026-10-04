@@ -80,12 +80,13 @@ locals {
 module "secrets_manager" {
   source = "./modules/secrets-manager"
 
-  project_name         = var.project_name
-  environment          = var.environment
-  tags                 = var.common_tags
-  kms_key_id           = local.kms.main_key_id
-  recovery_window_days = var.secrets_recovery_window_days
-  policy_name_suffix   = "oauth"
+  project_name            = var.project_name
+  environment             = var.environment
+  tags                    = var.common_tags
+  kms_key_id              = local.kms.main_key_id
+  manage_initial_versions = var.manage_initial_secret_versions
+  recovery_window_days    = var.secrets_recovery_window_days
+  policy_name_suffix      = "oauth"
 
   # Only enable automatic rotation if secrets are enabled
   automatic_rotation = var.oauth_secrets_enabled ? var.automatic_secret_rotation : {}
@@ -107,12 +108,13 @@ module "secrets_manager" {
 module "newsdata_secrets_manager" {
   source = "./modules/secrets-manager"
 
-  project_name         = var.project_name
-  environment          = var.environment
-  tags                 = var.common_tags
-  kms_key_id           = local.kms.main_key_id
-  recovery_window_days = var.secrets_recovery_window_days
-  policy_name_suffix   = "newsdata"
+  project_name            = var.project_name
+  environment             = var.environment
+  tags                    = var.common_tags
+  kms_key_id              = local.kms.main_key_id
+  manage_initial_versions = var.manage_initial_secret_versions
+  recovery_window_days    = var.secrets_recovery_window_days
+  policy_name_suffix      = "newsdata"
 
   # No automatic rotation for API keys
   automatic_rotation = {}
@@ -135,12 +137,13 @@ module "newsdata_secrets_manager" {
 module "congress_api_secrets_manager" {
   source = "./modules/secrets-manager"
 
-  project_name         = var.project_name
-  environment          = var.environment
-  tags                 = var.common_tags
-  kms_key_id           = local.kms.main_key_id
-  recovery_window_days = var.secrets_recovery_window_days
-  policy_name_suffix   = "congress-api"
+  project_name            = var.project_name
+  environment             = var.environment
+  tags                    = var.common_tags
+  kms_key_id              = local.kms.main_key_id
+  manage_initial_versions = var.manage_initial_secret_versions
+  recovery_window_days    = var.secrets_recovery_window_days
+  policy_name_suffix      = "congress-api"
 
   # No automatic rotation for API keys
   automatic_rotation = {}
@@ -166,12 +169,13 @@ module "congress_api_secrets_manager" {
 module "lda_api_secrets_manager" {
   source = "./modules/secrets-manager"
 
-  project_name         = var.project_name
-  environment          = var.environment
-  tags                 = var.common_tags
-  kms_key_id           = local.kms.main_key_id
-  recovery_window_days = var.secrets_recovery_window_days
-  policy_name_suffix   = "lda-api"
+  project_name            = var.project_name
+  environment             = var.environment
+  tags                    = var.common_tags
+  kms_key_id              = local.kms.main_key_id
+  manage_initial_versions = var.manage_initial_secret_versions
+  recovery_window_days    = var.secrets_recovery_window_days
+  policy_name_suffix      = "lda-api"
 
   # No automatic rotation for API keys
   automatic_rotation = {}
@@ -194,12 +198,13 @@ module "lda_api_secrets_manager" {
 module "stripe_secrets_manager" {
   source = "./modules/secrets-manager"
 
-  project_name         = var.project_name
-  environment          = var.environment
-  tags                 = var.common_tags
-  kms_key_id           = local.kms.main_key_id
-  recovery_window_days = var.secrets_recovery_window_days
-  policy_name_suffix   = "stripe"
+  project_name            = var.project_name
+  environment             = var.environment
+  tags                    = var.common_tags
+  kms_key_id              = local.kms.main_key_id
+  manage_initial_versions = var.manage_initial_secret_versions
+  recovery_window_days    = var.secrets_recovery_window_days
+  policy_name_suffix      = "stripe"
 
   # No automatic rotation for API keys
   automatic_rotation = {}
@@ -3809,12 +3814,13 @@ module "lda_disclosures_state_machine" {
 module "fec_api_secrets_manager" {
   source = "./modules/secrets-manager"
 
-  project_name         = var.project_name
-  environment          = var.environment
-  tags                 = var.common_tags
-  kms_key_id           = local.kms.main_key_id
-  recovery_window_days = var.secrets_recovery_window_days
-  policy_name_suffix   = "fec-api"
+  project_name            = var.project_name
+  environment             = var.environment
+  tags                    = var.common_tags
+  kms_key_id              = local.kms.main_key_id
+  manage_initial_versions = var.manage_initial_secret_versions
+  recovery_window_days    = var.secrets_recovery_window_days
+  policy_name_suffix      = "fec-api"
 
   automatic_rotation = {}
 

@@ -398,9 +398,11 @@ resource "aws_s3_object" "static_files" {
   content_type = each.value.content_type != null ? each.value.content_type : null
 
   # Use file hash to detect changes and trigger updates
-  etag = filemd5(each.value.source_path)
+  # source_hash, not etag: S3 etags aren't MD5s for KMS-encrypted objects
+  source_hash = filemd5(each.value.source_path)
 
-  # Server-side encryption inherited from bucket configuration
+  server_side_encryption = var.kms_key_arn != null ? "aws:kms" : "AES256"
+  kms_key_id             = var.kms_key_arn
 
   tags = merge(var.tags, {
     Name    = each.value.s3_key
@@ -408,5 +410,15 @@ resource "aws_s3_object" "static_files" {
     Source  = each.value.source_path
   })
 
+  # kms_key_id is computed, so an in-place update keeps sending the old key ID;
+  # switching encryption mode has to recreate the objects.
+  lifecycle {
+    replace_triggered_by = [terraform_data.static_files_encryption]
+  }
+
   depends_on = [aws_s3_bucket.this]
+}
+
+resource "terraform_data" "static_files_encryption" {
+  input = var.kms_key_arn != null ? "aws:kms" : "AES256"
 }

@@ -77,6 +77,8 @@ enable_indexed_data = true
 enable_kms          = false
 enable_sqs          = false
 
+manage_initial_secret_versions = false
+
 # No reserved concurrency carve-out for writer Lambdas (null = use account default pool)
 lambda_reserved_concurrency_default = null
 

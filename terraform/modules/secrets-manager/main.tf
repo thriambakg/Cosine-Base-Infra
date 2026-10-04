@@ -22,7 +22,7 @@ resource "aws_secretsmanager_secret" "secrets" {
 
 # Store secret values
 resource "aws_secretsmanager_secret_version" "secret_versions" {
-  for_each = var.secrets
+  for_each = var.manage_initial_versions ? var.secrets : {}
 
   secret_id     = aws_secretsmanager_secret.secrets[each.key].id
   secret_string = jsonencode(each.value.secret_data)
